@@ -30,6 +30,8 @@ fn spec(
         limit: Duration::from_secs(secs),
         tree: tree.into(),
         stop: None,
+        holds: Default::default(),
+        label: String::new(),
     }
 }
 
@@ -166,4 +168,88 @@ fn kill_9_while_run_check_runs_the_command_once_and_the_task_lands() {
         .filter(|e| e.file_name().to_string_lossy().starts_with("mason-sh-"))
         .collect();
     assert!(left.is_empty(), "{left:?}");
+}
+
+#[test]
+fn a_running_check_records_the_slots_it_holds_beside_its_host_until_it_ends() {
+    // s589: a daemon that restarts counts these as held. Asserted on the host list, not on time.
+    let s = Scratch::new("true", happy_script());
+    let d = s.start();
+    let work = tempfile::tempdir().unwrap();
+    let gate = work.path().join("release");
+    let cmd = format!("while [ ! -e {} ]; do sleep 0.1; done", gate.display());
+    let mut sp = spec(&d, work.path(), &cmd, "tree-h", 120);
+    sp.holds = [("test-suite".to_string(), 1)].into();
+    sp.label = "#9 check".into();
+    let hosts = d.cfg.hosts_dir();
+    std::thread::scope(|sc| {
+        let a = sc.spawn(|| run(&d, &sp));
+        let end = Instant::now() + Duration::from_secs(60);
+        let held = loop {
+            let h = mason_daemon::hostedcheck::running_holds(&hosts);
+            if !h.is_empty() {
+                break h;
+            }
+            assert!(Instant::now() < end, "the host never showed its holds");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].label, "#9 check");
+        assert_eq!(held[0].uses["test-suite"], 1);
+        std::fs::write(&gate, "").unwrap();
+        assert!(a.join().unwrap().unwrap().passed);
+    });
+    // The command ended: the host holds nothing, though its directory is still there.
+    assert!(mason_daemon::hostedcheck::running_holds(&hosts).is_empty());
+}
+
+#[test]
+fn a_check_feeds_the_develop_runs_counts_and_phases() {
+    use mason_core::checks::CheckPhase;
+    use mason_core::progress::Progress;
+    use mason_core::{ProjectId, StepRunId, TaskId};
+    use mason_daemon::hostedcheck::{executable_of, run_with, CheckProgress};
+    use mason_testing::{ParserKind, Suite};
+
+    assert_eq!(
+        executable_of(
+            "     Running unittests src/lib.rs (target/debug/deps/mason_core-0123456789abcdef)"
+        )
+        .as_deref(),
+        Some("mason_core")
+    );
+    assert_eq!(executable_of("ok 1 - a"), None);
+
+    let s = Scratch::new("true", happy_script());
+    let d = s.start();
+    let work = tempfile::tempdir().unwrap();
+    let run_id = StepRunId(9001);
+    let mut p = Progress::new(run_id.0, "develop", 0);
+    p.begin_agent(None, 0);
+    d.progress_seed(TaskId(9001), ProjectId(1), p);
+    let i = d.check_begin(run_id, "full");
+    d.check_edit(run_id, i, |c, now| c.enter(CheckPhase::Running, now));
+    let cmd = "echo '   Running unittests src/lib.rs (target/debug/deps/foo-0123456789abcdef)'; \
+               printf 'TAP version 13\\n1..3\\nok 1 - a\\nok 2 - b\\nnot ok 3 - c\\n'; exit 1";
+    let sp = spec(&d, work.path(), cmd, "tree-p", 60);
+    let pr = CheckProgress {
+        run: run_id,
+        check: i,
+        name: "check s".into(),
+        suite: Some(Suite::new("s", "true", ParserKind::Tap)),
+    };
+    let r = run_with(&d, &sp, Some(&pr)).unwrap();
+    assert!(!r.passed);
+    let p = d.progress_of(run_id.0).unwrap();
+    let sub = p.subs.iter().find(|s| s.name == "check s").expect("a sub");
+    assert_eq!((sub.unit.as_str(), sub.done.value), ("tests", 2));
+    assert_eq!(p.checks[0].current, "foo");
+    // The agent's own figure is not replaced by the check's count.
+    assert_ne!(p.unit, "tests");
+    d.check_edit(run_id, i, |c, now| c.finish("red", &["a::c".into()], now));
+    let p = d.progress_of(run_id.0).unwrap();
+    assert_eq!(p.checks.len(), 1);
+    assert_eq!(p.checks[0].phase, CheckPhase::Done);
+    assert_eq!(p.checks[0].result, "red");
+    assert_eq!(p.checks[0].failed, 1);
 }

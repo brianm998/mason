@@ -404,6 +404,36 @@ message ProgressCell {
   // retried invocations. Absent: nothing reported yet (never zero). Only `has_*` figures
   // were reported; cost is present only for an api account.
   TokenLine tokens = 21;
+  // A develop step's `run_check` calls so far, in order (additive).
+  repeated CheckLine checks = 22;
+  // The agent's latest tool call and when it was made (0: none yet).
+  string tool = 23;
+  uint64 tool_ms = 24;
+  // What the step is doing, made by the daemon: the open check first, then the tool call,
+  // or plainly idle ("idle, no check running; last action ...").
+  string doing = 25;
+}
+
+// One `run_check` call of a develop step.
+message CheckLine {
+  uint32 n = 1;
+  // "full", "3 packages", "tests: a, b".
+  string scope = 2;
+  // waiting, building, running or done.
+  string phase = 3;
+  uint64 started_ms = 4;
+  uint64 waited_ms = 5;
+  uint64 ran_ms = 6;
+  // The wait text while waiting.
+  string wait = 7;
+  // The test executable it is on, while running.
+  string current = 8;
+  // "" while going; green, red or ended.
+  string result = 9;
+  uint32 failed = 10;
+  repeated string failing = 11;
+  // The whole line as the daemon words it, for clients that show it as it is.
+  string text = 12;
 }
 
 // One count inside a step.
@@ -498,6 +528,10 @@ message TaskRow {
   // Why it waits, as data (`why_waiting` is made from the same data). Unset when the task is
   // not waiting on the scheduler. Additive.
   WaitInfo wait = 27;
+  // A developing task: its latest check in short form ("check: 212/340 tests, 9 min"), and
+  // what it is doing (the check first, then the tool call, or idle). Additive.
+  string check = 28;
+  string doing = 29;
 }
 
 // One party in a wait: a task, or a `mason run` lease that belongs to no task (a person's
@@ -816,6 +850,8 @@ message HomeView {
   string project = 9;
   // What most of the waiting work is held by, when one thing holds it. Unset otherwise.
   QueueHold queue_hold = 10;
+  // "31 developing: 23 waiting for a test slot, 6 running checks, 2 editing" (empty for none).
+  string developing = 11;
 }
 
 // One bucket's share of the machine's CPU.

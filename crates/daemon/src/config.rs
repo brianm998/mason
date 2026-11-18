@@ -63,6 +63,11 @@ pub struct DaemonConfig {
     /// Git work counts as stuck when the definitions thread has not finished a pass for this long
     /// (beyond its own interval).
     pub stuck_after: Duration,
+    /// Whether this daemon raises the "step host launch frozen" alert. The launches it looks
+    /// at are the whole process's (`mason_step_host::launcher::launching`), so in a test
+    /// process that hosts many daemons one test's slow launch would show up as an alert in
+    /// every other test's daemon; the test support turns it off there.
+    pub launch_frozen_alert: bool,
     /// A project's fetches must have been failing this long before `fetch:<project>` is raised.
     pub fetch_alert_after: Duration,
     /// A speech command running longer than this for one sentence is killed.
@@ -419,6 +424,8 @@ pub fn parse_health(text: &str) -> Result<Option<HealthCfg>, String> {
             "late_loops" => l.late_loops = n as u32,
             "cannot_land" => l.cannot_land = n as u32,
             "cooldown_h" => l.cooldown_ms = n * H,
+            "blocked_compiles" => l.blocked_compiles = n as u32,
+            "blocked_compile_m" => l.blocked_compile_ms = n * M,
             other => return Err(format!("daemon.toml: health.{other} is not a known key")),
         }
     }
@@ -520,6 +527,7 @@ impl DaemonConfig {
             reload_interval: Duration::from_secs(5),
             fetch_interval: Duration::from_secs(60),
             stuck_after: Duration::from_secs(300),
+            launch_frozen_alert: true,
             fetch_alert_after: Duration::from_secs(15 * 60),
             speech_timeout: Duration::from_secs(30),
             attention_interval: Duration::from_secs(5),

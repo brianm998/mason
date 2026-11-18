@@ -859,12 +859,14 @@ pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
     ));
     out.extend(stall_alert(d.last_big_stall(), now_ms()));
     let threshold = d.cfg.launch_frozen.as_millis() as u64;
-    out.extend(launch_frozen_alert(
-        &mason_step_host::launcher::launching_under(&d.cfg.hosts_dir()),
-        now_ms(),
-        threshold,
-        syspolicyd_running,
-    ));
+    if d.cfg.launch_frozen_alert {
+        out.extend(launch_frozen_alert(
+            &mason_step_host::launcher::launching_under(&d.cfg.hosts_dir()),
+            now_ms(),
+            threshold,
+            syspolicyd_running,
+        ));
+    }
     out.extend(host_loss_alerts(
         &d.store
             .host_losses_since(now_ms().saturating_sub(HOST_LOSS_ALERT_MS))
