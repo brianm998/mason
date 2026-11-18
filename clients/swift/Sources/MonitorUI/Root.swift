@@ -15,6 +15,7 @@ import SwiftUI
 public struct RootView: View {
     @ObservedObject var model: MonitorModel
     @Environment(\.colorScheme) private var scheme
+    @State private var windowHeight: CGFloat = 800
     #if !canImport(AppKit)
     @Environment(\.scenePhase) private var scenePhase
     #endif
@@ -63,6 +64,7 @@ public struct RootView: View {
                 .coordinateSpace(name: SidebarHandle.space)
             }
         }
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { windowHeight = $0 }
     }
 }
 
