@@ -17,8 +17,9 @@
 //! The limit counts from the host's start, not from the call that collects it.
 
 use crate::daemon::{now_ms, Daemon};
+use mason_core::StepRunId;
 use mason_landing::git;
-use mason_step_host::client::{collect_to_file, ClientError, HostClient};
+use mason_step_host::client::{collect_to_file, collect_to_file_observed, ClientError, HostClient};
 use mason_step_host::launcher::{spawn_host, SpawnOptions};
 use mason_step_host::protocol::{CURRENT, PREVIOUS};
 use mason_step_host::registry::{read_kv, write_kv, HostInfo};
@@ -43,6 +44,137 @@ pub struct CheckSpec {
     /// Polled while the command runs: `Some(note)` stops it (the owner skipped or forced
     /// what it belongs to). The outcome then carries the note in `stopped`.
     pub stop: Option<StopFn>,
+    /// The machine slots the caller holds while the command runs (empty: none). Written next
+    /// to the host so that a daemon which restarts counts them as held until the host's
+    /// command ends (s589).
+    pub holds: std::collections::BTreeMap<String, u32>,
+    /// Whose run it is, as the resources list shows it: `#567 check`.
+    pub label: String,
+}
+
+/// What a step host's command holds of the machine, as recorded at its start.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostHold {
+    pub dir: PathBuf,
+    pub label: String,
+    pub uses: std::collections::BTreeMap<String, u32>,
+}
+
+const HOLDS_FILE: &str = "holds.kv";
+
+fn write_holds(dir: &Path, spec: &CheckSpec) {
+    if spec.holds.is_empty() {
+        return;
+    }
+    let uses = spec
+        .holds
+        .iter()
+        .map(|(k, n)| format!("{k}={n}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let _ = write_kv(
+        &dir.join(HOLDS_FILE),
+        &[("label", spec.label.replace('\n', " ")), ("uses", uses)],
+    );
+}
+
+/// Every step host under `hosts` whose command still runs and recorded slots it holds.
+/// A host whose command ended, or that was lost, holds nothing.
+pub fn running_holds(hosts: &Path) -> Vec<HostHold> {
+    use mason_step_host::registry::{HostState, Registry};
+    let Ok(all) = Registry::new(hosts).scan() else {
+        return vec![];
+    };
+    all.into_iter()
+        .filter(|h| h.state == HostState::Running)
+        .filter_map(|h| {
+            let kv = read_kv(&h.info.dir.join(HOLDS_FILE)).ok()?;
+            let uses = kv
+                .get("uses")?
+                .split(',')
+                .filter_map(|p| {
+                    let (k, n) = p.split_once('=')?;
+                    Some((k.to_string(), n.parse().ok()?))
+                })
+                .collect();
+            Some(HostHold {
+                dir: h.info.dir,
+                label: kv
+                    .get("label")
+                    .cloned()
+                    .unwrap_or_else(|| h.info.id.clone()),
+                uses,
+            })
+        })
+        .collect()
+}
+
+/// Where a check's live counts go: the develop step's run, as the sub-count `name`, from
+/// the output of the suite's parser (none: nothing to count).
+#[derive(Clone)]
+pub struct CheckProgress {
+    pub run: StepRunId,
+    /// Which entry of the run's check history this run belongs to.
+    pub check: usize,
+    /// "check cargo-workspace".
+    pub name: String,
+    pub suite: Option<mason_testing::Suite>,
+}
+
+impl CheckProgress {
+    /// A function that takes the output as it arrives, keeps the counts and the test
+    /// executable cargo is on, and reports both. For display: no verdict comes of it.
+    fn feeder(&self, d: &Arc<Daemon>) -> impl FnMut(&[u8]) {
+        let mut live = self
+            .suite
+            .as_ref()
+            .and_then(|s| mason_testing::LiveCount::new(s.parser, s))
+            .map(|l| (l, Default::default()));
+        let (d, run, check, name) = (d.clone(), self.run, self.check, self.name.clone());
+        let mut partial: Vec<u8> = vec![];
+        let mut exe = String::new();
+        move |b: &[u8]| {
+            if let Some((l, last)) = live.as_mut() {
+                l.feed(b);
+                let c: mason_testing::Counts = l.counts();
+                if *last != Some(c.passed) {
+                    *last = Some(c.passed);
+                    d.progress_sub(run, &name, None, |s| {
+                        if s.done.source != mason_core::progress::Source::Reported {
+                            s.unit = "tests".into();
+                            s.done = mason_core::progress::Figure::counted(c.passed);
+                        }
+                    });
+                }
+            }
+            partial.extend_from_slice(b);
+            while let Some(i) = partial.iter().position(|x| *x == b'\n') {
+                let line: Vec<u8> = partial.drain(..=i).collect();
+                if let Some(e) = executable_of(&String::from_utf8_lossy(&line)) {
+                    if e != exe {
+                        exe = e.clone();
+                        d.check_edit(run, check, |c, _| c.current = e);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The test executable a cargo `Running unittests src/lib.rs (target/debug/deps/foo-0123abcd…)`
+/// line names (the file's name without cargo's hash), `None` for any other line.
+pub fn executable_of(line: &str) -> Option<String> {
+    let rest = line.trim().strip_prefix("Running ")?;
+    let path = rest.rsplit_once('(').and_then(|(_, p)| p.strip_suffix(')'));
+    let base = path.map(|p| p.rsplit('/').next().unwrap_or(p));
+    let name = match base {
+        Some(b) => match b.rsplit_once('-') {
+            Some((n, h)) if h.len() >= 8 && h.bytes().all(|c| c.is_ascii_hexdigit()) => n,
+            _ => b,
+        },
+        None => rest,
+    };
+    (!name.is_empty()).then(|| name.to_string())
 }
 
 /// See [`CheckSpec::stop`].
@@ -167,9 +299,18 @@ pub fn pending(d: &Daemon, spec: &CheckSpec) -> bool {
 /// Run `spec` (or attach to, or take the result of, the run that already is it).
 /// Blocks until there is a result.
 pub fn run(d: &Arc<Daemon>, spec: &CheckSpec) -> Shared {
+    run_with(d, spec, None)
+}
+
+/// [`run`], feeding the develop step's progress with the run's live counts (for display only;
+/// the verdict is what the command's exit says, as ever).
+pub fn run_with(d: &Arc<Daemon>, spec: &CheckSpec, progress: Option<&CheckProgress>) -> Shared {
     let _ = std::fs::create_dir_all(&spec.log_dir);
     let key = run_key(spec);
     // Find or allocate, one caller at a time, so two calls never take one number.
+    // Earlier runs of this prefix on another tree that nobody here is collecting: a call
+    // on a new tree means their results will never be asked for.
+    let mut superseded: Vec<String> = vec![];
     let (id, slot, collector) = {
         let mut map = inflight().lock().unwrap_or_else(|e| e.into_inner());
         let mut n = 0u32;
@@ -200,11 +341,33 @@ pub fn run(d: &Arc<Daemon>, spec: &CheckSpec) -> Shared {
                         map.insert(mapkey, slot.clone());
                         break (id, slot, true);
                     }
+                    if !same && !delivered && !map.contains_key(&mapkey) {
+                        superseded.push(id);
+                    }
                 }
             }
             n += 1;
         }
     };
+    for old in superseded {
+        if running(d, &old) && stop_host(d, &old) {
+            tracing::info!(host = %old, now = %id, "stopped a check on an older tree that nobody will collect");
+        }
+        let _ = write_kv(
+            &record_path(spec, &old),
+            &[
+                (
+                    "key",
+                    read_kv(&record_path(spec, &old))
+                        .ok()
+                        .and_then(|kv| kv.get("key").cloned())
+                        .unwrap_or_default(),
+                ),
+                ("delivered", "1".into()),
+                ("superseded", id.clone()),
+            ],
+        );
+    }
     if !collector {
         let mut g = slot.result.lock().unwrap_or_else(|e| e.into_inner());
         while g.is_none() {
@@ -212,7 +375,7 @@ pub fn run(d: &Arc<Daemon>, spec: &CheckSpec) -> Shared {
         }
         return g.clone().unwrap_or_else(|| Err("no result".into()));
     }
-    let res = collect(d, spec, &id);
+    let res = collect(d, spec, &id, progress);
     // Given to its callers now: a later call on the same tree runs again.
     mark_delivered(spec, &id, &key);
     {
@@ -227,7 +390,70 @@ pub fn run(d: &Arc<Daemon>, spec: &CheckSpec) -> Shared {
     res
 }
 
-fn collect(d: &Arc<Daemon>, spec: &CheckSpec, id: &str) -> Shared {
+/// Is the step host `id` alive with its command still running?
+fn running(d: &Daemon, id: &str) -> bool {
+    matches!(
+        mason_step_host::registry::status_of(&d.cfg.hosts_dir().join(id)),
+        Ok(s) if s.state == mason_step_host::registry::HostState::Running
+    )
+}
+
+/// Ask the step host `id` to stop its command (and its children). `false`: it could not be
+/// reached.
+fn stop_host(d: &Daemon, id: &str) -> bool {
+    let sock = d.cfg.hosts_dir().join(id).join("sock");
+    HostClient::connect(&sock, PREVIOUS, CURRENT, "daemon").is_ok_and(|mut h| h.stop(1000).is_ok())
+}
+
+/// The task and run a develop check's host id names (`t575r3670-check-cargo-workspace2`).
+pub fn check_owner(id: &str) -> Option<(u64, u64)> {
+    let (head, _) = id.split_once("-check")?;
+    let (t, r) = head.strip_prefix('t')?.split_once('r')?;
+    Some((t.parse().ok()?, r.parse().ok()?))
+}
+
+/// Stop develop checks that survived a daemon restart and that no run can collect any more:
+/// their task's open run is another one, or none. Their step hosts outlive the daemon by
+/// design, and since s589 they keep their slots, so left alone they run a whole suite for
+/// nobody while holding a slot (2026-11-18: three such runs beside two real ones, five full
+/// suites under a limit of two). A check this process is collecting is never touched, nor
+/// one whose run is still open: its agent may call again and attach to it.
+pub fn stop_unwanted(d: &Arc<Daemon>) -> usize {
+    use mason_step_host::registry::{HostState, Registry};
+    let Ok(all) = Registry::new(d.cfg.hosts_dir()).scan() else {
+        return 0;
+    };
+    let Ok(w) = d.world() else { return 0 };
+    let mut n = 0;
+    for h in all.into_iter().filter(|h| h.state == HostState::Running) {
+        let id = h.info.id.clone();
+        let Some((task, run)) = check_owner(&id) else {
+            continue;
+        };
+        if inflight()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(&h.info.dir)
+        {
+            continue;
+        }
+        if w.open_run(mason_core::TaskId(task)) == Some(StepRunId(run)) {
+            continue;
+        }
+        if stop_host(d, &id) {
+            tracing::info!(host = %id, "stopped a check whose run is over: nobody can collect it");
+            n += 1;
+        }
+    }
+    n
+}
+
+fn collect(
+    d: &Arc<Daemon>,
+    spec: &CheckSpec,
+    id: &str,
+    progress: Option<&CheckProgress>,
+) -> Shared {
     let hosts = d.cfg.hosts_dir();
     let dir = hosts.join(id);
     if !dir.join("host.kv").exists() {
@@ -244,6 +470,7 @@ fn collect(d: &Arc<Daemon>, spec: &CheckSpec, id: &str) -> Shared {
             heartbeat: d.cfg.heartbeat,
         };
         spawn_host(&o).map_err(|e| format!("cannot start the command: {e}"))?;
+        write_holds(&dir, spec);
     }
     let started = HostInfo::read(&dir).map_or_else(|_| now_ms(), |i| i.started_ms);
     let deadline = started.saturating_add(spec.limit.as_millis() as u64);
@@ -277,7 +504,17 @@ fn collect(d: &Arc<Daemon>, spec: &CheckSpec, id: &str) -> Shared {
     }
     let log = spec.log_dir.join(format!("{id}.log"));
     let exit = spec.log_dir.join(format!("{id}.exit"));
-    let rec = collect_to_file(&dir, &log, &exit);
+    let rec = match progress {
+        None => collect_to_file(&dir, &log, &exit),
+        Some(pr) => {
+            let mut feed = pr.feeder(d);
+            // After a restart the log is read again from its start, so the counts are exact.
+            if let Ok(old) = std::fs::read(&log) {
+                feed(&old);
+            }
+            collect_to_file_observed(&dir, &log, &exit, &mut |_, b| feed(b))
+        }
+    };
     done.store(true, Ordering::SeqCst);
     let rec = match rec {
         Ok(r) => r,

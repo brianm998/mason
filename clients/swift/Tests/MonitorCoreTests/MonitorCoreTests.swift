@@ -1278,8 +1278,7 @@ final class MonitorCoreTests: XCTestCase {
         m.sidebar?.sections[0].rows[0].progress = [c]
         var scheduled: [@MainActor () -> Void] = []
         m.scheduleProgressFlush = { scheduled.append($0) }
-        var publishes = 0
-        let sub = m.$sidebar.dropFirst().sink { _ in publishes += 1 }
+        let sub = ChangeCounter { _ = m.sidebar }
         for i in 1...100 {
             var p = Mason_V1_StepProgress()
             p.task = 1
@@ -1289,10 +1288,10 @@ final class MonitorCoreTests: XCTestCase {
             m.apply(.with { $0.stepProgress = p })
         }
         let revision = m.sidebarRevision
-        XCTAssertEqual(publishes, 0, "nothing is published while the frame is not due")
+        XCTAssertEqual(sub.count, 0, "nothing is published while the frame is not due")
         XCTAssertEqual(scheduled.count, 1, "one flush is asked for, not one per message")
         scheduled[0]()
-        XCTAssertEqual(publishes, 0, "live progress never assigns the sidebar")
+        XCTAssertEqual(sub.count, 0, "live progress never assigns the sidebar")
         XCTAssertEqual(m.sidebarRevision, revision)
         XCTAssertEqual(m.progressCells(task: 1).first?.done, 100)
         XCTAssertEqual(m.sidebar?.sections[0].rows[0].progress.first?.done, 1, "the view's own cells are untouched")
@@ -1539,10 +1538,8 @@ final class MonitorCoreTests: XCTestCase {
         m.sidebar?.sections[0].rows[0].progress = [c]
         m.sidebar?.sections[0].rows[1].progress = [c]
         let other = m.sidebar!.sections[0].rows[1]
-        var sidebarChanges = 0
-        let sub = m.$sidebar.dropFirst().sink { _ in sidebarChanges += 1 }
-        var liveChanges = 0
-        let liveSub = m.live.objectWillChange.sink { _ in liveChanges += 1 }
+        let sub = ChangeCounter { _ = m.sidebar }
+        let liveSub = ChangeCounter { _ = m.live.lastSeq; _ = m.live.liveLog }
         var p = Mason_V1_StepProgress()
         p.task = 1
         var n = c
@@ -1553,15 +1550,14 @@ final class MonitorCoreTests: XCTestCase {
         XCTAssertEqual(m.sidebar?.sections[0].rows[1], other, "task 2's row is untouched")
         XCTAssertEqual(m.progressCells(task: 1).first?.done, 3)
         XCTAssertEqual(m.progressCells(task: 2).first?.done, 1)
-        XCTAssertEqual(sidebarChanges, 0)
+        XCTAssertEqual(sub.count, 0)
         // A sequence bump and a log line change the live state and not the sidebar.
-        sidebarChanges = 0
         m.lastSeq = 99
         p.log = ["x"]
         p.progress = Mason_V1_ProgressCell()
         m.apply(progress: p)
-        XCTAssertEqual(sidebarChanges, 0)
-        XCTAssertGreaterThan(liveChanges, 0)
+        XCTAssertEqual(sub.count, 0)
+        XCTAssertGreaterThan(liveSub.count, 0)
         sub.cancel()
         liveSub.cancel()
     }
