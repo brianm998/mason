@@ -903,6 +903,17 @@ impl<'a> Ctx<'a> {
                 h.title = t.title.clone();
             }
         }
+        // The shared build directories' `deps` sizes (one stat each), so a bloated one shows.
+        for p in self.d.projects().values() {
+            if let Some(parent) = crate::taskcache::shared_parent(p) {
+                for (name, bytes) in crate::taskcache::shared_deps_sizes(&parent) {
+                    c.notes.push(crate::taskcache::deps_note(
+                        &format!("{}/{name}", p.id),
+                        bytes,
+                    ));
+                }
+            }
+        }
         c
     }
 

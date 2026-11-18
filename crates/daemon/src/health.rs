@@ -240,6 +240,16 @@ pub fn gather(d: &Arc<Daemon>, now: u64) -> Facts {
         x.syspolicyd_down = crate::attention::syspolicyd_running() == Some(false);
     }
     x.launch_blocked = frozen;
+    // Compiles stuck in the kernel (a build directory too big to list), from one process table.
+    if let Ok(o) = std::process::Command::new("/bin/ps")
+        .args(["-axo", "pid=,stat=,etime=,time=,command="])
+        .output()
+    {
+        x.procs = health::parse_ps(&String::from_utf8_lossy(&o.stdout))
+            .into_iter()
+            .filter(|p| p.state.contains('U'))
+            .collect();
+    }
     // The daemon: restarts, late loops and a failing self-update, from what earlier checks logged.
     let rows = d
         .store
