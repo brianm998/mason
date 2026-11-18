@@ -490,5 +490,6 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s583**: The ci_cancels_superseded_runs test now asserts the current `cancel-in-progress: ${{ github.ref != 'refs/heads/develop' }}` rule, so CI/test on develop is green again.
 - **s584**: The smoke list named the crate `mason`, which is now `mason-pipeline`, so every cargo-workspace run failed before a test ran; it now names `mason-pipeline`, and an exit script checks each `-p` name in the smoke list against the workspace.
 - **s585**: `testImagesAreBuiltOnceAndThenServedFromTheCache` empties the shared mascot cache first, so it no longer fails when an earlier test has already built `icon:queued@24`.
+- **s589**: A command that runs under a step host and holds slots is counted as holding them by the next daemon (read from the host's own directory before the first grant), so a restart can no longer let the queue grant the same slots again.
 - **s596**: s12.sh step 1 now captures `swift test` output to a file and checks its exit status, instead of `grep | head -1` under pipefail.
 <!-- status:end -->
