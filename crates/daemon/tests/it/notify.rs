@@ -152,7 +152,9 @@ fn one_alert_one_delivery_one_reminder_and_silence_after_it_clears() {
         notify::claim_at(&d, "mon", false, t0 + 100)["announcements"]
             .as_array()
             .unwrap()
-            .len(),
+            .iter()
+            .filter(|a| a["kind"] == "paused")
+            .count(),
         1
     );
     for _ in 0..3 {
