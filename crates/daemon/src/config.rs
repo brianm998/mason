@@ -628,6 +628,9 @@ pub struct ProjectCfg {
     /// Days a canceled or failed task's `task_cache` directory is kept after its last step
     /// (`task_cache_keep_days`; default 7).
     pub task_cache_keep_days: Option<u64>,
+    /// Clone the landing area's warm build into a new task's directory when it is of the commit
+    /// the task starts from (`task_cache_seed`; default off, decision 0552).
+    pub task_cache_seed: bool,
     /// A command that reads a task body on stdin and prints `clear` or
     /// `unclear`. Optional, and only consulted when the deterministic check is
     /// unsure. Anything but `clear`, or a failure, means explore.
@@ -1297,6 +1300,10 @@ pub fn parse_project(id: &str, text: &str) -> Result<ProjectCfg, String> {
             .get("task_cache_keep_days")
             .and_then(|v| v.as_integer())
             .map(|n| n.max(0) as u64),
+        task_cache_seed: doc
+            .get("task_cache_seed")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
         task_cache: match s("task_cache").filter(|t| !t.trim().is_empty()) {
             Some(t) => {
                 crate::taskcache::check_template(&t).map_err(|e| format!("{id}: {e}"))?;
