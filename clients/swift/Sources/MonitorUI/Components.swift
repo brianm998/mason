@@ -1295,7 +1295,7 @@ struct WaitBadge: View {
 /// red test: what holds it, for how long, and how many tasks wait behind it (s527).
 struct QueueHoldBanner: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
     let hold: Mason_V1_QueueHold
 
     var body: some View {
