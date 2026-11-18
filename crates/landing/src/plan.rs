@@ -142,8 +142,8 @@ pub enum Pin {
     /// task that breaks it alone, a larger group tasks that break it only together. Tasks
     /// in no group are not to blame.
     Groups(Vec<Vec<u64>>),
-    /// Every task reproduces it alone (of a batch of more than one): the red is the
-    /// base's, not any task's.
+    /// Every task reproduces it alone (of a batch of more than one) and the base alone is red
+    /// too: the red is the base's, not any task's.
     Base,
 }
 
@@ -151,10 +151,16 @@ pub enum Pin {
 /// the suites over just those tasks and says whether they fail. A half that is red is
 /// searched further; if neither half is red the red needs several tasks, and the set is
 /// shrunk one task at a time to the ones that are needed.
+///
+/// When every task is red alone, `red(&[])` runs the suites over the base with no task: only
+/// a red there makes it the base's. Each task can be red alone with a red of its own (on
+/// 2026-11-18 one task failed `cargo fmt` and the other clippy), and calling that the base's
+/// blamed nobody and held both forever.
 pub fn pin(ids: &[u64], red: &mut dyn FnMut(&[u64]) -> bool) -> Pin {
     let mut groups: Vec<Vec<u64>> = vec![];
     pin_into(ids, red, &mut groups);
-    if ids.len() > 1 && groups.len() == ids.len() && groups.iter().all(|g| g.len() == 1) {
+    if ids.len() > 1 && groups.len() == ids.len() && groups.iter().all(|g| g.len() == 1) && red(&[])
+    {
         return Pin::Base;
     }
     Pin::Groups(groups)
@@ -328,6 +334,13 @@ mod tests {
     #[test]
     fn a_red_every_task_reproduces_is_the_bases() {
         assert_eq!(pin(&[1, 2, 3], &mut |_| true), Pin::Base);
+    }
+
+    #[test]
+    fn tasks_each_red_alone_over_a_green_base_are_each_to_blame() {
+        // Each task breaks it with a red of its own; the base alone is green.
+        let r = pin(&[1, 2], &mut |s| !s.is_empty());
+        assert_eq!(r, Pin::Groups(vec![vec![1], vec![2]]));
     }
 
     #[test]
