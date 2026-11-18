@@ -1445,6 +1445,8 @@ pub(crate) fn prepare_worktree_only(c: &Ctx) -> Result<(), String> {
     })?;
     // The agent's own cargo builds into the task's directory too, not into `<worktree>/target`.
     crate::taskcache::point_cargo_at_task_cache(&c.d, &c.project, c.task.0, &c.wt);
+    // A new task's directory starts as a clone of the landing area's warm build (off by default).
+    crate::taskcache::seed_task_cache(&c.d, &c.project, c.task.0, &c.wt);
     Ok(())
 }
 
