@@ -10,5 +10,5 @@ grep -q '{tests_for_change}' .mason/mason.toml || { echo "s546: cargo-workspace 
 grep -q '^-p ' .mason/smoke-tests.txt || { echo "s546: the smoke list is empty" >&2; exit 1; }
 cargo test -p mason-daemon --lib affected
 cargo test -p mason-daemon --lib scope
-cargo test -p mason-daemon --test landing_split
+cargo test -p mason-daemon --test it landing_split::
 echo "s546: ok"
