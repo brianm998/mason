@@ -4,5 +4,5 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 cargo test -q -p mason-core checks::tests
-cargo test -q -p mason-daemon --test hosted_check a_check_feeds_the_develop
+cargo test -q -p mason-daemon --test it hosted_check::
 echo "s558: ok"

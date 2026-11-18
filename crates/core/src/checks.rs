@@ -67,7 +67,7 @@ pub const KEEP_FAILING: usize = 3;
 /// "45 s", "9 min", "1 h 12 min".
 pub fn dur(ms: u64) -> String {
     let s = ms / 1000;
-    if s < 90 {
+    if s < 60 {
         format!("{s} s")
     } else if s < 3600 {
         format!("{} min", (s + 30) / 60)
