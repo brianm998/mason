@@ -4,5 +4,5 @@
 # from the live registry, so a registration reload reaches it.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
-cargo test -p mason-daemon --test stop a_running_step_reads_limits_changed_by_a_registration_reload
+cargo test -p mason-daemon --test it stop::a_running_step_reads_limits_changed_by_a_registration_reload
 echo "s526 OK"

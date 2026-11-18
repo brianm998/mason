@@ -5,6 +5,6 @@
 # R1, and a red R2 files exactly one more.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-cargo test -q -p mason-daemon --test ci_watch ten_passes_past_the_threshold
+cargo test -q -p mason-daemon --test it ci_watch::ten_passes_past_the_threshold
 cargo test -q -p mason-core ci_watch
 echo "s551: ok"

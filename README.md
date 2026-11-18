@@ -477,7 +477,14 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s563**: UiThreadTest.isExpandedReadsEachKeyOnce now baselines the preference read count after constructing the model, so the constructor's mute read no longer fails it while any extra read per isExpanded call still does.
 - **s566**: PendingTaskPageTests now applies its sidebar view through the public `apply(Mason_V1_ServerMessage)` instead of the internal `apply(Mason_V1_View)`, so the Swift test target compiles and `swift test` prints its summary again.
 - **s567**: The s546 exit script now runs the landing_split tests through the `it` test binary, and s557 skips on Linux or with MASON_SKIP_SWIFT like the other Swift exit scripts.
+- **s571**: The s551 exit script pointed at a removed `ci_watch` test target and now runs the test through `--test it`.
 - **s572**: The Compose core tests that drive a real connection thread now wait up to 30 s instead of 5 s for their condition, so a loaded CI runner no longer fails one of them.
+- **s574**: s521 now runs the lint tests in the `it` test target, and the stuck:wait health test is confirmed fixed by 458f42b3.
+- **s575**: The shard-2 exit-scripts failure at c480ec5 could not be named from the supplied log tail and did not reproduce on current develop, so no code was changed.
+- **s576**: Exit scripts s514, s526 and s502 name the `it` test binary instead of the removed `limits` and `stop` targets, so CI/exit-scripts is green again.
+- **s577**: The s553 exit test named a deleted `base_red` test target and failed CI/exit-scripts; it now runs `--test it a_skip_with_no_step_name`.
+- **s579**: The fixsync test for a merge in progress now runs its conflicting merge with an identity and no editor or prompt, and asserts MERGE_HEAD and an unmerged entry exist before calling sync, reporting the merge's output if the setup fails.
+- **s580**: The daemon tests' orphan sweep is now compiled only on unix, with a no-op elsewhere, so the Windows `--all-targets` build no longer fails on the `nix` crate.
 - **s583**: The ci_cancels_superseded_runs test now asserts the current `cancel-in-progress: ${{ github.ref != 'refs/heads/develop' }}` rule, so CI/test on develop is green again.
 - **s584**: The smoke list named the crate `mason`, which is now `mason-pipeline`, so every cargo-workspace run failed before a test ran; it now names `mason-pipeline`, and an exit script checks each `-p` name in the smoke list against the workspace.
 - **s585**: `testImagesAreBuiltOnceAndThenServedFromTheCache` empties the shared mascot cache first, so it no longer fails when an earlier test has already built `icon:queued@24`.

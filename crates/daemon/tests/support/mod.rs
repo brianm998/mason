@@ -117,89 +117,101 @@ impl Drop for Scratch {
     }
 }
 
-/// One process of `ps`.
-struct Proc {
-    pid: i32,
-    ppid: i32,
-    pgid: i32,
-    command: String,
-}
+#[cfg(unix)]
+mod orphans {
+    use std::path::{Path, PathBuf};
 
-fn process_table() -> Vec<Proc> {
-    let Ok(out) = std::process::Command::new("/bin/ps")
-        .args(["-axo", "pid=,ppid=,pgid=,command="])
-        .output()
-    else {
-        return vec![];
-    };
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|l| {
-            let mut it = l.split_whitespace();
-            let pid = it.next()?.parse().ok()?;
-            let ppid = it.next()?.parse().ok()?;
-            let pgid = it.next()?.parse().ok()?;
-            let command = it.collect::<Vec<_>>().join(" ");
-            Some(Proc {
-                pid,
-                ppid,
-                pgid,
-                command,
-            })
-        })
-        .collect()
-}
-
-/// The `/tmp/ms*` scratch root a command line's `--dir` or `--data-dir` names, if any.
-/// Only that shape matches: a real pipeline's hosts live elsewhere.
-fn scratch_root_of(command: &str) -> Option<PathBuf> {
-    let mut words = command.split(' ');
-    while let Some(w) = words.next() {
-        if w != "--dir" && w != "--data-dir" {
-            continue;
-        }
-        let path = Path::new(words.next()?);
-        let rest = path
-            .strip_prefix("/tmp")
-            .or_else(|_| path.strip_prefix("/private/tmp"))
-            .ok()?;
-        let first = rest.components().next()?.as_os_str().to_str()?;
-        if first.starts_with("ms") && first.len() > 2 {
-            return Some(Path::new("/tmp").join(first));
-        }
+    /// One process of `ps`.
+    struct Proc {
+        pid: i32,
+        ppid: i32,
+        pgid: i32,
+        command: String,
     }
-    None
+
+    fn process_table() -> Vec<Proc> {
+        let Ok(out) = std::process::Command::new("/bin/ps")
+            .args(["-axo", "pid=,ppid=,pgid=,command="])
+            .output()
+        else {
+            return vec![];
+        };
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|l| {
+                let mut it = l.split_whitespace();
+                let pid = it.next()?.parse().ok()?;
+                let ppid = it.next()?.parse().ok()?;
+                let pgid = it.next()?.parse().ok()?;
+                let command = it.collect::<Vec<_>>().join(" ");
+                Some(Proc {
+                    pid,
+                    ppid,
+                    pgid,
+                    command,
+                })
+            })
+            .collect()
+    }
+
+    /// The `/tmp/ms*` scratch root a command line's `--dir` or `--data-dir` names, if any.
+    /// Only that shape matches: a real pipeline's hosts live elsewhere.
+    fn scratch_root_of(command: &str) -> Option<PathBuf> {
+        let mut words = command.split(' ');
+        while let Some(w) = words.next() {
+            if w != "--dir" && w != "--data-dir" {
+                continue;
+            }
+            let path = Path::new(words.next()?);
+            let rest = path
+                .strip_prefix("/tmp")
+                .or_else(|_| path.strip_prefix("/private/tmp"))
+                .ok()?;
+            let first = rest.components().next()?.as_os_str().to_str()?;
+            if first.starts_with("ms") && first.len() > 2 {
+                return Some(Path::new("/tmp").join(first));
+            }
+        }
+        None
+    }
+
+    /// Stop step hosts and test daemons whose scratch dir no longer exists, with their
+    /// children and the groups those lead. Once per test binary, before its first world.
+    pub fn sweep_orphans() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            use nix::sys::signal::{kill, killpg, Signal};
+            use nix::unistd::{getpgrp, getpid, Pid};
+            let table = process_table();
+            let (me, my_group) = (getpid().as_raw(), getpgrp().as_raw());
+            for p in &table {
+                let Some(root) = scratch_root_of(&p.command) else {
+                    continue;
+                };
+                if root.exists() || p.pid <= 1 || p.pid == me {
+                    continue;
+                }
+                for c in table.iter().filter(|c| c.ppid == p.pid) {
+                    if c.pgid > 1 && c.pgid != my_group {
+                        let _ = killpg(Pid::from_raw(c.pgid), Signal::SIGKILL);
+                    }
+                    let _ = kill(Pid::from_raw(c.pid), Signal::SIGKILL);
+                }
+                if p.pgid > 1 && p.pgid != my_group {
+                    let _ = killpg(Pid::from_raw(p.pgid), Signal::SIGKILL);
+                }
+                let _ = kill(Pid::from_raw(p.pid), Signal::SIGKILL);
+            }
+        });
+    }
 }
 
-/// Stop step hosts and test daemons whose scratch dir no longer exists, with their
-/// children and the groups those lead. Once per test binary, before its first world.
-fn sweep_orphans() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        use nix::sys::signal::{kill, killpg, Signal};
-        use nix::unistd::{getpgrp, getpid, Pid};
-        let table = process_table();
-        let (me, my_group) = (getpid().as_raw(), getpgrp().as_raw());
-        for p in &table {
-            let Some(root) = scratch_root_of(&p.command) else {
-                continue;
-            };
-            if root.exists() || p.pid <= 1 || p.pid == me {
-                continue;
-            }
-            for c in table.iter().filter(|c| c.ppid == p.pid) {
-                if c.pgid > 1 && c.pgid != my_group {
-                    let _ = killpg(Pid::from_raw(c.pgid), Signal::SIGKILL);
-                }
-                let _ = kill(Pid::from_raw(c.pid), Signal::SIGKILL);
-            }
-            if p.pgid > 1 && p.pgid != my_group {
-                let _ = killpg(Pid::from_raw(p.pgid), Signal::SIGKILL);
-            }
-            let _ = kill(Pid::from_raw(p.pid), Signal::SIGKILL);
-        }
-    });
-}
+#[cfg(unix)]
+use orphans::sweep_orphans;
+
+/// Orphan sweeping needs `ps` and signals; other platforms skip it.
+#[cfg(not(unix))]
+fn sweep_orphans() {}
 
 impl Scratch {
     pub fn new(test_cmd: &str, script: Value) -> Scratch {
