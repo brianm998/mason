@@ -271,6 +271,7 @@ impl Daemon {
                 rcfg.disk_stall_ms,
             );
             broker.set_policy(crate::policyd::Sampler::start(), rcfg.syspolicyd_max_pct);
+            broker.set_thermal(crate::thermal::Sampler::start(), rcfg.thermal_min_pct);
         }
         broker.set_disk(disk, disk_paths, rcfg.disk_floor_gb, disk_every);
         let targets = crate::targets::Targets::new(
