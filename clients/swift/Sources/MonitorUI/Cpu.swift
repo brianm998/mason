@@ -11,7 +11,7 @@ import SwiftUI
 struct CpuSection: View {
     @Environment(\.theme) var theme
     let model: MonitorModel
-    @ObservedObject var cpu: CpuModel
+    let cpu: CpuModel
     /// Set on home: the title and its '>' open the CPU page.
     var open: (() -> Void)? = nil
     @State private var expanded = false
