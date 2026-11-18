@@ -19,7 +19,7 @@ private struct ScrollMetricsKey: PreferenceKey {
 /// to what is there. Later updates never move it again. The main view gives it a fresh identity
 /// on every visit.
 struct RestoringScroll<Content: View>: View {
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
     var ready: Bool = true
     @ViewBuilder var content: () -> Content
 

@@ -46,7 +46,7 @@ struct ProgressCells: View {
 /// Reads a task's live cells from its own observed entry, falling back to the cells of the view
 /// that drew it. Only this view's body runs when a progress message names the task.
 struct LiveProgress<Content: View>: View {
-    @ObservedObject var live: TaskProgress
+    let live: TaskProgress
     let fallback: [Mason_V1_ProgressCell]
     @ViewBuilder let content: ([Mason_V1_ProgressCell]) -> Content
 
@@ -139,7 +139,7 @@ struct ProgressLine: View {
 /// agent's todo list with each item's status, the output figures, and where each number came from.
 struct ProgressDetail: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
     let cell: Mason_V1_ProgressCell
 
     var body: some View {
@@ -277,7 +277,7 @@ func tileCountColor(_ theme: Theme, count: UInt32, wants: Bool, connected: Bool)
 /// the state wants the owner; a dash while disconnected.
 struct CountTile: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
     let count: StateCount
 
     var body: some View {
@@ -432,7 +432,7 @@ struct CopyValueButton: View {
 /// An answer carries the card's hash, so a late click on a stale card is refused.
 struct DecisionCardView: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
     let task: UInt64
     let card: Mason_V1_DecisionCard
     @State private var other = ""
@@ -603,7 +603,7 @@ struct DecisionCardView: View {
 /// What a task waiting for the owner's approval waits on, in full, with Approve and Reject.
 struct ApprovalView: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
     let task: UInt64
     let approval: Mason_V1_Approval
     @State private var reason = ""
@@ -688,7 +688,7 @@ struct ApprovalView: View {
 struct ActionButtons: View {
     @Environment(\.theme) var theme
     @Environment(\.features) var features
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
     let row: TaskRow
     var hasApprovalView = false
 
@@ -773,7 +773,7 @@ struct ActionButtons: View {
 /// an Add blocker field with a task picker. A non-owner sees the list and no controls.
 struct BlockersView: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
     let row: TaskRow
     @State private var pick: UInt64 = 0
 
@@ -833,7 +833,7 @@ struct BlockersView: View {
 /// improvement without write access) what would go upstream. Edit is offered only while it waits.
 struct ProposalView: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
     let row: TaskRow
     let info: Mason_V1_ProposalInfo
     let title: String
@@ -903,7 +903,7 @@ struct ProposalView: View {
 /// Change a waiting proposal's title, text or evidence. Nothing else about it changes.
 struct EditProposalSheet: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
     let task: UInt64
     @State var title: String
     @State var text: String
@@ -951,7 +951,7 @@ struct EditProposalSheet: View {
 /// "Improve the pipeline": type what MASON should change about itself.
 struct ImproveSheet: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
     @Binding var isPresented: Bool
     @State private var text = ""
 
@@ -985,7 +985,7 @@ struct ImproveSheet: View {
 /// on the daemon's Mac, never here) and tries the remote.
 struct SSHKeySheet: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
 
     var body: some View {
         let project = model.sshKeyProject ?? ""
@@ -1108,7 +1108,7 @@ struct WebLink: View {
 /// kept when `selectable`.
 struct LinkedText: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
     let text: String
     var font: Font? = nil
     var color: Color? = nil
@@ -1295,7 +1295,7 @@ struct WaitBadge: View {
 /// red test: what holds it, for how long, and how many tasks wait behind it (s527).
 struct QueueHoldBanner: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
     let hold: Mason_V1_QueueHold
 
     var body: some View {
