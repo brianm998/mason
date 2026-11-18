@@ -2,6 +2,7 @@
 
 import Foundation
 import MasonProtocol
+import Observation
 
 /// The home page's disk section, as data: one line per volume of the daemon's `DiskHistory`
 /// (free bytes over time, y from 0 to the largest total shown). The same rules are in the
@@ -136,15 +137,16 @@ public func pruneHiddenVolumes(_ hidden: Set<String>, _ h: Mason_V1_DiskHistory)
 
 /// What the disk section observes, apart from `MonitorModel`'s whole-model publishing.
 @MainActor
-public final class DiskModel: ObservableObject {
-    @Published public private(set) var history: Mason_V1_DiskHistory?
+@Observable
+public final class DiskModel {
+    public private(set) var history: Mason_V1_DiskHistory?
     /// True once the daemon has sent any disk history; an older daemon never does, which hides the section.
-    @Published public private(set) var seen = false
-    @Published public private(set) var span: DiskSpan = .hour
-    @Published public private(set) var hidden: Set<String>
-    @Published public private(set) var colors: [String: Int] = [:]
-    private var palette = DiskColors()
-    private let prefs: Preferences
+    public private(set) var seen = false
+    public private(set) var span: DiskSpan = .hour
+    public private(set) var hidden: Set<String>
+    public private(set) var colors: [String: Int] = [:]
+    @ObservationIgnored private var palette = DiskColors()
+    @ObservationIgnored private let prefs: Preferences
 
     public init(preferences: Preferences = MemoryPreferences()) {
         prefs = preferences

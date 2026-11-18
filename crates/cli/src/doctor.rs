@@ -294,6 +294,16 @@ fn check_project(p: &ProjectCfg, out: &mut Vec<Finding>) {
         "project {name}: {} is a git repository",
         p.path.display()
     )));
+    if let Some(parent) = mason_daemon::taskcache::shared_parent(p) {
+        for (dir, bytes) in mason_daemon::taskcache::shared_deps_sizes(&parent) {
+            let text = mason_daemon::taskcache::deps_note(&format!("{name}/{dir}"), bytes);
+            out.push(if bytes > mason_daemon::taskcache::DEPS_LIMIT_BYTES {
+                warn(text)
+            } else {
+                ok(text)
+            });
+        }
+    }
     if let Some(r) = &p.remote {
         if git::run(&p.path, &["remote", "get-url", r]).is_err() {
             out.push(fail(format!(

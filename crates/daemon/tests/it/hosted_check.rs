@@ -30,6 +30,8 @@ fn spec(
         limit: Duration::from_secs(secs),
         tree: tree.into(),
         stop: None,
+        holds: Default::default(),
+        label: String::new(),
     }
 }
 
@@ -166,6 +168,39 @@ fn kill_9_while_run_check_runs_the_command_once_and_the_task_lands() {
         .filter(|e| e.file_name().to_string_lossy().starts_with("mason-sh-"))
         .collect();
     assert!(left.is_empty(), "{left:?}");
+}
+
+#[test]
+fn a_running_check_records_the_slots_it_holds_beside_its_host_until_it_ends() {
+    // s589: a daemon that restarts counts these as held. Asserted on the host list, not on time.
+    let s = Scratch::new("true", happy_script());
+    let d = s.start();
+    let work = tempfile::tempdir().unwrap();
+    let gate = work.path().join("release");
+    let cmd = format!("while [ ! -e {} ]; do sleep 0.1; done", gate.display());
+    let mut sp = spec(&d, work.path(), &cmd, "tree-h", 120);
+    sp.holds = [("test-suite".to_string(), 1)].into();
+    sp.label = "#9 check".into();
+    let hosts = d.cfg.hosts_dir();
+    std::thread::scope(|sc| {
+        let a = sc.spawn(|| run(&d, &sp));
+        let end = Instant::now() + Duration::from_secs(60);
+        let held = loop {
+            let h = mason_daemon::hostedcheck::running_holds(&hosts);
+            if !h.is_empty() {
+                break h;
+            }
+            assert!(Instant::now() < end, "the host never showed its holds");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].label, "#9 check");
+        assert_eq!(held[0].uses["test-suite"], 1);
+        std::fs::write(&gate, "").unwrap();
+        assert!(a.join().unwrap().unwrap().passed);
+    });
+    // The command ended: the host holds nothing, though its directory is still there.
+    assert!(mason_daemon::hostedcheck::running_holds(&hosts).is_empty());
 }
 
 #[test]

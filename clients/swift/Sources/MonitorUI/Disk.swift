@@ -9,7 +9,7 @@ import SwiftUI
 /// volume when there is more than one. Hidden entirely on a daemon that sends no disk history.
 struct DiskSection: View {
     let model: MonitorModel
-    @ObservedObject var disk: DiskModel
+    let disk: DiskModel
     /// Set on home: the title and its '>' open the Disk page.
     var open: (() -> Void)? = nil
 

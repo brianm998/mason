@@ -8,7 +8,7 @@ import SwiftUI
 /// `PhoneLayout.phoneHasNo`.
 struct PhoneDetailScreen: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
     let page: Page
 
     var body: some View {
@@ -36,7 +36,7 @@ struct PhoneDetailScreen: View {
 /// buttons under them. It sends what the Mac's stepper sends (`MonitorModel.stepSessionLimit`).
 struct PhoneSessionStepper: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
 
     var body: some View {
         let used = model.home?.sessionsUsed ?? 0
