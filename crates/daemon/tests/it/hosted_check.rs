@@ -202,3 +202,54 @@ fn a_running_check_records_the_slots_it_holds_beside_its_host_until_it_ends() {
     // The command ended: the host holds nothing, though its directory is still there.
     assert!(mason_daemon::hostedcheck::running_holds(&hosts).is_empty());
 }
+
+#[test]
+fn a_check_feeds_the_develop_runs_counts_and_phases() {
+    use mason_core::checks::CheckPhase;
+    use mason_core::progress::Progress;
+    use mason_core::{ProjectId, StepRunId, TaskId};
+    use mason_daemon::hostedcheck::{executable_of, run_with, CheckProgress};
+    use mason_testing::{ParserKind, Suite};
+
+    assert_eq!(
+        executable_of(
+            "     Running unittests src/lib.rs (target/debug/deps/mason_core-0123456789abcdef)"
+        )
+        .as_deref(),
+        Some("mason_core")
+    );
+    assert_eq!(executable_of("ok 1 - a"), None);
+
+    let s = Scratch::new("true", happy_script());
+    let d = s.start();
+    let work = tempfile::tempdir().unwrap();
+    let run_id = StepRunId(9001);
+    let mut p = Progress::new(run_id.0, "develop", 0);
+    p.begin_agent(None, 0);
+    d.progress_seed(TaskId(9001), ProjectId(1), p);
+    let i = d.check_begin(run_id, "full");
+    d.check_edit(run_id, i, |c, now| c.enter(CheckPhase::Running, now));
+    let cmd = "echo '   Running unittests src/lib.rs (target/debug/deps/foo-0123456789abcdef)'; \
+               printf 'TAP version 13\\n1..3\\nok 1 - a\\nok 2 - b\\nnot ok 3 - c\\n'; exit 1";
+    let sp = spec(&d, work.path(), cmd, "tree-p", 60);
+    let pr = CheckProgress {
+        run: run_id,
+        check: i,
+        name: "check s".into(),
+        suite: Some(Suite::new("s", "true", ParserKind::Tap)),
+    };
+    let r = run_with(&d, &sp, Some(&pr)).unwrap();
+    assert!(!r.passed);
+    let p = d.progress_of(run_id.0).unwrap();
+    let sub = p.subs.iter().find(|s| s.name == "check s").expect("a sub");
+    assert_eq!((sub.unit.as_str(), sub.done.value), ("tests", 2));
+    assert_eq!(p.checks[0].current, "foo");
+    // The agent's own figure is not replaced by the check's count.
+    assert_ne!(p.unit, "tests");
+    d.check_edit(run_id, i, |c, now| c.finish("red", &["a::c".into()], now));
+    let p = d.progress_of(run_id.0).unwrap();
+    assert_eq!(p.checks.len(), 1);
+    assert_eq!(p.checks[0].phase, CheckPhase::Done);
+    assert_eq!(p.checks[0].result, "red");
+    assert_eq!(p.checks[0].failed, 1);
+}

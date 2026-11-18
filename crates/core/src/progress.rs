@@ -241,6 +241,11 @@ pub struct Progress {
     /// Streams written to a pseudo-terminal: their live log lines have terminal
     /// control sequences removed (the log file keeps them). Not stored.
     pub terminal: std::collections::BTreeSet<String>,
+    /// The develop step's `run_check` calls so far (kept in memory, not stored).
+    pub checks: Vec<crate::checks::CheckEntry>,
+    /// The agent's latest tool-call summary and when it was made (0: none yet).
+    pub tool: String,
+    pub tool_ms: u64,
 }
 
 /// A line of terminal output without its control sequences: CSI (`ESC [ … final`),
@@ -574,6 +579,8 @@ impl Progress {
         let before = self.snapshot();
         self.agent = true;
         self.tool_calls += 1;
+        self.tool = summary.to_string();
+        self.tool_ms = at_ms;
         let doing = self.todo.iter().any(|t| t.status == "doing");
         if !self.reported_message && !doing {
             self.message = summary.to_string();
