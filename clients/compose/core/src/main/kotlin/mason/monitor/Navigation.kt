@@ -30,7 +30,7 @@ sealed class Page {
 
     companion object {
         /** The sections that have a page of their own (`mason://section/<name>`). */
-        val sectionNames = listOf("active_models", "landing", "queued", "cpu", "compilation",
+        val sectionNames = listOf("active_models", "landing", "queued", "cpu", "disk", "compilation",
             "exploring", "developing", "testing", "review")
 
         /** The page for a section of home; `landing` is the existing Landing page. */
