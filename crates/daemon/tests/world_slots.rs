@@ -24,7 +24,8 @@ fn slots_child() {
             None => break,
         }
     }
-    println!("HELD {}", held.len());
+    // libtest has already written "test slots_child ... " without a newline.
+    println!("\nHELD {}", held.len());
     let mut s = String::new();
     let _ = std::io::stdin().read_line(&mut s);
 }
@@ -44,15 +45,35 @@ fn limit_holds_across_processes() {
                 .unwrap()
         })
         .collect();
+    // Read each child's report on a thread, so a child that never reports fails the test
+    // (with what it did print) instead of leaving it waiting for ever.
     let mut total = 0;
     for c in &mut children {
-        let out = BufReader::new(c.stdout.as_mut().unwrap());
-        let n = out
-            .lines()
-            .map_while(Result::ok)
-            .find_map(|l| l.strip_prefix("HELD ").map(|n| n.parse::<usize>().unwrap()))
-            .expect("child reported");
-        total += n;
+        let out = c.stdout.take().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            let mut lines = BufReader::new(out).lines().map_while(Result::ok);
+            while let Some(l) = lines.next() {
+                if let Some(n) = l.trim().strip_prefix("HELD ") {
+                    let _ = tx.send(Ok(n.parse::<usize>().unwrap()));
+                    // Keep draining: a closed pipe would fail the child's own output.
+                    for _ in lines {}
+                    return;
+                }
+                seen.push(l);
+            }
+            let _ = tx.send(Err(seen));
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(120)) {
+            Ok(Ok(n)) => total += n,
+            other => {
+                for c in &mut children {
+                    let _ = c.kill();
+                }
+                panic!("child did not report: {other:?}");
+            }
+        }
     }
     // Both children are still holding: nothing is timed, the locks are counted.
     let held = slots::held_count(dir.path(), LIMIT);

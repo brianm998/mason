@@ -175,7 +175,6 @@ pub fn refusal(found: &[Marker]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
 
     fn open() -> String {
         "<".repeat(7)

@@ -16,7 +16,6 @@
 
 use mason_landing::git::{self, CatchUp};
 use std::path::Path;
-use std::process::Command;
 
 /// What folding the base in before a check did.
 #[derive(Debug, Clone, PartialEq, Eq)]

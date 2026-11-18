@@ -171,7 +171,6 @@ pub fn merge_clean(wt: &Path, base: &str) -> BaseFold {
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    use std::process::Command;
 
     fn git(dir: &Path, args: &[&str]) -> String {
         let out = mason_landing::git::command()
