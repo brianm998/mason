@@ -1,0 +1,3 @@
+# 0555: disk section beside the CPU section
+
+The disk chart sits in one row with the CPU section at 3:2 when the page is at least 900 dp wide (no existing threshold in `PhoneLayout.kt` applies to a desktop page), and stacks below it otherwise. `DiskSpan` is a typealias of `CpuSpan`, so the four spans and labels cannot drift. Volume colours reuse the theme's ten CPU task slots, assigned by `DiskColors` (lowest free slot, kept while listed), so hiding a volume never recolours another. The disk section appears once the daemon has sent any disk history (an older daemon never does); a pending span change keeps it shown. A hidden id the daemon no longer lists is dropped when a history with volumes arrives.

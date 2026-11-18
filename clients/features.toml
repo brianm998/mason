@@ -157,6 +157,15 @@ ios = "done"
 android = "todo"
 android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
+[feature.disk-history]
+description = "Home's Disk section, right of the CPU section (below it on a narrow window): free space per volume over time as a line chart (y from 0 to the largest total), a span picker (5 min, 1 h, 6 h, 24 h), the time and 'name: 412 GB free of 1.8 TB' on hover or tap, and a legend per volume with its latest reading and, with more than one volume, a checkbox that shows or hides its line (remembered)"
+swift = "todo"
+compose = "done"
+ios = "todo"
+platform_reason = "The next ticket: the Swift client and the iOS app have no Disk section yet; Compose has it first"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
+
 [feature.task-detail]
 description = "Steps, activity, live log, plan, checks, tests, history, decision card, actions"
 swift = "done"
