@@ -237,6 +237,10 @@ struct PhoneTaskRow: View {
                 if !row.activity.isEmpty {
                     Text(row.activity).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
+                if row.hasWait {
+                    Text(QueueWait.badge(row.wait.cause)).font(.caption.weight(.semibold)).foregroundStyle(.orange)
+                        .accessibilityIdentifier("wait:badge")
+                }
                 if !row.whyWaiting.isEmpty {
                     Text(row.whyWaiting).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }

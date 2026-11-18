@@ -3,7 +3,7 @@
 import AppKit
 import MasonProtocol
 import MasonTokens
-import MonitorCore
+@testable import MonitorCore
 import SwiftUI
 import XCTest
 

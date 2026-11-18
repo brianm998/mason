@@ -301,7 +301,8 @@ struct RowView: View, Equatable {
             .lineLimit(1).fixedSize()
     }
 
-    var activity: String { row.whyWaiting.isEmpty ? row.activity : row.whyWaiting }
+    var activity: String { QueueWait.line(row) }
+
 }
 
 /// Pinned at the bottom of the sidebar, under the list: every open owner session the owner is

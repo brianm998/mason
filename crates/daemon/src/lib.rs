@@ -90,6 +90,7 @@ pub mod usage;
 pub mod usersession;
 pub mod version;
 pub mod views;
+pub mod waitview;
 pub mod watch;
 pub mod watchdog;
 pub mod ws;
