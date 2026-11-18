@@ -43,6 +43,69 @@ pub struct CheckSpec {
     /// Polled while the command runs: `Some(note)` stops it (the owner skipped or forced
     /// what it belongs to). The outcome then carries the note in `stopped`.
     pub stop: Option<StopFn>,
+    /// The machine slots the caller holds while the command runs (empty: none). Written next
+    /// to the host so that a daemon which restarts counts them as held until the host's
+    /// command ends (s589).
+    pub holds: std::collections::BTreeMap<String, u32>,
+    /// Whose run it is, as the resources list shows it: `#567 check`.
+    pub label: String,
+}
+
+/// What a step host's command holds of the machine, as recorded at its start.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostHold {
+    pub dir: PathBuf,
+    pub label: String,
+    pub uses: std::collections::BTreeMap<String, u32>,
+}
+
+const HOLDS_FILE: &str = "holds.kv";
+
+fn write_holds(dir: &Path, spec: &CheckSpec) {
+    if spec.holds.is_empty() {
+        return;
+    }
+    let uses = spec
+        .holds
+        .iter()
+        .map(|(k, n)| format!("{k}={n}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let _ = write_kv(
+        &dir.join(HOLDS_FILE),
+        &[("label", spec.label.replace('\n', " ")), ("uses", uses)],
+    );
+}
+
+/// Every step host under `hosts` whose command still runs and recorded slots it holds.
+/// A host whose command ended, or that was lost, holds nothing.
+pub fn running_holds(hosts: &Path) -> Vec<HostHold> {
+    use mason_step_host::registry::{HostState, Registry};
+    let Ok(all) = Registry::new(hosts).scan() else {
+        return vec![];
+    };
+    all.into_iter()
+        .filter(|h| h.state == HostState::Running)
+        .filter_map(|h| {
+            let kv = read_kv(&h.info.dir.join(HOLDS_FILE)).ok()?;
+            let uses = kv
+                .get("uses")?
+                .split(',')
+                .filter_map(|p| {
+                    let (k, n) = p.split_once('=')?;
+                    Some((k.to_string(), n.parse().ok()?))
+                })
+                .collect();
+            Some(HostHold {
+                dir: h.info.dir,
+                label: kv
+                    .get("label")
+                    .cloned()
+                    .unwrap_or_else(|| h.info.id.clone()),
+                uses,
+            })
+        })
+        .collect()
 }
 
 /// See [`CheckSpec::stop`].
@@ -244,6 +307,7 @@ fn collect(d: &Arc<Daemon>, spec: &CheckSpec, id: &str) -> Shared {
             heartbeat: d.cfg.heartbeat,
         };
         spawn_host(&o).map_err(|e| format!("cannot start the command: {e}"))?;
+        write_holds(&dir, spec);
     }
     let started = HostInfo::read(&dir).map_or_else(|_| now_ms(), |i| i.started_ms);
     let deadline = started.saturating_add(spec.limit.as_millis() as u64);
