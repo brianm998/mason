@@ -16,6 +16,8 @@ public struct NotificationRow: Equatable, Identifiable {
     /// The action button's title, if the row has one.
     public let button: String?
     public let icon: String?
+    /// The daemon banner's kind, which picks its image.
+    public let daemonKind: String?
     /// Index into `header.banners` (daemon banners, and the expanded pause).
     public let bannerIndex: Int?
     /// Collapsed pause banners drawn as icons in this row.
@@ -49,7 +51,7 @@ extension MonitorModel {
     public func allNotificationRows() -> [NotificationRow] {
         var rows: [NotificationRow] = []
         func client(_ id: String, _ text: String, button: String? = nil, icon: String? = nil) {
-            rows.append(NotificationRow(key: id, kind: .client, uiID: id, text: text, button: button, icon: icon,
+            rows.append(NotificationRow(key: id, kind: .client, uiID: id, text: text, button: button, icon: icon, daemonKind: nil,
                                         bannerIndex: nil, collapsed: [], issue: nil, clientID: id))
         }
         if !connected {
@@ -68,15 +70,15 @@ extension MonitorModel {
         let banners = header?.banners ?? []
         let firstPause = banners.firstIndex { $0.kind == "paused" }
         for (i, b) in banners.enumerated() {
-            let icon = BannerIcons.id(forDaemonKind: b.kind)
+            let icon: String? = nil
             let key = Self.bannerKey(b)
             switch b.kind {
             case "push_auth":
                 rows.append(NotificationRow(key: key, kind: .push, uiID: "push-auth:\(Self.pushAuthProject(b))", text: b.text,
-                    button: canAct ? "Choose SSH key…" : nil, icon: icon, bannerIndex: i, collapsed: [], issue: nil, clientID: nil))
+                    button: canAct ? "Choose SSH key…" : nil, icon: icon, daemonKind: b.kind, bannerIndex: i, collapsed: [], issue: nil, clientID: nil))
             case "health":
                 rows.append(NotificationRow(key: key, kind: .health, uiID: "health-session:\(b.session)", text: b.text,
-                    button: "Open session", icon: icon, bannerIndex: i, collapsed: [], issue: nil, clientID: nil))
+                    button: "Open session", icon: icon, daemonKind: b.kind, bannerIndex: i, collapsed: [], issue: nil, clientID: nil))
             case "paused":
                 guard i == firstPause else { continue }
                 for row in pauseRows() {
@@ -84,17 +86,17 @@ extension MonitorModel {
                         ?? Self.sanitizeKey("paused-collapsed:" + row.collapsed.map { Self.bannerKey(banners[$0]) }.joined(separator: ","))
                     let first = row.expanded ?? row.collapsed.first
                     rows.append(NotificationRow(key: k, kind: .paused, uiID: row.expanded == nil ? "paused-collapsed-row" : "paused-row:\(row.expanded!)",
-                        text: first.map { banners[$0].text } ?? "", button: nil, icon: nil, bannerIndex: row.expanded,
+                        text: first.map { banners[$0].text } ?? "", button: nil, icon: nil, daemonKind: nil, bannerIndex: row.expanded,
                         collapsed: row.collapsed, issue: nil, clientID: nil))
                 }
             default:
-                rows.append(NotificationRow(key: key, kind: .banner, uiID: "banner:\(i)", text: b.text, button: nil, icon: icon,
+                rows.append(NotificationRow(key: key, kind: .banner, uiID: "banner:\(i)", text: b.text, button: nil, icon: icon, daemonKind: b.kind,
                                             bannerIndex: i, collapsed: [], issue: nil, clientID: nil))
             }
         }
         for p in header?.pendingIssues ?? [] {
             rows.append(NotificationRow(key: "issue:\(p.number)", kind: .pending, uiID: "pending:\(p.project):\(p.number)",
-                text: p.title, button: nil, icon: nil, bannerIndex: nil, collapsed: [], issue: Int(p.number), clientID: nil))
+                text: p.title, button: nil, icon: nil, daemonKind: nil, bannerIndex: nil, collapsed: [], issue: Int(p.number), clientID: nil))
         }
         return rows
     }

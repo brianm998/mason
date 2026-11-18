@@ -296,7 +296,7 @@ struct BannersView: View {
 
     @ViewBuilder func textRow(_ row: NotificationRow) -> some View {
         HStack(spacing: theme.spacing) {
-            bannerImage(row.icon)
+            bannerImage(row.daemonKind.flatMap { BannerIcons.id(forDaemonKind: $0) } ?? row.icon)
             Text(row.text).font(theme.body(.medium)).frame(maxWidth: .infinity, alignment: .leading)
                 .accessibilityIdentifier(row.uiID + "-text")
             if let button = row.button { Button(button) { press(row) }.accessibilityIdentifier(row.uiID) }
