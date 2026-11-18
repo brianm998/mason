@@ -38,7 +38,7 @@ public final class LiveState: ObservableObject {
 @MainActor
 public final class MonitorModel: ObservableObject {
     // From the daemon.
-    @Published public var header: HeaderView? { didSet { prunePauseCollapse() } }
+    @Published public var header: HeaderView? { didSet { prunePauseCollapse(); pruneDismissed() } }
     @Published public var sidebar: SidebarView? { didSet { sidebarRevision &+= 1; linkRevision &+= 1 } }
     /// Bumped on every new sidebar, so derived layouts know when to be rebuilt.
     var sidebarRevision: UInt64 = 0
@@ -383,7 +383,7 @@ public final class MonitorModel: ObservableObject {
     /// Called with every command result (the tools read them; the app shows errors).
     public var onResult: ((Mason_V1_CommandResult) -> Void)?
 
-    private let prefs: Preferences
+    let prefs: Preferences
     public var sender: ((Mason_V1_Command) -> Void)?
     public var subscribe: (() -> Void)?
 

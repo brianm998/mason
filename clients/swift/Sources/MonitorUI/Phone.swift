@@ -46,7 +46,7 @@ public struct PhoneRootView: View {
     private var stack: some View {
         NavigationStack(path: Binding(get: { nav.stack }, set: { nav.replace($0) })) {
             VStack(spacing: 0) {
-                BannersView(model: model)
+                BannersView(model: model, windowHeight: windowHeight)
                 PhoneSidebarScreen(model: model) { nav.select($0) }
             }
             .phoneChrome(model: model, title: "MASON", open: openAttention, add: { adding = true }, improve: { improving = true })

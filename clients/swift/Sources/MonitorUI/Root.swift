@@ -50,7 +50,7 @@ public struct RootView: View {
         VStack(spacing: 0) {
             TopBar(model: model)
             Divider()
-            BannersView(model: model)
+            BannersView(model: model, windowHeight: windowHeight)
             GeometryReader { geo in
                 let factor = MonitorModel.sidebarFactor(scale: model.textScale)
                 let width = MonitorModel.fit(
