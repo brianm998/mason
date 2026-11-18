@@ -23,6 +23,9 @@ pub enum WaitCause {
     DiskStall { slow_ms: u64, max_ms: u64 },
     /// macOS's `syspolicyd` is busy checking new programs and a compile is already running.
     Policy { busy_pct: u32, max_pct: u32 },
+    /// The CPU is held below `min_pct` of its speed for heat or power and machine work is
+    /// already running.
+    Thermal { speed_pct: u32, min_pct: u32 },
     /// Needs more of the resource than its limit, so it cannot run until the
     /// limit is raised.
     TooBig {
@@ -222,6 +225,7 @@ impl Wait {
             WaitCause::Settling { .. } => "settling",
             WaitCause::DiskStall { .. } => "disk-stall",
             WaitCause::Policy { .. } => "syspolicyd",
+            WaitCause::Thermal { .. } => "thermal",
             WaitCause::TooBig { .. } => "too-big",
             WaitCause::Unknown { .. } => "unknown",
         }
@@ -257,6 +261,7 @@ pub fn cause_class(cause: &WaitCause) -> String {
         WaitCause::Cpu { .. } | WaitCause::Settling { .. } => "cpu".into(),
         WaitCause::DiskStall { .. } => "disk-stall".into(),
         WaitCause::Policy { .. } => "syspolicyd".into(),
+        WaitCause::Thermal { .. } => "thermal".into(),
     }
 }
 
@@ -270,6 +275,9 @@ fn reason(cause: &WaitCause, now_ms: u64) -> Option<String> {
         WaitCause::Cpu { busy_pct, max_pct } => Some(format!("CPU {busy_pct}% > {max_pct}%")),
         WaitCause::DiskStall { .. } => Some("the build disk is slow".into()),
         WaitCause::Policy { .. } => Some("macOS is busy checking new programs".into()),
+        WaitCause::Thermal { speed_pct, .. } => {
+            Some(format!("the CPU is held to {speed_pct}% for heat"))
+        }
         WaitCause::Disk { .. } => Some("disk is low".into()),
         WaitCause::Memory { .. } => Some("memory is low".into()),
         _ => None,
@@ -370,6 +378,9 @@ fn explain_cause(w: &Wait, now_ms: u64) -> String {
         ),
         WaitCause::Policy { busy_pct, max_pct } => format!(
             "compile waiting: syspolicyd is at {busy_pct}% CPU checking new programs (limit {max_pct}%)"
+        ),
+        WaitCause::Thermal { speed_pct, min_pct } => format!(
+            "waiting: the CPU is held to {speed_pct}% of its speed for heat (work starts at {min_pct}% or more)"
         ),
         WaitCause::Settling { until } => format!(
             "compile waiting: letting the last compile show in CPU use ({} s)",
