@@ -31,8 +31,12 @@ final class PendingTaskPageTests: XCTestCase {
         sb.sections = [sec]
         var v = Mason_V1_View()
         v.body = .sidebar(sb)
+        var u = Mason_V1_ViewUpdate()
+        u.view = v
+        var msg = Mason_V1_ServerMessage()
+        msg.view = u
         XCTAssertNil(m.sidebarRow(7))
-        m.apply(v)
+        m.apply(msg)
         let r7 = try XCTUnwrap(m.sidebarRow(7))
         let d = TaskDetailPage.placeholder(r7)
         XCTAssertTrue(d.hasRow)
