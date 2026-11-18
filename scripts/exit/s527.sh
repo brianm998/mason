@@ -9,7 +9,7 @@ cd "$(dirname "$0")/../.."
 cargo test -q -p mason-scheduler --lib -- explain::tests
 cargo test -q -p mason-daemon --lib -- sched::tests::ten_compiles_behind_a_waiting_exclusive_lease_all_name_it sched::tests::a_gate_holding_most_waiting_work_is_the_queue_summary
 cargo test -q -p mason-daemon --lib -- waitview
-cargo test -q -p mason-cli -- the_hook_wraps_builds_and_leaves_everything_else
+cargo test -q -p mason-pipeline -- the_hook_wraps_builds_and_leaves_everything_else
 
 if [ "$(uname)" = Darwin ] && command -v swift >/dev/null && [ -z "${MASON_SKIP_SWIFT:-}" ]; then
   (cd clients/swift && swift test --filter QueueWaitTests --filter QueueHoldBannerTests)
