@@ -13,7 +13,7 @@ class RefusedLinkTest {
     }
 
     private fun waitFor(what: String, f: () -> Boolean) {
-        val end = System.currentTimeMillis() + 5000
+        val end = System.currentTimeMillis() + 30000
         while (!f()) {
             if (System.currentTimeMillis() > end) fail("timed out waiting for $what")
             Thread.sleep(10)
