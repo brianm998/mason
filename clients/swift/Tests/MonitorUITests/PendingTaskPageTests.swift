@@ -7,6 +7,7 @@ import MasonTokens
 import SwiftUI
 import XCTest
 
+@testable import MonitorCore
 @testable import MonitorUI
 
 /// Task #522: a task that is in the sidebar draws its title and actions before the task view

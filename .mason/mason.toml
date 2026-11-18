@@ -60,7 +60,7 @@ next = "land"
 [suite.cargo-workspace]
 build = "{project_test} --no-run"
 command = "{project_test}"
-rerun = "{project_test} {tests}"
+rerun = "{project_test} -- --exact {tests}"
 # The affected tests, not the whole workspace (decision 0539, superseding 0205). `{tests_for_change}`
 # is the test targets a change can affect, found by a static source scan (crates/daemon/src/affected.rs):
 # a changed test file runs itself, a changed `src` file runs its crate's unit tests and the targets

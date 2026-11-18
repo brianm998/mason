@@ -47,7 +47,7 @@ enum EditorActions {
 struct EditorPage: View {
     @Environment(\.theme) var theme
     @Environment(\.features) var features
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
     @State private var tab = Tab.graph
     @State private var message = ""
 
@@ -111,7 +111,7 @@ struct EditorPage: View {
 private struct GraphTab: View {
     @Environment(\.theme) var theme
     @Environment(\.features) var features
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
     let e: Mason_V1_EditorView
     static let nodeW: CGFloat = 170
     static let nodeH: CGFloat = 70
@@ -204,7 +204,7 @@ private struct GraphTab: View {
 
 private struct NodeView: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
     let n: Mason_V1_EditorNode
     let selected: Bool
     var editable = true
@@ -259,7 +259,7 @@ private struct NodeEditing: ViewModifier {
 
 private struct Palette: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
     let e: Mason_V1_EditorView
 
     struct Entry { var type: String; var categories: [String]; var available: Bool; var about: String; var fields: [String: Any] }
@@ -292,7 +292,7 @@ private struct Palette: View {
 
 private struct Inspector: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
     let e: Mason_V1_EditorView
     @State private var newName = ""
 
@@ -337,7 +337,7 @@ private struct Inspector: View {
 /// number, a switch, a list (of choices or of text), a table of whole numbers.
 private struct SchemaForm: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
     let step: String
     let schema: String
     let values: String
@@ -422,7 +422,7 @@ private struct FieldText: View {
 
 private struct TestsTab: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
     let e: Mason_V1_EditorView
 
     var body: some View {
@@ -459,7 +459,7 @@ private struct TestsTab: View {
 
 private struct LandingTab: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
     let e: Mason_V1_EditorView
     @State private var newTier = ""
 
@@ -547,7 +547,7 @@ private struct LandingTab: View {
 
 private struct PreviewTab: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
     let e: Mason_V1_EditorView
     @State private var scenario = ""
 
