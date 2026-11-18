@@ -1379,6 +1379,10 @@ impl Broker {
                         .unwrap_or_else(|| "cli".into()),
                 )),
                 Meta::Outside { .. } => Some((*id, "held outside the queue".into())),
+                Meta::Host { .. } => Some((
+                    *id,
+                    "held by a step host from before the restart".into(),
+                )),
                 Meta::Task => None,
             })
             .collect();
