@@ -21,7 +21,14 @@ trap cleanup EXIT
 cargo build -q -p mason-daemon -p mason-conformance
 bin=target/debug
 echo "== 1. the Swift package builds and its tests pass"
-(cd clients/swift && swift build 2>&1 | tail -1 && swift test 2>&1 | grep -E "Executed .* tests" | head -1)
+# Write the output to a file: `grep | head -1` closes the pipe early, and under pipefail
+# the resulting SIGPIPE (141) failed this step even when every test passed.
+(cd clients/swift && swift build 2>&1 | tail -1)
+swift_log="$root/swift-test.log"
+if ! (cd clients/swift && swift test >"$swift_log" 2>&1); then
+  tail -30 "$swift_log" >&2; echo "FAIL: swift test exited non-zero" >&2; exit 1
+fi
+grep -E "Executed .* tests" "$swift_log" | tail -1
 tool=clients/swift/.build/debug/monitor-tool
 
 start_demo() {
