@@ -17,8 +17,9 @@
 //! The limit counts from the host's start, not from the call that collects it.
 
 use crate::daemon::{now_ms, Daemon};
+use mason_core::StepRunId;
 use mason_landing::git;
-use mason_step_host::client::{collect_to_file, ClientError, HostClient};
+use mason_step_host::client::{collect_to_file, collect_to_file_observed, ClientError, HostClient};
 use mason_step_host::launcher::{spawn_host, SpawnOptions};
 use mason_step_host::protocol::{CURRENT, PREVIOUS};
 use mason_step_host::registry::{read_kv, write_kv, HostInfo};
@@ -43,6 +44,74 @@ pub struct CheckSpec {
     /// Polled while the command runs: `Some(note)` stops it (the owner skipped or forced
     /// what it belongs to). The outcome then carries the note in `stopped`.
     pub stop: Option<StopFn>,
+}
+
+/// Where a check's live counts go: the develop step's run, as the sub-count `name`, from
+/// the output of the suite's parser (none: nothing to count).
+#[derive(Clone)]
+pub struct CheckProgress {
+    pub run: StepRunId,
+    /// Which entry of the run's check history this run belongs to.
+    pub check: usize,
+    /// "check cargo-workspace".
+    pub name: String,
+    pub suite: Option<mason_testing::Suite>,
+}
+
+impl CheckProgress {
+    /// A function that takes the output as it arrives, keeps the counts and the test
+    /// executable cargo is on, and reports both. For display: no verdict comes of it.
+    fn feeder(&self, d: &Arc<Daemon>) -> impl FnMut(&[u8]) {
+        let mut live = self
+            .suite
+            .as_ref()
+            .and_then(|s| mason_testing::LiveCount::new(s.parser, s))
+            .map(|l| (l, Default::default()));
+        let (d, run, check, name) = (d.clone(), self.run, self.check, self.name.clone());
+        let mut partial: Vec<u8> = vec![];
+        let mut exe = String::new();
+        move |b: &[u8]| {
+            if let Some((l, last)) = live.as_mut() {
+                l.feed(b);
+                let c: mason_testing::Counts = l.counts();
+                if *last != Some(c.passed) {
+                    *last = Some(c.passed);
+                    d.progress_sub(run, &name, None, |s| {
+                        if s.done.source != mason_core::progress::Source::Reported {
+                            s.unit = "tests".into();
+                            s.done = mason_core::progress::Figure::counted(c.passed);
+                        }
+                    });
+                }
+            }
+            partial.extend_from_slice(b);
+            while let Some(i) = partial.iter().position(|x| *x == b'\n') {
+                let line: Vec<u8> = partial.drain(..=i).collect();
+                if let Some(e) = executable_of(&String::from_utf8_lossy(&line)) {
+                    if e != exe {
+                        exe = e.clone();
+                        d.check_edit(run, check, |c, _| c.current = e);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The test executable a cargo `Running unittests src/lib.rs (target/debug/deps/foo-0123abcd…)`
+/// line names (the file's name without cargo's hash), `None` for any other line.
+pub fn executable_of(line: &str) -> Option<String> {
+    let rest = line.trim().strip_prefix("Running ")?;
+    let path = rest.rsplit_once('(').and_then(|(_, p)| p.strip_suffix(')'));
+    let base = path.map(|p| p.rsplit('/').next().unwrap_or(p));
+    let name = match base {
+        Some(b) => match b.rsplit_once('-') {
+            Some((n, h)) if h.len() >= 8 && h.bytes().all(|c| c.is_ascii_hexdigit()) => n,
+            _ => b,
+        },
+        None => rest,
+    };
+    (!name.is_empty()).then(|| name.to_string())
 }
 
 /// See [`CheckSpec::stop`].
@@ -167,6 +236,12 @@ pub fn pending(d: &Daemon, spec: &CheckSpec) -> bool {
 /// Run `spec` (or attach to, or take the result of, the run that already is it).
 /// Blocks until there is a result.
 pub fn run(d: &Arc<Daemon>, spec: &CheckSpec) -> Shared {
+    run_with(d, spec, None)
+}
+
+/// [`run`], feeding the develop step's progress with the run's live counts (for display only;
+/// the verdict is what the command's exit says, as ever).
+pub fn run_with(d: &Arc<Daemon>, spec: &CheckSpec, progress: Option<&CheckProgress>) -> Shared {
     let _ = std::fs::create_dir_all(&spec.log_dir);
     let key = run_key(spec);
     // Find or allocate, one caller at a time, so two calls never take one number.
@@ -212,7 +287,7 @@ pub fn run(d: &Arc<Daemon>, spec: &CheckSpec) -> Shared {
         }
         return g.clone().unwrap_or_else(|| Err("no result".into()));
     }
-    let res = collect(d, spec, &id);
+    let res = collect(d, spec, &id, progress);
     // Given to its callers now: a later call on the same tree runs again.
     mark_delivered(spec, &id, &key);
     {
@@ -227,7 +302,12 @@ pub fn run(d: &Arc<Daemon>, spec: &CheckSpec) -> Shared {
     res
 }
 
-fn collect(d: &Arc<Daemon>, spec: &CheckSpec, id: &str) -> Shared {
+fn collect(
+    d: &Arc<Daemon>,
+    spec: &CheckSpec,
+    id: &str,
+    progress: Option<&CheckProgress>,
+) -> Shared {
     let hosts = d.cfg.hosts_dir();
     let dir = hosts.join(id);
     if !dir.join("host.kv").exists() {
@@ -277,7 +357,17 @@ fn collect(d: &Arc<Daemon>, spec: &CheckSpec, id: &str) -> Shared {
     }
     let log = spec.log_dir.join(format!("{id}.log"));
     let exit = spec.log_dir.join(format!("{id}.exit"));
-    let rec = collect_to_file(&dir, &log, &exit);
+    let rec = match progress {
+        None => collect_to_file(&dir, &log, &exit),
+        Some(pr) => {
+            let mut feed = pr.feeder(d);
+            // After a restart the log is read again from its start, so the counts are exact.
+            if let Ok(old) = std::fs::read(&log) {
+                feed(&old);
+            }
+            collect_to_file_observed(&dir, &log, &exit, &mut |_, b| feed(b))
+        }
+    };
     done.store(true, Ordering::SeqCst);
     let rec = match rec {
         Ok(r) => r,
