@@ -168,6 +168,7 @@ fun HomePage(model: MonitorModel) {
             }
         }
         if (adding) AddTaskDialog(model) { adding = false }
+        h?.queue_hold?.let { QueueHoldBanner(model, it) }
         val attention = h?.attention.orEmpty()
         if (attention.isNotEmpty()) {
             Section("Needs you") {
@@ -215,6 +216,7 @@ fun HomePage(model: MonitorModel) {
                         ProgressCells(model, r.progress, r.slow)
                         Text("${r.project} ${r.key}", style = theme.linked(theme.body(FontWeight.SemiBold)))
                         Text(r.title, style = theme.linked(theme.body()))
+                        r.wait?.let { WaitBadge(it.cause) }
                         Text(
                             if (r.why_waiting.isEmpty()) Format.duration(r.in_state_ms) else "${r.why_waiting}, ${Format.duration(r.in_state_ms)}",
                             style = theme.small(color = if (r.slow) theme.slow else theme.muted),
@@ -313,6 +315,14 @@ fun CompilationSection(model: MonitorModel, c: Compilation, open: (() -> Unit)? 
                 )
             }
         }
+        if (c.leases.isNotEmpty()) Text("Commands with no task", style = theme.body(FontWeight.SemiBold))
+        c.leases.forEachIndexed { i, l ->
+            Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.testTag("compile:lease:$i")) {
+                who(l.label, 0L, l.command)
+                Text(QueueWait.leaseDetail(l, now), style = theme.body(color = theme.muted))
+            }
+        }
         c.notes.forEachIndexed { i, n ->
             Text(n, style = theme.small(color = theme.attention), modifier = Modifier.testTag("compile:note:$i"))
         }
@@ -376,7 +386,17 @@ private fun TaskDetail(model: MonitorModel, d: TaskDetailView, loading: Boolean 
     Column(verticalArrangement = Arrangement.spacedBy(theme.spacingSmall)) {
         Text("${r.key} ${r.title}", style = theme.title(), modifier = Modifier.testTag("detail:${r.id}"))
         Text("${r.project}, ${r.state.replace('_', ' ')}, ${Format.duration(r.in_state_ms)} in this state", style = theme.body(color = theme.muted))
-        if (r.why_waiting.isNotEmpty()) LinkedText(model, r.why_waiting, theme.body(), Modifier.testTag("detail:why-waiting"))
+        if (r.why_waiting.isNotEmpty()) {
+            Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), verticalAlignment = Alignment.CenterVertically) {
+                r.wait?.let { WaitBadge(it.cause) }
+                LinkedText(model, r.why_waiting, theme.body(), Modifier.testTag("detail:why-waiting"))
+            }
+        }
+        r.wait?.let { w ->
+            QueueWait.chain(w, r.key).forEachIndexed { i, line ->
+                LinkedText(model, line, theme.small(color = theme.muted), Modifier.testTag("detail:wait-chain:$i"))
+            }
+        }
         if (r.issue != 0L || d.ci_links.isNotEmpty()) CiLinksLine(d.ci_links, r.issue, r.issue_url)
         Text(cpuTaskLine(d.cpu_permille), style = theme.body(color = theme.muted), modifier = Modifier.testTag("cpu"))
         Row(horizontalArrangement = Arrangement.spacedBy(theme.spacingLarge)) {
@@ -919,5 +939,37 @@ private fun StageRows(model: MonitorModel, name: String) {
                 }
             }
         }
+    }
+}
+
+/** The cause of a wait as a small badge on a task row (s527). */
+@Composable
+internal fun WaitBadge(cause: String) {
+    val theme = LocalTheme.current
+    Text(
+        QueueWait.badge(cause),
+        style = theme.small(color = theme.attention),
+        modifier = Modifier.background(theme.attention.copy(alpha = 0.15f), RoundedCornerShape(50)).padding(horizontal = 6.dp)
+            .testTag("wait:badge"),
+    )
+}
+
+/** The lines of the queue-held banner: the summary, then the lease holding the queue (s527). */
+internal fun queueHoldLines(h: mason.v1.QueueHold, now: Long): List<String> =
+    listOfNotNull(h.summary, h.party?.takeIf { it.lease }?.let { QueueWait.lease(it, now) })
+
+/** One line at the top of home when most waiting work is held by one request, gate or red test. */
+@Composable
+internal fun QueueHoldBanner(model: MonitorModel, h: mason.v1.QueueHold) {
+    val theme = LocalTheme.current
+    Column(
+        verticalArrangement = Arrangement.spacedBy(theme.spacingSmall),
+        modifier = Modifier.fillMaxWidth().background(theme.attention.copy(alpha = 0.12f), RoundedCornerShape(6.dp))
+            .padding(theme.spacing).testTag("home:queue-hold"),
+    ) {
+        val lines = queueHoldLines(h, model.daemonNow())
+        LinkedText(model, lines.first(), theme.body(FontWeight.SemiBold, color = theme.attention))
+        lines.drop(1).forEach { Text(it, style = theme.small(color = theme.muted), modifier = Modifier.testTag("home:queue-hold:lease")) }
+        if (h.kind == "red") h.tasks.take(8).forEach { t -> Link("#$t") { model.go(Page.Task(t)) } }
     }
 }
