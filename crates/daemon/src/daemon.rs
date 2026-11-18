@@ -1317,6 +1317,7 @@ impl Daemon {
             if read_at.is_none_or(|t| t.elapsed() >= crate::hung::EVERY) {
                 read_at = Some(std::time::Instant::now());
                 crate::hung::check(&d, &mut tracker, now_ms());
+                crate::hostedcheck::stop_unwanted(&d);
             }
             let c = d.broker.compilation();
             let mut now = format!("{} {}", c.limit, c.used);

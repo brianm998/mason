@@ -65,3 +65,21 @@ fn a_batch_tier_red_the_base_shows_too_blames_no_task() {
     assert!(w.sent_back(t1).is_none() && w.sent_back(t2).is_none());
     assert!(w.on_main("x/one.txt") && w.on_main("x/two.txt"));
 }
+
+#[test]
+fn two_tasks_each_red_alone_over_a_green_base_both_go_back() {
+    // On 2026-11-18 batch #372 held two tasks forever: one failed `cargo fmt`, the other
+    // clippy, each alone, and "every task reproduces the red alone" was taken as the base's
+    // red without running the base. The base here is green, so each task goes back.
+    let w = world(TOML, &[]);
+    let a = w.task("left", &[("x/left/red.integration", "left's own red")]);
+    let b = w.task("right", &[("x/right/red.integration", "right's own red")]);
+    wait_for("both to go back", 180, || {
+        w.sent_back(a).is_some() && w.sent_back(b).is_some()
+    });
+    for t in [a, b] {
+        let why = w.sent_back(t).unwrap();
+        assert!(why.contains("integration"), "{why}");
+    }
+    assert!(!w.on_main("x/left/red.integration") && !w.on_main("x/right/red.integration"));
+}

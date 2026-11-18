@@ -493,4 +493,5 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s585**: `testImagesAreBuiltOnceAndThenServedFromTheCache` empties the shared mascot cache first, so it no longer fails when an earlier test has already built `icon:queued@24`.
 - **s589**: A command that runs under a step host and holds slots is counted as holding them by the next daemon (read from the host's own directory before the first grant), so a restart can no longer let the queue grant the same slots again.
 - **s596**: s12.sh step 1 now captures `swift test` output to a file and checks its exit status, instead of `grep | head -1` under pipefail.
+- **s603**: The notify claim test counts only `paused` announcements and prints the claim on failure, so other alerts in a whole-workspace run no longer turn it red.
 <!-- status:end -->
