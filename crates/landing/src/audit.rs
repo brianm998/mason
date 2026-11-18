@@ -242,7 +242,7 @@ fn diff_text(repo: &Path, range: &str) -> Result<String, GitError> {
     ];
     // Not `git::run`, which trims: a first or last line must match exactly.
     let out = proc::output(
-        Command::new("git").args(args).current_dir(repo),
+        crate::git::command().args(args).current_dir(repo),
         crate::git::default_deadline(),
     );
     match out {
@@ -267,7 +267,9 @@ fn failed(args: &[&str], stderr: String) -> GitError {
 fn file_at(repo: &Path, rev: &str, file: &str) -> Option<String> {
     let spec = format!("{rev}:{file}");
     let o = proc::output(
-        Command::new("git").args(["show", &spec]).current_dir(repo),
+        crate::git::command()
+            .args(["show", &spec])
+            .current_dir(repo),
         crate::git::default_deadline(),
     )
     .ok()?;

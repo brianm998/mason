@@ -294,7 +294,7 @@ mod tests {
     // ---- against a real repository -------------------------------------------------------
 
     fn git_in(dir: &Path, args: &[&str]) {
-        let o = Command::new("git")
+        let o = mason_landing::git::command()
             .arg("-C")
             .arg(dir)
             .args(["-c", "user.name=t", "-c", "user.email=t@t"])

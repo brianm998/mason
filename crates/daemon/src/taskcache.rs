@@ -454,7 +454,7 @@ pub fn cargo_config_text(dir: &str) -> String {
 }
 
 fn git_out(wt: &Path, args: &[&str]) -> Result<(bool, String), String> {
-    let o = std::process::Command::new("git")
+    let o = mason_landing::git::command()
         .args(args)
         .current_dir(wt)
         .output()

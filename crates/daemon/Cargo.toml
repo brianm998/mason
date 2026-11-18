@@ -56,7 +56,7 @@ tower-service = "0.3"
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_SystemInformation", "Win32_System_Threading"] }
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.31.3", features = ["process", "signal", "resource"] }
+nix = { version = "0.31.3", features = ["process", "signal", "resource", "fs"] }
 
 [dev-dependencies]
 tokio = { version = "1.54.1", features = ["test-util"] }

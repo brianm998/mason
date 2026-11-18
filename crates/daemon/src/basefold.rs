@@ -68,7 +68,7 @@ pub fn fold(wt: &Path, base: &str) -> BaseFold {
 /// The files a merge of `base` into `HEAD` would conflict in, or `None` if it merges cleanly.
 /// `git merge-tree --write-tree` writes only objects: the worktree and the index are untouched.
 pub(crate) fn would_conflict(wt: &Path, base: &str) -> Result<Option<String>, String> {
-    let out = Command::new("git")
+    let out = mason_landing::git::command()
         .arg("-C")
         .arg(wt)
         .args([
@@ -143,7 +143,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn git(dir: &Path, args: &[&str]) -> String {
-        let out = Command::new("git")
+        let out = mason_landing::git::command()
             .arg("-C")
             .arg(dir)
             .args([

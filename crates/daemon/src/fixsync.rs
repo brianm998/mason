@@ -174,7 +174,7 @@ mod tests {
     use std::process::Command;
 
     fn git(dir: &Path, args: &[&str]) -> String {
-        let out = Command::new("git")
+        let out = mason_landing::git::command()
             .arg("-C")
             .arg(dir)
             .args([
@@ -299,7 +299,7 @@ mod tests {
         commit(&repo, "a.txt", "one\ntheirs\nthree\n");
         commit(&wt, "a.txt", "one\nmine\nthree\n");
         // The agent is resolving a merge of the base itself.
-        let out = Command::new("git")
+        let out = mason_landing::git::command()
             .arg("-C")
             .arg(&wt)
             .args(["merge", "--no-edit", "base"])
