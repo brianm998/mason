@@ -8,5 +8,10 @@ cd "$(dirname "$0")/../.."
 grep -q '^swift = "done"' <(sed -n '/^\[feature.disk-history\]/,/^\[feature\.[^d]/p' clients/features.toml)
 if ! command -v swift >/dev/null 2>&1; then echo "s591: swift missing, skipped"; exit 0; fi
 cd clients/swift
-swift test --filter 'DiskViewTests|DiskSectionTests'
+log=$(mktemp)
+trap 'rm -f "$log"' EXIT
+if ! swift test --filter 'DiskViewTests|DiskSectionTests' >"$log" 2>&1; then
+  grep -E 'error:' "$log" | head -20
+  exit 1
+fi
 echo "s591: ok"
