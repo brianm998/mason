@@ -81,8 +81,36 @@ fn pause(d: &Arc<Daemon>) {
     attention::sync_alerts(d);
 }
 
+// The daemon raises some alerts from process-wide state: `launch-frozen` reads the step-host
+// launcher's in-process list, which every other test in this executable that starts a step host
+// adds to. On a loaded machine such a launch waits past its threshold, and every daemon then
+// running here raised `launch-frozen` beside its own alert; that doubled the counts below in
+// whole-workspace runs. These tests are about the alert they raise, so they look at that kind
+// only.
+
+/// The live alerts of `kind`, oldest first.
+fn alerts_of(d: &Daemon, kind: &str) -> Vec<mason_store::AlertRow> {
+    d.store
+        .alerts(true)
+        .unwrap()
+        .into_iter()
+        .filter(|a| a.kind == kind)
+        .collect()
+}
+
+/// The live `paused` alerts these tests raise.
+fn paused(d: &Daemon) -> Vec<mason_store::AlertRow> {
+    alerts_of(d, "paused")
+}
+
+/// Announcements queued about the `paused` alert.
 fn announcements(d: &Daemon) -> usize {
-    d.store.announcements(100).unwrap().len()
+    d.store
+        .announcements(100)
+        .unwrap()
+        .iter()
+        .filter(|a| a.kind == "paused")
+        .count()
 }
 
 #[test]
@@ -102,7 +130,7 @@ fn one_alert_one_delivery_one_reminder_and_silence_after_it_clears() {
     for _ in 0..3 {
         notify::tick_at(&d, t0);
     }
-    assert_eq!(d.store.alerts(true).unwrap().len(), 1);
+    assert_eq!(paused(&d).len(), 1);
     assert_eq!(
         announcements(&d),
         1,
@@ -136,7 +164,7 @@ fn one_alert_one_delivery_one_reminder_and_silence_after_it_clears() {
         serde_json::from_str::<Value>(&got.lock().unwrap()[1].1).unwrap()["reminder"],
         true
     );
-    assert!(d.store.alerts(true).unwrap()[0].reminded_at.is_some());
+    assert!(paused(&d)[0].reminded_at.is_some());
 
     for _ in 0..3 {
         notify::tick_at(&d, t0 + 2_600);
@@ -151,7 +179,7 @@ fn one_alert_one_delivery_one_reminder_and_silence_after_it_clears() {
     attention::resume(&d, "", "all").unwrap();
     attention::sync_alerts(&d);
     notify::tick_at(&d, t0 + 3_900);
-    assert!(d.store.alerts(true).unwrap().is_empty());
+    assert!(paused(&d).is_empty());
     assert_eq!((announcements(&d), got.lock().unwrap().len()), (2, 2));
 }
 
@@ -167,7 +195,7 @@ fn acknowledging_stops_the_noise_and_a_return_is_a_new_alert() {
     pause(&d);
     notify::tick(&d);
     assert_eq!(announcements(&d), 1);
-    let key = d.store.alerts(true).unwrap()[0].key.clone();
+    let key = paused(&d)[0].key.clone();
     assert!(notify::ack(&d, &key).unwrap());
     std::thread::sleep(Duration::from_millis(1300));
     notify::tick(&d);
@@ -176,10 +204,7 @@ fn acknowledging_stops_the_noise_and_a_return_is_a_new_alert() {
         (1, 0),
         "acknowledged: no webhook, no reminder"
     );
-    assert!(
-        d.store.alerts(true).unwrap()[0].acked_at.is_some(),
-        "still visible"
-    );
+    assert!(paused(&d)[0].acked_at.is_some(), "still visible");
     // It clears and comes back: new alert, new notice.
     attention::resume(&d, "", "all").unwrap();
     attention::sync_alerts(&d);
@@ -549,7 +574,7 @@ fn the_disk_alert_survives_a_store_that_refuses_writes_and_is_delivered_once() {
     });
     assert!(notify::store_unwritable(&d));
     assert!(
-        d.store.alerts(true).unwrap().is_empty(),
+        alerts_of(&d, "disk").is_empty(),
         "nothing reached the table"
     );
     for _ in 0..4 {
@@ -557,12 +582,17 @@ fn the_disk_alert_survives_a_store_that_refuses_writes_and_is_delivered_once() {
     }
     assert_eq!(got.lock().unwrap().len(), 1, "sent once, not every pass");
     assert_eq!(notify::unrecorded_deliveries(&d), 1);
-    let since = notify::live_alerts(&d, true).unwrap()[0].since;
+    let since = notify::live_alerts(&d, true)
+        .unwrap()
+        .into_iter()
+        .find(|a| a.kind == "disk")
+        .unwrap()
+        .since;
 
     notify::refuse_writes(&d, false);
     attention::sync_alerts(&d);
     assert!(!notify::store_unwritable(&d));
-    let rows = d.store.alerts(true).unwrap();
+    let rows = alerts_of(&d, "disk");
     assert_eq!(rows.len(), 1, "the table caught up");
     assert_eq!(rows[0].since, since, "it is the same alert");
     for _ in 0..4 {
@@ -585,7 +615,7 @@ fn audible_pause(s: &Scratch) -> Arc<Daemon> {
 }
 
 fn played(d: &Daemon) -> Vec<(String, String, bool)> {
-    let a = d.store.alerts(true).unwrap().remove(0);
+    let a = paused(d).remove(0);
     d.store
         .deliveries_for(&a.key, a.since)
         .unwrap()
@@ -595,15 +625,21 @@ fn played(d: &Daemon) -> Vec<(String, String, bool)> {
         .collect()
 }
 
+/// Announcements about the `paused` alert in a claim's answer.
 fn count(v: &Value) -> usize {
-    v["announcements"].as_array().unwrap().len()
+    v["announcements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["kind"] == "paused")
+        .count()
 }
 
 #[test]
 fn an_alert_raised_with_no_monitor_records_no_delivery() {
     let s = world();
     let d = audible_pause(&s);
-    let since = d.store.alerts(true).unwrap()[0].since;
+    let since = paused(&d)[0].since;
     notify::tick_at(&d, since + 1000);
     assert_eq!(announcements(&d), 1, "queued");
     assert!(played(&d).is_empty(), "queued is not delivered");
@@ -613,7 +649,7 @@ fn an_alert_raised_with_no_monitor_records_no_delivery() {
 fn a_claim_long_afterwards_gets_one_announcement_and_records_it() {
     let s = world();
     let d = audible_pause(&s);
-    let since = d.store.alerts(true).unwrap()[0].since;
+    let since = paused(&d)[0].since;
     notify::tick_at(&d, since + 1000);
     let late = since + 3 * HOUR;
     let first = notify::claim_at(&d, "mon", false, late);
@@ -635,7 +671,7 @@ fn a_claim_long_afterwards_gets_one_announcement_and_records_it() {
 fn an_alert_that_cleared_first_gets_nothing() {
     let s = world();
     let d = audible_pause(&s);
-    let since = d.store.alerts(true).unwrap()[0].since;
+    let since = paused(&d)[0].since;
     notify::tick_at(&d, since + 1000);
     attention::resume(&d, "", "all").unwrap();
     attention::sync_alerts(&d);
@@ -649,7 +685,7 @@ fn an_alert_that_cleared_first_gets_nothing() {
 fn a_muted_claim_gets_nothing_and_records_nothing() {
     let s = world();
     let d = audible_pause(&s);
-    let since = d.store.alerts(true).unwrap()[0].since;
+    let since = paused(&d)[0].since;
     notify::tick_at(&d, since + 1000);
     let m = notify::claim_at(&d, "quiet", true, since + 3 * HOUR);
     assert_eq!(count(&m), 0);
@@ -675,7 +711,7 @@ fn rounds_while_muted(d: &Arc<Daemon>, since: u64, rounds: u64) -> u64 {
 fn reminders_queued_while_muted_do_not_replay_when_unmuted() {
     let s = world();
     let d = audible_pause(&s);
-    let since = d.store.alerts(true).unwrap()[0].since;
+    let since = paused(&d)[0].since;
     // The initial announcement was heard before the monitor was muted.
     notify::tick_at(&d, since + 1000);
     assert_eq!(count(&notify::claim_at(&d, "mon", false, since + 1500)), 1);
@@ -688,7 +724,7 @@ fn reminders_queued_while_muted_do_not_replay_when_unmuted() {
 fn a_never_heard_alert_plays_at_most_once_after_unmute_however_many_rounds_passed() {
     let s = world();
     let d = audible_pause(&s);
-    let since = d.store.alerts(true).unwrap()[0].since;
+    let since = paused(&d)[0].since;
     let t = rounds_while_muted(&d, since, 3);
     let got = notify::claim_at(&d, "mon", false, t);
     assert!(count(&got) <= 1, "{got}");

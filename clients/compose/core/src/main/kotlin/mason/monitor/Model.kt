@@ -34,6 +34,18 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     /** The latest CPU history for [cpuSpan]; the graph is built from it off the main thread. */
     var cpuHistory by mutableStateOf<mason.v1.CpuHistory?>(null)
     var cpuSpan by mutableStateOf(CpuSpan.Hour)
+    /** The latest disk history for [diskSpan]; null until it arrives (and just after a new span is picked). */
+    var diskHistory by mutableStateOf<mason.v1.DiskHistory?>(null)
+    var diskSpan by mutableStateOf(DiskSpan.Hour)
+    /** True once the daemon has sent any disk history; an older daemon never does, which hides the section. */
+    var diskSeen by mutableStateOf(false)
+    /** The volume ids whose line is off, kept across restarts. */
+    var hiddenVolumes by mutableStateOf(decodeHiddenVolumes(prefs.string(KEY_HIDDEN_VOLUMES)))
+        private set
+    private val diskPalette = DiskColors()
+    /** Each listed volume's colour slot, stable while it is listed. */
+    var diskColors by mutableStateOf<Map<String, Int>>(emptyMap())
+        private set
     var taskDetail by mutableStateOf<TaskDetailView?>(null)
     var landing by mutableStateOf<LandingView?>(null)
     var usage by mutableStateOf<UsageView?>(null)
@@ -364,6 +376,33 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         cpuHistory = null
         subscribe?.invoke()
     }
+    /** Pick the disk graph's span and ask the daemon for that range. */
+    fun pickDiskSpan(s: DiskSpan) {
+        if (s == diskSpan) return
+        diskSpan = s
+        diskHistory = null
+        subscribe?.invoke()
+    }
+
+    /** Show or hide a volume's line; remembered. */
+    fun toggleVolume(id: String) {
+        hiddenVolumes = if (id in hiddenVolumes) hiddenVolumes - id else hiddenVolumes + id
+        prefs.setString(KEY_HIDDEN_VOLUMES, encodeHiddenVolumes(hiddenVolumes))
+    }
+
+    private fun noteDisk(h: mason.v1.DiskHistory) {
+        diskHistory = h
+        diskSeen = true
+        diskColors = diskPalette.assign(h.volumes.map { it.id })
+        if (h.volumes.isNotEmpty()) {
+            val kept = pruneHiddenVolumes(hiddenVolumes, h)
+            if (kept != hiddenVolumes) {
+                hiddenVolumes = kept
+                prefs.setString(KEY_HIDDEN_VOLUMES, encodeHiddenVolumes(kept))
+            }
+        }
+    }
+
     fun goBack() = navigate { h, s -> h.goBack(s) }
     fun goForward() = navigate { h, s -> h.goForward(s) }
     fun goHome() = navigate { h, s -> h.goHome(s) }
@@ -1006,6 +1045,7 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
             settleAfterView()
         }
         v.cpu_history?.let { cpuHistory = it }
+        v.disk_history?.let { noteDisk(it) }
         v.landing?.let { landing = it }
         v.usage?.let { usage = it }
         v.editor?.let { editor = it }
@@ -1037,6 +1077,7 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         const val CLAIM_EVERY_MS = 3_000L
         const val KEY_SCALE = "textScale"
         const val KEY_MUTE = "muted"
+        const val KEY_HIDDEN_VOLUMES = "disk.hidden"
         const val KEY_SIDEBAR = "sidebarWidth"
         /** Text zoom stops scaling the panel here, as before. */
         const val SIDEBAR_SCALE_CAP = 1.5
