@@ -39,6 +39,7 @@ pub const SUITE_KEYS: &[&str] = &[
     "narrow_each",
     "narrow_never",
     "narrow_packages",
+    "resume_after_loss",
 ];
 const ENV_KEYS: &[&str] = &[
     "type",
@@ -262,6 +263,10 @@ pub fn parse(doc: &DocumentMut, out: &mut Vec<Problem>) -> Testing {
                 },
                 "narrow_packages" => match v.as_bool() {
                     Some(b) => s.narrow_packages = b,
+                    None => out.push(Problem::new(&path, "must be true or false")),
+                },
+                "resume_after_loss" => match v.as_bool() {
+                    Some(b) => s.resume_after_loss = b,
                     None => out.push(Problem::new(&path, "must be true or false")),
                 },
                 "narrow_command" => nw[0] = string(v, &path, out),
