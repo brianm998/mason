@@ -73,6 +73,9 @@ exec {real} "$@"
             .unwrap();
         let path = std::env::var("PATH").unwrap_or_default();
         std::env::set_var("PATH", format!("{}:{path}", dir.join("bin").display()));
+        // `landing::git::program()` prefers the resolved real git over PATH, so point
+        // it at the stub explicitly (before the first git call in this process).
+        std::env::set_var("MASON_GIT", &git);
         Stub { dir, _tmp: tmp }
     });
     s.clear();

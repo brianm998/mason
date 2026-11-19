@@ -1928,6 +1928,11 @@ impl TestChecks {
             };
             let limit = suite.timeout.unwrap_or(self.timeout).min(self.timeout);
             let before = suite.command.clone();
+            // Only a run filtered to named tests is reliably short. Narrowing by change or by
+            // package, and the re-run after a red (which adds the changed crates), can select a
+            // whole integration binary: on 2026-11-18 two such runs of the daemon's `it` held
+            // the small lane for 80 minutes beside the one test-suite slot the owner allowed.
+            let mut small = false;
             // Only this develop-phase check narrows. The test step runs `command` whole.
             if let Some(names) = &red {
                 if let (Some(t), Some(dc)) = (suite.rerun.clone(), suite.dev_command.clone()) {
@@ -2009,6 +2014,7 @@ impl TestChecks {
                     continue;
                 }
                 if let (false, Some(t)) = (scope.tests.is_empty(), &suite.rerun) {
+                    small = true;
                     suite.command = t.replace(
                         "{tests}",
                         &scope
@@ -2115,9 +2121,9 @@ impl TestChecks {
                     *have = (*have).max(*v);
                 }
             }
-            // A command that was narrowed is short: it takes the small lane when the definition
+            // A run filtered to named tests is short: it takes the small lane when the definition
             // declares one, so it does not queue behind a full run.
-            if suite.command != before {
+            if small && suite.command != before {
                 uses = small_lane(&def, uses);
             }
             let rspec = spec(
@@ -5043,7 +5049,7 @@ mod tests {
     // ---- Task 180: the weakening scan at submit_change -----------------------------------
 
     fn sh(dir: &Path, args: &[&str]) {
-        let o = std::process::Command::new("git")
+        let o = mason_landing::git::command()
             .arg("-C")
             .arg(dir)
             .args(["-c", "user.name=t", "-c", "user.email=t@t"])
