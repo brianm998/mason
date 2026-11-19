@@ -471,6 +471,11 @@ struct TaskDetailPage: View {
                 }
                 Text(Format.cpuTaskLine(permille: d.cpuPermille)).font(theme.body()).foregroundStyle(theme.muted)
                     .accessibilityIdentifier("cpu")
+                if r.testImmune {
+                    Text("Immune to testing: no tests run for it through landing (lint and the build still do). The full run is owed.")
+                        .font(theme.small()).foregroundStyle(theme.slow)
+                        .accessibilityIdentifier("test-immune")
+                }
                 let copies = compact
                     ? AnyLayout(VStackLayout(alignment: .leading, spacing: theme.spacingSmall))
                     : AnyLayout(HStackLayout(spacing: theme.spacingLarge))
