@@ -58,11 +58,15 @@ next = "land"
 # point `command` and `dev_command` at `python3 -I scripts/test-parallel.py -- {project_test}` (and
 # `{packages}`) and set MASON_TEST_JOBS if the machine has headroom; decision 0243 says why it is off.
 [suite.cargo-workspace]
-build = "RUSTC_BOOTSTRAP=1 {project_test} --no-run"
-# `RUSTC_BOOTSTRAP=1` lets stable libtest accept `--report-time`, so each result line ends in
-# `<1.234s>` (s634); it is set on build, run and rerun alike, because cargo keys its rebuild fingerprint on it and a run that differs from its build recompiles the workspace.
-command = "RUSTC_BOOTSTRAP=1 {project_test} -- -Z unstable-options --report-time"
-rerun = "RUSTC_BOOTSTRAP=1 {project_test} -- --exact {tests}"
+build = "{project_test} --no-run"
+# Per-test times (s634, decision 0627): libtest's `--report-time` ends each result line in
+# `<1.234s>`. Stable libtest accepts it only with RUSTC_BOOTSTRAP=1 in the test process's own
+# environment, so the variable goes to the test executables through a cargo `runner` and to the
+# doc tests through `RUSTDOC`, never to cargo or rustc: anyhow, thiserror and proc-macro2 rerun
+# their build scripts when it changes, and a run or build that differs from the last recompiles
+# most of the workspace (the in-test `cargo build` of tests/support strips it for the same reason).
+command = '''RUSTDOC="$PWD/scripts/rustdoc-bootstrap.sh" {project_test} --config 'target."cfg(unix)".runner=["env","RUSTC_BOOTSTRAP=1"]' -- -Z unstable-options --report-time'''
+rerun = "{project_test} -- --exact {tests}"
 # The affected tests, not the whole workspace (decision 0539, superseding 0205). `{tests_for_change}`
 # is the test targets a change can affect, found by a static source scan (crates/daemon/src/affected.rs):
 # a changed test file runs itself, a changed `src` file runs its crate's unit tests and the targets
@@ -71,8 +75,8 @@ rerun = "RUSTC_BOOTSTRAP=1 {project_test} -- --exact {tests}"
 # runs it too, plus the smoke set in `.mason/smoke-tests.txt` (owner-edited). The whole suite runs
 # once per landing batch (`[[tier]] batch` in landing.toml).
 # `: {packages}` is a no-op that a daemon older than s546 needs to accept the key.
-dev_command = ": {packages}; RUSTC_BOOTSTRAP=1 {project_test} {tests_for_change} -- -Z unstable-options --report-time"
-dev_build = ": {packages}; RUSTC_BOOTSTRAP=1 {project_test} {tests_for_change} --no-run"
+dev_command = ''': {packages}; RUSTDOC="$PWD/scripts/rustdoc-bootstrap.sh" {project_test} {tests_for_change} --config 'target."cfg(unix)".runner=["env","RUSTC_BOOTSTRAP=1"]' -- -Z unstable-options --report-time'''
+dev_build = ": {packages}; {project_test} {tests_for_change} --no-run"
 narrow_packages = true
 parser = "regex"
 pass_regex = '^test (.+) \.\.\. ok(?: <[0-9.]+s>)?$'
