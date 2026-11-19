@@ -5049,7 +5049,7 @@ mod tests {
     // ---- Task 180: the weakening scan at submit_change -----------------------------------
 
     fn sh(dir: &Path, args: &[&str]) {
-        let o = std::process::Command::new("git")
+        let o = mason_landing::git::command()
             .arg("-C")
             .arg(dir)
             .args(["-c", "user.name=t", "-c", "user.email=t@t"])

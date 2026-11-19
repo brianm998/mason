@@ -159,7 +159,10 @@ struct HomePage: View {
                     }
                 }
 
-                CpuSection(model: model, cpu: model.cpu, open: { model.go(.section("cpu")) })
+                CpuDiskRow(stacked: compact, spacing: theme.spacingLarge) {
+                    CpuSection(model: model, cpu: model.cpu, open: { model.go(.section("cpu")) })
+                    DiskSection(model: model, disk: model.disk, open: { model.go(.section("disk")) })
+                }
 
                 if let h = model.home, h.hasCompilation {
                     CompilationSection(model: model, c: h.compilation, open: { model.go(.section("compilation")) })
@@ -994,6 +997,8 @@ struct SectionPage: View {
                     }
                 case "cpu":
                     CpuSection(model: model, cpu: model.cpu)
+                case "disk":
+                    DiskSection(model: model, disk: model.disk)
                 case "compilation":
                     if let h = model.home, h.hasCompilation {
                         CompilationSection(model: model, c: h.compilation)
