@@ -513,14 +513,23 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s607**: Exit scripts s449, s484, s485, s486 and s508 ran `cargo test --test <module>` against test targets that were merged into the daemon's single `it` executable, so they failed on the Linux exit-scripts shard 4; they now name `--test it`.
 - **s611**: `scripts/exit/s580.sh` gets the missing SPDX-License-Identifier line, so the CI/lint SPDX check passes again.
 - **s612**: A waiter with holders is flagged stuck past max(wait_m, its queue position x the longest holder run), and the whole-queue bound moves to the aged-wait note.
+- **s616**: `affected::render` puts `--doc` in a group of its own, so no cargo invocation mixes `--doc` with `--lib`, `--bins` or `--test`.
 - **s626**: The s121/s132 exit scripts use the icon's asset-catalog path and s475's 931-test gate is platform-aware (927 on non-macOS), turning CI/exit-scripts green on Linux.
 - **s627**: The red CI/monitor-compose run 44399898483 could not be classified because the supplied log tail is only post-job Gradle cache cleanup; no code changed and the decision (0620) records what to read in the full log.
 - **s628**: The mason-adapters codex and conformance tests make scratch directories through a shared helper that uses `/tmp` on Unix and the platform temp dir on Windows, so CI/windows passes again.
 - **s629**: s451 and s572 now skip their gradle runs under MASON_SKIP_COMPOSE, and s469-real is listed in docs/real-checks.md with a RESULT line, so s299 and s450 pass on the Linux shard.
 - **s630**: The s602 exit test now clears `MASON_EXIT_SHARD` before running its scratch runner, so it no longer fails with "expected exit 1, got 0" on CI shard 4/6; s630 checks it under that shard.
+- **s632**: The per-task test step and `run_check` drop the changed paths the impact map sends only to other suites (`clients/swift/**`) before narrowing a suite, so a client-only change runs the smoke set instead of all cargo tests.
 - **s633**: when a cargo-workspace suite's host is lost, the fresh host runs only the test executables whose `test result:` line the lost run's log did not reach, and the verdict reads the finished blocks of the lost log plus the fresh output, so a red stays red and `min_tests` counts both.
+- **s634**: The cargo-workspace suite now runs libtest with `--report-time`, the regex parser reads each test's `<N.NNNs>` time, the store keeps the last 10 times per test, and `mason report` lists the 20 slowest tests with their share of the suite.
 - **s635**: The landing queue's items and running batches have a Land now button (Swift macOS/iPad/iPhone, Compose desktop/Android) that stops a running batch's remaining local suites and CI wait, keeps the freeze and the build floor, lands every member, and records what it stopped as deferred debts that run on the base after the merge.
 - **s636**: The hold-across-a-kill test waits for the stored rate-limit window to pass before asserting the account is "ok".
+- **s637**: The red CI/monitor-compose run 44453947626 names no failing step in the supplied log tail (only post-job Gradle cache cleanup), so no code changed and decision 0630 records how to classify it from the full log.
+- **s638**: Gate the daemon tests' flock slot support behind cfg(unix) so `cargo build --workspace --all-targets` compiles on Windows.
 - **s639**: the open_session tests in crates/cli retry a 127 spawn failure when the fake provider never ran, which removes the likely ETXTBSY flake behind s320 on the Linux shard.
 - **s640**: The s11, s23 and s426 exit gates now use medians of ten runs and condition waits instead of single wall-clock samples, with the 250 ms and 100 ms targets unchanged.
+- **s641**: The s597 exit test no longer contains the literal `--test limits`, so s576's stale-target guard stops matching it and s576 reaches its cargo tests.
+- **s642**: The test's own fetch and worktree removal retry when they lose a race with the daemon's background git work, and its `on_main` reads wait for the push to show; no assertion changed.
+- **s643**: The skipped-batch fast-tier tests now form their batch by `max_size = 2` with a 20m window and create skip debts before admission, so a slow machine can no longer split the pair.
+- **s644**: `sched::tests::ten_compiles_behind_a_waiting_exclusive_lease_all_name_it` compares task ids on the wait view instead of searching a Debug string that holds epoch-millisecond timestamps.
 <!-- status:end -->

@@ -59,7 +59,13 @@ next = "land"
 # `{packages}`) and set MASON_TEST_JOBS if the machine has headroom; decision 0243 says why it is off.
 [suite.cargo-workspace]
 build = "{project_test} --no-run"
-command = "{project_test}"
+# Per-test times (s634, decision 0627): libtest's `--report-time` ends each result line in
+# `<1.234s>`. Stable libtest accepts it only with RUSTC_BOOTSTRAP=1 in the test process's own
+# environment, so the variable goes to the test executables through a cargo `runner` and to the
+# doc tests through `RUSTDOC`, never to cargo or rustc: anyhow, thiserror and proc-macro2 rerun
+# their build scripts when it changes, and a run or build that differs from the last recompiles
+# most of the workspace (the in-test `cargo build` of tests/support strips it for the same reason).
+command = '''RUSTDOC="$PWD/scripts/rustdoc-bootstrap.sh" {project_test} --config 'target."cfg(unix)".runner=["env","RUSTC_BOOTSTRAP=1"]' -- -Z unstable-options --report-time'''
 rerun = "{project_test} -- --exact {tests}"
 # The affected tests, not the whole workspace (decision 0539, superseding 0205). `{tests_for_change}`
 # is the test targets a change can affect, found by a static source scan (crates/daemon/src/affected.rs):
@@ -69,12 +75,12 @@ rerun = "{project_test} -- --exact {tests}"
 # runs it too, plus the smoke set in `.mason/smoke-tests.txt` (owner-edited). The whole suite runs
 # once per landing batch (`[[tier]] batch` in landing.toml).
 # `: {packages}` is a no-op that a daemon older than s546 needs to accept the key.
-dev_command = ": {packages}; {project_test} {tests_for_change}"
+dev_command = ''': {packages}; RUSTDOC="$PWD/scripts/rustdoc-bootstrap.sh" {project_test} {tests_for_change} --config 'target."cfg(unix)".runner=["env","RUSTC_BOOTSTRAP=1"]' -- -Z unstable-options --report-time'''
 dev_build = ": {packages}; {project_test} {tests_for_change} --no-run"
 narrow_packages = true
 parser = "regex"
-pass_regex = '^test (.+) \.\.\. ok$'
-fail_regex = '^test (.+) \.\.\. FAILED$'
+pass_regex = '^test (.+) \.\.\. ok(?: <[0-9.]+s>)?$'
+fail_regex = '^test (.+) \.\.\. FAILED(?: <[0-9.]+s>)?$'
 min_tests = 100
 level = "unit"
 uses = { test-suite = 1 }
