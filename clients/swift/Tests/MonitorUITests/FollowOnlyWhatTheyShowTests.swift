@@ -84,6 +84,8 @@ final class FollowOnlyWhatTheyShowTests: XCTestCase {
         return m
     }
 
+    private var hostWindows: [NSWindow] = []
+
     private func host(_ m: MonitorModel) -> NSHostingView<AnyView> {
         let h = NSHostingView(rootView: AnyView(
             VStack(spacing: 0) {
@@ -95,6 +97,11 @@ final class FollowOnlyWhatTheyShowTests: XCTestCase {
             }
             .environment(\.theme, Theme(dark: false, scale: 1))))
         h.frame = NSRect(x: 0, y: 0, width: 1400, height: 3000)
+        // A window that is never ordered in: a window-less host evaluates no bodies on the CI runner.
+        let w = NSWindow(contentRect: h.frame, styleMask: [.titled], backing: .buffered, defer: true)
+        w.isReleasedWhenClosed = false
+        w.contentView = h
+        hostWindows.append(w)
         h.layoutSubtreeIfNeeded()
         return h
     }

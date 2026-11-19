@@ -35,7 +35,7 @@ use mason_testing::{
 };
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 // ---- which suites a change needs -------------------------------------------
@@ -317,6 +317,9 @@ struct Ran {
     ran_ms: Option<u64>,
     /// It ran only some of the suite's tests (s386): its time is not the suite's.
     narrowed: bool,
+    /// After a lost host, the finished executables of the lost run were kept and only the rest
+    /// ran again (#621): what was reused, for the step's note. Its time is not the suite's either.
+    resumed: Option<String>,
 }
 
 /// Record how long a suite's build or run took, when it finished on its own (s385): the
@@ -361,11 +364,45 @@ fn run_hosted(
     th: Thresholds,
     env: Vec<(String, String)>,
 ) -> Result<Ran, String> {
+    run_hosted_resuming(
+        d, id, cmd, cwd, limit, log_dir, check, run, watch, th, env, None,
+    )
+}
+
+/// [`run_hosted`]; with a `resume` template (`resume::template`), a lost host's finished cargo
+/// test executables are kept and only the others run on the fresh host, the verdict reading
+/// both (#621). A second loss in a row still fails the step.
+#[allow(clippy::too_many_arguments)]
+fn run_hosted_resuming(
+    d: &Arc<Daemon>,
+    id: &str,
+    cmd: &str,
+    cwd: &Path,
+    limit: Duration,
+    log_dir: &Path,
+    check: Check,
+    run: Option<StepRunId>,
+    watch: Option<&Suite>,
+    th: Thresholds,
+    env: Vec<(String, String)>,
+    resume: Option<&str>,
+) -> Result<Ran, String> {
     use crate::hostloss as hl;
     let hosts = d.cfg.hosts_dir();
     let again_id = hl::rerun_id(id);
     let mut first = None;
     let mut on = id.to_string();
+    let mut cmd = cmd.to_string();
+    let mut plan: Option<crate::resume::Plan> = None;
+    // The finished part of the lost run, read from its log.
+    let planned = |cmd: &mut String, plan: &mut Option<crate::resume::Plan>| {
+        if let Some(t) = resume {
+            *plan = crate::resume::plan_for(cwd, &log_dir.join(format!("{id}.log")));
+            if let Some(p) = plan {
+                *cmd = crate::resume::command(t, p);
+            }
+        }
+    };
     // A progress file left by an earlier attempt says nothing about this one.
     if !hosts.join(id).join("host.kv").exists() && !hosts.join(&again_id).join("host.kv").exists() {
         if let Some(f) = watch.and_then(|w| w.progress.as_ref()) {
@@ -375,12 +412,13 @@ fn run_hosted(
     if hosts.join(&again_id).join("host.kv").exists() {
         first = mason_step_host::registry::lost_report(&hosts.join(id)).ok();
         on = again_id.clone();
+        planned(&mut cmd, &mut plan);
     }
     loop {
         match run_hosted_once(
             d,
             &on,
-            cmd,
+            &cmd,
             cwd,
             limit,
             log_dir,
@@ -390,12 +428,20 @@ fn run_hosted(
             th,
             env.clone(),
         ) {
-            Ok(r) => return Ok(r),
+            Ok(mut r) => {
+                if let Some(p) = plan.take() {
+                    let (code, output) = crate::resume::combine(&p.reused, r.code, &r.output);
+                    (r.code, r.output) = (code, output);
+                    r.resumed = Some(p.note());
+                }
+                return Ok(r);
+            }
             Err(HostedErr::Other(e)) => return Err(e),
             Err(HostedErr::Lost(rep)) if on == id => {
                 hl::record(d, run, id, &rep, true);
                 first = Some(*rep);
                 on = again_id.clone();
+                planned(&mut cmd, &mut plan);
             }
             Err(HostedErr::Lost(rep)) => {
                 hl::record(d, run, id, &rep, false);
@@ -566,6 +612,7 @@ fn run_hosted_once(
             _ => None,
         },
         narrowed: false,
+        resumed: None,
     })
 }
 
@@ -736,6 +783,11 @@ struct Who {
 pub struct Members {
     pub tasks: Vec<TaskId>,
     pub step: String,
+    /// The project's name, to read its freeze.
+    pub project: String,
+    /// What Land now stopped in this batch (`suite:NAME`, `ci:NAME`), filled in as runs are
+    /// stopped. The landing engine turns it into one deferred debt per member when it lands.
+    pub stopped: Arc<Mutex<std::collections::BTreeSet<String>>>,
 }
 
 impl Members {
@@ -743,7 +795,45 @@ impl Members {
         Members {
             tasks: tasks.to_vec(),
             step: test_step_name(def).unwrap_or_default(),
+            project: String::new(),
+            stopped: Default::default(),
         }
+    }
+
+    pub fn in_project(mut self, project: &str) -> Members {
+        self.project = project.to_string();
+        self
+    }
+
+    /// Why the batch is to stop waiting on its remaining verification because the owner
+    /// pressed Land now on a member while it ran, if it is. Unlike force, it keeps the
+    /// freeze: a frozen project's batch is stopped only when a member is the fix.
+    pub fn land_now(&self, d: &Daemon) -> Option<String> {
+        let t = self.tasks.iter().find(|t| {
+            d.store.landing_flag(t.0).ok().flatten().as_deref() == Some(LAND_NOW_RUNNING)
+        })?;
+        let frozen = d
+            .store
+            .freezes()
+            .ok()
+            .and_then(|v| v.into_iter().find(|f| f.project == self.project));
+        if let Some(f) = frozen {
+            if !self.tasks.iter().any(|x| Some(x.0) == f.fix_task) {
+                return None;
+            }
+        }
+        Some(format!(
+            "land now by the owner (task #{}): the remaining tests run after the merge",
+            t.0
+        ))
+    }
+
+    /// Remember that Land now stopped `scope`.
+    pub fn note_stopped(&self, scope: &str) {
+        self.stopped
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(scope.to_string());
     }
 
     /// Why the batch is to be landed without verification, if it is: a member is forced.
@@ -775,6 +865,12 @@ impl Members {
         debts
             .and_then(|v| v.first().copied())
             .map(|id| format!("skipped by the owner (debt #{id})"))
+    }
+
+    /// As [`Members::stop`], and Land now stops the run too. The builds of the batch's floor
+    /// are not stopped by it (`stop` only): what lands must still build.
+    pub fn stop_running(&self, d: &Daemon, suite: &str) -> Option<String> {
+        self.stop(d, suite).or_else(|| self.land_now(d))
     }
 }
 
@@ -836,7 +932,7 @@ impl Who {
         Arc::new(move || {
             let Some((t, run)) = task else {
                 // A batch's run: stopped by what the owner did to its members.
-                return if members.stop(&d, &suite).is_some() {
+                return if members.stop_running(&d, &suite).is_some() {
                     Stop::Skipped
                 } else {
                     Stop::No
@@ -860,6 +956,9 @@ impl Who {
 /// The debt scope of a task made immune to testing: every suite and every step that tests
 /// is skipped for it, from develop's checks to landing, and the full run is owed.
 pub const ALL_TESTS: &str = "tests:all";
+
+/// The landing flag Land now sets on a task that is already in a running batch.
+pub const LAND_NOW_RUNNING: &str = "now_running";
 
 /// An open debt that skips this suite or its whole step (or all of the task's testing).
 pub(crate) fn skip_for(d: &Daemon, task: TaskId, suite: &str, step: &str) -> Option<u64> {
@@ -1512,7 +1611,13 @@ fn run_suite(
         } else {
             format!("{}-u{}-{}", who.id_prefix, now_ms(), suite.name)
         };
-        let ran = match run_hosted(
+        // A whole-suite run with no skips can go on after a lost host from what finished (#621).
+        let resume = if skipped_cmd.is_none() && suite.results_file.is_none() && !suite.pty {
+            crate::resume::template(suite)
+        } else {
+            None
+        };
+        let ran = match run_hosted_resuming(
             d,
             &id,
             &crate::jobs::pty_wrap(
@@ -1530,6 +1635,7 @@ fn run_suite(
             Some(suite),
             who.thresholds(),
             who.env.clone(),
+            resume.as_deref(),
         ) {
             Ok(r) => r,
             Err(e) => {
@@ -1542,7 +1648,7 @@ fn run_suite(
             }
         };
         let ran = Ran {
-            narrowed: suite.narrowed,
+            narrowed: suite.narrowed || ran.resumed.is_some(),
             ..ran
         };
         record_time(who, &suite.name, "run", &ran);
@@ -1874,6 +1980,37 @@ fn run_suite(
         if waiting {
             on_wait(None);
         }
+        // Say what a lost host's run left reusable (#621).
+        let result = match (result, &ran.resumed) {
+            (
+                SuiteRun::Done {
+                    outcome,
+                    results,
+                    mut notes,
+                },
+                Some(r),
+            ) => {
+                notes.push(format!("{}: {r}", suite.name));
+                SuiteRun::Done {
+                    outcome,
+                    results,
+                    notes,
+                }
+            }
+            (
+                SuiteRun::Product {
+                    feedback,
+                    failing,
+                    red,
+                },
+                Some(r),
+            ) => SuiteRun::Product {
+                feedback: format!("({}: {r})\n{feedback}", suite.name),
+                failing,
+                red,
+            },
+            (other, _) => other,
+        };
         return result;
     }
 }
@@ -2588,6 +2725,13 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
                 }
                 if !matches!(outcome, SuiteOutcome::Proven | SuiteOutcome::Reused) {
                     details.extend(n.clone());
+                } else {
+                    // What a lost host's run left reusable is said in the closing note (#621).
+                    details.extend(
+                        n.iter()
+                            .filter(|x| x.contains(": lost host after "))
+                            .cloned(),
+                    );
                 }
                 notes.extend(n);
                 if let Some(r) = results {
@@ -3037,15 +3181,31 @@ pub fn landing_scope(def: &Definition, state: State, scope: &str) -> String {
 
 /// The suites a debt's scope names in `def`. Immunity (`tests:all`) owes the Test step's
 /// suites, or every suite when there is no Test step.
-fn debt_suites(def: &Definition, scope: &str) -> Vec<Suite> {
+///
+/// A force or an early Land now (`landing:force`, `landing:land_now`) skipped the landing tier
+/// and owes its suites: `tier` (the batch tier's suite names; empty when the project has none,
+/// then the Test step's suites).
+fn debt_suites(def: &Definition, tier: &[String], scope: &str) -> Vec<Suite> {
     if scope == ALL_TESTS {
         return match test_step_name(def) {
-            Some(test) => debt_suites(def, &format!("step:{test}")),
+            Some(test) => debt_suites(def, tier, &format!("step:{test}")),
             None => def.testing.suites.clone(),
         };
     }
     let (kind, name) = scope.split_once(':').unwrap_or(("", ""));
     match kind {
+        "landing" if matches!(name, "force" | "land_now") => {
+            if tier.is_empty() {
+                match test_step_name(def) {
+                    Some(test) => debt_suites(def, tier, &format!("step:{test}")),
+                    None => vec![],
+                }
+            } else {
+                tier.iter()
+                    .filter_map(|n| def.testing.suite(n).cloned())
+                    .collect()
+            }
+        }
         "suite" => def.testing.suite(name).cloned().into_iter().collect(),
         "step" => def
             .step(name)
@@ -3058,6 +3218,14 @@ fn debt_suites(def: &Definition, scope: &str) -> Vec<Suite> {
             .unwrap_or_default(),
         _ => vec![],
     }
+}
+
+/// The suite names of the project's landing `batch` tier (empty when it has none).
+fn landing_tier(d: &Daemon, pid: ProjectId) -> Vec<String> {
+    crate::landing::load_config(d, pid)
+        .ok()
+        .and_then(|c| c.batch_suites().map(<[String]>::to_vec))
+        .unwrap_or_default()
 }
 
 /// The commit a debt's task landed, when the base branch `tip` contains it. Recorded on the
@@ -3212,7 +3380,7 @@ pub fn settle_debts(d: &Arc<Daemon>) -> usize {
         let Some(p) = d.project(pid).cloned() else {
             continue;
         };
-        let suites = debt_suites(&d.current_def(pid), &row.scope);
+        let suites = debt_suites(&d.current_def(pid), &landing_tier(d, pid), &row.scope);
         if suites.is_empty() {
             continue;
         }
@@ -3395,7 +3563,10 @@ pub fn pay(d: &Arc<Daemon>, debt: u64) -> Result<String, String> {
         .ok_or("its project is gone")?;
     let p = d.project(pid).ok_or("its project is gone")?.clone();
     let def = d.current_def(pid);
-    let suites = debt_suites(&def, &row.scope);
+    if row.scope.starts_with("ci:") {
+        return pay_ci(d, &row, &p);
+    }
+    let suites = debt_suites(&def, &landing_tier(d, pid), &row.scope);
     if suites.is_empty() {
         return Err("the debt's suite no longer exists in the definition".into());
     }
@@ -3526,6 +3697,111 @@ pub fn pay(d: &Arc<Daemon>, debt: u64) -> Result<String, String> {
     } else {
         let _ = d.store.debt_tried(debt, now_ms());
         Err(format!("still owed: {}", verdicts.join("; ")))
+    }
+}
+
+/// The name a CI debt's scope carries: the workflow when the CI system names one, else `ci`.
+pub fn ci_scope(p: &crate::config::ProjectCfg) -> String {
+    let name = match p.services.ci.as_ref().map(|c| &c.kind) {
+        Some(crate::config::CiKind::GithubActions {
+            workflow: Some(w), ..
+        }) => w.clone(),
+        _ => "ci".to_string(),
+    };
+    format!("ci:{name}")
+}
+
+/// Pay a CI debt (`ci:<name>`, left by Land now): push the base branch's tip under a
+/// candidate name, wait for CI on it, and delete the name again. Green pays the debt; red
+/// leaves it owed.
+fn pay_ci(
+    d: &Arc<Daemon>,
+    row: &mason_store::DebtRow,
+    p: &crate::config::ProjectCfg,
+) -> Result<String, String> {
+    let (ci, cfg) = crate::services::ci(p)?.ok_or("the project has no [ci] section any more")?;
+    let remote = p
+        .remote
+        .clone()
+        .ok_or("the project has no remote to run CI on")?;
+    let pid = d.project_id_by_name(&p.id).ok_or("its project is gone")?;
+    let _ = d.fetch_remote(pid);
+    let tip = git::run(&p.path, &["rev-parse", &p.base_ref()]).map_err(|e| e.to_string())?;
+    let tip = tip.trim().to_string();
+    let name = format!("mason/ci/{}-debt{}", p.id, row.id);
+    git::run(
+        &p.path,
+        &[
+            "push",
+            "--porcelain",
+            &remote,
+            &format!("{tip}:refs/heads/{name}"),
+        ],
+    )
+    .map_err(|e| format!("could not push {name}: {e}"))?;
+    let started = Instant::now();
+    let state = (|| -> Result<mason_adapter_api::service::CiState, String> {
+        let run = ci.trigger(&name, &tip).map_err(|e| e.to_string())?;
+        loop {
+            match ci.status(&run).map_err(|e| e.to_string())? {
+                mason_adapter_api::service::CiState::Pending => {
+                    if started.elapsed().as_secs() > cfg.timeout_s {
+                        return Err(format!("CI still not finished after {} s", cfg.timeout_s));
+                    }
+                    std::thread::sleep(Duration::from_secs(cfg.poll_s.max(1)));
+                }
+                done => return Ok(done),
+            }
+        }
+    })();
+    let _ = git::run(
+        &p.path,
+        &["push", &remote, "--delete", &format!("refs/heads/{name}")],
+    );
+    match state {
+        Ok(mason_adapter_api::service::CiState::Green) => {
+            let how = format!(
+                "CI green when run on {} at {}",
+                p.base_ref(),
+                &tip[..tip.len().min(10)]
+            );
+            d.store
+                .pay_debt(row.id, now_ms(), &how)
+                .map_err(|e| e.to_string())?;
+            Ok(format!("paid: {how}"))
+        }
+        Ok(mason_adapter_api::service::CiState::Red { summary, .. }) => {
+            let _ = d.store.debt_tried(row.id, now_ms());
+            Err(format!("still owed: CI is red on the base: {summary}"))
+        }
+        Ok(_) => Err("CI did not answer".into()),
+        Err(e) => {
+            let _ = d.store.debt_tried(row.id, now_ms());
+            Err(format!("still owed: {e}"))
+        }
+    }
+}
+
+/// One deferred debt for each of `tasks` and each scope in `scopes` that it does not owe yet:
+/// what Land now stopped, to be run on the base after the merge.
+pub fn defer_stopped(d: &Daemon, project: &str, tasks: &[u64], scopes: &[String]) {
+    let owner = d.cfg.owner_names.first().cloned().unwrap_or_default();
+    for t in tasks {
+        let open = d.store.debts(Some(*t), true).unwrap_or_default();
+        for sc in scopes {
+            if open.iter().any(|x| &x.scope == sc) {
+                continue;
+            }
+            let _ = d.store.add_debt(
+                *t,
+                project,
+                sc,
+                "Land now: skipped to land past slow testing; runs after the merge",
+                &owner,
+                true,
+                now_ms(),
+            );
+        }
     }
 }
 
@@ -3824,8 +4100,13 @@ pub fn run_over(
                 outcome: SuiteOutcome::Skipped,
                 notes,
                 ..
-            } => out.notes.push(match members.stop(d, name) {
-                Some(why) => format!("{name}: {why}"),
+            } => out.notes.push(match members.stop_running(d, name) {
+                Some(why) => {
+                    if members.land_now(d).is_some() {
+                        members.note_stopped(&format!("suite:{name}"));
+                    }
+                    format!("{name}: {why}")
+                }
                 None => notes.join("; "),
             }),
             SuiteRun::Done { notes, .. } => {
@@ -3866,6 +4147,7 @@ mod lossy_tests {
             stalled: None,
             ran_ms: None,
             narrowed: false,
+            resumed: None,
         };
         (ran, dir)
     }
@@ -4100,5 +4382,40 @@ mod reuse_tests {
             .ancestor_baselines("cargo", "", 10)
             .unwrap()
             .is_empty());
+    }
+}
+
+#[cfg(test)]
+mod land_now_debt_tests {
+    use super::*;
+    use mason_testing::ParserKind;
+
+    #[test]
+    fn a_forced_or_land_now_debt_owes_the_suites_of_the_tier_it_skipped() {
+        let mut def = Definition::empty();
+        for n in ["unit", "integration", "smoke"] {
+            def.testing.suites.push(Suite::new(n, "x", ParserKind::Tap));
+        }
+        let tier = vec!["integration".to_string(), "smoke".to_string()];
+        for scope in ["landing:force", "landing:land_now"] {
+            let names: Vec<String> = debt_suites(&def, &tier, scope)
+                .into_iter()
+                .map(|s| s.name)
+                .collect();
+            assert_eq!(names, ["integration", "smoke"], "{scope}");
+        }
+        // A tier that names a suite the definition lost owes the rest, not an error.
+        let gone = vec!["integration".to_string(), "removed".to_string()];
+        assert_eq!(debt_suites(&def, &gone, "landing:force").len(), 1);
+        // Other scopes are as before.
+        assert_eq!(debt_suites(&def, &tier, "suite:unit").len(), 1);
+        assert!(debt_suites(&def, &tier, "landing:other").is_empty());
+    }
+
+    #[test]
+    fn a_ci_scope_names_the_workflow_or_ci() {
+        // `ci:` debts are paid by running CI on the base, not by suites.
+        let def = Definition::empty();
+        assert!(debt_suites(&def, &[], "ci:build").is_empty());
     }
 }

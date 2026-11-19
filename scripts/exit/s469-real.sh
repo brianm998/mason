@@ -16,4 +16,5 @@ cat <<'LIST'
  7. mason devices revoke <name> on the Mac: the app returns to the pairing screen. Pair again; Daemon > Forget does the same.
  8. Confirm the token is not readable in the app's shared_prefs (adb shell run-as <application id> cat shared_prefs/mason.xml).
 LIST
+echo "RESULT s469-real: checklist printed, not run; record each step on a real phone"
 exit 1

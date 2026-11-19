@@ -827,7 +827,14 @@ fn form_and_start(
     let mut singles: Vec<(Wait, String)> = vec![];
     for w in &waiting {
         match flag(w.task).as_deref() {
-            Some(k @ ("force" | "now")) => singles.push((w.clone(), k.to_string())),
+            Some("force") => singles.push((w.clone(), "force".to_string())),
+            // Land now (also when pressed while the task was in a batch that did not land it)
+            // gets a batch of its own without waiting for the window, but not past a freeze.
+            Some("now" | crate::suites::LAND_NOW_RUNNING)
+                if freeze.as_ref().is_none_or(|f| f.fix_task == Some(w.task.0)) =>
+            {
+                singles.push((w.clone(), "now".to_string()))
+            }
             _ => {
                 // Frozen: only the fix passes.
                 if freeze
@@ -1029,6 +1036,7 @@ fn run_batch(
                     host,
                     pr: Mutex::new(None),
                     service_error: Mutex::new(None),
+                    stopped: Default::default(),
                 }
                 .run(tasks),
                 Err(e) => {
@@ -1123,6 +1131,9 @@ struct Runner {
     pr: Mutex<Option<OpenPr>>,
     /// Set when a service could not answer: the batch ends with this reason.
     service_error: Mutex<Option<String>>,
+    /// What Land now stopped in this batch's verification (`suite:NAME`, `ci:NAME`): the
+    /// members owe it as deferred debts once they land.
+    stopped: Arc<Mutex<BTreeSet<String>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -1402,6 +1413,10 @@ impl Runner {
                 deliver(d, TaskId(pk.task), pk.verdict());
             }
             rounds += 1;
+            self.stopped
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear();
             if rounds > limit {
                 break Err(format!("gave up after {rounds} rounds: the base kept moving or the batch kept changing"));
             }
@@ -1911,7 +1926,7 @@ impl Runner {
                                 let (d, m) = (d.clone(), members.clone());
                                 Some(Arc::new(move || {
                                     if skippable {
-                                        m.stop(&d, "")
+                                        m.stop_running(&d, "")
                                     } else {
                                         m.forced(&d)
                                     }
@@ -2061,6 +2076,7 @@ impl Runner {
                         for t in &active {
                             landed.push(t.id);
                         }
+                        self.defer_stopped(&landed);
                         break Ok(());
                     }
                     // Red after it was green, or a conflict with the moved base: assemble again.
@@ -2117,6 +2133,8 @@ impl Runner {
                     for t in &active {
                         landed.push(t.id);
                     }
+                    // Before the verdict: the post-land payment runs what Land now stopped.
+                    self.defer_stopped(&landed);
                     break Ok(());
                 }
             }
@@ -2159,6 +2177,14 @@ impl Runner {
         // -- the verdicts
         let was_ok = outcome.is_ok();
         let all_ids: Vec<u64> = ids.clone();
+        // Land now is for this batch: a task it did not land goes back to the ordinary queue.
+        for id in all_ids.iter().filter(|i| !landed.contains(i)) {
+            if d.store.landing_flag(*id).ok().flatten().as_deref()
+                == Some(crate::suites::LAND_NOW_RUNNING)
+            {
+                let _ = d.store.clear_landing_flag(*id);
+            }
+        }
         match &outcome {
             Ok(()) => {
                 for id in &all_ids {
@@ -2356,7 +2382,36 @@ impl Runner {
 
     /// The batch's tasks, for what the owner does to them while it verifies.
     fn members(&self, def: &mason_definition::Definition) -> crate::suites::Members {
-        crate::suites::Members::new(&self.member_tasks, def)
+        let mut m =
+            crate::suites::Members::new(&self.member_tasks, def).in_project(&self.project().id);
+        m.stopped = self.stopped.clone();
+        m
+    }
+
+    /// Has the owner pressed Land now on a member of this running batch (and no freeze
+    /// holds it back)?
+    fn land_now(&self) -> bool {
+        crate::suites::Members {
+            tasks: self.member_tasks.clone(),
+            project: self.project().id.clone(),
+            ..Default::default()
+        }
+        .land_now(&self.d)
+        .is_some()
+    }
+
+    /// The members landed: what Land now stopped is now owed by each, to be run on the base.
+    fn defer_stopped(&self, landed: &[u64]) {
+        let scopes: Vec<String> = self
+            .stopped
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .cloned()
+            .collect();
+        if !scopes.is_empty() {
+            crate::suites::defer_stopped(&self.d, &self.project().id, landed, &scopes);
+        }
     }
 
     /// Is any member of the batch forced? Read live, as the owner may press Force while the
@@ -2386,6 +2441,9 @@ impl Runner {
             return green();
         }
         let mut r = self.run_local(def, suites, wt, base, log_dir, prefix);
+        // Land now stopped the tests (kept: the freeze, the merge and the build floor); what it
+        // stopped is owed after the merge. What lands must still build.
+        let land_now = self.land_now();
         // Forced while it ran: the suites were stopped, and nothing else is run.
         if self.forced() {
             r.green = true;
@@ -2412,7 +2470,7 @@ impl Runner {
             self.pr_verify(wt)
         } else {
             // No suites for the batch and no CI: nothing has built what is about to land.
-            if self.cfg.batch_suites().is_none() {
+            if self.cfg.batch_suites().is_none() || land_now {
                 let f = self.build_floor(def, wt, base, log_dir, prefix);
                 if !f.green {
                     self.floor_red
@@ -2431,7 +2489,26 @@ impl Runner {
             return r;
         };
         match outside {
-            Ok((true, notes, _)) => r.notes.extend(notes),
+            Ok((true, notes, _)) => {
+                r.notes.extend(notes);
+                // CI was not waited for: nothing but the build floor has built the union.
+                let ci_skipped = self
+                    .stopped
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .iter()
+                    .any(|s| s.starts_with("ci:"));
+                if ci_skipped && self.cfg.mode.uses_candidate_ref() {
+                    let f = self.build_floor(def, wt, base, log_dir, prefix);
+                    if !f.green {
+                        self.floor_red
+                            .store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    r.green = f.green;
+                    r.failed.extend(f.failed);
+                    r.notes.extend(f.notes);
+                }
+            }
             Ok((false, notes, failed)) => {
                 r.green = false;
                 r.failed.extend(failed);
@@ -3097,11 +3174,17 @@ impl Runner {
         let started = Instant::now();
         self.d.landing.ci.start(batch, &name, now_ms());
         self.say(&format!("waiting for CI on {name}"));
+        let skipped = std::cell::Cell::new(false);
         let r = (|| {
             let run = self.ask("CI trigger", started, cfg.timeout_s, cfg.poll_s, || {
                 ci.trigger(&name, &sha).map(Some)
             })?;
             self.ask("CI", started, cfg.timeout_s, cfg.poll_s, || {
+                // Land now: stop waiting. CI is owed on the base after the merge.
+                if self.land_now() {
+                    skipped.set(true);
+                    return Ok(Some(CiState::Green));
+                }
                 let (state, detail) = ci.status_detail(&run)?;
                 Ok(match state {
                     CiState::Pending => {
@@ -3123,6 +3206,20 @@ impl Runner {
         }
         self.point("ci_finished");
         self.drop_candidate(&name, ref_id);
+        if skipped.get() {
+            self.d.landing.ci.finish(batch, "skipped");
+            self.stopped
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(crate::suites::ci_scope(self.project()));
+            return Ok((
+                true,
+                vec![format!(
+                    "CI on {name}: not waited for (land now); it runs on the base after the merge"
+                )],
+                vec![],
+            ));
+        }
         Ok(match r? {
             CiState::Green => {
                 self.d.landing.clear(self.pid, "redbase");

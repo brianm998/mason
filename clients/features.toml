@@ -234,6 +234,13 @@ ios = "done"
 android = "todo"
 android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
+[feature.landing-land-now]
+description = "A Land now button on each landing item and each running batch (Home's landing queue and the Landing page), on owner devices where the daemon offers land_now: a one-line confirm, then the pending states; the batch lands past its remaining tests, which run on the base after the merge as debts"
+swift = "done"
+compose = "done"
+ios = "done"
+android = "done"
+
 [feature.tracker-state]
 description = "The landing page shows one tracker line per project: off (with the config path to add [tracker] to), polling with imported, ignored, unchanged and waiting-for-a-slot counts, or stopped with the reason"
 swift = "done"

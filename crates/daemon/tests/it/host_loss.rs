@@ -18,7 +18,7 @@ use support::*;
 
 /// SIGKILL the host in `dir` (not its child), if it still is the process the registry
 /// recorded. Returns whether it was killed.
-fn kill_host_only(dir: &Path) -> bool {
+pub(crate) fn kill_host_only(dir: &Path) -> bool {
     use mason_step_host::registry::{proc_command, proc_start, read_kv};
     let Ok(kv) = read_kv(&dir.join("host.kv")) else {
         return false;
