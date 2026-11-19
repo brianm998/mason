@@ -41,7 +41,7 @@ public final class LiveState {
 @Observable
 public final class MonitorModel {
     // From the daemon.
-    public var header: HeaderView? { didSet { prunePauseCollapse() } }
+    public var header: HeaderView? { didSet { prunePauseCollapse(); pruneDismissed() } }
     public var sidebar: SidebarView? { didSet { sidebarRevision &+= 1; linkRevision &+= 1 } }
     /// Bumped on every new sidebar, so derived layouts know when to be rebuilt.
     @ObservationIgnored var sidebarRevision: UInt64 = 0
@@ -388,7 +388,7 @@ public final class MonitorModel {
     /// Called with every command result (the tools read them; the app shows errors).
     @ObservationIgnored public var onResult: ((Mason_V1_CommandResult) -> Void)?
 
-    private let prefs: Preferences
+    let prefs: Preferences
     @ObservationIgnored public var sender: ((Mason_V1_Command) -> Void)?
     @ObservationIgnored public var subscribe: (() -> Void)?
 
@@ -576,7 +576,7 @@ public final class MonitorModel {
         return prefs.bool(Keys.pause(project: project, mode: mode)) ?? false
     }
     /// Bumped when a preference the views read through a method (not a property) changes.
-    public private(set) var prefsRevision = 0
+    public internal(set) var prefsRevision = 0
     /// Bumped when the announcer's settings (kept in the announcer, not here) change.
     public private(set) var announcerRevision = 0
     public func announcerSettingsChanged() { announcerRevision &+= 1 }

@@ -3,6 +3,7 @@
 # s602 exit test: run-exit-scripts.sh names every failing script in a final line.
 # It runs the real runner in a scratch repo with fake scripts (the real shard would recurse into this one).
 set -euo pipefail
+unset MASON_EXIT_SHARD  # the scratch runs must cover all fake scripts, not the CI shard
 here=$(cd "$(dirname "$0")/../.." && pwd)
 t=$(mktemp -d); trap 'rm -rf "$t"' EXIT
 cd "$t"; git init -q .; mkdir -p scripts/exit
