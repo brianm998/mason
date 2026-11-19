@@ -1522,10 +1522,19 @@ impl Runner {
                             crate::suites::skip_for(&self.d, TaskId(t.id), "", &st.name).is_some()
                         })
                 });
+            // Every task in the batch was made immune to testing by the owner (a fast track:
+            // its testing happens later, as its debt says). No test of any tier runs for the
+            // batch; the lint tier and the build floor still do, so what lands builds.
+            let all_immune = !active.is_empty()
+                && active
+                    .iter()
+                    .all(|t| crate::suites::immune(&self.d, TaskId(t.id)).is_some());
             // The same batches get the fast unit tier after the build floor (s509), in this
-            // verification and in every rerun of it.
-            self.fast_tier
-                .store(tests_skipped, std::sync::atomic::Ordering::SeqCst);
+            // verification and in every rerun of it; an immune batch does not.
+            self.fast_tier.store(
+                tests_skipped && !all_immune,
+                std::sync::atomic::Ordering::SeqCst,
+            );
 
             // -- verify the union once
             let suites = if force {
@@ -1944,6 +1953,14 @@ impl Runner {
                                     batch = batch_id,
                                     "the rebuild was stopped: {}",
                                     o.stopped.unwrap_or_default()
+                                );
+                                return true;
+                            }
+                            Ok(o) if o.passed && all_immune => {
+                                tracing::info!(
+                                    batch = batch_id,
+                                    "the base moved: rebuilt; not re-tested, every task is \
+                                     immune to testing"
                                 );
                                 return true;
                             }
