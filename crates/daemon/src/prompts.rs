@@ -228,6 +228,7 @@ mod tests {
             clarity_classifier: None,
             priority_jump: false,
             hold_back_secs: 7200,
+            small_run_s: 180,
             hold_back_ignore: Vec::new(),
             card_rewriter: None,
             overlay_text: String::new(),

@@ -73,6 +73,7 @@ pub mod runtimes;
 pub mod sched;
 pub mod schedule;
 pub mod scope;
+pub mod targettimes;
 pub mod selfguard;
 pub mod selftest;
 pub mod services;

@@ -1008,7 +1008,7 @@ pub(crate) fn acquire_needs_while(
     needs: mason_scheduler::Needs,
     wanted: &dyn Fn() -> bool,
 ) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
-    acquire_needs_as(c, needs, wanted, false, None)
+    acquire_needs_as(c, needs, wanted, false, None, None)
 }
 
 /// [`acquire_needs_while`] with how long the work is expected to hold the lease (s385);
@@ -1021,7 +1021,19 @@ pub(crate) fn acquire_needs_expecting(
     beside: bool,
     expected_ms: Option<u64>,
 ) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
-    acquire_needs_as(c, needs, wanted, beside, expected_ms)
+    acquire_needs_as(c, needs, wanted, beside, expected_ms, None)
+}
+
+/// [`acquire_needs_expecting`] with a `label` that starts the wait text ("small run, est. 70 s").
+pub(crate) fn acquire_needs_labeled(
+    c: &Ctx,
+    needs: mason_scheduler::Needs,
+    wanted: &dyn Fn() -> bool,
+    beside: bool,
+    expected_ms: Option<u64>,
+    label: Option<&str>,
+) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
+    acquire_needs_as(c, needs, wanted, beside, expected_ms, label)
 }
 
 fn acquire_needs_as(
@@ -1030,6 +1042,7 @@ fn acquire_needs_as(
     wanted: &dyn Fn() -> bool,
     beside: bool,
     expected_ms: Option<u64>,
+    label: Option<&str>,
 ) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
     let d = &c.d;
     // Device pools are sized by what the provider lists, never by a default.
@@ -1064,7 +1077,10 @@ fn acquire_needs_as(
         &mut |why| {
             waited = c.emit(EventKind::WaitStarted {
                 task: c.task,
-                on: crate::targets::wait_text(d, &asked, why),
+                on: match label {
+                    Some(l) => format!("{l}: {}", crate::targets::wait_text(d, &asked, why)),
+                    None => crate::targets::wait_text(d, &asked, why),
+                },
                 class: Some(crate::targets::wait_class(d, &asked, c.task)),
             });
         },
@@ -1106,8 +1122,10 @@ pub(crate) fn tests_uses(
 /// The resource a scoped `run_check` takes instead of `test-suite`, when the definition declares it.
 pub(crate) const TEST_SMALL: &str = "test-small";
 
-/// `uses` for a scoped check: `test-small` in place of `test-suite` when the definition declares
-/// `[resource.test-small]`. Otherwise `uses` unchanged. Full checks and the test step never call this.
+/// `uses` for a short run: `test-small` in place of `test-suite` when the definition declares
+/// `[resource.test-small]`. Otherwise `uses` unchanged. A scoped `run_check` calls it, and the
+/// test step for a narrowed suite whose targets' recorded times are short (s649); full checks
+/// and whole runs never do.
 pub(crate) fn small_lane(
     def: &Definition,
     mut uses: std::collections::BTreeMap<String, u32>,

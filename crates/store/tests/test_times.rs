@@ -43,3 +43,21 @@ fn recorded_times_keep_the_last_runs_and_rank_the_slowest_first() {
     assert_eq!(p.len(), 2);
     assert_eq!(p[0].test, "slow");
 }
+
+#[test]
+fn target_times_keep_the_last_runs_and_give_a_median_per_target() {
+    let d = tempfile::tempdir().unwrap();
+    let s = Store::open(d.path().join("mason.db")).unwrap();
+    for at in 0..12u64 {
+        let ms = if at < 2 { 9_000 } else { 100 };
+        s.record_target_times("p", "cargo", &times(&[("it", ms), ("lib", 5)]), at + 1)
+            .unwrap();
+    }
+    s.record_target_times("q", "cargo", &times(&[("it", 1)]), 50)
+        .unwrap();
+    let m = s.target_medians("p", "cargo").unwrap();
+    assert_eq!(m.get("it"), Some(&100));
+    assert_eq!(m.get("lib"), Some(&5));
+    assert_eq!(m.len(), 2);
+    assert!(s.target_medians("p", "other").unwrap().is_empty());
+}
