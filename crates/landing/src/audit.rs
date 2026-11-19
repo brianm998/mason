@@ -17,7 +17,6 @@ use crate::git::GitError;
 use crate::proc;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
-use std::process::Command;
 
 /// A line needs this many tokens to be matched by token window rather than exactly.
 pub const MIN_TOKENS: usize = 3;
