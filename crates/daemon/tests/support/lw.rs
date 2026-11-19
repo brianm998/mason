@@ -196,6 +196,16 @@ pub fn world_built_fast(landing_toml: &str, files: &[(&str, &str)], fast: bool) 
 impl W {
     /// A task already in its landing step, with a branch carrying `files`.
     pub fn task(&self, title: &str, files: &[(&str, &str)]) -> TaskId {
+        self.task_with(title, files, |_, _| {})
+    }
+
+    /// Like `task`, but runs `before` once the task exists and before it is admitted.
+    pub fn task_with(
+        &self,
+        title: &str,
+        files: &[(&str, &str)],
+        before: impl FnOnce(&W, TaskId),
+    ) -> TaskId {
         let t = file_task_as(&self.d, title, "x", true, TrustSource::Owner, false);
         let pid = self.d.project_id_by_name("scratch").unwrap();
         let br = format!("mason/scratch/t{}", t.0);
@@ -225,6 +235,7 @@ impl W {
             &self.s.repo,
             &["worktree", "remove", "--force", tmp.to_str().unwrap()],
         );
+        before(self, t);
         let def = self.d.current_def(pid);
         self.d
             .emit(EventKind::Admitted {
