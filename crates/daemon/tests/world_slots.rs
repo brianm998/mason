@@ -87,3 +87,97 @@ fn limit_holds_across_processes() {
     }
     assert_eq!(slots::held_count(dir.path(), LIMIT), 0);
 }
+
+/// Run as a child of `a_process_waiting_for_a_slot_gets_its_share`: be present in the
+/// directory without holding a slot, say so, and stay until the parent closes stdin.
+#[test]
+fn present_child() {
+    let Some(dir) = std::env::var_os("MASON_PRESENT_CHILD_DIR") else {
+        return;
+    };
+    let _here = slots::join(std::path::Path::new(&dir));
+    println!("\nPRESENT");
+    let mut s = String::new();
+    let _ = std::io::stdin().read_line(&mut s);
+}
+
+/// Wait for a child's marker line, keeping its stdout drained afterwards.
+fn await_line(c: &mut std::process::Child, marker: &'static str) {
+    let out = c.stdout.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut lines = BufReader::new(out).lines().map_while(Result::ok);
+        while let Some(l) = lines.next() {
+            if l.trim() == marker {
+                let _ = tx.send(());
+                for _ in lines {}
+                return;
+            }
+        }
+    });
+    if rx
+        .recv_timeout(std::time::Duration::from_secs(120))
+        .is_err()
+    {
+        let _ = c.kill();
+        panic!("child never printed {marker}");
+    }
+}
+
+#[test]
+fn a_process_waiting_for_a_slot_gets_its_share() {
+    const FOUR: usize = 4;
+    let dir = tempfile::tempdir().unwrap();
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "present_child",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("MASON_PRESENT_CHILD_DIR", dir.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    await_line(&mut child, "PRESENT");
+
+    // Two processes want slots, so this one stops at half of them and leaves the rest free.
+    let mut held: Vec<_> = std::iter::from_fn(|| slots::try_take(dir.path(), FOUR)).collect();
+    assert_eq!(held.len(), slots::share(FOUR, 2));
+    assert_eq!(slots::held_count(dir.path(), FOUR), 2);
+
+    // Once the other has gone, its share is this one's to take.
+    drop(child.stdin.take());
+    assert!(child.wait().unwrap().success());
+    held.extend(std::iter::from_fn(|| slots::try_take(dir.path(), FOUR)));
+    assert_eq!(held.len(), FOUR);
+    drop(held);
+    assert_eq!(slots::held_count(dir.path(), FOUR), 0);
+}
+
+#[test]
+fn a_presence_file_nobody_holds_is_not_counted_and_is_swept() {
+    let dir = tempfile::tempdir().unwrap();
+    let procs = dir.path().join("procs");
+    std::fs::create_dir_all(&procs).unwrap();
+    let stale = procs.join("1.lock");
+    std::fs::write(&stale, "").unwrap();
+    assert_eq!(slots::present(dir.path()), 0);
+    assert!(!stale.exists());
+    // Alone, this process may take every slot.
+    let held: Vec<_> = std::iter::from_fn(|| slots::try_take(dir.path(), 3)).collect();
+    assert_eq!(held.len(), 3);
+    assert_eq!(slots::present(dir.path()), 1);
+    drop(held);
+    assert_eq!(slots::present(dir.path()), 0);
+}
+
+#[test]
+fn shares_round_up_so_no_slot_is_left_idle() {
+    assert_eq!(slots::share(8, 1), 8);
+    assert_eq!(slots::share(8, 3), 3);
+    assert_eq!(slots::share(3, 2), 2);
+    assert_eq!(slots::share(2, 5), 1);
+    assert_eq!(slots::share(4, 0), 4);
+}

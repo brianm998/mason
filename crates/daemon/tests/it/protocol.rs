@@ -755,8 +755,8 @@ fn a_state_change_reaches_a_local_client_within_250_ms() {
         std::thread::spawn(move || {
             d2.demo_next();
         });
-        // The change has reached the client when a view reflecting it arrives.
-        collect(&mut c, Duration::from_secs(5), |m| views_of(m).len() >= 3);
+        // The change has reached the client when a view reflecting it arrives (unchanged views are no longer resent, so one is enough).
+        collect(&mut c, Duration::from_secs(5), |m| !views_of(m).is_empty());
         lat.push(t0.elapsed());
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -1314,4 +1314,132 @@ fn changing_the_disk_span_resubscribes() {
         spans(m).contains(&600_000)
     });
     assert!(spans(&got).contains(&600_000), "{:?}", spans(&got));
+}
+
+fn sidebar_views(msgs: &[ServerMessage]) -> Vec<mason_protocol::SidebarView> {
+    views_of(msgs)
+        .into_iter()
+        .filter_map(|v| match v.body {
+            Some(Body::Sidebar(s)) => Some(s),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn an_unchanged_view_is_not_sent_again_and_a_changed_one_is() {
+    let (d, port, _dir) = demo();
+    let mut c = Client::connect(port, Encoding::Protobuf).unwrap();
+    c.hello(0, true).unwrap();
+    let kinds = [ViewKind::Sidebar, ViewKind::Usage];
+    c.subscribe(&kinds, "", 0).unwrap();
+    let has = |m: &[ServerMessage], f: fn(&View) -> bool| views_of(m).iter().any(f);
+    let is_usage: fn(&View) -> bool = |v| matches!(v.body, Some(Body::Usage(_)));
+    let is_side: fn(&View) -> bool = |v| matches!(v.body, Some(Body::Sidebar(_)));
+    let first = collect(&mut c, Duration::from_secs(10), |m| {
+        has(m, is_usage) && has(m, is_side)
+    });
+    assert!(has(&first, is_usage) && has(&first, is_side));
+    // The same subscription again rebuilds everything; nothing differs, then one task is filed.
+    c.subscribe(&kinds, "", 0).unwrap();
+    let pid = ProjectId(1);
+    d.emit(EventKind::ProjectRegistered {
+        project: pid,
+        name: "p".into(),
+    })
+    .unwrap();
+    d.emit(EventKind::TaskFiled {
+        project: pid,
+        title: "one more".into(),
+        body: "b".into(),
+        priority: Priority::Normal,
+        trust: TrustSource::Owner,
+        explored: false,
+        proposed: false,
+        blockers: vec![],
+        not_before: Some(Timestamp(u64::MAX / 4)),
+    })
+    .unwrap();
+    let mut got = collect(&mut c, Duration::from_secs(10), |m| has(m, is_side));
+    got.extend(collect(&mut c, Duration::from_millis(800), |_| false));
+    assert_eq!(sidebar_views(&got).len(), 1, "the changed sidebar, once");
+    assert!(!has(&got, is_usage), "usage did not change: not sent again");
+}
+
+#[test]
+fn history_bodies_come_with_row_bodies_and_the_sidebar_is_sent_once() {
+    let (d, port, _dir) = demo();
+    let pid = ProjectId(1);
+    d.emit(EventKind::ProjectRegistered {
+        project: pid,
+        name: "p".into(),
+    })
+    .unwrap();
+    for i in 0..500 {
+        let a = d
+            .emit(EventKind::TaskFiled {
+                project: pid,
+                title: format!("t{i}"),
+                body: "x".repeat(1500),
+                priority: Priority::Normal,
+                trust: TrustSource::Owner,
+                explored: false,
+                proposed: false,
+                blockers: vec![],
+                not_before: Some(Timestamp(u64::MAX / 4)),
+            })
+            .unwrap();
+        let t = a
+            .effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::TaskCreated { task } => Some(*task),
+                _ => None,
+            })
+            .unwrap();
+        d.emit(EventKind::Canceled {
+            task: t,
+            delete_branch: false,
+        })
+        .unwrap();
+    }
+    let mut c = Client::connect(port, Encoding::Protobuf).unwrap();
+    c.hello(0, true).unwrap();
+    let size = |s: &mason_protocol::SidebarView| {
+        let m = ServerMessage {
+            body: Some(server_message::Body::View(ViewUpdate {
+                seq: 0,
+                view: Some(View {
+                    body: Some(Body::Sidebar(s.clone())),
+                }),
+            })),
+        };
+        encode_server(&m, Encoding::Protobuf).len()
+    };
+    c.subscribe_full(&[ViewKind::Sidebar], "", 0, "", 0, 0, false)
+        .unwrap();
+    let lean = collect(&mut c, Duration::from_secs(20), |m| {
+        !sidebar_views(m).is_empty()
+    });
+    // Several rebuild ticks with nothing changed: the sidebar is not sent again.
+    for _ in 0..3 {
+        c.subscribe_full(&[ViewKind::Sidebar], "", 0, "", 0, 0, false)
+            .unwrap();
+    }
+    let more = collect(&mut c, Duration::from_millis(1500), |_| false);
+    assert_eq!(sidebar_views(&lean).len(), 1);
+    assert!(
+        sidebar_views(&more).is_empty(),
+        "sent again though unchanged"
+    );
+    c.subscribe_full(&[ViewKind::Sidebar], "", 0, "", 0, 0, true)
+        .unwrap();
+    let full = collect(&mut c, Duration::from_secs(20), |m| {
+        !sidebar_views(m).is_empty()
+    });
+    let (l, f) = (
+        size(&sidebar_views(&lean)[0]),
+        size(&sidebar_views(&full)[0]),
+    );
+    assert!(l * 4 < f, "without bodies {l} bytes, with {f}");
 }

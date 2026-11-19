@@ -337,7 +337,8 @@ impl Store {
         })
     }
 
-    /// Overrides and quarantines past their expiry that are still stored, as readable names.
+    /// Overrides past their expiry that are still stored, as readable names. Quarantine rows are
+    /// the ledger's history and are not switches, so they are not listed.
     pub fn expired_switches(&self, now_ms: u64) -> Result<Vec<String>, StoreError> {
         self.read(move |c| {
             let mut out = vec![];
@@ -347,19 +348,6 @@ impl Store {
             for r in st.query_map(params![now_ms as i64], |r| {
                 Ok(format!(
                     "override {}.{} (owner {})",
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?
-                ))
-            })? {
-                out.push(r?);
-            }
-            let mut st = c.prepare(
-                "SELECT suite, test, owner FROM quarantine WHERE expires_at <= ?1 ORDER BY suite, test",
-            )?;
-            for r in st.query_map(params![now_ms as i64], |r| {
-                Ok(format!(
-                    "quarantine {}::{} (owner {})",
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
                     r.get::<_, String>(2)?

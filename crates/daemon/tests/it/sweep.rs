@@ -175,3 +175,17 @@ fn drifted_projections_are_detected_and_rebuilt() {
     assert!(filed.contains(&"projection_drift".to_string()), "{filed:?}");
     d.store.verify().unwrap();
 }
+
+#[test]
+fn an_expired_override_is_deleted_and_files_no_bug() {
+    let s = Scratch::new("test -f hello.txt", happy_script());
+    let d = s.start();
+    d.store
+        .add_override("scratch", "step.develop.budget", "9", "brian", 1, 2)
+        .unwrap();
+    assert_eq!(d.store.expired_switches(10).unwrap().len(), 1);
+    assert!(sweep_once(&d).is_empty());
+    assert!(sweep_once(&d).is_empty());
+    assert_eq!(d.store.expired_switches(10).unwrap().len(), 0);
+    assert_eq!(d.store.bugs().unwrap().len(), 0);
+}
