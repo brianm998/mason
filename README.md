@@ -522,4 +522,5 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s635**: The landing queue's items and running batches have a Land now button (Swift macOS/iPad/iPhone, Compose desktop/Android) that stops a running batch's remaining local suites and CI wait, keeps the freeze and the build floor, lands every member, and records what it stopped as deferred debts that run on the base after the merge.
 - **s636**: The hold-across-a-kill test waits for the stored rate-limit window to pass before asserting the account is "ok".
 - **s639**: the open_session tests in crates/cli retry a 127 spawn failure when the fake provider never ran, which removes the likely ETXTBSY flake behind s320 on the Linux shard.
+- **s640**: The s11, s23 and s426 exit gates now use medians of ten runs and condition waits instead of single wall-clock samples, with the 250 ms and 100 ms targets unchanged.
 <!-- status:end -->
