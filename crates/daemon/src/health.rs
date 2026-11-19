@@ -220,6 +220,7 @@ pub fn gather(d: &Arc<Daemon>, now: u64) -> Facts {
     x.load_assumed = x.load_assumed || x.load_source == Some("assumed-busy");
     x.mem_free_mb = crate::sched::measure_free_memory_mb();
     x.stall_ms = disk_probe_ms(d);
+    // The launch list is process-wide; tests turn this knob off so they don't read each other's.
     let launching = if d.cfg.launch_frozen_alert {
         mason_step_host::launcher::launching_under(&d.cfg.hosts_dir())
     } else {
