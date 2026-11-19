@@ -852,6 +852,11 @@ fn call_for(c: &Command) -> Result<Call, String> {
             Some(json!({"reason": c.reason, "as": c.actor})),
             Some((t.task, "land_now")),
         ),
+        Cmd::LandNowBatch(b) => post(
+            format!("/batches/{}/land-now", b.batch),
+            Some(json!({"as": c.actor})),
+            None,
+        ),
         Cmd::Force(t) => post(
             format!("/tasks/{}/force", t.task),
             Some(json!({"reason": c.reason, "as": c.actor})),

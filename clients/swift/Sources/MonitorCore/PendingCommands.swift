@@ -15,6 +15,10 @@ public struct PendingCommand: Equatable, Sendable {
         case notSent
     }
 
+    /// A batch's place among the task ids a pending command is kept under: batch and task ids
+    /// are both small numbers, so a batch's is lifted clear of every task's.
+    public static func batchKey(_ batch: UInt64) -> UInt64 { (1 << 62) | batch }
+
     /// How many later sidebar or task views are waited for before the action is offered again.
     public static let viewsToWait = 3
 
@@ -48,7 +52,7 @@ public struct PendingCommand: Equatable, Sendable {
         case "undefer": return ("Restoring…", "Restored")
         case "revive": return ("Reviving…", "Revived")
         case "explore_anyway": return ("Exploring…", "Asked to explore")
-        case "land_now": return ("Landing…", "Landing requested")
+        case "land_now", "land_now_batch": return ("Landing…", "Landing requested")
         case "force": return ("Forcing…", "Forced")
         case "skip_test": return ("Skipping…", "Skipped")
         case "skip_all_tests": return ("Skipping all testing…", "Immune to testing")
@@ -77,6 +81,7 @@ public struct PendingCommand: Equatable, Sendable {
         case .answer(let x)?: return ("answer", x.task)
         case .skip(let x)?: return (x.allTests ? "skip_all_tests" : "skip_test", x.task)
         case .landNow(let x)?: return ("land_now", x.task)
+        case .landNowBatch(let x)?: return ("land_now_batch", batchKey(x.batch))
         case .force(let x)?: return ("force", x.task)
         case .unblock(let x)?: return ("unblock", x.task)
         case .block(let x)?: return ("block", x.task)

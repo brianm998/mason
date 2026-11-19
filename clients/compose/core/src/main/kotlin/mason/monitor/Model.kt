@@ -169,6 +169,9 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     /** The confirmation dialog is open. */
     var confirmingDaemonUpdate by mutableStateOf(false)
 
+    /** The Land now the owner pressed and has not yet confirmed (the landing queue's one-line confirm). */
+    var landNowAsk by mutableStateOf<LandNowTarget?>(null)
+
     /** The button was pressed: ask first if the daemon says to, else act. */
     fun pressUpdateDaemon() {
         if (daemonUpdateConfirm.isEmpty()) updateDaemon() else confirmingDaemonUpdate = true
@@ -643,6 +646,8 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     fun reject(task: Long, reason: String = "") = send(Command(reject = Reject(task = task, reason = reason)))
     fun exploreAnyway(task: Long) = send(Command(explore_anyway = TaskRef(task = task)))
     fun landNow(task: Long) = send(Command(land_now = TaskRef(task = task)))
+    /** Land now for a whole running batch: every member lands past its remaining tests, which run on the base after the merge. */
+    fun landNowBatch(batch: Long) = send(Command(land_now_batch = BatchRef(batch = batch)))
     fun force(task: Long) = send(Command(force = TaskRef(task = task)))
     fun skipTest(task: Long, step: String) = send(Command(skip = Skip(task = task, step = step)))
     /** Make a task immune to testing (a fast track): no test runs for it through landing; the full run is owed. */

@@ -518,4 +518,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s628**: The mason-adapters codex and conformance tests make scratch directories through a shared helper that uses `/tmp` on Unix and the platform temp dir on Windows, so CI/windows passes again.
 - **s629**: s451 and s572 now skip their gradle runs under MASON_SKIP_COMPOSE, and s469-real is listed in docs/real-checks.md with a RESULT line, so s299 and s450 pass on the Linux shard.
 - **s630**: The s602 exit test now clears `MASON_EXIT_SHARD` before running its scratch runner, so it no longer fails with "expected exit 1, got 0" on CI shard 4/6; s630 checks it under that shard.
+- **s633**: when a cargo-workspace suite's host is lost, the fresh host runs only the test executables whose `test result:` line the lost run's log did not reach, and the verdict reads the finished blocks of the lost log plus the fresh output, so a red stays red and `min_tests` counts both.
+- **s635**: The landing queue's items and running batches have a Land now button (Swift macOS/iPad/iPhone, Compose desktop/Android) that stops a running batch's remaining local suites and CI wait, keeps the freeze and the build floor, lands every member, and records what it stopped as deferred debts that run on the base after the merge.
+- **s636**: The hold-across-a-kill test waits for the stored rate-limit window to pass before asserting the account is "ok".
 <!-- status:end -->

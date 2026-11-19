@@ -198,6 +198,8 @@ public final class MonitorModel {
     public var daemonUpdateConfirm: String { updateInfo?.daemonConfirm ?? "" }
     /// The confirmation dialog is open.
     public var confirmingDaemonUpdate = false
+    /// The Land now the owner pressed and has not yet confirmed (the landing queue's one-line confirm).
+    public var landNowAsk: LandNowTarget?
 
     /// The button was pressed: ask first if the daemon says to, else act.
     public func pressUpdateDaemon() {
@@ -744,6 +746,9 @@ public final class MonitorModel {
     public func reject(_ task: UInt64, reason: String = "") { command { $0.reject = .with { $0.task = task; $0.reason = reason } } }
     public func exploreAnyway(_ task: UInt64) { command { $0.exploreAnyway = .with { $0.task = task } } }
     public func landNow(_ task: UInt64) { command { $0.landNow = .with { $0.task = task } } }
+    /// Land now for a whole running batch: every member lands past its remaining tests, which
+    /// run on the base after the merge.
+    public func landNowBatch(_ batch: UInt64) { command { $0.landNowBatch = .with { $0.batch = batch } } }
     public func force(_ task: UInt64) { command { $0.force = .with { $0.task = task } } }
     public func skipTest(_ task: UInt64, step: String) {
         command { $0.skip = .with { $0.task = task; $0.step = step } }
