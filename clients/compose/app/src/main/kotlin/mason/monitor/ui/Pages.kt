@@ -223,7 +223,7 @@ fun HomePage(model: MonitorModel) {
             Section("Landing queue", open = { model.go(Page.Landing) }) {
                 val items = model.landing?.items.orEmpty()
                 if (items.isNotEmpty()) {
-                    LandingItems(model, items)
+                    LandingItems(model, items, model.landing?.batches.orEmpty())
                 } else {
                     val queue = h?.stages?.firstOrNull { it.state == "landing" }?.rows.orEmpty()
                     if (queue.isEmpty()) Text("Nothing is landing.", style = theme.body(color = theme.muted))
@@ -540,11 +540,14 @@ fun LandingPage(model: MonitorModel) {
                 }
                 l.queue.forEach { r -> Link("${r.key} ${r.title}") { model.go(Page.Task(r.id)) } }
             }
-            if (l.items.isNotEmpty()) Section("Landing tasks") { LandingItems(model, l.items) }
+            if (l.items.isNotEmpty()) Section("Landing tasks") { LandingItems(model, l.items, emptyList()) }
             Section("Batches") {
                 if (l.batches.isEmpty()) Text("No batch has formed yet.", style = theme.body(color = theme.muted))
                 l.batches.forEach { b ->
-                    Text(batchText(b), style = theme.body())
+                    Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing)) {
+                        Text(batchText(b), style = theme.body())
+                        LandNowButton(model, LandNowTarget.Batch(b.id), model.canLandNow(b))
+                    }
                     b.ci?.let { ci ->
                         val uri = androidx.compose.ui.platform.LocalUriHandler.current
                         Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing)) {
@@ -754,16 +757,57 @@ fun MascotPicture(id: String, size: androidx.compose.ui.unit.Dp, modifier: Modif
 
 /** "Landing now" (in a batch) above "Queued", one line per task. */
 @Composable
-internal fun LandingItems(model: MonitorModel, items: List<mason.v1.TaskLanding>) {
+internal fun LandingItems(model: MonitorModel, items: List<mason.v1.TaskLanding>, batches: List<mason.v1.BatchLine>) {
     val theme = LocalTheme.current
     val g = landingGroups(items)
     if (g.first.isNotEmpty()) {
         Text("Landing now", style = theme.body(color = theme.muted))
-        g.first.forEach { i -> Link(landingItemText(i)) { model.go(Page.Task(i.task)) } }
+        // The running batches that offer Land now are drawn here too (Home; the Landing page lists its own).
+        landNowBatches(batches).forEach { b ->
+            Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing)) {
+                Text("Batch #${b.id} ${b.phase}: ${b.tasks.joinToString(" ") { "#$it" }}", style = theme.body())
+                LandNowButton(model, LandNowTarget.Batch(b.id), model.canLandNow(b))
+            }
+        }
+        g.first.forEach { i ->
+            Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing)) {
+                Link(landingItemText(i)) { model.go(Page.Task(i.task)) }
+                LandNowButton(model, LandNowTarget.Task(i.task), model.canLandNow(i))
+            }
+        }
     }
     if (g.second.isNotEmpty()) {
         Text("Queued", style = theme.body(color = theme.muted))
-        g.second.forEach { i -> Link(landingItemText(i)) { model.go(Page.Task(i.task)) } }
+        g.second.forEach { i ->
+            Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing)) {
+                Link(landingItemText(i)) { model.go(Page.Task(i.task)) }
+                LandNowButton(model, LandNowTarget.Task(i.task), model.canLandNow(i))
+            }
+        }
+    }
+}
+
+/** The Land now button of the landing queue: owner devices only ([shown]), a one-line confirm, then the pending-command label until the queue changes. */
+@Composable
+internal fun LandNowButton(model: MonitorModel, target: LandNowTarget, shown: Boolean) {
+    if (!shown) return
+    val pending = model.landNowLabel(target)
+    androidx.compose.material3.OutlinedButton(
+        onClick = { model.askLandNow(target) },
+        enabled = pending == null,
+        modifier = Modifier.testTag("landnow:${target.pendingKey.first}"),
+    ) { Text(pending ?: "Land now") }
+    if (model.landNowAsk == target) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { model.cancelLandNow() },
+            text = { Text(target.confirmText) },
+            confirmButton = {
+                androidx.compose.material3.Button(onClick = { model.confirmLandNow() }, modifier = Modifier.testTag("landnow-confirm")) { Text("Land now") }
+            },
+            dismissButton = {
+                androidx.compose.material3.Button(onClick = { model.cancelLandNow() }) { Text("Cancel") }
+            },
+        )
     }
 }
 

@@ -117,6 +117,9 @@ message Command {
     // Proposed to deferred, and back. Owner decisions; no timer.
     TaskRef defer = 20;
     TaskRef undefer = 21;
+    // Land now for a whole running batch: every member lands past its remaining testing,
+    // and what was skipped runs on the base after the merge.
+    BatchRef land_now_batch = 22;
     Raw raw = 30;
   }
   // Who is acting and, optionally, why (recorded with overrides).
@@ -126,6 +129,10 @@ message Command {
 
 message TaskRef {
   uint64 task = 1;
+}
+
+message BatchRef {
+  uint64 batch = 1;
 }
 
 message ApproveTask {
@@ -1166,6 +1173,8 @@ message BatchLine {
   bool running = 8;
   // The CI the batch is waiting on, or waited on last. Absent when it has none.
   optional BatchCi ci = 9;
+  // What the owner may do to the batch: "land_now" while it has not started promoting.
+  repeated string allowed_actions = 10;
 }
 
 // One workflow's job counts in a CI run.
@@ -1238,6 +1247,8 @@ message TaskLanding {
   uint64 phase_ms = 12;
   // The batch CI's state: queued, running, green, red; empty when none.
   string ci_state = 13;
+  // "land_now" while the task is queued or in a batch that has not started promoting.
+  repeated string allowed_actions = 14;
 }
 
 message ProviderStatus {
