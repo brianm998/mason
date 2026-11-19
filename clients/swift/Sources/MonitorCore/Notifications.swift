@@ -103,7 +103,7 @@ extension MonitorModel {
 
     private var dismissedKeys: [String] {
         _ = prefsRevision  // observed: a dismissal redraws the bar
-        (prefs.string(NotificationKeys.dismissed) ?? "").split(separator: "\n").map(String.init)
+        return (prefs.string(NotificationKeys.dismissed) ?? "").split(separator: "\n").map(String.init)
     }
 
     /// The rows the bar shows: everything not dismissed. Forgets dismissals whose row is gone.
