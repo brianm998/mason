@@ -49,3 +49,35 @@ fun MonitorModel.confirmLandNow() {
         is LandNowTarget.Batch -> landNowBatch(t.id)
     }
 }
+
+/** Why Land now for all cannot be used, or null when it can: the same rule as Skip testing. */
+val MonitorModel.landDisabledReason: String?
+    get() = readOnlyReason?.let { "Read-only: $it" } ?: if (!isOwner) "Only the owner can land tasks now" else null
+
+/** The rows of a landing page that offer Land now. */
+fun MonitorModel.landableRows(rows: List<TaskRow>): List<TaskRow> = rows.filter { "land_now" in it.allowed_actions }
+
+/**
+ * Land now for every row that allows it. Land now on one member lands its whole running batch, so
+ * one `land_now_batch` goes out per running batch holding a landable row, and one `land_now` for
+ * each landable task in none of those batches.
+ */
+fun MonitorModel.landAllNow(rows: List<TaskRow>) {
+    landDisabledReason?.let { landNotice = it; return }
+    val targets = landableRows(rows)
+    if (targets.isEmpty()) {
+        landNotice = "Nothing to land: no task here allows it"
+        return
+    }
+    val running = landNowBatches(landing?.batches.orEmpty())
+    val batches = mutableListOf<Long>()
+    val singles = mutableListOf<Long>()
+    for (r in targets) {
+        val b = running.firstOrNull { r.id in it.tasks }
+        if (b == null) singles += r.id else if (b.id !in batches) batches += b.id
+    }
+    batches.forEach { landNowBatch(it) }
+    singles.forEach { landNow(it) }
+    val n = targets.size
+    landNotice = "Land now sent for $n task${if (n == 1) "" else "s"} (${batches.size} batch${if (batches.size == 1) "" else "es"})"
+}

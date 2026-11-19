@@ -1451,4 +1451,46 @@ class MonitorCoreTest {
         assertEquals("macOS: 5 jobs · 1 queued · 1 running (build) · 2 passed · 1 failed", Format.jobsText("macOS", j))
         assertEquals("CI: 1 job · 1 passed", Format.jobsText("CI", JobCounts(succeeded = 1)))
     }
+
+    // ---- Land now for all ----
+
+    private fun landingModel(owner: Boolean = true): Pair<MonitorModel, MutableList<Command>> {
+        val m = model()
+        m.isOwner = owner
+        m.landing = LandingView(batches = listOf(BatchLine(id = 7, running = true, tasks = listOf(1L, 2L), allowed_actions = listOf("land_now"))))
+        val sent = mutableListOf<Command>()
+        m.sender = { sent += it }
+        return m to sent
+    }
+
+    @Test fun landAllNowSendsOneBatchCommandAndOnePerQueuedTask() {
+        val (m, sent) = landingModel()
+        m.landAllNow(listOf(row(1, "landing", actions = listOf("land_now")), row(2, "landing", actions = listOf("land_now")),
+            row(3, "landing", actions = listOf("land_now")), row(4, "landing", actions = listOf("cancel"))))
+        assertEquals(listOf(7L), sent.mapNotNull { it.land_now_batch?.batch })
+        assertEquals(listOf(3L), sent.mapNotNull { it.land_now?.task })
+        assertEquals(2, sent.size)
+        assertEquals("Land now sent for 3 tasks (1 batch)", m.landNotice)
+    }
+
+    @Test fun landAllNowSendsNothingWhenNothingAllowsItOrTheDeviceCannotAct() {
+        val (m, sent) = landingModel()
+        m.landAllNow(listOf(row(4, "landing", actions = listOf("cancel"))))
+        assertTrue(sent.isEmpty())
+        assertEquals("Nothing to land: no task here allows it", m.landNotice)
+        m.isOwner = false
+        assertNotNull(m.landDisabledReason)
+        m.landAllNow(listOf(row(3, "landing", actions = listOf("land_now"))))
+        assertTrue(sent.isEmpty())
+        assertEquals(m.landDisabledReason, m.landNotice)
+    }
+
+    @Test fun landingRowsOfferLandNowOnlyWhenAllowedAndCanAct() {
+        val (m, _) = landingModel()
+        val rows = listOf(row(1, "landing", actions = listOf("land_now")), row(4, "landing", actions = listOf("cancel")))
+        assertEquals(listOf(1L), m.landableRows(rows).map { it.id })
+        assertTrue(m.canAct && "land_now" in rows[0].allowed_actions)
+        m.isOwner = false
+        assertFalse(m.canAct && "land_now" in rows[0].allowed_actions)
+    }
 }

@@ -986,11 +986,26 @@ fun SectionPage(model: MonitorModel, name: String) {
 private fun StageRows(model: MonitorModel, name: String) {
     val theme = LocalTheme.current
     val rows = model.sectionRows(name)
+    var askAll by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
     Section(SectionPages.title(name), name) {
         if (name == "testing" && rows.isNotEmpty()) {
             Pill("Skip testing for all", modifier = Modifier.testTag("testing:skip-all")) { model.skipAllTests(rows) }
             (model.skipDisabledReason ?: model.skipNotice ?: model.lastResult)?.let {
                 Text(it, style = theme.body(color = theme.attention), modifier = Modifier.testTag("testing:skip-notice"))
+            }
+        }
+        if (name == "landing" && rows.isNotEmpty()) {
+            Pill("Land now for all", modifier = Modifier.testTag("landing:land-all")) { askAll = true }
+            (model.landDisabledReason ?: model.landNotice ?: model.lastResult)?.let {
+                Text(it, style = theme.body(color = theme.attention), modifier = Modifier.testTag("landing:land-notice"))
+            }
+            if (askAll) {
+                androidx.compose.material3.AlertDialog(
+                    onDismissRequest = { askAll = false },
+                    text = { Text("Land ${model.landableRows(rows).size} tasks now? Their remaining tests run after the merge; a red result raises an alert.") },
+                    confirmButton = { androidx.compose.material3.Button(onClick = { askAll = false; model.landAllNow(rows) }) { Text("Land now") } },
+                    dismissButton = { androidx.compose.material3.Button(onClick = { askAll = false }) { Text("Cancel") } },
+                )
             }
         }
         if (rows.isEmpty()) Text("Nothing here.", style = theme.body(color = theme.muted))
@@ -1007,6 +1022,7 @@ private fun StageRows(model: MonitorModel, name: String) {
                 if (name == "testing" && model.canAct && "skip_test" in r.allowed_actions) {
                     Pill("Skip testing", modifier = Modifier.testTag("testing:skip:${r.id}")) { model.skipTest(r.id, r.step) }
                 }
+                if (name == "landing") LandNowButton(model, LandNowTarget.Task(r.id), model.canAct && "land_now" in r.allowed_actions)
             }
         }
     }
