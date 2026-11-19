@@ -12,6 +12,7 @@ import XCTest
 /// row has a dismiss X; a button brings dismissed rows back. Offscreen only: no window.
 @MainActor
 final class NotificationBarTests: XCTestCase {
+    private var windows: [NSWindow] = []
     private func model(rows: Int, text: (Int) -> String = { "Notification number \($0)" }) -> MonitorModel {
         let m = MonitorModel()
         m.connected = true
@@ -31,6 +32,11 @@ final class NotificationBarTests: XCTestCase {
         let view = NSHostingView(rootView: AnyView(
             BannersView(model: m, windowHeight: 2000).environment(\.theme, Theme(dark: false, scale: 1))))
         view.frame = CGRect(x: 0, y: 0, width: width, height: 2000)
+        // A window that is never shown gives the view an accessibility tree; nothing reaches the screen.
+        let window = NSWindow(contentRect: view.frame, styleMask: [.borderless], backing: .buffered, defer: true)
+        window.isReleasedWhenClosed = false
+        window.contentView = view
+        windows.append(window)
         // Row heights arrive as preferences, so lay out until they have been applied.
         for _ in 0..<5 {
             view.layoutSubtreeIfNeeded()
@@ -81,7 +87,7 @@ final class NotificationBarTests: XCTestCase {
         XCTAssertFalse(ids.contains("notifications-resize"))
         XCTAssertFalse(ids.contains("notifications-scroll"))
         let more = identifiers(laidOut(model(rows: 4)))
-        XCTAssertTrue(more.contains("notifications-resize"))
+        XCTAssertTrue(more.contains("notifications-resize"), "ids: \(more.sorted())")
     }
 
     func testEveryRowHasADismissButton() {
