@@ -1869,7 +1869,7 @@ impl TestChecks {
         );
         // What the diff touches (whole packages, or test targets for `{tests_for_change}`),
         // found once for each kind and only if a suite asks for it.
-        let mut touched: BTreeMap<bool, Option<crate::scope::Narrow>> = BTreeMap::new();
+        let mut touched: BTreeMap<(bool, String), Option<crate::scope::Narrow>> = BTreeMap::new();
         let mut narrowed: Vec<String> = vec![];
         // After a red full run, an unscoped check re-runs the failures and the changed crates.
         let red = self
@@ -1926,6 +1926,10 @@ impl TestChecks {
                     continue;
                 }
             };
+            // Only the paths this suite may read narrow it; the rest go to other suites.
+            let kept: Option<Vec<String>> = paths
+                .as_deref()
+                .map(|p| crate::suites::split_for_suite(&def, &sel.suite, p).0);
             let limit = suite.timeout.unwrap_or(self.timeout).min(self.timeout);
             let before = suite.command.clone();
             // Only a run filtered to named tests is reliably short. Narrowing by change or by
@@ -1938,9 +1942,9 @@ impl TestChecks {
                 if let (Some(t), Some(dc)) = (suite.rerun.clone(), suite.dev_command.clone()) {
                     let tests_mode = crate::scope::wants_tests(&dc);
                     let pk = touched
-                        .entry(tests_mode)
+                        .entry((tests_mode, name.clone()))
                         .or_insert_with(|| {
-                            paths.as_deref().and_then(|p| {
+                            kept.as_deref().and_then(|p| {
                                 crate::scope::narrow_for(&self.wt, p, tests_mode, false)
                             })
                         })
@@ -1967,9 +1971,9 @@ impl TestChecks {
                         use crate::scope::Narrow;
                         let changed = if scope.changed || scope.packages.is_empty() {
                             touched
-                                .entry(tests_mode)
+                                .entry((tests_mode, name.clone()))
                                 .or_insert_with(|| {
-                                    paths.as_deref().and_then(|p| {
+                                    kept.as_deref().and_then(|p| {
                                         crate::scope::narrow_for(&self.wt, p, tests_mode, false)
                                     })
                                 })
@@ -2005,7 +2009,9 @@ impl TestChecks {
                         .dev_command
                         .as_deref()
                         .is_some_and(crate::scope::wants_tests)
-                    && paths.as_deref().is_some_and(crate::affected::reads_none)
+                    && kept
+                        .as_deref()
+                        .is_some_and(|k| k.is_empty() || crate::affected::reads_none(k))
                 {
                     lines.push(format!(
                         "{name}: not run, none of its tests reads what you changed (docs, \
