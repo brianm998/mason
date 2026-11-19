@@ -117,6 +117,10 @@ pub struct Suite {
     /// In a task's test step, run `dev_command` for the changed crates and their dependents
     /// (s396), as `run_check` does. The landing batch runs `command` whole.
     pub narrow_packages: bool,
+    /// After a lost step host, rerun only the cargo test executables whose `test result:` line
+    /// the lost run did not reach (#621). A suite whose `dev_command` takes `{tests_for_change}`
+    /// does it without this key.
+    pub resume_after_loss: bool,
 }
 
 /// The `narrow_*` keys of a suite (s386): where its tests live, how one is named, and the
@@ -167,6 +171,7 @@ impl Suite {
             narrow: None,
             narrowed: false,
             narrow_packages: false,
+            resume_after_loss: false,
         }
     }
 }
