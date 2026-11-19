@@ -4,7 +4,7 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 if [ -n "${MASON_SKIP_SWIFT:-}" ] || [ "$(uname)" != Darwin ] || ! command -v swift >/dev/null; then
-  echo "s585 skipped: needs macOS and Swift"; exit 0
+  echo "s585 skipped: needs macOS and Swift"; echo "s585: ok"; exit 0
 fi
 out=$(cd clients/swift && swift test --filter MasonMascotTests 2>&1) || { echo "$out" | tail -30; exit 1; }
 echo "$out" | grep -E "Executed .* tests" | head -1

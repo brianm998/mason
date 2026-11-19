@@ -80,6 +80,9 @@ pub struct ResourceCfg {
     /// How busy macOS's `syspolicyd` may be, in percent of one core, before further compiles
     /// wait (0: never). It scans each new executable's first launch.
     pub syspolicyd_max_pct: u32,
+    /// The CPU speed limit, in percent, below which no further machine work starts while some
+    /// is running (0: never). macOS lowers it for heat or power.
+    pub thermal_min_pct: u32,
     /// Order waiting work by tracker priority before steps remaining. It applies to
     /// every project at once, since one queue serves them all.
     pub priority_first: bool,
@@ -125,6 +128,10 @@ pub const DEFAULT_DISK_STALL_MS: u64 = 2000;
 /// reaches about 100 to 200%.
 pub const DEFAULT_SYSPOLICYD_MAX_PCT: u32 = 300;
 
+/// The default `thermal_min_pct`. A cool machine reads 100; before the 2026-11-18 resets the
+/// owner's iMac Pro read 51 and 27 under light load.
+pub const DEFAULT_THERMAL_MIN_PCT: u32 = 80;
+
 /// How often an open `mason run` wait is added to its task's deadline while it waits (s417).
 /// Anything longer than this of a wait in progress is lost if the daemon restarts.
 pub const CREDIT_EVERY: Duration = Duration::from_secs(30);
@@ -143,6 +150,7 @@ impl Default for ResourceCfg {
             disk_floor_gb: crate::disk::DEFAULT_FLOOR_GB,
             disk_stall_ms: DEFAULT_DISK_STALL_MS,
             syspolicyd_max_pct: DEFAULT_SYSPOLICYD_MAX_PCT,
+            thermal_min_pct: DEFAULT_THERMAL_MIN_PCT,
             priority_first: false,
             from_file: Default::default(),
             max_wait_s: DEFAULT_MAX_WAIT_S,
@@ -216,6 +224,14 @@ pub fn parse_resource_cfg(text: &str) -> Result<ResourceCfg, String> {
                 "cpu" if name == "compile_jobs" => c.compile_jobs = n as u32,
                 "cpu" if name == "compile_idle_kill_s" => c.compile_idle_kill_s = n as u32,
                 "cpu" if name == "syspolicyd_max_pct" => c.syspolicyd_max_pct = n as u32,
+                "cpu" if name == "thermal_min_pct" => {
+                    if !(0..=100).contains(&n) {
+                        return Err(
+                            "resources.toml: cpu.thermal_min_pct must be from 0 to 100".into()
+                        );
+                    }
+                    c.thermal_min_pct = n as u32;
+                }
                 "disk" if name == "floor_gb" => c.disk_floor_gb = n as u64,
                 "disk" if name == "stall_ms" => c.disk_stall_ms = n as u64,
                 other => return Err(format!("resources.toml: unknown setting {other}.{name}")),
@@ -234,6 +250,7 @@ pub const GATES: &[&str] = &[
     "compile_jobs",
     "compile_idle_kill_s",
     "syspolicyd_max_pct",
+    "thermal_min_pct",
     "stall_ms",
     "memory.floor_mb",
     "disk.floor_gb",
@@ -261,6 +278,10 @@ fn check_gate(name: &str, v: i64) -> Result<(), String> {
         if !(1..=100).contains(&v) {
             return Err("compile_cpu_max must be from 1 to 100".into());
         }
+    } else if name == "thermal_min_pct" {
+        if !(0..=100).contains(&v) {
+            return Err("thermal_min_pct must be from 0 to 100".into());
+        }
     } else if v < 0 {
         return Err(format!("{name} must be a whole number, 0 or more"));
     } else if matches!(
@@ -281,6 +302,7 @@ fn base_gate(c: &ResourceCfg, name: &str) -> Option<i64> {
         "compile_jobs" => i64::from(c.compile_jobs),
         "compile_idle_kill_s" => i64::from(c.compile_idle_kill_s),
         "syspolicyd_max_pct" => i64::from(c.syspolicyd_max_pct),
+        "thermal_min_pct" => i64::from(c.thermal_min_pct),
         "stall_ms" => c.disk_stall_ms as i64,
         "memory.floor_mb" => c.memory_floor_mb? as i64,
         _ => c.disk_floor_gb as i64,
@@ -338,6 +360,13 @@ enum Meta {
     Outside {
         class: String,
     },
+    /// Slots held by a command that runs under a step host which outlived the daemon that
+    /// granted them (s589). The old daemon took the kernel locks, so they went with it; the
+    /// ledger counts them until the host's command ends (`dir` says when). Never compared
+    /// with the kernel: there is no lock to find.
+    Host {
+        dir: PathBuf,
+    },
 }
 
 struct State {
@@ -394,6 +423,11 @@ struct State {
     policy_read: Option<(u32, u32)>,
     /// When the reading first went to the limit or over it and has stayed there since.
     policy_since: Option<u64>,
+    /// The CPU speed limit and the level below which machine work waits. `None`: no gate.
+    thermal: Option<Arc<dyn crate::thermal::ThermalSource>>,
+    thermal_min: u32,
+    /// The latest reading: (speed %, minimum %), `None` with no gate or no reading.
+    thermal_read: Option<(u32, u32)>,
     /// When the last scheduling pass ran. A waiter skips its own pass while this is
     /// younger than the broker's tick (see `acquire`).
     last_pass: Option<Instant>,
@@ -590,6 +624,7 @@ fn apply_gate(st: &mut State, name: &str) {
         "compile_idle_kill_s" => st.compile_idle_kill_s = v.unwrap_or(0) as u32,
         "stall_ms" => st.stall_ms = v.unwrap_or(0) as u64,
         "syspolicyd_max_pct" => st.policy_max = v.unwrap_or(0) as u32,
+        "thermal_min_pct" => st.thermal_min = v.unwrap_or(0) as u32,
         "memory.floor_mb" => {
             st.floor_mb = v.map(|n| n as u64);
             st.mem = None;
@@ -718,6 +753,9 @@ impl Broker {
                 policy_max: cfg.syspolicyd_max_pct,
                 policy_read: None,
                 policy_since: None,
+                thermal: None,
+                thermal_min: cfg.thermal_min_pct,
+                thermal_read: None,
                 last_pass: None,
                 pass_running: false,
                 passes: 0,
@@ -998,6 +1036,27 @@ impl Broker {
         self.cv.notify_all();
     }
 
+    /// Turn the thermal gate on: no further machine work while `source` reads below `min_pct`
+    /// and some is running.
+    pub fn set_thermal(&self, source: Arc<dyn crate::thermal::ThermalSource>, min_pct: u32) {
+        let mut st = lock(&self.st);
+        st.thermal = Some(source);
+        st.thermal_min = st
+            .overrides
+            .get("thermal_min_pct")
+            .map_or(min_pct, |v| *v as u32);
+        st = self.pass(st);
+        drop(st);
+        self.cv.notify_all();
+    }
+
+    /// The thermal reading: (speed %, minimum %). `None` with no gate or no reading.
+    pub fn thermal_read(&self) -> Option<(u32, u32)> {
+        let mut st = lock(&self.st);
+        self.cpu_gate(&mut st);
+        st.thermal_read
+    }
+
     /// Read the CPU and stall sources afresh. Every plan is made right after
     /// this, so the ledger's stall reading is always current.
     fn cpu_gate(&self, st: &mut State) -> Option<CpuGate> {
@@ -1020,6 +1079,18 @@ impl Broker {
             });
         st.ledger.set_policy(policy);
         st.policy_read = policy.map(|p| (p.busy_pct, p.max_pct));
+        let min_pct = st.thermal_min;
+        let thermal = st
+            .thermal
+            .as_ref()
+            .filter(|_| min_pct > 0)
+            .and_then(|source| {
+                source
+                    .speed_pct()
+                    .map(|speed_pct| mason_scheduler::ThermalGate { speed_pct, min_pct })
+            });
+        st.ledger.set_thermal(thermal);
+        st.thermal_read = thermal.map(|t| (t.speed_pct, t.min_pct));
         match policy {
             Some(p) if p.busy_pct >= p.max_pct => {
                 if st.policy_since.is_none() {
@@ -1098,7 +1169,12 @@ impl Broker {
             .holders
             .iter()
             .map(|h| h.id)
-            .filter(|id| !matches!(st.meta.get(id), Some(Meta::Outside { .. })))
+            .filter(|id| {
+                !matches!(
+                    st.meta.get(id),
+                    Some(Meta::Outside { .. } | Meta::Host { .. })
+                )
+            })
             .collect();
         let classes: Vec<(String, u32)> = snap
             .capacity
@@ -1222,6 +1298,9 @@ impl Broker {
                 st.meta.remove(&id);
                 changed = true;
             }
+        }
+        if probes.is_some() {
+            changed |= Self::release_ended_hosts(st);
         }
         if let Some(probes) = probes {
             changed |= self.count_outside_holders(st, now, probes);
@@ -1364,6 +1443,9 @@ impl Broker {
                         .unwrap_or_else(|| "cli".into()),
                 )),
                 Meta::Outside { .. } => Some((*id, "held outside the queue".into())),
+                Meta::Host { .. } => {
+                    Some((*id, "held by a step host from before the restart".into()))
+                }
                 Meta::Task => None,
             })
             .collect();
@@ -1486,6 +1568,59 @@ impl Broker {
             }
         }
         changed
+    }
+
+    /// Count, as held, the slots of every command that still runs under a step host the
+    /// previous daemon started (s589). Called once, before the first grant: until it is,
+    /// the machine classes would look free. Each is released when its host's command ends.
+    /// Only machine classes the broker knows are counted; the rest are not slots.
+    pub fn adopt_hosts(&self, holds: &[crate::hostedcheck::HostHold]) {
+        let mut st = lock(&self.st);
+        let now = crate::daemon::now_ms();
+        let caps = st.ledger.snapshot().capacity;
+        for h in holds {
+            let amounts: BTreeMap<String, u32> = h
+                .uses
+                .iter()
+                .filter(|(k, n)| **n > 0 && caps.get(*k).is_some_and(|c| c.kind == Kind::Machine))
+                .map(|(k, n)| (k.clone(), *n))
+                .collect();
+            if amounts.is_empty() {
+                continue;
+            }
+            let needs = Needs {
+                exclusive: false,
+                amounts,
+            };
+            let id = st.ledger.adopt(
+                needs,
+                &format!("{} (from before the restart)", h.label),
+                now,
+            );
+            st.meta.insert(id, Meta::Host { dir: h.dir.clone() });
+        }
+    }
+
+    /// Give back the slots of a host whose command ended (or whose host is gone).
+    fn release_ended_hosts(st: &mut State) -> bool {
+        use mason_step_host::registry::{status_of, HostState};
+        let ended: Vec<u64> = st
+            .meta
+            .iter()
+            .filter_map(|(id, m)| match m {
+                Meta::Host { dir } => (!matches!(
+                    status_of(dir),
+                    Ok(s) if s.state == HostState::Running
+                ))
+                .then_some(*id),
+                _ => None,
+            })
+            .collect();
+        for id in &ended {
+            st.ledger.release(*id);
+            st.meta.remove(id);
+        }
+        !ended.is_empty()
     }
 
     /// Record, for the length of one `on_wait` call, what the wait is for. The callback reads
@@ -2403,6 +2538,12 @@ impl Broker {
                 st.policy_max
             ));
         }
+        if st.thermal.is_some() && st.thermal_min > 0 {
+            rules.push_str(&format!(
+                ", and no further compile or test while macOS holds the CPU below {}% of its speed",
+                st.thermal_min
+            ));
+        }
         if st.compile_idle_kill_s > 0 {
             rules.push_str(&format!(
                 ". A task's command that uses no CPU for {} while holding a slot is stopped",
@@ -2589,6 +2730,12 @@ fn compile_reason(w: &mason_scheduler::Wait, now: u64, limit: u32) -> (&'static 
                 "the build disk is slow ({:.1} s to answer, limit {:.1} s)",
                 *slow_ms as f64 / 1000.0,
                 *max_ms as f64 / 1000.0
+            ),
+        ),
+        WaitCause::Thermal { speed_pct, min_pct } => (
+            "thermal",
+            format!(
+                "macOS holds the CPU to {speed_pct}% of its speed for heat (work starts at {min_pct}% or more)"
             ),
         ),
         WaitCause::Policy { busy_pct, max_pct } => (
@@ -3253,6 +3400,128 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(granted, "{}", b.snapshot());
+    }
+
+    /// A step host dir whose "host process" is this test process, so it reads as running.
+    fn fake_host(root: &Path, id: &str, label: &str, uses: &str) -> PathBuf {
+        use mason_step_host::registry::write_kv;
+        let dir = root.join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        write_kv(
+            &dir.join("host.kv"),
+            &[
+                ("id", id.to_string()),
+                ("host_pid", std::process::id().to_string()),
+                ("child_pid", std::process::id().to_string()),
+                ("sock", dir.join("sock").display().to_string()),
+                ("started_ms", "1".to_string()),
+                ("heartbeat_ms", "1".to_string()),
+            ],
+        )
+        .unwrap();
+        write_kv(
+            &dir.join("holds.kv"),
+            &[("label", label.to_string()), ("uses", uses.to_string())],
+        )
+        .unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_command_still_running_under_its_host_keeps_its_slot_across_a_restart() {
+        // s589: the old daemon took the kernel locks, so they went with it. The new daemon
+        // counts the host's recorded slots until the host's command ends.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = ResourceCfg {
+            machine: BTreeMap::from([("test-suite".to_string(), 1)]),
+            ..Default::default()
+        };
+        let b = Broker::new(
+            dir.path().join("locks"),
+            dir.path().join("limits.kv"),
+            &cfg,
+            2,
+            crate::cpu::FakeCpu::new(0),
+            &[],
+        )
+        .unwrap();
+        let hosts = dir.path().join("h");
+        let hd = fake_host(&hosts, "t567r1-check0", "#567 check", "test-suite=1");
+        let found = crate::hostedcheck::running_holds(&hosts);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].label, "#567 check");
+        b.adopt_hosts(&found);
+        assert_eq!(b.used("test-suite"), 1);
+        assert!(
+            b.snapshot()
+                .to_string()
+                .contains("#567 check (from before the restart)"),
+            "{}",
+            b.snapshot()
+        );
+        let one = BTreeMap::from([("test-suite".to_string(), 1)]);
+        let second = b.lease_open("second", &one);
+        for _ in 0..50 {
+            assert!(
+                matches!(b.lease_poll(second), LeaseState::Waiting { .. }),
+                "the limit is 1 and the first command still runs: {}",
+                b.snapshot()
+            );
+            assert_eq!(b.used("test-suite"), 1);
+        }
+        // The command ends: its slot is given back and the second request is granted.
+        mason_step_host::registry::ExitRecord {
+            code: 0,
+            signal: 0,
+            output_len: 0,
+            ended_ms: 2,
+        }
+        .write(&hd)
+        .unwrap();
+        let mut granted = false;
+        for _ in 0..2000 {
+            if matches!(b.lease_poll(second), LeaseState::Granted { .. }) {
+                granted = true;
+                break;
+            }
+            std::thread::yield_now();
+        }
+        assert!(granted, "{}", b.snapshot());
+        assert_eq!(b.used("test-suite"), 1, "only the second holds it now");
+    }
+
+    #[test]
+    fn an_ended_host_or_an_unknown_class_is_not_adopted() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = ResourceCfg {
+            machine: BTreeMap::from([("test-suite".to_string(), 1)]),
+            ..Default::default()
+        };
+        let b = Broker::new(
+            dir.path().join("locks"),
+            dir.path().join("limits.kv"),
+            &cfg,
+            2,
+            crate::cpu::FakeCpu::new(0),
+            &[],
+        )
+        .unwrap();
+        let hosts = dir.path().join("h");
+        let done = fake_host(&hosts, "a-check0", "#1 check", "test-suite=1");
+        mason_step_host::registry::ExitRecord {
+            code: 0,
+            signal: 0,
+            output_len: 0,
+            ended_ms: 2,
+        }
+        .write(&done)
+        .unwrap();
+        fake_host(&hosts, "b-check0", "#2 check", "nonsense=1");
+        let found = crate::hostedcheck::running_holds(&hosts);
+        assert_eq!(found.len(), 1, "the ended host holds nothing");
+        b.adopt_hosts(&found);
+        assert_eq!(b.used("test-suite"), 0);
+        assert_eq!(b.used("nonsense"), 0);
     }
 
     #[test]

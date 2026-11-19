@@ -1672,6 +1672,7 @@ impl Runner {
                             batch_id,
                             rounds,
                             Some(&mapped),
+                            &mapped,
                         );
                         if let Some(e) = self.take_service_error() {
                             break 'outer Err(e);
@@ -1764,8 +1765,16 @@ impl Runner {
                                 continue 'outer;
                             }
                             let (found, runs) = self.pin_red(
-                                &def, &batch, &lock, &active, &int_wt, &log_dir, batch_id, rounds,
+                                &def,
+                                &batch,
+                                &lock,
+                                &active,
+                                &int_wt,
+                                &log_dir,
+                                batch_id,
+                                rounds,
                                 None,
+                                &vr.failed.iter().cloned().collect::<Vec<_>>(),
                             );
                             if let Some(e) = self.take_service_error() {
                                 break 'outer Err(e);
@@ -1887,6 +1896,8 @@ impl Runner {
                             env: vec![],
                             limit: p.test_timeout,
                             tree: tree.clone(),
+                            holds: Default::default(),
+                            label: String::new(),
                             stop: {
                                 let (d, m) = (d.clone(), members.clone());
                                 Some(Arc::new(move || {
@@ -2493,6 +2504,8 @@ impl Runner {
                 env: vec![],
                 limit: self.project().test_timeout,
                 tree: crate::hostedcheck::tree_key(wt),
+                holds: Default::default(),
+                label: String::new(),
                 stop: Some({
                     let (d, m) = (d.clone(), members.clone());
                     Arc::new(move || m.forced(&d))
@@ -2591,6 +2604,8 @@ impl Runner {
                 env: vec![],
                 limit: self.project().test_timeout,
                 tree: crate::hostedcheck::tree_key(wt),
+                holds: Default::default(),
+                label: String::new(),
                 stop: Some({
                     let (d, m) = (d.clone(), members.clone());
                     Arc::new(move || m.forced(&d)) as crate::hostedcheck::StopFn
@@ -2763,6 +2778,8 @@ impl Runner {
                 env: vec![],
                 limit: self.project().test_timeout,
                 tree: crate::hostedcheck::tree_key(wt),
+                holds: Default::default(),
+                label: String::new(),
                 stop: stoppable.then(|| {
                     let (d, m, name) = (d.clone(), members.clone(), name.clone());
                     Arc::new(move || m.stop(&d, &name)) as crate::hostedcheck::StopFn
@@ -3513,6 +3530,7 @@ impl Runner {
         batch_id: u64,
         rounds: usize,
         mapped: Option<&[String]>,
+        failed: &[String],
     ) -> (plan::Pin, Vec<SplitRun>) {
         let ids: Vec<u64> = active.iter().map(|t| t.id).collect();
         let mut runs: Vec<SplitRun> = vec![];
@@ -3527,19 +3545,29 @@ impl Runner {
                 let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
                 batch.assemble(&sub, &|_| {})
             };
-            let Ok(a) = a else { return false };
+            // A base that cannot be checked out keeps the old answer (the base's), not a blame.
+            let Ok(a) = a else { return subset.is_empty() };
             tried += 1;
-            let which = subset
-                .iter()
-                .map(|t| format!("#{t}"))
-                .collect::<Vec<_>>()
-                .join(", ");
+            let which = if subset.is_empty() {
+                "the base alone".to_string()
+            } else {
+                subset
+                    .iter()
+                    .map(|t| format!("#{t}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
             self.say(&format!(
                 "batch #{batch_id} is red: splitting it to find the task (run {tried}: {which})"
             ));
             let prefix = format!("b{batch_id}-r{rounds}-bis{tried}");
             let r = match mapped {
                 Some(m) => self.run_local(def, m, int_wt, &a.base_tip, log_dir, &prefix),
+                // The base alone (`plan::pin` asks when every task was red alone): a base
+                // has no diff to select suites by, so it runs the ones that were red.
+                None if subset.is_empty() => {
+                    self.verify(def, failed, int_wt, &a.base_tip, log_dir, &prefix)
+                }
                 None => {
                     let s = self.suites_for(def, batch, &a);
                     self.verify(def, &s, int_wt, &a.base_tip, log_dir, &prefix)

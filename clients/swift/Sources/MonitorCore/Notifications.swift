@@ -102,6 +102,7 @@ extension MonitorModel {
     }
 
     private var dismissedKeys: [String] {
+        _ = prefsRevision  // observed: a dismissal redraws the bar
         (prefs.string(NotificationKeys.dismissed) ?? "").split(separator: "\n").map(String.init)
     }
 
@@ -123,7 +124,7 @@ extension MonitorModel {
         var keys = dismissedKeys
         if !keys.contains(key) { keys.append(key) }
         prefs.setString(keys.joined(separator: "\n"), for: NotificationKeys.dismissed)
-        objectWillChange.send()
+        prefsRevision &+= 1
     }
 
     /// Shows again every dismissed row that is present now.
@@ -131,7 +132,7 @@ extension MonitorModel {
         let present = Set(allNotificationRows().map(\.key))
         let kept = dismissedKeys.filter { !present.contains($0) }
         prefs.setString(kept.joined(separator: "\n"), for: NotificationKeys.dismissed)
-        objectWillChange.send()
+        prefsRevision &+= 1
     }
 
     func pruneDismissed(present: Set<String>? = nil) {
@@ -145,11 +146,11 @@ extension MonitorModel {
     }
 
     /// The chosen height of the scrolling bar (nil: the default, three rows).
-    public var notificationHeight: Double? { prefs.double(NotificationKeys.height) }
+    public var notificationHeight: Double? { _ = prefsRevision; return prefs.double(NotificationKeys.height) }
 
     public func setNotificationHeight(_ h: Double) {
         prefs.setDouble(h, for: NotificationKeys.height)
-        objectWillChange.send()
+        prefsRevision &+= 1
     }
 
     /// At least one row, at most every row, and at most the window's share.

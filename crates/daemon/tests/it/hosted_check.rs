@@ -30,6 +30,8 @@ fn spec(
         limit: Duration::from_secs(secs),
         tree: tree.into(),
         stop: None,
+        holds: Default::default(),
+        label: String::new(),
     }
 }
 
@@ -169,6 +171,39 @@ fn kill_9_while_run_check_runs_the_command_once_and_the_task_lands() {
 }
 
 #[test]
+fn a_running_check_records_the_slots_it_holds_beside_its_host_until_it_ends() {
+    // s589: a daemon that restarts counts these as held. Asserted on the host list, not on time.
+    let s = Scratch::new("true", happy_script());
+    let d = s.start();
+    let work = tempfile::tempdir().unwrap();
+    let gate = work.path().join("release");
+    let cmd = format!("while [ ! -e {} ]; do sleep 0.1; done", gate.display());
+    let mut sp = spec(&d, work.path(), &cmd, "tree-h", 120);
+    sp.holds = [("test-suite".to_string(), 1)].into();
+    sp.label = "#9 check".into();
+    let hosts = d.cfg.hosts_dir();
+    std::thread::scope(|sc| {
+        let a = sc.spawn(|| run(&d, &sp));
+        let end = Instant::now() + Duration::from_secs(60);
+        let held = loop {
+            let h = mason_daemon::hostedcheck::running_holds(&hosts);
+            if !h.is_empty() {
+                break h;
+            }
+            assert!(Instant::now() < end, "the host never showed its holds");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].label, "#9 check");
+        assert_eq!(held[0].uses["test-suite"], 1);
+        std::fs::write(&gate, "").unwrap();
+        assert!(a.join().unwrap().unwrap().passed);
+    });
+    // The command ended: the host holds nothing, though its directory is still there.
+    assert!(mason_daemon::hostedcheck::running_holds(&hosts).is_empty());
+}
+
+#[test]
 fn a_check_feeds_the_develop_runs_counts_and_phases() {
     use mason_core::checks::CheckPhase;
     use mason_core::progress::Progress;
@@ -217,4 +252,102 @@ fn a_check_feeds_the_develop_runs_counts_and_phases() {
     assert_eq!(p.checks[0].phase, CheckPhase::Done);
     assert_eq!(p.checks[0].result, "red");
     assert_eq!(p.checks[0].failed, 1);
+}
+
+/// Start `cmd` under a step host named `id`, as a daemon that has since gone would have,
+/// with a run record keyed `key` that nobody has been given. Returns once it runs.
+fn start_left_behind(
+    d: &mason_daemon::daemon::Daemon,
+    log_dir: Option<&Path>,
+    id: &str,
+    key: &str,
+) {
+    use mason_step_host::launcher::{spawn_host, SpawnOptions};
+    if let Some(dir) = log_dir {
+        std::fs::create_dir_all(dir).unwrap();
+        mason_step_host::registry::write_kv(
+            &dir.join(format!("{id}.check")),
+            &[("key", key.to_string()), ("delivered", "0".into())],
+        )
+        .unwrap();
+    }
+    spawn_host(&SpawnOptions {
+        host_bin: d.cfg.host_bin.clone(),
+        root: d.cfg.hosts_dir(),
+        id: id.to_string(),
+        cmd: vec!["sh".into(), "-c".into(), "sleep 300".into()],
+        cwd: None,
+        env: vec![],
+        clear_env: false,
+        stdin: None,
+        linger: Duration::from_secs(5),
+        heartbeat: d.cfg.heartbeat,
+    })
+    .unwrap();
+    wait_for("the left-behind host to run", 60, || host_running(d, id));
+}
+
+fn host_running(d: &mason_daemon::daemon::Daemon, id: &str) -> bool {
+    matches!(
+        mason_step_host::registry::status_of(&d.cfg.hosts_dir().join(id)),
+        Ok(s) if s.state == mason_step_host::registry::HostState::Running
+    )
+}
+
+#[test]
+fn a_call_on_a_new_tree_stops_an_uncollected_run_on_an_older_tree() {
+    // 2026-11-18: after a daemon restart, develop agents asked for checks on new trees while
+    // their old runs kept going under surviving step hosts, results nobody would read, each a
+    // whole suite holding a slot.
+    let s = Scratch::new("true", happy_script());
+    let d = s.start();
+    let work = tempfile::tempdir().unwrap();
+    let sp = spec(&d, work.path(), "echo done", "tree-b", 60);
+    start_left_behind(&d, Some(&sp.log_dir), "t0r1-check0", "an older tree");
+    let r = run(&d, &sp).unwrap();
+    assert!(r.passed, "{r:?}");
+    assert_ne!(r.id, "t0r1-check0", "the new tree ran afresh");
+    wait_for("the older run to stop", 60, || {
+        !host_running(&d, "t0r1-check0")
+    });
+    let rec = mason_step_host::registry::read_kv(&sp.log_dir.join("t0r1-check0.check")).unwrap();
+    assert_eq!(rec.get("delivered").map(String::as_str), Some("1"));
+}
+
+#[test]
+fn the_sweep_stops_a_check_whose_run_is_over_and_nothing_else() {
+    let s = Scratch::new("true", happy_script());
+    let d = s.start();
+    start_left_behind(&d, None, "t999r7-check-x0", "k");
+    start_left_behind(&d, None, "b3-retest0", "k");
+    // The daemon sweeps on its own too, so the count here may be 0: the outcome is what counts.
+    mason_daemon::hostedcheck::stop_unwanted(&d);
+    wait_for("the dead run's check to stop", 60, || {
+        !host_running(&d, "t999r7-check-x0")
+    });
+    assert!(
+        host_running(&d, "b3-retest0"),
+        "a landing re-test is not a develop check"
+    );
+    let sock = d.cfg.hosts_dir().join("b3-retest0").join("sock");
+    let mut h = mason_step_host::client::HostClient::connect(
+        &sock,
+        mason_step_host::protocol::PREVIOUS,
+        mason_step_host::protocol::CURRENT,
+        "test",
+    )
+    .unwrap();
+    h.stop(1000).unwrap();
+}
+
+#[test]
+fn a_check_id_names_its_task_and_run() {
+    use mason_daemon::hostedcheck::check_owner;
+    assert_eq!(
+        check_owner("t575r3670-check-cargo-workspace2"),
+        Some((575, 3670))
+    );
+    assert_eq!(check_owner("t0r1-check0"), Some((0, 1)));
+    assert_eq!(check_owner("b3-retest0"), None);
+    assert_eq!(check_owner("t5r7-1"), None);
 }

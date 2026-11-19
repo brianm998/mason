@@ -13,7 +13,7 @@ import SwiftUI
 /// The window (Part 17): the top bar, the banners (only while true), then the
 /// sidebar and the main view, which show exactly one thing at a time.
 public struct RootView: View {
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
     @Environment(\.colorScheme) private var scheme
     @State private var windowHeight: CGFloat = 800
     #if !canImport(AppKit)
@@ -79,7 +79,7 @@ func startStatus(connected: Bool, reconnecting: Bool, link: String? = nil) -> St
 /// whole (the robot is left, the word right: a crop would lose both); there is no progress bar.
 struct StartView: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
 
     var body: some View {
         VStack(spacing: CGFloat(MasonTokens.sizeSpacingLarge) * CGFloat(theme.scale)) {
@@ -102,7 +102,7 @@ struct StartView: View {
 struct SidebarHandle: View {
     static let space = "sidebar-row"
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
     let factor: Double
     let width: CGFloat
     @State private var inside = false

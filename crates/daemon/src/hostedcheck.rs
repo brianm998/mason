@@ -44,6 +44,69 @@ pub struct CheckSpec {
     /// Polled while the command runs: `Some(note)` stops it (the owner skipped or forced
     /// what it belongs to). The outcome then carries the note in `stopped`.
     pub stop: Option<StopFn>,
+    /// The machine slots the caller holds while the command runs (empty: none). Written next
+    /// to the host so that a daemon which restarts counts them as held until the host's
+    /// command ends (s589).
+    pub holds: std::collections::BTreeMap<String, u32>,
+    /// Whose run it is, as the resources list shows it: `#567 check`.
+    pub label: String,
+}
+
+/// What a step host's command holds of the machine, as recorded at its start.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostHold {
+    pub dir: PathBuf,
+    pub label: String,
+    pub uses: std::collections::BTreeMap<String, u32>,
+}
+
+const HOLDS_FILE: &str = "holds.kv";
+
+fn write_holds(dir: &Path, spec: &CheckSpec) {
+    if spec.holds.is_empty() {
+        return;
+    }
+    let uses = spec
+        .holds
+        .iter()
+        .map(|(k, n)| format!("{k}={n}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let _ = write_kv(
+        &dir.join(HOLDS_FILE),
+        &[("label", spec.label.replace('\n', " ")), ("uses", uses)],
+    );
+}
+
+/// Every step host under `hosts` whose command still runs and recorded slots it holds.
+/// A host whose command ended, or that was lost, holds nothing.
+pub fn running_holds(hosts: &Path) -> Vec<HostHold> {
+    use mason_step_host::registry::{HostState, Registry};
+    let Ok(all) = Registry::new(hosts).scan() else {
+        return vec![];
+    };
+    all.into_iter()
+        .filter(|h| h.state == HostState::Running)
+        .filter_map(|h| {
+            let kv = read_kv(&h.info.dir.join(HOLDS_FILE)).ok()?;
+            let uses = kv
+                .get("uses")?
+                .split(',')
+                .filter_map(|p| {
+                    let (k, n) = p.split_once('=')?;
+                    Some((k.to_string(), n.parse().ok()?))
+                })
+                .collect();
+            Some(HostHold {
+                dir: h.info.dir,
+                label: kv
+                    .get("label")
+                    .cloned()
+                    .unwrap_or_else(|| h.info.id.clone()),
+                uses,
+            })
+        })
+        .collect()
 }
 
 /// Where a check's live counts go: the develop step's run, as the sub-count `name`, from
@@ -245,6 +308,9 @@ pub fn run_with(d: &Arc<Daemon>, spec: &CheckSpec, progress: Option<&CheckProgre
     let _ = std::fs::create_dir_all(&spec.log_dir);
     let key = run_key(spec);
     // Find or allocate, one caller at a time, so two calls never take one number.
+    // Earlier runs of this prefix on another tree that nobody here is collecting: a call
+    // on a new tree means their results will never be asked for.
+    let mut superseded: Vec<String> = vec![];
     let (id, slot, collector) = {
         let mut map = inflight().lock().unwrap_or_else(|e| e.into_inner());
         let mut n = 0u32;
@@ -275,11 +341,33 @@ pub fn run_with(d: &Arc<Daemon>, spec: &CheckSpec, progress: Option<&CheckProgre
                         map.insert(mapkey, slot.clone());
                         break (id, slot, true);
                     }
+                    if !same && !delivered && !map.contains_key(&mapkey) {
+                        superseded.push(id);
+                    }
                 }
             }
             n += 1;
         }
     };
+    for old in superseded {
+        if running(d, &old) && stop_host(d, &old) {
+            tracing::info!(host = %old, now = %id, "stopped a check on an older tree that nobody will collect");
+        }
+        let _ = write_kv(
+            &record_path(spec, &old),
+            &[
+                (
+                    "key",
+                    read_kv(&record_path(spec, &old))
+                        .ok()
+                        .and_then(|kv| kv.get("key").cloned())
+                        .unwrap_or_default(),
+                ),
+                ("delivered", "1".into()),
+                ("superseded", id.clone()),
+            ],
+        );
+    }
     if !collector {
         let mut g = slot.result.lock().unwrap_or_else(|e| e.into_inner());
         while g.is_none() {
@@ -300,6 +388,64 @@ pub fn run_with(d: &Arc<Daemon>, spec: &CheckSpec, progress: Option<&CheckProgre
         .unwrap_or_else(|e| e.into_inner())
         .remove(&d.cfg.hosts_dir().join(&id));
     res
+}
+
+/// Is the step host `id` alive with its command still running?
+fn running(d: &Daemon, id: &str) -> bool {
+    matches!(
+        mason_step_host::registry::status_of(&d.cfg.hosts_dir().join(id)),
+        Ok(s) if s.state == mason_step_host::registry::HostState::Running
+    )
+}
+
+/// Ask the step host `id` to stop its command (and its children). `false`: it could not be
+/// reached.
+fn stop_host(d: &Daemon, id: &str) -> bool {
+    let sock = d.cfg.hosts_dir().join(id).join("sock");
+    HostClient::connect(&sock, PREVIOUS, CURRENT, "daemon").is_ok_and(|mut h| h.stop(1000).is_ok())
+}
+
+/// The task and run a develop check's host id names (`t575r3670-check-cargo-workspace2`).
+pub fn check_owner(id: &str) -> Option<(u64, u64)> {
+    let (head, _) = id.split_once("-check")?;
+    let (t, r) = head.strip_prefix('t')?.split_once('r')?;
+    Some((t.parse().ok()?, r.parse().ok()?))
+}
+
+/// Stop develop checks that survived a daemon restart and that no run can collect any more:
+/// their task's open run is another one, or none. Their step hosts outlive the daemon by
+/// design, and since s589 they keep their slots, so left alone they run a whole suite for
+/// nobody while holding a slot (2026-11-18: three such runs beside two real ones, five full
+/// suites under a limit of two). A check this process is collecting is never touched, nor
+/// one whose run is still open: its agent may call again and attach to it.
+pub fn stop_unwanted(d: &Arc<Daemon>) -> usize {
+    use mason_step_host::registry::{HostState, Registry};
+    let Ok(all) = Registry::new(d.cfg.hosts_dir()).scan() else {
+        return 0;
+    };
+    let Ok(w) = d.world() else { return 0 };
+    let mut n = 0;
+    for h in all.into_iter().filter(|h| h.state == HostState::Running) {
+        let id = h.info.id.clone();
+        let Some((task, run)) = check_owner(&id) else {
+            continue;
+        };
+        if inflight()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(&h.info.dir)
+        {
+            continue;
+        }
+        if w.open_run(mason_core::TaskId(task)) == Some(StepRunId(run)) {
+            continue;
+        }
+        if stop_host(d, &id) {
+            tracing::info!(host = %id, "stopped a check whose run is over: nobody can collect it");
+            n += 1;
+        }
+    }
+    n
 }
 
 fn collect(
@@ -324,6 +470,7 @@ fn collect(
             heartbeat: d.cfg.heartbeat,
         };
         spawn_host(&o).map_err(|e| format!("cannot start the command: {e}"))?;
+        write_holds(&dir, spec);
     }
     let started = HostInfo::read(&dir).map_or_else(|_| now_ms(), |i| i.started_ms);
     let deadline = started.saturating_add(spec.limit.as_millis() as u64);

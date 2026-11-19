@@ -1879,6 +1879,16 @@ impl TestChecks {
             .clone()
             .filter(|r| !r.is_empty() && scope.is_empty() && !scope.full);
         let tracks = scope.is_empty() || scope.full;
+        // An unscoped check runs what the change affects, not the whole workspace: on
+        // 2026-11-18, 87 of 111 develop checks ran every test binary (about 15 minutes each,
+        // docs-only changes too) and the queue for the test slots was hours long. `full: true`
+        // runs everything; the test step and the landing batch always do.
+        let by_default = red.is_none() && scope.is_empty() && !scope.full;
+        let defaulted = CheckScope {
+            changed: true,
+            ..scope.clone()
+        };
+        let scope: &CheckScope = if by_default { &defaulted } else { scope };
         let mut failing: Vec<String> = vec![];
         let mut auto_narrowed = false;
         let project_test = self.cmd.as_ref().map(|c| c.test.as_str());
@@ -1892,6 +1902,8 @@ impl TestChecks {
                 env: vec![("MASON_HELD".to_string(), held_text(uses))],
                 limit,
                 tree: crate::hostedcheck::tree_key(&self.wt),
+                holds: uses.clone(),
+                label: format!("#{} check", self.task),
                 stop: None,
             }
         };
@@ -1916,6 +1928,11 @@ impl TestChecks {
             };
             let limit = suite.timeout.unwrap_or(self.timeout).min(self.timeout);
             let before = suite.command.clone();
+            // Only a run filtered to named tests is reliably short. Narrowing by change or by
+            // package, and the re-run after a red (which adds the changed crates), can select a
+            // whole integration binary: on 2026-11-18 two such runs of the daemon's `it` held
+            // the small lane for 80 minutes beside the one test-suite slot the owner allowed.
+            let mut small = false;
             // Only this develop-phase check narrows. The test step runs `command` whole.
             if let Some(names) = &red {
                 if let (Some(t), Some(dc)) = (suite.rerun.clone(), suite.dev_command.clone()) {
@@ -1979,7 +1996,25 @@ impl TestChecks {
                         }
                         Some(Narrow::Targets(groups))
                     };
+                // A change no test of this suite reads (docs, markdown, exit scripts) runs none
+                // of it here; the test step still runs it whole.
+                if scope.changed
+                    && scope.tests.is_empty()
+                    && scope.packages.is_empty()
+                    && suite
+                        .dev_command
+                        .as_deref()
+                        .is_some_and(crate::scope::wants_tests)
+                    && paths.as_deref().is_some_and(crate::affected::reads_none)
+                {
+                    lines.push(format!(
+                        "{name}: not run, none of its tests reads what you changed (docs, \
+                         markdown, exit scripts); the test step runs it whole"
+                    ));
+                    continue;
+                }
                 if let (false, Some(t)) = (scope.tests.is_empty(), &suite.rerun) {
+                    small = true;
                     suite.command = t.replace(
                         "{tests}",
                         &scope
@@ -2086,9 +2121,9 @@ impl TestChecks {
                     *have = (*have).max(*v);
                 }
             }
-            // A command that was narrowed is short: it takes the small lane when the definition
+            // A run filtered to named tests is short: it takes the small lane when the definition
             // declares one, so it does not queue behind a full run.
-            if suite.command != before {
+            if small && suite.command != before {
                 uses = small_lane(&def, uses);
             }
             let rspec = spec(
@@ -2178,7 +2213,13 @@ impl TestChecks {
                  (or with full: true) for it; it is the test step's check."
             ));
         }
-        if !narrowed.is_empty() {
+        if !narrowed.is_empty() && by_default {
+            lines.push(format!(
+                "Ran what your change affects ({}). The test step runs the whole workspace; \
+                 pass full: true only if you need all of it now.",
+                narrowed.join("; ")
+            ));
+        } else if !narrowed.is_empty() {
             lines.push(format!(
                 "Scoped ({}): this green is not the test step's. The test step runs the whole \
                  workspace; run one unscoped run_check before you submit.",
@@ -2394,6 +2435,8 @@ impl TestChecks {
                 env: vec![("MASON_HELD".to_string(), held_text(uses))],
                 limit: self.timeout,
                 tree: crate::hostedcheck::tree_key(&self.wt),
+                holds: uses.clone(),
+                label: format!("#{} check", self.task),
                 stop: None,
             }
         };
@@ -2654,7 +2697,7 @@ impl CheckSlots {
         // drains for an exclusive request, if it will be done in time (s385, s422).
         let lease = d.broker.acquire_expecting(
             self.task,
-            &format!("#{}", self.task.0),
+            &format!("#{}", self.task),
             rank,
             needs,
             &alive,

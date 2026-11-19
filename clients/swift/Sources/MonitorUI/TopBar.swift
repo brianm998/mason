@@ -10,7 +10,7 @@ import SwiftUI
 /// over weekly); one count tile per state; a 2x2 grid of add task, improve, mute, voice.
 struct TopBar: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    @Bindable var model: MonitorModel
     @State private var adding = false
     @State private var improving = false
     @State private var voices = false
@@ -68,19 +68,7 @@ struct TopBar: View {
                 .onChange(of: model.project) { _, _ in model.subscribe?() }
             }
 
-            VStack(alignment: .leading, spacing: 0) {
-                ForEach(model.usage?.providers ?? [], id: \.name) { p in
-                    // 5-hour above weekly; the first line keeps the account's id, the rest add a number.
-                    ForEach(Array(topBarUsageLines(model.usage, p).enumerated()), id: \.offset) { i, line in
-                        Text(line)
-                            .font(theme.small()).foregroundStyle(theme.muted).lineLimit(1)
-                            .accessibilityIdentifier(i == 0 ? "topbar-usage:\(p.name)" : "topbar-usage:\(p.name):\(i)")
-                    }
-                }
-                if let note = model.usage?.note, (model.usage?.providers.isEmpty ?? true) {
-                    Text(note).font(theme.small()).foregroundStyle(theme.muted).lineLimit(1)
-                }
-            }
+            TopBarUsage(model: model)
             .layoutPriority(-1)
             .frame(minWidth: 0)
 
@@ -158,7 +146,7 @@ private struct ButtonWidth: PreferenceKey {
 
 struct BannersView: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
     /// The window's height, for the cap on the scrolling bar.
     var windowHeight: CGFloat = 800
     @State private var heights: [String: CGFloat] = [:]
@@ -369,7 +357,7 @@ struct BannersView: View {
 
 struct AddTaskSheet: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
     @Binding var isPresented: Bool
     @State private var project = ""
     @State private var title = ""
@@ -449,4 +437,26 @@ struct PendingIssueRow: View {
 func topBarUsageLines(_ u: Mason_V1_UsageView?, _ p: Mason_V1_ProviderStatus) -> [String] {
     let lines = (u?.topBar ?? []).filter { $0.hasPrefix("\(p.name) ") }
     return lines.isEmpty ? ["\(p.name): \(p.sessionsUsed) of \(p.sessionsLimit) sessions"] : lines
+}
+
+/// The usage lines in the top bar, a view of their own so a new usage view redraws these and not the bar.
+struct TopBarUsage: View {
+    @Environment(\.theme) var theme
+    let model: MonitorModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(model.usage?.providers ?? [], id: \.name) { p in
+                // 5-hour above weekly; the first line keeps the account's id, the rest add a number.
+                ForEach(Array(topBarUsageLines(model.usage, p).enumerated()), id: \.offset) { i, line in
+                    Text(line)
+                        .font(theme.small()).foregroundStyle(theme.muted).lineLimit(1)
+                        .accessibilityIdentifier(i == 0 ? "topbar-usage:\(p.name)" : "topbar-usage:\(p.name):\(i)")
+                }
+            }
+            if let note = model.usage?.note, (model.usage?.providers.isEmpty ?? true) {
+                Text(note).font(theme.small()).foregroundStyle(theme.muted).lineLimit(1)
+            }
+        }
+    }
 }
