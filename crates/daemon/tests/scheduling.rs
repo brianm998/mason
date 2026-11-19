@@ -539,6 +539,16 @@ fn run_check_queues_like_the_test_step_and_frees_the_agents_slot() {
 fn skipping_the_test_step_ends_a_waiting_run_check_and_runs_nothing() {
     // On 2026-11-13 the owner skipped testing for every active task, and their agents
     // still waited in `run_check` for compile slots to run the tests anyway.
+    skip_ends_a_waiting_run_check("step:test");
+}
+
+#[test]
+fn immunity_to_testing_ends_a_waiting_run_check_and_runs_nothing_through_landing() {
+    // The monitor's Skip all testing, set while the task is still developing.
+    skip_ends_a_waiting_run_check(mason_daemon::suites::ALL_TESTS);
+}
+
+fn skip_ends_a_waiting_run_check(scope: &str) {
     let runs = tempfile::tempdir().unwrap();
     let log = runs.path().join("held");
     let cmd = format!("echo $MASON_HELD >> {}; test -f hello.txt", log.display());
@@ -568,7 +578,25 @@ fn skipping_the_test_step_ends_a_waiting_run_check_and_runs_nothing() {
             .explain_task(t)
             .is_some_and(|w| w.contains("compile"))
     });
-    mason_daemon::suites::skip(&d, t, "step:test", "drain the queue", "brian", false).unwrap();
+    let actions = |d: &std::sync::Arc<mason_daemon::daemon::Daemon>| {
+        let w = d.world().unwrap();
+        let ctx = mason_daemon::views::Ctx::new(d, &w);
+        let row = ctx.row(&w.tasks[&t]);
+        (row.allowed_actions, row.test_immune)
+    };
+    let (before, immune) = actions(&d);
+    assert!(before.iter().any(|a| a == "skip_all_tests"), "{before:?}");
+    assert!(!immune);
+    mason_daemon::suites::skip(&d, t, scope, "drain the queue", "brian", false).unwrap();
+    if scope == mason_daemon::suites::ALL_TESTS {
+        let (after, immune) = actions(&d);
+        assert!(!after.iter().any(|a| a == "skip_all_tests"), "{after:?}");
+        assert!(immune, "the row says the task is immune");
+        assert!(
+            mason_daemon::suites::skip(&d, t, scope, "again", "brian", false).is_err(),
+            "immunity is recorded once"
+        );
+    }
     // The check stops waiting and says it did not run; the test step is skipped too, and the
     // task is on to landing with the slot still held outside.
     wait_state(&d, t, State::Landing, 90);
