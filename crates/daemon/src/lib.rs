@@ -83,6 +83,7 @@ pub mod suites;
 pub mod sweep;
 pub mod targets;
 pub mod taskcache;
+pub mod thermal;
 pub mod tiermap;
 pub mod tracker;
 pub mod update;

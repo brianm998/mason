@@ -100,6 +100,9 @@ pub struct World<'a> {
     /// Measured by the caller: how busy macOS's `syspolicyd` is checking new programs.
     /// `None` means no syspolicyd gate.
     pub policy: Option<PolicyGate>,
+    /// Measured by the caller: how far the CPU's speed is limited for heat or power.
+    /// `None` means no thermal gate.
+    pub thermal: Option<ThermalGate>,
     /// A request that has waited this long (same unit as `now`) moves ahead of
     /// all other pipeline work that is not a landing, oldest first
     /// (`order.max_wait_s`). `None` means requests do not age.
@@ -129,6 +132,19 @@ pub struct StallGate {
 pub struct PolicyGate {
     pub busy_pct: u32,
     pub max_pct: u32,
+}
+
+/// The CPU is held below full speed for heat or power (`CPU_Speed_Limit` under 100). On the
+/// owner's iMac Pro the SMC's power-limit storms came minutes before T2 watchdog resets
+/// (2026-11-18 07:29 and 12:23), with only a third of the machine busy. Like a stall, it is only a
+/// reason to wait while machine work is running, so a hot machine with nothing of ours on it
+/// can never hold the queue for good; work already running is never revoked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ThermalGate {
+    /// The CPU speed limit in percent (100: not limited).
+    pub speed_pct: u32,
+    /// Below this, no further machine work starts. 0 turns the gate off.
+    pub min_pct: u32,
 }
 
 /// The disk floor. Below it no `compile` and no LLM session is granted, even when nothing
@@ -467,6 +483,17 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
             }
             _ => None,
         };
+        let throttled = match world.thermal {
+            Some(g)
+                if g.min_pct > 0
+                    && g.speed_pct < g.min_pct
+                    && usage.machine_any
+                    && uses_machine(capacity, &r.needs) =>
+            {
+                Some(g)
+            }
+            _ => None,
+        };
         // The pacing lets a started compile show in the CPU reading; with none running
         // there is nothing to wait for.
         let settling = world
@@ -520,6 +547,13 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
                 Some(WaitCause::Policy {
                     busy_pct: g.busy_pct,
                     max_pct: g.max_pct,
+                })
+            }
+            (Fit::Yes, None, _) if throttled.is_some() => {
+                let g = throttled.expect("checked");
+                Some(WaitCause::Thermal {
+                    speed_pct: g.speed_pct,
+                    min_pct: g.min_pct,
                 })
             }
             (Fit::Yes, None, _) if settling.is_some() => Some(WaitCause::Settling {
@@ -607,6 +641,7 @@ fn build_wait(
         | WaitCause::Settling { .. }
         | WaitCause::DiskStall { .. }
         | WaitCause::Policy { .. }
+        | WaitCause::Thermal { .. }
         | WaitCause::Disk { .. } => true,
         _ => false,
     };
