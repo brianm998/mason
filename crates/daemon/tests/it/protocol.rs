@@ -755,8 +755,8 @@ fn a_state_change_reaches_a_local_client_within_250_ms() {
         std::thread::spawn(move || {
             d2.demo_next();
         });
-        // The change has reached the client when a view reflecting it arrives.
-        collect(&mut c, Duration::from_secs(5), |m| views_of(m).len() >= 3);
+        // The change has reached the client when a view reflecting it arrives (unchanged views are no longer resent, so one is enough).
+        collect(&mut c, Duration::from_secs(5), |m| !views_of(m).is_empty());
         lat.push(t0.elapsed());
         std::thread::sleep(Duration::from_millis(50));
     }
