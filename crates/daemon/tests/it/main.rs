@@ -69,6 +69,7 @@ mod repin;
 mod replay;
 mod report;
 mod restart_limit;
+mod resume_loss;
 mod retry_idempotent;
 mod retry_outside;
 mod row_bodies;

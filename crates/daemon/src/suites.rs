@@ -317,6 +317,9 @@ struct Ran {
     ran_ms: Option<u64>,
     /// It ran only some of the suite's tests (s386): its time is not the suite's.
     narrowed: bool,
+    /// After a lost host, the finished executables of the lost run were kept and only the rest
+    /// ran again (#621): what was reused, for the step's note. Its time is not the suite's either.
+    resumed: Option<String>,
 }
 
 /// Record how long a suite's build or run took, when it finished on its own (s385): the
@@ -361,11 +364,45 @@ fn run_hosted(
     th: Thresholds,
     env: Vec<(String, String)>,
 ) -> Result<Ran, String> {
+    run_hosted_resuming(
+        d, id, cmd, cwd, limit, log_dir, check, run, watch, th, env, None,
+    )
+}
+
+/// [`run_hosted`]; with a `resume` template (`resume::template`), a lost host's finished cargo
+/// test executables are kept and only the others run on the fresh host, the verdict reading
+/// both (#621). A second loss in a row still fails the step.
+#[allow(clippy::too_many_arguments)]
+fn run_hosted_resuming(
+    d: &Arc<Daemon>,
+    id: &str,
+    cmd: &str,
+    cwd: &Path,
+    limit: Duration,
+    log_dir: &Path,
+    check: Check,
+    run: Option<StepRunId>,
+    watch: Option<&Suite>,
+    th: Thresholds,
+    env: Vec<(String, String)>,
+    resume: Option<&str>,
+) -> Result<Ran, String> {
     use crate::hostloss as hl;
     let hosts = d.cfg.hosts_dir();
     let again_id = hl::rerun_id(id);
     let mut first = None;
     let mut on = id.to_string();
+    let mut cmd = cmd.to_string();
+    let mut plan: Option<crate::resume::Plan> = None;
+    // The finished part of the lost run, read from its log.
+    let planned = |cmd: &mut String, plan: &mut Option<crate::resume::Plan>| {
+        if let Some(t) = resume {
+            *plan = crate::resume::plan_for(cwd, &log_dir.join(format!("{id}.log")));
+            if let Some(p) = plan {
+                *cmd = crate::resume::command(t, p);
+            }
+        }
+    };
     // A progress file left by an earlier attempt says nothing about this one.
     if !hosts.join(id).join("host.kv").exists() && !hosts.join(&again_id).join("host.kv").exists() {
         if let Some(f) = watch.and_then(|w| w.progress.as_ref()) {
@@ -375,12 +412,13 @@ fn run_hosted(
     if hosts.join(&again_id).join("host.kv").exists() {
         first = mason_step_host::registry::lost_report(&hosts.join(id)).ok();
         on = again_id.clone();
+        planned(&mut cmd, &mut plan);
     }
     loop {
         match run_hosted_once(
             d,
             &on,
-            cmd,
+            &cmd,
             cwd,
             limit,
             log_dir,
@@ -390,12 +428,20 @@ fn run_hosted(
             th,
             env.clone(),
         ) {
-            Ok(r) => return Ok(r),
+            Ok(mut r) => {
+                if let Some(p) = plan.take() {
+                    let (code, output) = crate::resume::combine(&p.reused, r.code, &r.output);
+                    (r.code, r.output) = (code, output);
+                    r.resumed = Some(p.note());
+                }
+                return Ok(r);
+            }
             Err(HostedErr::Other(e)) => return Err(e),
             Err(HostedErr::Lost(rep)) if on == id => {
                 hl::record(d, run, id, &rep, true);
                 first = Some(*rep);
                 on = again_id.clone();
+                planned(&mut cmd, &mut plan);
             }
             Err(HostedErr::Lost(rep)) => {
                 hl::record(d, run, id, &rep, false);
@@ -566,6 +612,7 @@ fn run_hosted_once(
             _ => None,
         },
         narrowed: false,
+        resumed: None,
     })
 }
 
@@ -1527,7 +1574,13 @@ fn run_suite(
         } else {
             format!("{}-u{}-{}", who.id_prefix, now_ms(), suite.name)
         };
-        let ran = match run_hosted(
+        // A whole-suite run with no skips can go on after a lost host from what finished (#621).
+        let resume = if skipped_cmd.is_none() && suite.results_file.is_none() && !suite.pty {
+            crate::resume::template(suite)
+        } else {
+            None
+        };
+        let ran = match run_hosted_resuming(
             d,
             &id,
             &crate::jobs::pty_wrap(
@@ -1545,6 +1598,7 @@ fn run_suite(
             Some(suite),
             who.thresholds(),
             who.env.clone(),
+            resume.as_deref(),
         ) {
             Ok(r) => r,
             Err(e) => {
@@ -1557,7 +1611,7 @@ fn run_suite(
             }
         };
         let ran = Ran {
-            narrowed: suite.narrowed,
+            narrowed: suite.narrowed || ran.resumed.is_some(),
             ..ran
         };
         record_time(who, &suite.name, "run", &ran);
@@ -1889,6 +1943,37 @@ fn run_suite(
         if waiting {
             on_wait(None);
         }
+        // Say what a lost host's run left reusable (#621).
+        let result = match (result, &ran.resumed) {
+            (
+                SuiteRun::Done {
+                    outcome,
+                    results,
+                    mut notes,
+                },
+                Some(r),
+            ) => {
+                notes.push(format!("{}: {r}", suite.name));
+                SuiteRun::Done {
+                    outcome,
+                    results,
+                    notes,
+                }
+            }
+            (
+                SuiteRun::Product {
+                    feedback,
+                    failing,
+                    red,
+                },
+                Some(r),
+            ) => SuiteRun::Product {
+                feedback: format!("({}: {r})\n{feedback}", suite.name),
+                failing,
+                red,
+            },
+            (other, _) => other,
+        };
         return result;
     }
 }
@@ -2596,6 +2681,13 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
                 }
                 if !matches!(outcome, SuiteOutcome::Proven | SuiteOutcome::Reused) {
                     details.extend(n.clone());
+                } else {
+                    // What a lost host's run left reusable is said in the closing note (#621).
+                    details.extend(
+                        n.iter()
+                            .filter(|x| x.contains(": lost host after "))
+                            .cloned(),
+                    );
                 }
                 notes.extend(n);
                 if let Some(r) = results {
@@ -4011,6 +4103,7 @@ mod lossy_tests {
             stalled: None,
             ran_ms: None,
             narrowed: false,
+            resumed: None,
         };
         (ran, dir)
     }
