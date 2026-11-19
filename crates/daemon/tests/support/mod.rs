@@ -51,6 +51,8 @@ pub struct Scratch {
     pub script: PathBuf,
     /// Held for as long as this scratch world lives (declared last, so released last).
     _slot: Slot,
+    /// The root's `owner.lock`, held while this world lives.
+    _owner: Owner,
 }
 
 /// How many scratch worlds (each a real daemon with step hosts, git and a scripted
@@ -115,7 +117,10 @@ impl Drop for Scratch {
 }
 
 #[cfg(unix)]
-mod orphans {
+pub mod orphans {
+    use nix::fcntl::{Flock, FlockArg};
+    use std::fs::{File, OpenOptions};
+    use std::io::Write;
     use std::path::{Path, PathBuf};
 
     /// One process of `ps`.
@@ -153,7 +158,7 @@ mod orphans {
 
     /// The `/tmp/ms*` scratch root a command line's `--dir` or `--data-dir` names, if any.
     /// Only that shape matches: a real pipeline's hosts live elsewhere.
-    fn scratch_root_of(command: &str) -> Option<PathBuf> {
+    pub fn scratch_root_of(command: &str) -> Option<PathBuf> {
         let mut words = command.split(' ');
         while let Some(w) = words.next() {
             if w != "--dir" && w != "--data-dir" {
@@ -172,43 +177,166 @@ mod orphans {
         None
     }
 
-    /// Stop step hosts and test daemons whose scratch dir no longer exists, with their
-    /// children and the groups those lead. Once per test binary, before its first world.
+    /// How old a root without `owner.lock` must be before it counts as left over: an older
+    /// test binary (made before locks) may still be running in a younger one.
+    const LOCKLESS_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+
+    /// The scratch root's ownership: an exclusive `flock` on `<root>/owner.lock`, held for
+    /// the scratch's life. The kernel drops it when the process dies, however it dies.
+    pub struct Owner(#[allow(dead_code)] Option<Flock<File>>);
+
+    /// Take ownership of `root`, writing this pid in the lock file for diagnostics. The pid
+    /// is written after the lock is held, so a sweep that sees an unlocked, empty file knows
+    /// the owner is still starting up.
+    pub fn claim(root: &Path) -> Owner {
+        let open = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(root.join("owner.lock"));
+        let Ok(file) = open else { return Owner(None) };
+        let Ok(mut lock) = Flock::lock(file, FlockArg::LockExclusiveNonblock) else {
+            return Owner(None);
+        };
+        let _ = lock.set_len(0);
+        let _ = write!(&mut *lock, "{}", std::process::id());
+        Owner(Some(lock))
+    }
+
+    /// What a root's lock says.
+    #[derive(PartialEq, Debug)]
+    enum Lock {
+        Missing,
+        Held,
+        /// Nobody holds it and a pid was written: the owner is gone.
+        Free,
+        /// Nobody holds it and nothing was written: an owner between create and lock.
+        Starting,
+    }
+
+    fn lock_state(root: &Path) -> Lock {
+        let path = root.join("owner.lock");
+        if !path.exists() {
+            return Lock::Missing;
+        }
+        let Ok(file) = OpenOptions::new().read(true).write(true).open(&path) else {
+            return Lock::Held;
+        };
+        match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
+            Err(_) => Lock::Held,
+            Ok(lock) => {
+                if lock.metadata().map_or(0, |m| m.len()) > 0 {
+                    Lock::Free
+                } else {
+                    Lock::Starting
+                }
+            }
+        }
+    }
+
+    fn age(path: &Path) -> std::time::Duration {
+        std::fs::metadata(path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .unwrap_or_default()
+    }
+
+    /// Whether a scratch root that exists is left over from a test that is gone.
+    fn root_is_dead(root: &Path) -> bool {
+        match lock_state(root) {
+            Lock::Held => false,
+            Lock::Free => true,
+            Lock::Starting | Lock::Missing => age(root) > LOCKLESS_AGE,
+        }
+    }
+
+    /// Stop step hosts and test daemons whose scratch root is gone or whose owner is gone
+    /// (with their children and the groups those lead), then remove the dead roots. A root
+    /// whose lock is held is never touched.
+    pub fn sweep_now() {
+        use nix::sys::signal::{kill, killpg, Signal};
+        use nix::unistd::{getpgrp, getpid, Pid};
+        let table = process_table();
+        let (me, my_group) = (getpid().as_raw(), getpgrp().as_raw());
+        let mut dead: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+        let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+        let tmp = std::fs::read_dir("/tmp").into_iter().flatten().flatten();
+        for e in tmp {
+            let name = e.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if !name.starts_with("ms") || name.len() <= 2 {
+                continue;
+            }
+            let root = e.path();
+            if root.is_dir() && root_is_dead(&root) {
+                dead.insert(root.clone());
+            }
+            seen.insert(root);
+        }
+        for p in &table {
+            if let Some(root) = scratch_root_of(&p.command) {
+                if !root.exists() {
+                    dead.insert(root);
+                }
+            }
+        }
+        for p in &table {
+            let Some(root) = scratch_root_of(&p.command) else {
+                continue;
+            };
+            if !dead.contains(&root) || p.pid <= 1 || p.pid == me {
+                continue;
+            }
+            for c in table.iter().filter(|c| c.ppid == p.pid) {
+                if c.pgid > 1 && c.pgid != my_group {
+                    let _ = killpg(Pid::from_raw(c.pgid), Signal::SIGKILL);
+                }
+                let _ = kill(Pid::from_raw(c.pid), Signal::SIGKILL);
+            }
+            if p.pgid > 1 && p.pgid != my_group {
+                let _ = killpg(Pid::from_raw(p.pgid), Signal::SIGKILL);
+            }
+            let _ = kill(Pid::from_raw(p.pid), Signal::SIGKILL);
+        }
+        for root in dead.iter().filter(|r| seen.contains(*r)) {
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    /// `sweep_now`, once per test binary, before its first world.
     pub fn sweep_orphans() {
         static ONCE: std::sync::Once = std::sync::Once::new();
-        ONCE.call_once(|| {
-            use nix::sys::signal::{kill, killpg, Signal};
-            use nix::unistd::{getpgrp, getpid, Pid};
-            let table = process_table();
-            let (me, my_group) = (getpid().as_raw(), getpgrp().as_raw());
-            for p in &table {
-                let Some(root) = scratch_root_of(&p.command) else {
-                    continue;
-                };
-                if root.exists() || p.pid <= 1 || p.pid == me {
-                    continue;
-                }
-                for c in table.iter().filter(|c| c.ppid == p.pid) {
-                    if c.pgid > 1 && c.pgid != my_group {
-                        let _ = killpg(Pid::from_raw(c.pgid), Signal::SIGKILL);
-                    }
-                    let _ = kill(Pid::from_raw(c.pid), Signal::SIGKILL);
-                }
-                if p.pgid > 1 && p.pgid != my_group {
-                    let _ = killpg(Pid::from_raw(p.pgid), Signal::SIGKILL);
-                }
-                let _ = kill(Pid::from_raw(p.pid), Signal::SIGKILL);
-            }
-        });
+        ONCE.call_once(sweep_now);
+    }
+
+    /// A shell `while` loop that blocks until `release` exists, and ends early when `dir` is
+    /// gone or the process `owner` (the test) is. A killed test never runs its cleanup, so the
+    /// loop must notice by itself, or the step host running it polls for ever.
+    pub fn blocking_loop(dir: &Path, release: &Path, owner: u32, tick: &str) -> String {
+        format!(
+            "while [ -d '{d}' ] && [ ! -e '{f}' ] && kill -0 {owner} 2>/dev/null; do sleep {tick}; done",
+            d = dir.display(),
+            f = release.display(),
+        )
     }
 }
 
 #[cfg(unix)]
-use orphans::sweep_orphans;
+pub use orphans::{blocking_loop, claim, sweep_orphans, Owner};
 
 /// Orphan sweeping needs `ps` and signals; other platforms skip it.
 #[cfg(not(unix))]
 fn sweep_orphans() {}
+
+#[cfg(not(unix))]
+pub struct Owner;
+
+#[cfg(not(unix))]
+fn claim(_root: &Path) -> Owner {
+    Owner
+}
 
 impl Scratch {
     pub fn new(test_cmd: &str, script: Value) -> Scratch {
@@ -218,6 +346,7 @@ impl Scratch {
             .prefix("ms")
             .tempdir_in("/tmp")
             .unwrap();
+        let owner = claim(root.path());
         let r = std::fs::canonicalize(root.path()).unwrap();
         let origin = r.join("o.git");
         let repo = r.join("repo");
@@ -244,6 +373,7 @@ impl Scratch {
             data_dir: r.join("d"),
             script: script_path,
             _slot: slot,
+            _owner: owner,
         };
         s.write_project("scratch", test_cmd, "");
         s

@@ -99,8 +99,9 @@ fn daemon_pid(s: &Scratch) -> u64 {
 /// self-test outlast the agent, and the host then exited normally, code 0.
 fn gated_script(gate: &Path) -> Value {
     let wait = format!(
-        "touch '{0}/started'; while [ -d '{0}' ] && [ ! -e '{0}/release' ]; do sleep 0.2; done",
-        gate.display()
+        "touch '{0}/started'; {1}",
+        gate.display(),
+        blocking_loop(gate, &gate.join("release"), std::process::id(), "0.2")
     );
     json!({"steps": {"explore": [explore_turn()], "develop": [[
         {"sh": TASK_SCRIPT_COMMIT},
