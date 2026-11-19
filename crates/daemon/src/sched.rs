@@ -3770,8 +3770,28 @@ mod tests {
         // The holder goes: no row, chain or summary names it on the next snapshot.
         b.release(holder, Some(TaskId(510)));
         let v = b.wait_view();
-        let shown = format!("{:?}", v.tasks);
-        assert!(!shown.contains("510"), "{shown}");
+        // Compare task ids, not a Debug string: that carries epoch-ms values, which can
+        // contain "510" by chance.
+        for (t, w) in &v.tasks {
+            assert!(
+                w.holders.iter().all(|p| p.task != 510),
+                "#{t}: {:?}",
+                w.holders
+            );
+            assert!(w.blocker.as_ref().is_none_or(|p| p.task != 510), "#{t}");
+            assert!(
+                w.chain
+                    .iter()
+                    .all(|l| l.party.as_ref().is_none_or(|p| p.task != 510)),
+                "#{t}: {:?}",
+                w.chain
+            );
+        }
+        if let Some(h) = &v.hold {
+            assert!(!h.tasks.contains(&510), "{:?}", h.tasks);
+            assert!(h.holders.iter().all(|p| p.task != 510), "{:?}", h.holders);
+            assert!(h.party.as_ref().is_none_or(|p| p.task != 510));
+        }
         assert!(!v.hold.as_ref().is_some_and(|h| h.summary.contains("#510")));
     }
 
