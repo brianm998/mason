@@ -306,13 +306,15 @@ pub fn tool_spec(tool: &str) -> Option<(String, Value)> {
             json!({
                 "name": {"type": "string", "description": "Check name, such as 'unit'"},
                 "tests": {"type": "array", "items": {"type": "string"},
-                    "description": "Optional. Run only tests whose names match these filters (at most 20), on a suite that can. A scoped green is not the test step's: it still runs everything."},
+                    "description": "Optional. Run only tests whose names match these filters (at most 20), on a suite that can. A scoped green covers only those tests; the test step runs what your change affects."},
                 "packages": {"type": "array", "items": {"type": "string"},
                     "description": "Optional. Run only these packages (at most 20), on a suite that can."},
                 "changed": {"type": "boolean",
                     "description": "Optional. Run only the packages your changes touch and what depends on them, on a suite that can."},
                 "full": {"type": "boolean",
-                    "description": "Optional. Run everything. After a red full run, an unscoped run_check re-runs only the tests that failed and the crates you changed; the next unscoped one, or full: true, is the full run."}
+                    "description": "Optional. Run everything, as the landing batch does. Rarely needed: the test step runs what your change affects. After a red run, an unscoped run_check re-runs only the tests that failed and the crates you changed."},
+                "why": {"type": "string",
+                    "description": "Optional. With full: true, say why everything is needed; it is logged with the check."}
             }),
             &["name"],
         ),
@@ -692,6 +694,8 @@ pub struct CheckScope {
     pub changed: bool,
     /// Run everything, even after a red full run (s523). Not a narrowing: `is_empty` ignores it.
     pub full: bool,
+    /// Why `full` was asked for (logged with the check; never required).
+    pub why: Option<String>,
 }
 
 impl CheckScope {
@@ -711,6 +715,18 @@ impl CheckScope {
             packages: list("packages"),
             changed: a.get("changed").and_then(Value::as_bool).unwrap_or(false),
             full: a.get("full").and_then(Value::as_bool).unwrap_or(false),
+            why: a
+                .get("why")
+                .and_then(Value::as_str)
+                .map(|w| {
+                    w.chars()
+                        .map(|c| if c.is_control() { ' ' } else { c })
+                        .take(200)
+                        .collect::<String>()
+                        .trim()
+                        .to_string()
+                })
+                .filter(|w| !w.is_empty()),
         }
     }
 
@@ -1581,6 +1597,36 @@ mod tests {
     }
 
     #[test]
+    fn full_with_why_reaches_the_handler_and_why_is_optional() {
+        use std::sync::Mutex;
+        struct H(Arc<Mutex<Vec<CheckScope>>>);
+        impl CheckHandler for H {
+            fn run(&self, _: &str) -> CheckRun {
+                CheckRun::Unknown
+            }
+            fn run_scoped(&self, _: &str, s: &CheckScope) -> CheckRun {
+                self.0.lock().unwrap().push(s.clone());
+                CheckRun::Done {
+                    passed: true,
+                    summary: "ok".into(),
+                }
+            }
+        }
+        let seen = Arc::new(Mutex::new(vec![]));
+        let c = ContractHandle::new(StepKind::Develop, Box::new(H(seen.clone())));
+        let r = c.call(
+            "run_check",
+            &json!({"name": "tests", "full": true, "why": "changed build.rs"}),
+        );
+        assert!(r.ok, "{}", r.text);
+        assert!(c.call("run_check", &json!({"name": "tests", "full": true})).ok);
+        let seen = seen.lock().unwrap();
+        assert!(seen[0].full);
+        assert_eq!(seen[0].why.as_deref(), Some("changed build.rs"));
+        assert!(seen[1].full && seen[1].why.is_none());
+    }
+
+    #[test]
     fn a_scope_reaches_the_handler_and_its_names_are_never_shell_text() {
         use std::sync::Mutex;
         struct H(Arc<Mutex<Vec<CheckScope>>>);
@@ -1609,7 +1655,8 @@ mod tests {
                 tests: vec!["foo".into(), "a::b_c".into()],
                 packages: vec!["mason-daemon".into()],
                 changed: true,
-                full: false
+                full: false,
+                why: None
             }
         );
         for bad in [

@@ -294,7 +294,7 @@ fn a_scoped_run_check_runs_the_narrowed_command_and_the_test_step_still_runs_it_
     let logs = render_logs(&d, t.0);
     assert!(logs.contains("RAN-RERUN foo"), "{logs}");
     assert!(logs.contains("RAN-DEV -p pk-one"), "{logs}");
-    assert!(logs.contains("this green is not the test step's"), "{logs}");
+    assert!(logs.contains("this green covers only those tests"), "{logs}");
     // Neither scoped green stood in for the test step: it ran the whole suite.
     assert!(logs.contains("RAN-FULL"), "{logs}");
 }
