@@ -44,10 +44,17 @@ final class LazySidebarTests: XCTestCase {
         return m
     }
 
+    private var hostWindows: [NSWindow] = []
+
     private func host(_ m: MonitorModel, height: CGFloat) -> NSHostingView<AnyView> {
         let h = NSHostingView(rootView: AnyView(
             SidebarPane(model: m, width: 360).environment(\.theme, Theme(dark: false, scale: 1))))
         h.frame = NSRect(x: 0, y: 0, width: 360, height: height)
+        // A window that is never ordered in: a window-less host evaluates no bodies on the CI runner.
+        let w = NSWindow(contentRect: h.frame, styleMask: [.titled], backing: .buffered, defer: true)
+        w.isReleasedWhenClosed = false
+        w.contentView = h
+        hostWindows.append(w)
         h.layoutSubtreeIfNeeded()
         return h
     }
@@ -69,10 +76,6 @@ final class LazySidebarTests: XCTestCase {
     func testScrollingToAHeaderFarDownRealisesIt() {
         let m = fixture()
         let h = host(m, height: 600)
-        // A window that is never ordered in, so the scroll view has a window to scroll in.
-        let w = NSWindow(contentRect: h.frame, styleMask: [.titled], backing: .buffered, defer: true)
-        w.contentView = h
-        w.isReleasedWhenClosed = false
         settle(h)
         SectionHeader.realised = []
         m.scrollTarget = "canceled"
