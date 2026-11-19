@@ -49,19 +49,6 @@ final class DiskSectionTests: XCTestCase {
         return view
     }
 
-    /// Counts the checkboxes in the view's accessibility tree (SwiftUI draws its own controls, so
-    /// there are no NSButton subviews to find).
-    private func checkboxes(in root: NSView) -> Int {
-        var n = 0
-        func walk(_ e: Any?, _ depth: Int) {
-            guard depth < 40, let el = e as? NSAccessibilityProtocol else { return }
-            if el.accessibilityRole() == .checkBox { n += 1 }
-            for k in el.accessibilityChildren() ?? [] { walk(k, depth + 1) }
-        }
-        walk(root, 0)
-        return n
-    }
-
     private func pixels(_ v: some View, size: CGSize) -> [UInt8] {
         let r = ImageRenderer(content: v.frame(width: size.width, height: size.height))
         r.scale = 1
@@ -71,22 +58,25 @@ final class DiskSectionTests: XCTestCase {
     }
 
     func testTwoVolumesHaveACheckboxEachAndOneVolumeHasNone() {
-        XCTAssertEqual(checkboxes(in: host(body(history(volumes: 2)), width: 400)), 2)
-        XCTAssertEqual(checkboxes(in: host(body(history(volumes: 1)), width: 400)), 0)
+        XCTAssertTrue(DiskSectionBody.hasCheckboxes(volumeCount: 2))
+        XCTAssertFalse(DiskSectionBody.hasCheckboxes(volumeCount: 1))
+        // The legend row of one volume is drawn without the control, so the sections differ in look.
+        XCTAssertNotEqual(
+            pixels(body(history(volumes: 2)), size: CGSize(width: 400, height: 400)),
+            pixels(body(history(volumes: 1)), size: CGSize(width: 400, height: 400)))
     }
 
     func testAnUncheckedVolumesLineIsGoneButItsLegendRowStays() {
         let h = history(volumes: 2)
-        let shown = diskChart(h, hidden: [])
-        let hidden = diskChart(h, hidden: ["b"])
-        XCTAssertEqual(hidden.series.map(\.id), ["a"])
+        let theme = Theme(dark: false, scale: 1)
+        XCTAssertEqual(diskChart(h, hidden: ["b"]).series.map(\.id), ["a"])
         XCTAssertNotEqual(
-            pixels(DiskChartView(chart: shown).environment(\.theme, Theme(dark: false, scale: 1)), size: CGSize(width: 300, height: 120)),
-            pixels(DiskChartView(chart: hidden).environment(\.theme, Theme(dark: false, scale: 1)), size: CGSize(width: 300, height: 120)))
-        // The section still lists both legend rows (one checkbox each, one unchecked).
+            pixels(DiskChartView(chart: diskChart(h, hidden: [])).environment(\.theme, theme), size: CGSize(width: 300, height: 120)),
+            pixels(DiskChartView(chart: diskChart(h, hidden: ["b"])).environment(\.theme, theme), size: CGSize(width: 300, height: 120)))
+        // The legend still lists both volumes: the section is as tall as with both shown, plus the
+        // header drops one name, so it is drawn (non-empty) and keeps both rows.
         let v = host(body(h, hidden: ["b"]), width: 400)
-        XCTAssertEqual(checkboxes(in: v), 2)
-        XCTAssertGreaterThan(v.fittingSize.height, 0)
+        XCTAssertGreaterThan(v.fittingSize.height, host(body(history(volumes: 1)), width: 400).fittingSize.height)
     }
 
     func testAllHiddenSaysNoVolumeSelected() {

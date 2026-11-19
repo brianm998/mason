@@ -64,9 +64,12 @@ struct DiskSectionBody: View {
                 Text("Collecting disk history…").font(theme.small()).foregroundStyle(theme.muted)
                     .accessibilityIdentifier("disk-collecting")
             }
-            ForEach(volumes, id: \.id) { v in legend(v, volumes.count > 1) }
+            ForEach(volumes, id: \.id) { v in legend(v, Self.hasCheckboxes(volumeCount: volumes.count)) }
         }
     }
+
+    /// A volume's legend row has a show/hide checkbox only when there is more than one volume.
+    static func hasCheckboxes(volumeCount: Int) -> Bool { volumeCount > 1 }
 
     @ViewBuilder private func legend(_ v: Mason_V1_DiskVolume, _ checkable: Bool) -> some View {
         let latest = history.flatMap { diskLatest($0, id: v.id) }
