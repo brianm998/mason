@@ -57,6 +57,8 @@ public final class MonitorModel {
     public var home: HomeView?
     /// The CPU shares, observed apart from the whole model: the CPU section watches only this.
     public let cpu = CpuModel()
+    /// The disk history, observed apart from the whole model like `cpu`.
+    public let disk: DiskModel
     public var taskDetail: TaskDetailView? { didSet { linkRevision &+= 1 } }
     public var landing: LandingView?
     public var usage: UsageView?
@@ -407,6 +409,7 @@ public final class MonitorModel {
 
     public init(preferences: Preferences = MemoryPreferences(), defaultTextScale: Double = 1.0) {
         prefs = preferences
+        disk = DiskModel(preferences: preferences)
         textScale = preferences.double(Keys.scale) ?? defaultTextScale
         muted = preferences.bool(Keys.mute) ?? false
         sidebarWidth = Self.clampSidebar(preferences.double(Keys.sidebarWidth) ?? Double(MasonTokens.sizeSidebarWidth))
@@ -489,6 +492,10 @@ public final class MonitorModel {
     public func goHome() { navigate { $0.goHome(scroll: $1) } }
     /// Pick the CPU graph's span and ask the daemon for that range.
     public func setCpuSpan(_ s: CpuSpan) { cpu.setSpan(s); subscribe?() }
+    /// Pick the disk graph's span and ask the daemon for that range.
+    public func setDiskSpan(_ s: DiskSpan) { disk.setSpan(s); subscribe?() }
+    /// Show or hide a volume's line; remembered.
+    public func toggleVolume(_ id: String) { disk.toggleVolume(id) }
 
     public func open(url: URL) {
         if let p = Page.from(url: url) { go(p) }
@@ -1176,6 +1183,8 @@ public final class MonitorModel {
             cpu.update(x)
         case .cpuHistory(let x)?:
             cpu.update(history: x)
+        case .diskHistory(let x)?:
+            disk.update(history: x)
         case .taskDetail(let x)?:
             // A different task's page starts its log over; the same task's view carries the tail again.
             progress.resetDetail()
