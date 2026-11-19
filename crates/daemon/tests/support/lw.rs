@@ -196,12 +196,22 @@ pub fn world_built_fast(landing_toml: &str, files: &[(&str, &str)], fast: bool) 
 impl W {
     /// A task already in its landing step, with a branch carrying `files`.
     pub fn task(&self, title: &str, files: &[(&str, &str)]) -> TaskId {
+        self.task_with(title, files, |_, _| {})
+    }
+
+    /// Like `task`, but runs `before` once the task exists and before it is admitted.
+    pub fn task_with(
+        &self,
+        title: &str,
+        files: &[(&str, &str)],
+        before: impl FnOnce(&W, TaskId),
+    ) -> TaskId {
         let t = file_task_as(&self.d, title, "x", true, TrustSource::Owner, false);
         let pid = self.d.project_id_by_name("scratch").unwrap();
         let br = format!("mason/scratch/t{}", t.0);
         let tmp = self.s.root.path().join(format!("mk{}", t.0));
         // The remote's main may have moved: start from it.
-        sh(&self.s.repo, &["fetch", "-q", "origin"]);
+        retry_git(&self.s.repo, &["fetch", "-q", "origin"]);
         add_worktree(&self.s.repo, &br, &tmp);
         for (p, body) in files {
             let f = tmp.join(p);
@@ -221,10 +231,11 @@ impl W {
                 title,
             ],
         );
-        sh(
+        retry_git(
             &self.s.repo,
             &["worktree", "remove", "--force", tmp.to_str().unwrap()],
         );
+        before(self, t);
         let def = self.d.current_def(pid);
         self.d
             .emit(EventKind::Admitted {
@@ -326,4 +337,18 @@ pub fn add_worktree(repo: &std::path::Path, branch: &str, dir: &std::path::Path)
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
     panic!("git worktree add kept failing: {last}");
+}
+
+/// A repo command of the test's own, tried again when it loses a race with the daemon's
+/// background git work (a ref or index lock held for a moment). Bounded, no timing assertion.
+pub fn retry_git(repo: &std::path::Path, args: &[&str]) -> String {
+    let mut last = String::new();
+    for _ in 0..8 {
+        match mason_landing::git::run(repo, args) {
+            Ok(out) => return out,
+            Err(e) => last = e.to_string(),
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    panic!("git {args:?} kept failing: {last}");
 }

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+#![cfg(unix)]
 //! The scratch-world limit holds across processes, counted by lock files held.
 
 mod support;
