@@ -89,6 +89,13 @@ that line into the Results section at the bottom, with anything you saw that the
   Needs the phone.
 - **Record:** the RESULT line, and whether the phone found, paired and was refused as a viewer.
 
+## The Android phone app on a real phone (s469)
+
+- **What was never run:** the Android phone app on a real phone against a daemon.
+- **Run:** `bash scripts/exit/s469-real.sh` prints the 8-step checklist; needs a phone on the same Wi-Fi.
+- **Costs:** nothing.
+- **Record:** the RESULT line, and pass or fail per step, under Results.
+
 ## The other real scripts
 
 These earlier checks also use something real. They are on this page so that the list is complete.
