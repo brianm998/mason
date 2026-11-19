@@ -513,7 +513,9 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s607**: Exit scripts s449, s484, s485, s486 and s508 ran `cargo test --test <module>` against test targets that were merged into the daemon's single `it` executable, so they failed on the Linux exit-scripts shard 4; they now name `--test it`.
 - **s611**: `scripts/exit/s580.sh` gets the missing SPDX-License-Identifier line, so the CI/lint SPDX check passes again.
 - **s612**: A waiter with holders is flagged stuck past max(wait_m, its queue position x the longest holder run), and the whole-queue bound moves to the aged-wait note.
+- **s626**: The s121/s132 exit scripts use the icon's asset-catalog path and s475's 931-test gate is platform-aware (927 on non-macOS), turning CI/exit-scripts green on Linux.
 - **s627**: The red CI/monitor-compose run 44399898483 could not be classified because the supplied log tail is only post-job Gradle cache cleanup; no code changed and the decision (0620) records what to read in the full log.
 - **s628**: The mason-adapters codex and conformance tests make scratch directories through a shared helper that uses `/tmp` on Unix and the platform temp dir on Windows, so CI/windows passes again.
+- **s629**: s451 and s572 now skip their gradle runs under MASON_SKIP_COMPOSE, and s469-real is listed in docs/real-checks.md with a RESULT line, so s299 and s450 pass on the Linux shard.
 - **s630**: The s602 exit test now clears `MASON_EXIT_SHARD` before running its scratch runner, so it no longer fails with "expected exit 1, got 0" on CI shard 4/6; s630 checks it under that shard.
 <!-- status:end -->
