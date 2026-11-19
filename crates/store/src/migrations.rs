@@ -752,6 +752,16 @@ const STEPS: &[&str] = &[
          tests TEXT NOT NULL
      );
      CREATE INDEX check_runs_task ON check_runs(task, id);",
+    // 39: how long each test took in a finished run of a suite (s634), the last few per test,
+    // so the slowest tests can be listed. Additive.
+    "CREATE TABLE test_times (
+         project TEXT NOT NULL,
+         suite   TEXT NOT NULL,
+         test    TEXT NOT NULL,
+         ms      INTEGER NOT NULL,
+         at_ms   INTEGER NOT NULL
+     );
+     CREATE INDEX test_times_key ON test_times(project, suite, test, at_ms);",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;

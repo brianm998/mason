@@ -28,6 +28,10 @@ pub fn step_host_bin() -> PathBuf {
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
         let ok = std::process::Command::new(cargo)
             .args(["build", "-q", "-p", "mason-step-host", "--bin", "step-host"])
+            // The suite's runner gives this process RUSTC_BOOTSTRAP=1 for `--report-time`
+            // (s634); build scripts rerun when it changes, so a build that kept it would
+            // recompile the workspace the suite's build just compiled without it.
+            .env_remove("RUSTC_BOOTSTRAP")
             .status()
             .unwrap()
             .success();
