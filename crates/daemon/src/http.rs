@@ -1684,13 +1684,15 @@ async fn skip_task(
     Path(id): Path<u64>,
     Json(b): Json<Value>,
 ) -> Res {
-    let scope = match (b["suite"].as_str(), b["step"].as_str()) {
-        (Some(s), None) => format!("suite:{s}"),
-        (None, Some(s)) => format!("step:{s}"),
+    let all = b["all"].as_bool().unwrap_or(false);
+    let scope = match (b["suite"].as_str(), b["step"].as_str(), all) {
+        (Some(s), None, false) => format!("suite:{s}"),
+        (None, Some(s), false) => format!("step:{s}"),
+        (None, None, true) => crate::suites::ALL_TESTS.to_string(),
         _ => {
             return Err(fail(
                 StatusCode::BAD_REQUEST,
-                "name one `suite` or one `step` to skip",
+                "name one `suite` or one `step` to skip, or `all` for every test",
             ))
         }
     };

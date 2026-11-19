@@ -9,7 +9,7 @@
 //! mason task cancel <id> [--delete-branch]
 //! mason task retry <id> [--from exploring|developing|testing|review|landing]
 //! mason logs <id> [--follow]
-//! mason task skip <id> (--suite S | --step S) [--reason R] [--deferred]
+//! mason task skip <id> (--suite S | --step S | --all) [--reason R] [--deferred]
 //! mason debt list | run <id>
 //! mason quarantine list | add <suite> <test> --owner O --days N [--reason R] | remove <suite> <test>
 //! mason test parse <parser> <file> [--min N]
@@ -103,8 +103,9 @@ mason: command-line client for the MASON pipeline
   mason digest [--days N] [--project P]   landed, interventions, time by state, skips, forced landings (recorded data only)
   mason schedule list | run <name>    recurring jobs (introspect, analyst:<project>, <project>/<schedule>); run one now
   mason triage list | review <id> (--agree | --disagree)   the triage agent's sampled suggestions; it never answers
-  mason task skip <id> (--suite S | --step S) [--reason R] [--deferred]
-                                      skip a suite or step by force, even mid-run; records a debt
+  mason task skip <id> (--suite S | --step S | --all) [--reason R] [--deferred]
+                                      skip a suite or step by force, even mid-run; records a debt;
+                                      --all makes the task immune to testing through landing
   mason debt list | run <id>          what was skipped and not yet proven; run one on the base branch
   mason quarantine list | add <suite> <test> --owner O --days N [--reason R] | remove <suite> <test>
   mason test parse <parser> <file> [--min N]   read a results file the way a suite would, and judge it
@@ -3246,23 +3247,33 @@ fn main() {
                         .or_else(|| std::env::var("USER").ok())
                         .unwrap_or_default();
                     let deferred = a.flag("--deferred");
+                    let all = a.flag("--all");
                     finish(&a);
                     let mut body = json!({"reason": reason, "owner": owner, "deferred": deferred});
-                    match (suite, step) {
-                        (Some(s), None) => body["suite"] = json!(s),
-                        (None, Some(s)) => body["step"] = json!(s),
-                        _ => die("name one suite or one step: --suite S or --step S"),
+                    match (suite, step, all) {
+                        (Some(s), None, false) => body["suite"] = json!(s),
+                        (None, Some(s), false) => body["step"] = json!(s),
+                        (None, None, true) => body["all"] = json!(true),
+                        _ => die("name one suite, one step or all: --suite S, --step S or --all"),
                     }
                     let r = or_die(d.call("POST", &format!("/tasks/{id}/skip"), Some(&body)));
-                    println!(
-                        "Skipped by force. Debt #{} is open{}; its closing verdict is downgraded.",
-                        r["debt"],
-                        if deferred {
-                            " and will run after landing"
-                        } else {
-                            ""
-                        }
-                    );
+                    if all {
+                        println!(
+                            "Task #{id} is immune to testing: no test runs for it through landing \
+                             (lint and the build floor still do). Debt #{} owes the full run.",
+                            r["debt"]
+                        );
+                    } else {
+                        println!(
+                            "Skipped by force. Debt #{} is open{}; its closing verdict is downgraded.",
+                            r["debt"],
+                            if deferred {
+                                " and will run after landing"
+                            } else {
+                                ""
+                            }
+                        );
+                    }
                 }
                 "answer" => {
                     let id = task_id(&mut a);
