@@ -25,7 +25,6 @@ use mason_plugins::PluginType;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -100,7 +99,7 @@ impl Scan {
 
 fn blob(repo: &Path, object: &str) -> Option<Vec<u8>> {
     let out = mason_landing::proc::output(
-        Command::new("git")
+        mason_landing::git::command()
             .args(["cat-file", "blob", object])
             .current_dir(repo),
         mason_landing::git::default_deadline(),
@@ -116,7 +115,7 @@ pub fn scan_commit(repo: &Path, commit: &str) -> Scan {
         extensions: vec![],
     };
     let Ok(out) = mason_landing::proc::output(
-        Command::new("git")
+        mason_landing::git::command()
             .args([
                 "ls-tree",
                 "-r",

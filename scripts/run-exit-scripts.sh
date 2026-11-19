@@ -18,5 +18,5 @@ for s in scripts/exit/s[0-9][0-9].sh scripts/exit/s[0-9][0-9][0-9].sh; do
   echo "== $s"
   bash "$s" || { echo "FAILED: $s" >&2; fail=1; failed="$failed $s"; }
 done
-[ -z "$failed" ] || echo "FAILED scripts:$failed" >&2
+[ "$fail" -eq 0 ] || echo "FAILED scripts:$failed" >&2
 exit $fail

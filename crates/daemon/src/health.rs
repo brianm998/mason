@@ -105,9 +105,9 @@ pub fn gather(d: &Arc<Daemon>, now: u64) -> Facts {
         let in_state = now.saturating_sub(t.state_entered_at.0);
         let last_start = ix.last_start_of(t.id);
         let wait = waits.get(&t.id).cloned();
-        let hf = holders
-            .get(&t.id)
-            .and_then(|(since, depth)| health::holder_fact(since, now, *depth));
+        let hf = holders.get(&t.id).and_then(|(since, depth, position)| {
+            health::holder_fact(since, now, *depth, *position)
+        });
         let since_run = now.saturating_sub(t.state_entered_at.0.max(last_start));
         match t.state {
             State::Queued => {
@@ -220,7 +220,12 @@ pub fn gather(d: &Arc<Daemon>, now: u64) -> Facts {
     x.load_assumed = x.load_assumed || x.load_source == Some("assumed-busy");
     x.mem_free_mb = crate::sched::measure_free_memory_mb();
     x.stall_ms = disk_probe_ms(d);
-    let launching = mason_step_host::launcher::launching();
+    // The launch list is process-wide; tests turn this knob off so they don't read each other's.
+    let launching = if d.cfg.launch_frozen_alert {
+        mason_step_host::launcher::launching()
+    } else {
+        Vec::new()
+    };
     x.frozen_launches = launching
         .iter()
         .map(|l| {

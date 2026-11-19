@@ -138,16 +138,24 @@ pub struct HolderFact {
     pub run_ms: u64,
     /// Waiting tasks in the same class.
     pub queue_depth: u32,
+    /// The waiter's place in that queue (1 is next in line).
+    pub position: u32,
 }
 
 /// Holder facts from the grant times (`since`) of a slot's holders; `None` without holders.
-pub fn holder_fact(held_since: &[u64], now: u64, queue_depth: u32) -> Option<HolderFact> {
+pub fn holder_fact(
+    held_since: &[u64],
+    now: u64,
+    queue_depth: u32,
+    position: u32,
+) -> Option<HolderFact> {
     let newest = held_since.iter().max()?;
     let oldest = held_since.iter().min()?;
     Some(HolderFact {
         last_grant_ms: now.saturating_sub(*newest),
         run_ms: now.saturating_sub(*oldest),
         queue_depth,
+        position,
     })
 }
 
@@ -324,7 +332,12 @@ pub fn judge(x: &Facts, l: &Limits) -> Vec<Finding> {
     for t in &x.tasks {
         if let Some((what, ms)) = &t.waiting {
             if *ms > l.wait_ms {
-                let bound = t.holders.as_ref().map(|h| {
+                // The work ahead of this task, and the whole queue (for the aged-wait note).
+                let bound = t
+                    .holders
+                    .as_ref()
+                    .map(|h| (h.position as u64).saturating_mul(h.run_ms).max(l.wait_ms));
+                let queue_bound = t.holders.as_ref().map(|h| {
                     (h.queue_depth as u64)
                         .saturating_mul(h.run_ms)
                         .max(l.wait_ms)
@@ -337,9 +350,10 @@ pub fn judge(x: &Facts, l: &Limits) -> Vec<Finding> {
                     let mut ev = vec![format!("#{} is {}; the wait is `{what}`", t.id, t.state)];
                     if let (Some(h), Some(b)) = (&t.holders, bound) {
                         ev.push(format!(
-                            "newest holder grant {} min ago, longest holder run {} min, bound {} min",
+                            "newest holder grant {} min ago, longest holder run {} min, position {}, bound {} min",
                             mins(h.last_grant_ms),
                             mins(h.run_ms),
+                            h.position,
                             mins(b)
                         ));
                     }
@@ -360,7 +374,14 @@ pub fn judge(x: &Facts, l: &Limits) -> Vec<Finding> {
                             t.id,
                             mins(*ms)
                         ),
-                        vec![format!("#{} is {}; the wait is `{what}`", t.id, t.state)],
+                        {
+                            let mut ev =
+                                vec![format!("#{} is {}; the wait is `{what}`", t.id, t.state)];
+                            if let Some(b) = queue_bound {
+                                ev.push(format!("whole-queue bound {} min", mins(b)));
+                            }
+                            ev
+                        },
                     ));
                 }
                 continue;
@@ -818,6 +839,7 @@ mod tests {
             &[100 * H - grant, 100 * H - grant.max(20 * MIN)],
             100 * H,
             23,
+            23,
         );
         let x = Facts {
             tasks: (1..=23).map(|i| waiter(i, wait, h.clone())).collect(),
@@ -834,6 +856,31 @@ mod tests {
         let f = crowd(9 * H, 10 * MIN);
         assert!(f.iter().all(|x| x.key.starts_with("stuck:wait:")));
         assert_eq!(f.len(), 23);
+    }
+
+    #[test]
+    fn waiters_are_judged_by_the_work_ahead_of_them() {
+        let at = |position: u32, wait: u64| {
+            let h = holder_fact(
+                &[100 * H - 10 * MIN, 100 * H - 90 * MIN],
+                100 * H,
+                9,
+                position,
+            );
+            let x = Facts {
+                tasks: vec![waiter(7, wait, h)],
+                ..Default::default()
+            };
+            keys(&judge(&x, &l()))
+        };
+        // Position 2 x 90 min = 180 min.
+        assert_eq!(at(2, 200 * MIN), ["stuck:wait:7"]);
+        // Under the wait_ms floor.
+        assert!(at(2, 100 * MIN).is_empty());
+        // Position 9 x 90 min = 810 min.
+        assert!(!at(9, 200 * MIN)
+            .iter()
+            .any(|k| k.starts_with("stuck:wait:")));
     }
 
     #[test]
