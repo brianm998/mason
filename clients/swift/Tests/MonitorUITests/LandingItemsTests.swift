@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import MasonProtocol
+import MonitorCore
 import XCTest
 
 @testable import MonitorUI
@@ -30,5 +31,69 @@ final class LandingItemsTests: XCTestCase {
     func testText() {
         XCTAssertEqual(landingItemText(item(1, batch: 7)), "#1 t1: batch #7, running suites, phase 2 of 4 ▰▰▱▱, 2 min")
         XCTAssertEqual(landingItemText(item(3, position: 1, why: "behind 1 batch")), "#3 t3: queued #1, behind 1 batch")
+    }
+
+    private final class Sent { var commands: [Mason_V1_Command] = [] }
+
+    // ---- Land now (pure model: nothing rendered) ----
+
+    private func offered(_ i: Mason_V1_TaskLanding) -> Mason_V1_TaskLanding {
+        var i = i
+        i.allowedActions = ["land_now"]
+        return i
+    }
+
+    private func batch(_ id: UInt64, running: Bool, actions: [String]) -> Mason_V1_BatchLine {
+        var b = Mason_V1_BatchLine()
+        b.id = id
+        b.running = running
+        b.phase = "verifying"
+        b.tasks = [1, 2]
+        b.allowedActions = actions
+        return b
+    }
+
+    @MainActor
+    func testLandNowIsOfferedOnlyWhereAllowedAndTheDeviceCanAct() {
+        let m = MonitorModel()
+        m.connected = true
+        m.isOwner = true
+        XCTAssertTrue(m.canLandNow(offered(item(1, batch: 7))))
+        XCTAssertTrue(m.canLandNow(offered(item(3, position: 1))))
+        XCTAssertFalse(m.canLandNow(item(1, batch: 7)), "the daemon did not offer it (promoting or landed)")
+        XCTAssertTrue(m.canLandNow(batch: batch(7, running: true, actions: ["land_now"])))
+        XCTAssertFalse(m.canLandNow(batch: batch(7, running: true, actions: [])))
+        XCTAssertFalse(m.canLandNow(batch: batch(7, running: false, actions: ["land_now"])))
+        XCTAssertEqual(landNowBatches([batch(7, running: true, actions: ["land_now"]), batch(8, running: true, actions: [])]).map(\.id), [7])
+        m.isOwner = false
+        XCTAssertFalse(m.canLandNow(offered(item(1, batch: 7))), "not the owner's device")
+        XCTAssertFalse(m.canLandNow(batch: batch(7, running: true, actions: ["land_now"])))
+    }
+
+    @MainActor
+    func testLandNowAsksFirstThenSendsTheRightCommand() {
+        let m = MonitorModel()
+        m.connected = true
+        m.isOwner = true
+        let log = Sent()
+        m.sender = { c in log.commands.append(c) }
+        m.askLandNow(.task(5))
+        XCTAssertTrue(log.commands.isEmpty, "nothing is sent before the confirm")
+        XCTAssertEqual(LandNowTarget.task(5).confirmText,
+                       "Land #5 now? Its remaining tests run after the merge; a red result raises an alert.")
+        m.cancelLandNow()
+        m.confirmLandNow()
+        XCTAssertTrue(log.commands.isEmpty, "a cancelled ask sends nothing")
+        m.askLandNow(.task(5))
+        m.confirmLandNow()
+        XCTAssertEqual(log.commands.count, 1)
+        XCTAssertEqual(log.commands[0].landNow.task, 5)
+        XCTAssertEqual(m.landNowLabel(.task(5)), "Landing…")
+        m.askLandNow(.batch(9))
+        m.confirmLandNow()
+        XCTAssertEqual(log.commands.count, 2)
+        XCTAssertEqual(log.commands[1].landNowBatch.batch, 9)
+        XCTAssertEqual(m.landNowLabel(.batch(9)), "Landing…")
+        XCTAssertNil(m.landNowLabel(.batch(5)), "a batch's pending state is not a task's")
     }
 }

@@ -165,6 +165,22 @@ private fun SectionPage(model: MonitorModel, name: String, open: (Page) -> Unit)
     }
 }
 
+/** Land now on the landing queue: owner devices only, a one-line confirm, then the pending-command label. */
+@Composable
+private fun LandNowButton(model: MonitorModel, target: LandNowTarget, shown: Boolean) {
+    if (!shown) return
+    val pending = model.landNowLabel(target)
+    OutlinedButton(onClick = { model.askLandNow(target) }, Modifier.padding(horizontal = 24.dp), enabled = pending == null) { Text(pending ?: "Land now") }
+    if (model.landNowAsk == target) {
+        AlertDialog(
+            onDismissRequest = { model.cancelLandNow() },
+            text = { Text(target.confirmText) },
+            confirmButton = { Button(onClick = { model.confirmLandNow() }) { Text("Land now") } },
+            dismissButton = { OutlinedButton(onClick = { model.cancelLandNow() }) { Text("Cancel") } },
+        )
+    }
+}
+
 @Composable
 private fun LandingPage(model: MonitorModel) {
     val l = model.landing
@@ -176,7 +192,14 @@ private fun LandingPage(model: MonitorModel) {
     for (r in l.queue) {
         TaskRowItem(r) {}
         if (model.canAct && "land_now" in r.allowed_actions) {
-            OutlinedButton(onClick = { model.landNow(r.id) }, Modifier.padding(horizontal = 24.dp)) { Text("Land now") }
+            LandNowButton(model, LandNowTarget.Task(r.id), true)
+        }
+    }
+    if (l.batches.isNotEmpty()) {
+        Heading("Batches")
+        for (b in l.batches) {
+            Text("Batch #${b.id} ${b.phase}${if (b.running) " (running)" else ""}: ${b.tasks.joinToString(" ") { "#$it" }}", Modifier.padding(horizontal = 24.dp, vertical = 2.dp), style = MaterialTheme.typography.bodySmall)
+            LandNowButton(model, LandNowTarget.Batch(b.id), model.canLandNow(b))
         }
     }
     if (l.debts.isNotEmpty()) {

@@ -521,3 +521,190 @@ fn a_batch_whose_testing_was_skipped_still_runs_the_lint_check() {
         "a skipped batch landed past the lint"
     );
 }
+
+// ---- Land now on a running batch (#615) ---------------------------------------------------
+
+fn post_api(d: &Arc<mason_daemon::Daemon>, path: String) -> (u16, serde_json::Value) {
+    let d = d.clone();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async move {
+            use tower::ServiceExt;
+            let req = axum::http::Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("content-type", "application/json")
+                .header("x-mason-as", "owner")
+                .body(axum::body::Body::from("{}"))
+                .unwrap();
+            let resp = mason_daemon::http::api_router(d)
+                .oneshot(req)
+                .await
+                .unwrap();
+            let status = resp.status().as_u16();
+            let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+                .await
+                .unwrap();
+            (
+                status,
+                serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+            )
+        })
+}
+
+/// `checks.sh` whose `integration` suite blocks until the file `gate` exists.
+fn gated_checks(gate: &std::path::Path) -> String {
+    CHECKS.replacen(
+        "echo \"1..1\"\n",
+        &format!(
+            "[ \"$n\" = integration ] && while [ ! -f {} ]; do sleep 0.2; done\necho \"1..1\"\n",
+            gate.display()
+        ),
+        1,
+    )
+}
+
+/// Two tasks in one batch whose tier suite blocks; Land now for the batch over the API.
+/// Returns the world, the gate file and the two tasks, both landed.
+fn land_now_blocked_batch(extra: &[(&str, &str)]) -> (W, std::path::PathBuf, [TaskId; 2]) {
+    let gate_dir = tempfile::tempdir().unwrap().keep();
+    let gate = gate_dir.join("gate");
+    let checks = gated_checks(&gate);
+    let w = world(
+        "window = \"3s\"\nmax_size = 5\n[[tier]]\nname = \"batch\"\nsuites = [\"integration\"]\n",
+        &[("checks.sh", &checks)],
+    );
+    let mut one: Vec<(&str, &str)> = vec![("x/one.txt", "1")];
+    one.extend_from_slice(extra);
+    let t1 = w.task("one", &one);
+    let t2 = w.task("two", &[("x/two.txt", "2")]);
+    wait_for("both tasks in one running batch", 90, || {
+        w.d.landing().in_batch(t1)
+            && w.d.landing().in_batch(t2)
+            && w.d
+                .store
+                .batches(Some("scratch"), 5)
+                .unwrap()
+                .iter()
+                .any(|b| b.finished_at.is_none() && b.phase == "verifying" && b.tasks.contains(','))
+    });
+    let b =
+        w.d.store
+            .batches(Some("scratch"), 5)
+            .unwrap()
+            .into_iter()
+            .find(|b| b.finished_at.is_none())
+            .unwrap();
+    // The views offer it while the batch runs.
+    let v = mason_daemon::views::Ctx::new(&w.d, &w.d.world().unwrap()).landing("scratch");
+    assert!(
+        v.batches
+            .iter()
+            .find(|x| x.id == b.id)
+            .is_some_and(|x| x.allowed_actions == ["land_now"]),
+        "{:?}",
+        v.batches
+    );
+    assert!(
+        v.items
+            .iter()
+            .filter(|i| i.status == "in_batch")
+            .all(|i| i.allowed_actions == ["land_now"]),
+        "{:?}",
+        v.items
+    );
+    let (code, body) = post_api(&w.d, format!("/batches/{}/land-now", b.id));
+    assert_eq!(code, 200, "{body}");
+    wait_for("the batch to land past its blocked suite", 90, || {
+        w.landed(t1) && w.landed(t2)
+    });
+    (w, gate, [t1, t2])
+}
+
+fn deferred_integration_debts(w: &W, t: TaskId) -> Vec<mason_store::DebtRow> {
+    w.d.store
+        .debts(Some(t.0), false)
+        .unwrap()
+        .into_iter()
+        .filter(|x| x.scope == "suite:integration" && x.deferred)
+        .collect()
+}
+
+#[test]
+fn land_now_lands_a_batch_past_a_blocked_suite_and_the_skipped_suite_runs_after_the_merge() {
+    let (w, gate, tasks) = land_now_blocked_batch(&[]);
+    assert!(w.on_main("x/one.txt") && w.on_main("x/two.txt"));
+    for t in tasks {
+        assert_eq!(
+            deferred_integration_debts(&w, t).len(),
+            1,
+            "one deferred suite debt per member"
+        );
+    }
+    // The payment runs on the base and blocks on the gate: release it.
+    std::fs::write(&gate, "go").unwrap();
+    wait_for("both debts to be paid on the base tip", 120, || {
+        tasks.iter().all(|t| {
+            let d = deferred_integration_debts(&w, *t);
+            d.len() == 1 && d[0].status != "open" && !d[0].how.is_empty()
+        })
+    });
+}
+
+#[test]
+fn a_red_suite_run_after_land_now_leaves_the_debt_owed_and_raises_the_alert() {
+    let (w, gate, tasks) = land_now_blocked_batch(&[("red.integration", "x")]);
+    std::fs::write(&gate, "go").unwrap();
+    wait_for("the debt to be tried and still red", 120, || {
+        deferred_integration_debts(&w, tasks[0])
+            .iter()
+            .any(|x| x.status == "open" && x.tried_at > 0)
+    });
+    let alerts = mason_daemon::attention::alerts_now(&w.d);
+    assert!(
+        alerts
+            .iter()
+            .any(|(k, kind, _)| k == "debts" && kind == "debt"),
+        "{alerts:?}"
+    );
+}
+
+#[test]
+fn land_now_does_not_land_a_batch_that_does_not_build() {
+    let gate_dir = tempfile::tempdir().unwrap().keep();
+    let gate = gate_dir.join("gate");
+    let checks = gated_checks(&gate);
+    let w = world_built(
+        "window = \"2s\"\nmax_size = 5\n[[tier]]\nname = \"batch\"\nsuites = [\"integration\"]\n",
+        &[("checks.sh", &checks)],
+    );
+    let t = w.task("does not build", &[("x/red.build.alpha", "x")]);
+    wait_for("its batch to run", 90, || w.d.landing().in_batch(t));
+    let (code, body) = post_api(&w.d, format!("/tasks/{}/land-now", t.0));
+    assert_eq!(code, 200, "{body}");
+    assert_eq!(body["applied"], true, "{body}");
+    wait_for("it to go back: the build floor is kept", 120, || {
+        w.sent_back(t).is_some()
+    });
+    assert!(!w.on_main("x/red.build.alpha"));
+    assert!(!w.landed(t));
+}
+
+#[test]
+fn land_now_keeps_the_freeze() {
+    let w = world("window = \"0s\"\n", &[]);
+    let fix = w.task("the fix", &[("x/fix.txt", "1")]);
+    let other = w.task("not the fix", &[("x/other.txt", "1")]);
+    w.d.store
+        .set_freeze("scratch", "test freeze", Some(fix.0), 1)
+        .unwrap();
+    let (code, _) = post_api(&w.d, format!("/tasks/{}/land-now", other.0));
+    assert_eq!(code, 200);
+    // The fix passes the freeze; the coordinator has then looked at the queue with `other`
+    // flagged, and left it.
+    wait_for("the fix to land", 90, || w.landed(fix));
+    assert!(!w.landed(other), "Land now does not pass a freeze");
+    assert!(!w.on_main("x/other.txt"));
+}

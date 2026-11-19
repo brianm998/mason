@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-const CHECKS: &str = r#"#!/bin/sh
+pub const CHECKS: &str = r#"#!/bin/sh
 n="$1"
 # `hang.NAME` holds a path: record this shell's pid there, then block until killed.
 f="$(find . -name "hang.$n" -not -path "./.git/*" | head -1)"

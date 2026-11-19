@@ -1661,6 +1661,7 @@ fn override_kind(path: &str) -> Option<(&'static str, Option<u64>)> {
             };
             Some((kind, id.parse().ok()))
         }
+        ["batches", _, "land-now"] => Some(("land_now_batch", None)),
         ["pause"] => Some(("pause", None)),
         ["update", "now"] => Some(("update_now", None)),
         ["resources", "gate"] => Some(("gate", None)),
@@ -2387,38 +2388,53 @@ async fn land_override(
             let project = d2
                 .project(t.project)
                 .map_or(String::new(), |p| p.id.clone());
-            let flag = if kind == "force" { "force" } else { "now" };
+            let in_batch = d2.landing.in_batch(TaskId(id));
+            // Land now on a task in a running batch stops that batch's remaining verification;
+            // `now` on a queued task only gives it a batch of its own.
+            let flag = match (kind.as_str(), in_batch) {
+                ("force", _) => "force",
+                ("land-now", true) => crate::suites::LAND_NOW_RUNNING,
+                _ => "now",
+            };
             // A mark is for a task that has yet to land.
             if !matches!(t.state, State::Landed | State::Canceled) {
                 d2.store
                     .set_landing_flag(id, flag, &who, now_ms())
                     .map_err(store_err)?;
             }
-            let debt = d2
-                .store
-                .add_debt(
-                    id,
-                    &project,
-                    &format!("landing:{}", kind.replace('-', "_")),
-                    &reason,
-                    &who,
-                    false,
-                    now_ms(),
+            // What a running batch skips is recorded, suite by suite, when it lands; no
+            // blanket debt then, or the tier would run twice after the merge.
+            let debt = if flag == crate::suites::LAND_NOW_RUNNING {
+                None
+            } else {
+                Some(
+                    d2.store
+                        .add_debt(
+                            id,
+                            &project,
+                            &format!("landing:{}", kind.replace('-', "_")),
+                            &reason,
+                            &who,
+                            false,
+                            now_ms(),
+                        )
+                        .map_err(store_err)?,
                 )
-                .map_err(store_err)?;
+            };
             d2.landing.wake();
             d2.poke();
-            Ok((debt, d2.landing.in_batch(TaskId(id))))
+            Ok((debt, in_batch))
         })
         .await
         .map_err(pool_err)??;
     let (debt, in_batch) = debt;
-    // A running batch reads `force` while it verifies (it stops, and lands); `now` only picks
-    // a batch, so it changes nothing for a task already in one.
+    // A running batch reads `force` while it verifies (it stops, and lands); Land now stops
+    // the testing it still has to do, keeps the freeze and the build floor, and defers the
+    // stopped tests as debts to run after the merge.
     let (applied, note) = match (in_batch, kind.as_str()) {
         (true, "land-now") => (
-            false,
-            "already in a running landing batch; it is running, so land now changes nothing (skip its testing or force it); the debt stays open",
+            true,
+            "marked; the running landing batch stops its remaining testing and lands (the freeze and the build floor still apply); the stopped tests run after the merge, as debts",
         ),
         (true, _) => (
             true,
@@ -2434,6 +2450,67 @@ async fn land_override(
         "applied": applied,
         "note": note,
     })))
+}
+
+/// Land now for a whole batch: flags every member of the running batch.
+async fn land_now_batch(
+    Shared(d): Shared<Arc<Daemon>>,
+    Path(id): Path<u64>,
+    body: Option<Json<Value>>,
+) -> Res {
+    let who = body
+        .as_ref()
+        .and_then(|b| b["as"].as_str())
+        .map(String::from)
+        .unwrap_or_else(|| d.cfg.owner_names.first().cloned().unwrap_or_default());
+    let d2 = d.clone();
+    let members = d
+        .pool
+        .run(move || {
+            let row = d2
+                .store
+                .batches(None, 100_000)
+                .map_err(store_err)?
+                .into_iter()
+                .find(|b| b.id == id && b.finished_at.is_none())
+                .ok_or_else(|| fail(StatusCode::NOT_FOUND, format!("no running batch #{id}")))?;
+            let tasks: Vec<u64> = row
+                .tasks
+                .split(',')
+                .filter_map(|x| x.trim().parse().ok())
+                .collect();
+            let w = d2.world().map_err(store_err)?;
+            let mut flagged = vec![];
+            for t in tasks {
+                let Some(task) = w.tasks.get(&TaskId(t)) else {
+                    continue;
+                };
+                if task.state != State::Landing {
+                    continue;
+                }
+                let flag = if d2.landing.in_batch(TaskId(t)) {
+                    crate::suites::LAND_NOW_RUNNING
+                } else {
+                    "now"
+                };
+                d2.store
+                    .set_landing_flag(t, flag, &who, now_ms())
+                    .map_err(store_err)?;
+                flagged.push(t);
+            }
+            d2.landing.wake();
+            d2.poke();
+            Ok::<_, (StatusCode, Json<Value>)>(flagged)
+        })
+        .await
+        .map_err(pool_err)??;
+    if members.is_empty() {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            format!("batch #{id} has no task waiting to land"),
+        ));
+    }
+    Ok(Json(json!({"applied": true, "tasks": members})))
 }
 
 async fn open_session(Shared(d): Shared<Arc<Daemon>>, Path(id): Path<u64>) -> Res {
@@ -3778,6 +3855,7 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/health/pipeline", get(health_report))
         .route("/health/check", post(health_check))
         .route("/health/history", get(health_history))
+        .route("/batches/{id}/land-now", post(land_now_batch))
         .route("/tasks/{id}/{kind}", post(land_override))
         .route("/account/hold", post(account_hold))
         .route("/account/release", post(account_release))

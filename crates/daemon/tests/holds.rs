@@ -522,7 +522,8 @@ fn a_real_daemon_keeps_a_hold_across_a_kill_and_the_cli_holds_and_releases() {
     assert_eq!(during, before, "no session starts during the hold");
     // The restart found the hold in force and kept it; there is no need to also wait out the rest
     // of the stored hold. Move its end to two seconds from now and let the daemon see it expire.
-    // The rate-limit window still holds the account until HOLD_S after the event.
+    // The hold is lifted at now+2, but the stored rate-limit snapshot stays "blocked" until the
+    // reset the provider reported (HOLD_S after the event); only a later reading replaces it.
     for mut h in store.account_holds().unwrap() {
         h.until_ms = Some((now() + 2) * 1000);
         store.put_account_hold(h).unwrap();
@@ -530,6 +531,9 @@ fn a_real_daemon_keeps_a_hold_across_a_kill_and_the_cli_holds_and_releases() {
     drop(store);
     s.wait_task(0, "landed", 300);
     s.wait_task(1, "landed", 300);
+    wait_for("the rate-limit window to pass", 300, || {
+        usage_of(&s, "claude")["status"] == "ok"
+    });
     assert_eq!(usage_of(&s, "claude")["status"], "ok");
 
     // By hand, from the CLI.
