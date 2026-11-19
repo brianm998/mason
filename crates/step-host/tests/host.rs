@@ -3,7 +3,8 @@
 
 use mason_step_host::client::{collect_to_file, ClientError, Event, HostClient};
 use mason_step_host::launcher::{
-    exit_signal, launching, spawn_host, spawn_host_within, SpawnOptions, START_LIMIT,
+    exit_signal, launching, launching_under, spawn_host, spawn_host_within, SpawnOptions,
+    START_LIMIT,
 };
 use mason_step_host::protocol::{self, Frame};
 use mason_step_host::registry::{
@@ -787,4 +788,19 @@ fn a_reap_writes_the_kills_ledger_and_an_unmatched_one_writes_nothing() {
         "{text}"
     );
     let _ = std::fs::remove_dir_all(&r);
+}
+
+#[test]
+fn a_launch_is_listed_only_under_the_root_it_started_in() {
+    let (d, r) = root();
+    let (_d2, r2) = root();
+    let mut o = opts(&r, "t578-scoped", "sleep 5");
+    o.host_bin = slow_host(d.path(), 1);
+    let h = std::thread::spawn(move || spawn_host(&o).map(|_| ()));
+    wait_until("the launch is listed under its root", || {
+        launching_under(&r).iter().any(|l| l.id == "t578-scoped")
+    });
+    assert!(launching_under(&r2).iter().all(|l| l.id != "t578-scoped"));
+    h.join().unwrap().unwrap();
+    assert!(launching_under(&r).is_empty());
 }
