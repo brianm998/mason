@@ -490,7 +490,7 @@ pub struct WaitAlert {
 const KERNEL_WAIT_SAYS_AFTER: Duration = Duration::from_secs(60);
 
 /// Per waiting task: its holders' grant times and the waiting count of its class.
-type WaitHolders = BTreeMap<TaskId, (Vec<u64>, u32)>;
+pub type WaitHolders = BTreeMap<TaskId, (Vec<u64>, u32, u32)>;
 
 struct DiskCfg {
     source: Arc<dyn DiskSource>,
@@ -1372,7 +1372,7 @@ impl Broker {
                 *depth.entry(w.class()).or_default() += 1;
             }
         }
-        let holders: BTreeMap<TaskId, (Vec<u64>, u32)> = waits
+        let holders: BTreeMap<TaskId, (Vec<u64>, u32, u32)> = waits
             .waits
             .iter()
             .filter_map(|(id, w)| {
@@ -1382,6 +1382,7 @@ impl Broker {
                         (
                             w.held_by.iter().map(|h| h.since).collect(),
                             depth.get(&w.class()).copied().unwrap_or(0),
+                            w.position as u32,
                         ),
                     )
                 })
@@ -1469,7 +1470,7 @@ impl Broker {
     }
 
     /// Holder grant times and class queue depth per waiting task (at most one pass old).
-    pub fn waits_holders(&self) -> Arc<BTreeMap<TaskId, (Vec<u64>, u32)>> {
+    pub fn waits_holders(&self) -> Arc<WaitHolders> {
         self.waits_holders
             .read()
             .unwrap_or_else(|e| e.into_inner())
