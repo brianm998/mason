@@ -113,7 +113,7 @@ pub struct Launching {
     pub since_ms: u64,
 }
 
-type Launches = Mutex<Vec<(u64, Launching)>>;
+type Launches = Mutex<Vec<(u64, PathBuf, Launching)>>;
 
 fn launches() -> &'static Launches {
     static L: OnceLock<Launches> = OnceLock::new();
@@ -126,7 +126,22 @@ pub fn launching() -> Vec<Launching> {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .iter()
-        .map(|(_, l)| l.clone())
+        .map(|(_, _, l)| l.clone())
+        .collect();
+    v.sort_by_key(|l| l.since_ms);
+    v
+}
+
+/// The launches waiting right now whose hosts root is `dir` or lies under it, oldest first.
+/// A daemon asks about its own hosts directory, so launches of other daemons in the same
+/// process (tests run many) are not its business.
+pub fn launching_under(dir: &Path) -> Vec<Launching> {
+    let mut v: Vec<Launching> = launches()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter(|(_, root, _)| root.starts_with(dir))
+        .map(|(_, _, l)| l.clone())
         .collect();
     v.sort_by_key(|l| l.since_ms);
     v
@@ -136,11 +151,12 @@ pub fn launching() -> Vec<Launching> {
 struct LaunchGuard(u64);
 
 impl LaunchGuard {
-    fn new(id: &str) -> Self {
+    fn new(id: &str, root: &Path) -> Self {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         launches().lock().unwrap_or_else(|e| e.into_inner()).push((
             n,
+            root.to_path_buf(),
             Launching {
                 id: id.to_string(),
                 since_ms: crate::registry::now_ms(),
@@ -155,7 +171,7 @@ impl Drop for LaunchGuard {
         launches()
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .retain(|(n, _)| *n != self.0);
+            .retain(|(n, _, _)| *n != self.0);
     }
 }
 
@@ -202,7 +218,7 @@ pub fn spawn_host_within(o: &SpawnOptions, limit: Duration) -> io::Result<HostIn
         .stderr(Stdio::null());
     mason_platform::process::detached(&mut cmd);
     let mut child = cmd.spawn()?;
-    let _listed = LaunchGuard::new(&o.id);
+    let _listed = LaunchGuard::new(&o.id, &o.root);
 
     let started = Instant::now();
     let mut warned = false;

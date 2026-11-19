@@ -171,7 +171,7 @@ impl ClaudeHarness {
         netguard::enable_test_mode();
         // Short paths: a host's socket lives under the registry root.
         ClaudeHarness {
-            dir: tempfile::tempdir_in("/tmp").unwrap(),
+            dir: common::short_tempdir().unwrap(),
             n: AtomicUsize::new(0),
             hosted,
         }

@@ -30,7 +30,7 @@ impl CodexHarness {
     fn new(hosted: bool) -> Self {
         netguard::enable_test_mode();
         CodexHarness {
-            dir: tempfile::tempdir_in("/tmp").unwrap(),
+            dir: common::short_tempdir().unwrap(),
             n: AtomicUsize::new(0),
             hosted,
         }

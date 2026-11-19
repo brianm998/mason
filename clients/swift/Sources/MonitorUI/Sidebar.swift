@@ -296,9 +296,7 @@ struct RowView: View, Equatable {
     }
 
     var durationText: some View {
-        Text(Format.duration(ms: row.inStateMs))
-            .font(theme.small()).foregroundStyle(row.slow ? theme.slow : theme.muted)
-            .lineLimit(1).fixedSize()
+        RowDuration(row: row, clock: clock, color: row.slow ? theme.slow : theme.muted)
     }
 
     var activity: String { QueueWait.line(row) }
@@ -489,5 +487,22 @@ struct MetaLayout: Layout {
                 x += size.width + spacing
             }
         }
+    }
+}
+
+/// The time in state, counted from the row's `stateSinceMs` on the shared one-second tick.
+struct RowDuration: View {
+    @Environment(\.theme) var theme
+    let row: TaskRow
+    let clock: LiveState
+    let color: Color
+    @ObservedObject private var ticker = SharedTick.shared
+
+    var body: some View {
+        Text(Format.duration(ms: row.inState(now: clock.daemonNow(ticker.now))))
+            .font(theme.small()).foregroundStyle(color)
+            .lineLimit(1).fixedSize()
+            .onAppear { SharedTick.shared.join() }
+            .onDisappear { SharedTick.shared.leave() }
     }
 }
