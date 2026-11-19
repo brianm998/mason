@@ -222,7 +222,7 @@ pub fn gather(d: &Arc<Daemon>, now: u64) -> Facts {
     x.stall_ms = disk_probe_ms(d);
     // The launch list is process-wide; tests turn this knob off so they don't read each other's.
     let launching = if d.cfg.launch_frozen_alert {
-        mason_step_host::launcher::launching()
+        mason_step_host::launcher::launching_under(&d.cfg.hosts_dir())
     } else {
         Vec::new()
     };

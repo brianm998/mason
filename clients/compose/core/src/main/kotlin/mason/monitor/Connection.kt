@@ -161,7 +161,7 @@ class MonitorConnection(
             Page.Settings -> model.loadSettings()
             else -> {}
         }
-        return ClientMessage(subscribe = Subscribe(views = views, project = model.project, task = task, editor_step = model.editorStep, cpu_span_ms = model.cpuSpan.ms, disk_span_ms = model.diskSpan.ms))
+        return ClientMessage(subscribe = Subscribe(views = views, project = model.project, task = task, editor_step = model.editorStep, cpu_span_ms = model.cpuSpan.ms, disk_span_ms = model.diskSpan.ms, row_bodies = model.search.wantsRowBodies))
     }
 
     private fun send(c: Command) {
