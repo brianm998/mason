@@ -300,7 +300,7 @@ fn a_scoped_run_check_runs_the_narrowed_command_and_the_test_step_still_runs_it_
 }
 
 /// s523: after a red full run, an unscoped `run_check` re-runs only the failing tests and the
-/// changed packages (in the small lane); after a green run it runs what the change affects;
+/// changed packages; after a green run it runs what the change affects;
 /// `full: true` is always full.
 #[test]
 fn after_a_red_full_run_an_unscoped_check_reruns_only_the_failures_and_the_changed_crates() {
@@ -435,4 +435,56 @@ fn a_docs_only_change_runs_no_cargo_style_suite_in_run_check() {
     );
     assert!(!logs.contains("RAN-DEV"), "{logs}");
     assert!(logs.contains("RAN-FULL"), "{logs}");
+}
+
+/// Only a check filtered to named tests takes the small lane. Narrowed by change or package it
+/// can still be a whole integration binary, so it keeps the test step's own lane (2026-11-18).
+#[test]
+fn only_a_name_filtered_check_takes_the_small_lane() {
+    let def = narrowable()
+        .replace(
+            r#"rerun = "echo RAN-RERUN {tests}; sh checks.sh""#,
+            r#"rerun = "echo RAN-RERUN {tests} HELD=$MASON_HELD; sh checks.sh""#,
+        )
+        .replace(
+            r#"dev_command = "echo RAN-DEV {packages}; sh checks.sh""#,
+            r#"dev_command = "echo RAN-DEV {packages} HELD=$MASON_HELD; sh checks.sh""#,
+        )
+        .replace(
+            "[step.test]",
+            "[resource.test-small]\ncount = 1\n\n[step.test]",
+        );
+    let turns = json!([
+        {"sh": "echo hello > hello.txt && git add -A && git -c user.name=t -c user.email=t@t commit -qm change"},
+        {"call": {"tool": "run_check", "args": {"name": "tests", "tests": ["foo"]}}},
+        {"call": {"tool": "run_check", "args": {"name": "tests", "packages": ["pk-one"]}}},
+        {"call": {"tool": "submit_change", "args": {"summary": "change", "head": "$HEAD"}}}
+    ]);
+    let (_s, d) = start(vec![turns], &def);
+    let t = file_task_as(
+        &d,
+        "Lanes",
+        "Please do it.",
+        true,
+        TrustSource::Owner,
+        false,
+    );
+    wait_state(&d, t, State::Landed, 120);
+    let logs = render_logs(&d, t.0);
+    let line = |tag: &str| {
+        logs.lines()
+            .find(|l| l.contains(tag))
+            .unwrap_or_else(|| panic!("no {tag} line in {logs}"))
+            .to_string()
+    };
+    let rerun = line("RAN-RERUN foo");
+    let dev = line("RAN-DEV -p pk-one");
+    assert!(
+        rerun.contains("test-small") && !rerun.contains("test-suite"),
+        "{rerun}"
+    );
+    assert!(
+        dev.contains("test-suite") && !dev.contains("test-small"),
+        "{dev}"
+    );
 }

@@ -494,6 +494,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s589**: A command that runs under a step host and holds slots is counted as holding them by the next daemon (read from the host's own directory before the first grant), so a restart can no longer let the queue grant the same slots again.
 - **s593**: s551's exit script now runs its test in the merged `it` binary instead of the retired `ci_watch` target.
 - **s596**: s12.sh step 1 now captures `swift test` output to a file and checks its exit status, instead of `grep | head -1` under pipefail.
+- **s597**: Exit scripts s476, s484 and s502 now name daemon tests where they live (the `it` test binary's apns and limits modules, and tests/it/testing.rs), so ubuntu exit-scripts shard 3 can pass.
 - **s598**: scripts/exit/s13.sh no longer hides Gradle's exit status and prints each failing Compose testcase, and the Compose connection tests wait on signals from their fake sockets instead of sleeping against a deadline.
 - **s599**: The smoke list now runs `-p mason-daemon --test it` instead of the missing `landing_floor` target, and an exit test checks that every `--test` name in the list is a real target.
 - **s602**: `run-exit-scripts.sh` ends with a `FAILED scripts: ...` line naming every failing script, and `s585.sh` prints `s585: ok` when it skips.
@@ -501,4 +502,5 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s605**: `scripts/exit/s576.sh` now puts `--exclude` before `--`, so grep no longer reports a missing file `--exclude=s576.sh` and the self-exclusion applies; `s605.sh` guards the whole class.
 - **s606**: The CI/windows test build no longer compiles the unix-only open_session tests, which failed on `std::os::unix` and `Permissions::from_mode`.
 - **s607**: Exit scripts s449, s484, s485, s486 and s508 ran `cargo test --test <module>` against test targets that were merged into the daemon's single `it` executable, so they failed on the Linux exit-scripts shard 4; they now name `--test it`.
+- **s611**: `scripts/exit/s580.sh` gets the missing SPDX-License-Identifier line, so the CI/lint SPDX check passes again.
 <!-- status:end -->

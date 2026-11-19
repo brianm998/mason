@@ -4,7 +4,7 @@
 //! checked over random workloads by simulating the whole run.
 
 use mason_scheduler::{
-    explain, CpuGate, Kind, Ledger, Needs, PolicyGate, Rank, StallGate, WaitCause,
+    explain, CpuGate, Kind, Ledger, Needs, PolicyGate, Rank, StallGate, ThermalGate, WaitCause,
 };
 use proptest::prelude::*;
 use std::collections::BTreeMap;
@@ -1248,4 +1248,58 @@ fn the_0922_case_starts_the_waiters_at_once() {
         assert_eq!(p.grants, vec![x]);
         assert!(p.waits.contains_key(&late));
     }
+}
+
+#[test]
+fn a_hot_cpu_holds_further_machine_work_but_not_the_first_or_an_agent() {
+    // 2026-11-18: the owner's iMac Pro sat at a 27% CPU speed limit under two test suites and
+    // two compiles, ten minutes after a T2 watchdog reset.
+    let mut l = Ledger::new();
+    l.set_capacity("llm:claude", 2, Kind::Llm);
+    l.set_capacity("compile", 4, Kind::Machine);
+    l.set_capacity("test-suite", 3, Kind::Machine);
+    l.set_thermal(Some(ThermalGate {
+        speed_pct: 27,
+        min_pct: 80,
+    }));
+    let rank = |n: u64| Rank::new(false, 1, 2, n, n, false);
+    let first = l.submit(rank(1), Needs::of(&[("test-suite", 1)]), "#1", 0);
+    assert_eq!(
+        l.schedule(0, None, None).grants,
+        vec![first],
+        "the first machine job starts: nothing of ours runs, so a hot machine never holds the queue for good"
+    );
+    let suite = l.submit(rank(2), Needs::of(&[("test-suite", 1)]), "#2", 1);
+    let compile = l.submit(rank(3), Needs::of(&[("compile", 1)]), "#3", 1);
+    let agent = l.submit(rank(4), Needs::of(&[("llm:claude", 1)]), "#4", 1);
+    let p = l.schedule(1, None, None);
+    assert_eq!(p.grants, vec![agent], "agents are not held by heat");
+    for id in [suite, compile] {
+        let w = &p.waits[&id];
+        assert!(
+            matches!(w.cause, WaitCause::Thermal { .. }),
+            "{:?}",
+            w.cause
+        );
+        let text = explain(w, 1);
+        assert!(text.contains("27%") && text.contains("80%"), "{text}");
+    }
+    // At or above the minimum, work starts again.
+    l.set_thermal(Some(ThermalGate {
+        speed_pct: 90,
+        min_pct: 80,
+    }));
+    let p = l.schedule(2, None, None);
+    assert!(
+        p.grants.contains(&suite) && p.grants.contains(&compile),
+        "{:?}",
+        p.grants
+    );
+    // A minimum of 0 turns the gate off.
+    let more = l.submit(rank(5), Needs::of(&[("compile", 1)]), "#5", 3);
+    l.set_thermal(Some(ThermalGate {
+        speed_pct: 10,
+        min_pct: 0,
+    }));
+    assert_eq!(l.schedule(3, None, None).grants, vec![more]);
 }
