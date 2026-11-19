@@ -701,6 +701,14 @@ final class MonitorCoreTests: XCTestCase {
         return m
     }
 
+    /// A monitor started by `make run` has the old commit in MASON_MONITOR_VERSION. The rebuilt
+    /// binary must not inherit it, or it reports the old commit and offers the update forever.
+    func testARelaunchedMonitorDoesNotInheritTheOldVersion() {
+        let env = Relaunch.environment(from: ["MASON_MONITOR_VERSION": "0f45f127", "HOME": "/h", "MASON_SOURCE_DIR": "/s"])
+        XCTAssertNil(env["MASON_MONITOR_VERSION"])
+        XCTAssertEqual(env, ["HOME": "/h", "MASON_SOURCE_DIR": "/s"])
+    }
+
     func testAMonitorOffersToUpdateOnlyWhenItsOwnSourceMoved() {
         let m = MonitorModel()
         m.onInstall = { _ in }
