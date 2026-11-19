@@ -492,20 +492,26 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s583**: The ci_cancels_superseded_runs test now asserts the current `cancel-in-progress: ${{ github.ref != 'refs/heads/develop' }}` rule, so CI/test on develop is green again.
 - **s584**: The smoke list named the crate `mason`, which is now `mason-pipeline`, so every cargo-workspace run failed before a test ran; it now names `mason-pipeline`, and an exit script checks each `-p` name in the smoke list against the workspace.
 - **s585**: `testImagesAreBuiltOnceAndThenServedFromTheCache` empties the shared mascot cache first, so it no longer fails when an earlier test has already built `icon:queued@24`.
+- **s586**: Every notification row has a dismiss X, the bar shows at most three rows before a scroll view with a draggable, adjustable handle, and a "Show hidden notifications (N)" button brings dismissed rows back.
 - **s589**: A command that runs under a step host and holds slots is counted as holding them by the next daemon (read from the host's own directory before the first grant), so a restart can no longer let the queue grant the same slots again.
 - **s591**: The macOS and iOS monitors show Home's Disk section (free space per volume over time, span picker, hover or tap tip, legend with a show/hide checkbox per volume when there are several) to the right of the CPU section at about 3:2, stacked below it on a narrow width, matching the Compose client.
+- **s592**: The exit-script runner now ends a red run with a `FAILED scripts:` line naming every failing script, so the culprit shows in the last lines of a log; the exit status and shard selection are unchanged.
 - **s593**: s551's exit script now runs its test in the merged `it` binary instead of the retired `ci_watch` target.
+- **s594**: `launch-frozen` now reads only the step-host launches under the daemon's own hosts directory, with the threshold a per-daemon config field, so test daemons in one process no longer see each other's launches.
 - **s596**: s12.sh step 1 now captures `swift test` output to a file and checks its exit status, instead of `grep | head -1` under pipefail.
 - **s597**: Exit scripts s476, s484 and s502 now name daemon tests where they live (the `it` test binary's apns and limits modules, and tests/it/testing.rs), so ubuntu exit-scripts shard 3 can pass.
 - **s598**: scripts/exit/s13.sh no longer hides Gradle's exit status and prints each failing Compose testcase, and the Compose connection tests wait on signals from their fake sockets instead of sleeping against a deadline.
 - **s599**: The smoke list now runs `-p mason-daemon --test it` instead of the missing `landing_floor` target, and an exit test checks that every `--test` name in the list is a real target.
+- **s600**: The sweep deletes overrides past their expiry, and the `expired_switches` finding reports overrides only, so it no longer fires forever on rows nothing removed.
 - **s601**: Two daemon integration tests no longer fail on CI by reading another test's step-host launch or a non-paused announcement.
 - **s602**: `run-exit-scripts.sh` ends with a `FAILED scripts: ...` line naming every failing script, and `s585.sh` prints `s585: ok` when it skips.
 - **s603**: The notify claim test counts only `paused` announcements and prints the claim on failure, so other alerts in a whole-workspace run no longer turn it red.
+- **s604**: The exit-scripts runner now prints `FAILED scripts: <names>` as its last stdout line on failure, so a log tail names the failing script.
 - **s605**: `scripts/exit/s576.sh` now puts `--exclude` before `--`, so grep no longer reports a missing file `--exclude=s576.sh` and the self-exclusion applies; `s605.sh` guards the whole class.
 - **s606**: The CI/windows test build no longer compiles the unix-only open_session tests, which failed on `std::os::unix` and `Permissions::from_mode`.
 - **s607**: Exit scripts s449, s484, s485, s486 and s508 ran `cargo test --test <module>` against test targets that were merged into the daemon's single `it` executable, so they failed on the Linux exit-scripts shard 4; they now name `--test it`.
 - **s611**: `scripts/exit/s580.sh` gets the missing SPDX-License-Identifier line, so the CI/lint SPDX check passes again.
 - **s612**: A waiter with holders is flagged stuck past max(wait_m, its queue position x the longest holder run), and the whole-queue bound moves to the aged-wait note.
 - **s627**: The red CI/monitor-compose run 44399898483 could not be classified because the supplied log tail is only post-job Gradle cache cleanup; no code changed and the decision (0620) records what to read in the full log.
+- **s630**: The s602 exit test now clears `MASON_EXIT_SHARD` before running its scratch runner, so it no longer fails with "expected exit 1, got 0" on CI shard 4/6; s630 checks it under that shard.
 <!-- status:end -->
