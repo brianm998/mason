@@ -2629,6 +2629,13 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
                 }
                 if !matches!(outcome, SuiteOutcome::Proven | SuiteOutcome::Reused) {
                     details.extend(n.clone());
+                } else {
+                    // What a lost host's run left reusable is said in the closing note (#621).
+                    details.extend(
+                        n.iter()
+                            .filter(|x| x.contains(": lost host after "))
+                            .cloned(),
+                    );
                 }
                 notes.extend(n);
                 if let Some(r) = results {
