@@ -134,12 +134,41 @@ extension TopBar {
 /// 85% of the illustration size, or the bar's height if that is less.
 func topBarMascotSide(illustration: CGFloat, bar: CGFloat) -> CGFloat { min(illustration * 0.85, bar) }
 
+/// The measured heights of the rows (by key) and of the show-hidden button.
+private struct RowHeights: PreferenceKey {
+    static var defaultValue: [String: CGFloat] = [:]
+    static func reduce(value: inout [String: CGFloat], nextValue: () -> [String: CGFloat]) { value.merge(nextValue()) { $1 } }
+}
+private struct ButtonWidth: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+}
+
+/// Where the parts of the bar are, by accessibility id, for tests that render it offscreen.
+private struct Probe: PreferenceKey {
+    static var defaultValue: [String: CGRect] = [:]
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) { value.merge(nextValue()) { $1 } }
+}
+
+private extension View {
+    func probe(_ id: String) -> some View {
+        background(GeometryReader { g in Color.clear.preference(key: Probe.self, value: [id: g.frame(in: .global)]) })
+    }
+}
+
 struct BannersView: View {
     @Environment(\.theme) var theme
     let model: MonitorModel
+    /// The window's height, for the cap on the scrolling bar.
+    var windowHeight: CGFloat = 800
+    /// Called with the frames of the bar's parts (tests only).
+    var onProbe: (([String: CGRect]) -> Void)?
+    @State private var heights: [String: CGFloat] = [:]
+    @State private var buttonWidth: CGFloat = 0
+    @State private var dragStart: CGFloat?
 
     var body: some View {
-        bannerStack
+        bar
             .sheet(isPresented: Binding(get: { model.sshKeyProject != nil }, set: { if !$0 { model.closeSSHKeys() } })) {
                 SSHKeySheet(model: model)
             }
@@ -154,66 +183,157 @@ struct BannersView: View {
             }
     }
 
-    var bannerStack: some View {
-        VStack(spacing: 0) {
-            if !model.connected {
-                banner(model.linkStatus ?? (model.reconnecting ? "Daemon restarting, reconnecting…" : "Connection lost. Reconnecting…"), id: "connection", icon: "connection_lost")
-            }
-            if model.daemonDown {
-                banner("Daemon down: MASON has lost its daemon. Check that masond is running.", id: "daemon-down", icon: "daemon_down")
-            }
-            if let why = model.readOnlyReason {
-                banner("Read-only: \(why)", id: "read-only", icon: "read_only")
-            }
-            if !model.daemonUpdateText.isEmpty {
-                updateRow(model.daemonUpdateText, button: model.canUpdateDaemon ? (model.downloadURL.isEmpty ? model.daemonUpdateButton : "Download") : nil, id: "daemon-update") {
-                    if model.downloadURL.isEmpty { model.pressUpdateDaemon() } else { model.openDownloadPage() }
-                }
-            }
-            if let text = monitorUpdateText {
-                updateRow(text, button: model.canCancelMonitorUpdate ? "Cancel" : (model.updateAvailable && model.updating == nil ? "Update monitor" : nil), id: "monitor-update", icon: "update") {
-                    if model.canCancelMonitorUpdate { model.cancelMonitorUpdate() } else { model.updateMonitor() }
-                }
-            }
-            ForEach(Array((model.header?.banners ?? []).enumerated()), id: \.offset) { i, b in
-                if b.kind == "push_auth" {
-                    // A refused push holds landing; the owner picks the key that fixes it.
-                    let project = MonitorModel.pushAuthProject(b)
-                    updateRow(b.text, button: model.canAct ? "Choose SSH key…" : nil, id: "push-auth:\(project)", icon: BannerIcons.id(forDaemonKind: b.kind)) {
-                        model.chooseSSHKey(project: project)
+    private func rowHeight(_ r: NotificationRow) -> CGFloat { heights[r.key] ?? 0 }
+
+    /// The chosen height, kept between one row and all rows (and the window's share).
+    private func scrollHeight(_ rows: [NotificationRow]) -> CGFloat {
+        let all = rows.map(rowHeight)
+        let first = rows.prefix(MonitorModel.visibleNotificationRows).map(rowHeight).reduce(0, +)
+        let want = model.notificationHeight.map { CGFloat($0) } ?? first
+        return CGFloat(MonitorModel.clampNotificationHeight(Double(want), oneRow: Double(all.first ?? 0),
+                                                            total: Double(all.reduce(0, +)), window: Double(windowHeight)))
+    }
+
+    var bar: some View {
+        let rows = model.notificationRows()
+        let hidden = model.hiddenNotificationCount()
+        return ZStack(alignment: .topTrailing) {
+            Group {
+                if rows.count > MonitorModel.visibleNotificationRows {
+                    VStack(spacing: 0) {
+                        ScrollView(.vertical) { stack(rows, hidden: hidden) }
+                            .frame(height: scrollHeight(rows))
+                            .accessibilityIdentifier("notifications-scroll")
+                            .probe("notifications-scroll")
+                        resizeHandle(rows)
                     }
-                } else if b.kind == "health" {
-                    // The pipeline's health session needs the owner: the button opens its dialog.
-                    updateRow(b.text, button: "Open session", id: "health-session:\(b.session)", icon: BannerIcons.id(forDaemonKind: b.kind)) {
-                        model.openOwnerSession(b.session)
-                    }
-                } else if b.kind == "paused" {
-                    // The whole pause group is drawn once, where the first pause is.
-                    if i == model.header?.banners.firstIndex(where: { $0.kind == "paused" }) { pauseGroup }
                 } else {
-                    banner(b.text, id: "banner:\(i)", icon: BannerIcons.id(forDaemonKind: b.kind))
+                    stack(rows, hidden: hidden)
                 }
             }
-            ForEach(model.header?.pendingIssues ?? [], id: \.number) { p in
-                PendingIssueRow(issue: p)
+            if hidden > 0 {
+                Button("Show hidden notifications (\(hidden))") { model.showHiddenNotifications() }
+                    .buttonStyle(.borderless)
+                    .font(theme.small())
+                    .padding(.horizontal, theme.spacing).padding(.vertical, theme.spacingSmall)
+                    .fixedSize()
+                    .background(GeometryReader { Color.clear.preference(key: ButtonWidth.self, value: $0.size.width) })
+                    .accessibilityIdentifier("show-hidden-notifications")
+                    .probe("show-hidden-notifications")
+            }
+        }
+        .onPreferenceChange(RowHeights.self) { heights = $0 }
+        .onPreferenceChange(ButtonWidth.self) { buttonWidth = $0 }
+        .onPreferenceChange(Probe.self) { onProbe?($0) }
+    }
+
+    private func stack(_ rows: [NotificationRow], hidden: Int) -> some View {
+        VStack(spacing: 0) {
+            ForEach(Array(rows.enumerated()), id: \.element.key) { i, row in
+                rowView(row, inset: i == 0 && hidden > 0 ? buttonWidth : 0)
+                    .background(GeometryReader { Color.clear.preference(key: RowHeights.self, value: [row.key: $0.size.height]) })
             }
         }
     }
 
-    /// The pauses: each expanded one is a full banner with Resume and a collapse button; collapsed
-    /// ones are icons, in the first expanded pause's row or alone in one compact row.
-    var pauseGroup: some View {
-        let banners = model.header?.banners ?? []
-        return ForEach(Array(model.pauseRows().enumerated()), id: \.offset) { _, row in
-            HStack(spacing: theme.spacing) {
-                ForEach(row.collapsed, id: \.self) { i in collapsedPauseIcon(banners[i], index: i) }
-                if let e = row.expanded { expandedPause(banners[e], index: e) } else { Spacer(minLength: 0) }
+    private func resizeHandle(_ rows: [NotificationRow]) -> some View {
+        let step = rows.first.map(rowHeight) ?? 20
+        return Capsule().fill(theme.muted.opacity(0.6)).frame(width: 36, height: 3)
+            .frame(maxWidth: .infinity).frame(height: 10)
+            .background(theme.surface)
+            .contentShape(Rectangle())
+            #if canImport(AppKit)
+            .onHover { inside in if inside { NSCursor.resizeUpDown.push() } else { NSCursor.pop() } }
+            #endif
+            .gesture(DragGesture(minimumDistance: 1)
+                .onChanged { g in
+                    if dragStart == nil { dragStart = scrollHeight(rows) }
+                    set(height: (dragStart ?? 0) + g.translation.height, rows: rows)
+                }
+                .onEnded { _ in dragStart = nil })
+            .accessibilityElement()
+            .accessibilityLabel("Resize notifications")
+            .accessibilityValue("\(Int(scrollHeight(rows))) points")
+            .accessibilityAdjustableAction { direction in
+                switch direction {
+                case .increment: set(height: scrollHeight(rows) + step, rows: rows)
+                case .decrement: set(height: scrollHeight(rows) - step, rows: rows)
+                @unknown default: break
+                }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, theme.spacingLarge).padding(.vertical, theme.spacing)
-            .background(theme.slow.opacity(0.18))
-            .accessibilityIdentifier(row.expanded == nil ? "paused-collapsed-row" : "paused-row:\(row.expanded!)")
+            .accessibilityIdentifier("notifications-resize")
+            .probe("notifications-resize")
+    }
+
+    private func set(height: CGFloat, rows: [NotificationRow]) {
+        let all = rows.map(rowHeight)
+        model.setNotificationHeight(MonitorModel.clampNotificationHeight(
+            Double(height), oneRow: Double(all.first ?? 0), total: Double(all.reduce(0, +)), window: Double(windowHeight)))
+    }
+
+    /// One row: its content, then the dismiss X; `inset` keeps it clear of the show-hidden button.
+    func rowView(_ row: NotificationRow, inset: CGFloat) -> some View {
+        let pending = row.kind == .pending
+        return HStack(spacing: theme.spacing) {
+            content(row).frame(maxWidth: .infinity, alignment: .leading)
+            Button { model.dismissNotification(row.key) } label: { Image(systemName: "xmark") }
+                .buttonStyle(.borderless)
+                .touchTarget().hint("Dismiss")
+                .accessibilityLabel("Dismiss")
+                .accessibilityIdentifier("dismiss:\(row.key)")
+                .probe("dismiss:\(row.key)")
         }
+        .padding(.leading, theme.spacingLarge).padding(.trailing, theme.spacingLarge + inset)
+        .padding(.vertical, pending ? theme.spacingSmall : theme.spacing)
+        .background(theme.slow.opacity(pending ? 0.12 : 0.18))
+    }
+
+    @ViewBuilder func content(_ row: NotificationRow) -> some View {
+        switch row.kind {
+        case .pending:
+            if let p = (model.header?.pendingIssues ?? []).first(where: { Int($0.number) == row.issue }) {
+                PendingIssueRow(issue: p)
+            }
+        case .paused:
+            pauseContent(row)
+        default:
+            textRow(row)
+        }
+    }
+
+    @ViewBuilder func textRow(_ row: NotificationRow) -> some View {
+        HStack(spacing: theme.spacing) {
+            bannerImage(row.daemonKind.flatMap { BannerIcons.id(forDaemonKind: $0) } ?? row.icon)
+            Text(row.text).font(theme.body(.medium)).frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityIdentifier(row.uiID + "-text")
+                .probe(row.uiID + "-text")
+            if let button = row.button { Button(button) { press(row) }.accessibilityIdentifier(row.uiID) }
+        }
+        .accessibilityIdentifier(row.button == nil ? row.uiID : row.uiID + "-banner")
+    }
+
+    private func press(_ row: NotificationRow) {
+        let b = row.bannerIndex.flatMap { i in (model.header?.banners ?? []).indices.contains(i) ? model.header?.banners[i] : nil }
+        switch row.kind {
+        case .push: if let b { model.chooseSSHKey(project: MonitorModel.pushAuthProject(b)) }
+        case .health: if let b { model.openOwnerSession(b.session) }
+        default:
+            if row.clientID == "daemon-update" {
+                if model.downloadURL.isEmpty { model.pressUpdateDaemon() } else { model.openDownloadPage() }
+            } else if row.clientID == "monitor-update" {
+                if model.canCancelMonitorUpdate { model.cancelMonitorUpdate() } else { model.updateMonitor() }
+            }
+        }
+    }
+
+    /// A pause row: collapsed ones are icons, the expanded one a full banner with Resume and Collapse.
+    func pauseContent(_ row: NotificationRow) -> some View {
+        let banners = model.header?.banners ?? []
+        return HStack(spacing: theme.spacing) {
+            ForEach(row.collapsed.filter { banners.indices.contains($0) }, id: \.self) { i in collapsedPauseIcon(banners[i], index: i) }
+            if let e = row.bannerIndex, banners.indices.contains(e) { expandedPause(banners[e], index: e) } else { Spacer(minLength: 0) }
+        }
+        .accessibilityIdentifier(row.uiID)
     }
 
     func collapsedPauseIcon(_ b: Mason_V1_Banner, index: Int) -> some View {
@@ -236,32 +356,14 @@ struct BannersView: View {
                 Button("Resume") { model.resumePause(project: b.project, mode: b.mode) }
                     .accessibilityIdentifier("resume-pause:\(index)")
             }
-            Button { model.setPauseCollapsed(project: b.project, mode: b.mode, true) } label: { Image(systemName: "xmark") }
+            Button { model.setPauseCollapsed(project: b.project, mode: b.mode, true) } label: { Image(systemName: "chevron.up") }
                 .buttonStyle(.borderless)
                 .touchTarget().hint("Collapse")
                 .accessibilityLabel("Collapse")
                 .accessibilityIdentifier("collapse-pause:\(index)")
+                .probe("collapse-pause:\(index)")
         }
         .accessibilityIdentifier("banner:\(index)")
-    }
-
-    /// What to say about this monitor's own version, if anything.
-    var monitorUpdateText: String? {
-        if let doing = model.updating { return doing }
-        guard model.updateAvailable else { return model.updateError }
-        return model.updateError ?? "A newer monitor is available (\(String(model.latestMonitor.prefix(8))))."
-    }
-
-    func updateRow(_ text: String, button: String?, id: String, icon: String? = nil, action: @escaping () -> Void) -> some View {
-        HStack(spacing: theme.spacing) {
-            bannerImage(icon)
-            Text(text).font(theme.body(.medium))
-            Spacer()
-            if let button { Button(button, action: action).accessibilityIdentifier(id) }
-        }
-        .padding(.horizontal, theme.spacingLarge).padding(.vertical, theme.spacing)
-        .background(theme.slow.opacity(0.18))
-        .accessibilityIdentifier(id + "-banner")
     }
 
     /// The decorative image at the start of a banner; nothing for an unknown id.
@@ -271,17 +373,6 @@ struct BannersView: View {
                 .frame(width: theme.mascotBannerIcon, height: theme.mascotBannerIcon)
                 .accessibilityHidden(hidden)
         }
-    }
-
-    func banner(_ text: String, id: String, icon: String? = nil) -> some View {
-        HStack(spacing: theme.spacing) {
-            bannerImage(icon)
-            Text(text).font(theme.body(.medium))
-        }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, theme.spacingLarge).padding(.vertical, theme.spacing)
-            .background(theme.slow.opacity(0.18))
-            .accessibilityIdentifier(id)
     }
 }
 
@@ -358,8 +449,6 @@ struct PendingIssueRow: View {
             Spacer()
         }
         .font(theme.small())
-        .padding(.horizontal, theme.spacingLarge).padding(.vertical, theme.spacingSmall)
-        .background(theme.slow.opacity(0.12))
         .accessibilityIdentifier("pending:\(issue.project):\(issue.number)")
     }
 }
