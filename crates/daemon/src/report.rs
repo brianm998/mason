@@ -14,6 +14,9 @@ use std::collections::BTreeMap;
 
 const DAY_MS: u64 = 86_400_000;
 
+/// How many tests the slowest-tests list holds.
+const SLOWEST_TESTS: usize = 20;
+
 /// What the store tables add to the event log, for the window.
 #[derive(Default)]
 pub struct Rows {
@@ -25,6 +28,8 @@ pub struct Rows {
     pub flaky: Vec<String>,
     /// (project, scope) of each open debt.
     pub open_debts: Vec<(String, String)>,
+    /// The slowest tests by median time, longest first (s634).
+    pub slowest: Vec<mason_store::SlowTest>,
 }
 
 #[derive(Default)]
@@ -215,7 +220,23 @@ impl Collector {
             .filter(|(p, _)| in_p(p))
             .map(|(p, s)| json!({"project": p, "scope": s}))
             .collect();
+        let slowest: Vec<Value> = rows
+            .slowest
+            .iter()
+            .filter(|t| in_p(&t.project))
+            .take(SLOWEST_TESTS)
+            .map(|t| {
+                let share = if t.suite_total_ms == 0 {
+                    0.0
+                } else {
+                    (t.median_ms as f64 * 1000.0 / t.suite_total_ms as f64).round() / 10.0
+                };
+                json!({"project": t.project, "suite": t.suite, "test": t.test,
+                       "median_ms": t.median_ms, "runs": t.runs, "share_percent": share})
+            })
+            .collect();
         json!({
+            "slowest_tests": slowest,
             "from": self.from, "to": self.to, "project": project,
             "landed": {"total": total(&self.landed), "per_day": per_day(&self.landed)},
             "failed": {"total": total(&self.failed), "per_day": per_day(&self.failed)},
@@ -337,6 +358,10 @@ pub fn report(d: &Daemon, project: Option<&str>, days: u64) -> Value {
             .into_iter()
             .map(|x| (x.project, x.scope))
             .collect(),
+        slowest: d
+            .store
+            .slowest_tests(project, SLOWEST_TESTS)
+            .unwrap_or_default(),
     };
     c.finish(&rows, project)
 }
@@ -497,6 +522,18 @@ mod tests {
             host_losses: vec![(1, day1 + 6_000), (2, 100)],
             flaky: vec!["s::t".into(), "s::t".into(), "s::u".into()],
             open_debts: vec![("p".into(), "suite:x".into())],
+            slowest: ["a", "b", "c"]
+                .iter()
+                .zip([4_000, 3_000, 1_000])
+                .map(|(t, m)| mason_store::SlowTest {
+                    project: "p".into(),
+                    suite: "cargo".into(),
+                    test: t.to_string(),
+                    median_ms: m,
+                    runs: 3,
+                    suite_total_ms: 10_000,
+                })
+                .collect(),
         };
         let v = c.finish(&rows, None);
         assert_eq!(v["landed"]["total"], 2, "{v:#}");
@@ -531,5 +568,10 @@ mod tests {
         assert_eq!(v["flaky"]["sightings"], 3);
         assert_eq!(v["flaky"]["by_test"]["s::t"], 2);
         assert_eq!(v["open_debts"].as_array().unwrap().len(), 1);
+        let slow = v["slowest_tests"].as_array().unwrap();
+        let names: Vec<_> = slow.iter().map(|t| t["test"].as_str().unwrap()).collect();
+        assert_eq!(names, ["a", "b", "c"]);
+        assert_eq!(slow[0]["median_ms"], 4_000);
+        assert_eq!(slow[0]["share_percent"], 40.0);
     }
 }
