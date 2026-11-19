@@ -132,7 +132,11 @@ fn junit(text: &str) -> Vec<Case> {
         } else {
             Status::Pass
         };
-        out.push(Case { name: full, status });
+        out.push(Case {
+            name: full,
+            status,
+            ms: None,
+        });
         rest = next;
     }
     out
@@ -169,7 +173,11 @@ fn tap_line(r: &Regex, l: &str) -> Option<Case> {
         } else {
             Status::Pass
         };
-        Some(Case { name, status })
+        Some(Case {
+            name,
+            status,
+            ms: None,
+        })
     }
 }
 
@@ -349,7 +357,11 @@ fn playwright(text: &str) -> Result<Vec<Case>, String> {
             } else {
                 Status::Pass
             };
-            out.push(Case { name, status });
+            out.push(Case {
+                name,
+                status,
+                ms: None,
+            });
         }
         for child in suite["suites"].as_array().into_iter().flatten() {
             walk(child, &path, out);
@@ -390,7 +402,11 @@ fn cucumber(text: &str) -> Result<Vec<Case>, String> {
             } else {
                 Status::Pass
             };
-            out.push(Case { name, status });
+            out.push(Case {
+                name,
+                status,
+                ms: None,
+            });
         }
     }
     Ok(out)
@@ -402,6 +418,15 @@ fn cucumber(text: &str) -> Result<Vec<Case>, String> {
 pub(crate) struct RegexPair {
     pass: Option<Regex>,
     fail: Option<Regex>,
+}
+
+/// The time libtest's `--report-time` appends to a result line: `test a::b ... ok <0.120s>`
+/// gives 120. `None` when the line has no such suffix.
+fn duration_ms(l: &str) -> Option<u64> {
+    static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r"<(\d+(?:\.\d+)?)s>\s*$").expect("a fixed pattern"));
+    let secs: f64 = re.captures(l)?[1].parse().ok()?;
+    Some((secs * 1000.0).round() as u64)
 }
 
 fn regex_pair(suite: &Suite) -> Result<RegexPair, String> {
@@ -442,13 +467,17 @@ fn regex_fail_name(c: &regex::Captures, l: &str) -> String {
 
 fn regex_line(r: &RegexPair, l: &str) -> Option<Case> {
     if let Some(c) = r.fail.as_ref().and_then(|r| r.captures(l)) {
-        return Some(Case::fail(regex_fail_name(&c, l), "matched fail_regex"));
+        let mut case = Case::fail(regex_fail_name(&c, l), "matched fail_regex");
+        case.ms = duration_ms(l);
+        return Some(case);
     }
     let c = r.pass.as_ref().and_then(|r| r.captures(l))?;
     let name = c
         .get(1)
         .map_or_else(|| l.trim().to_string(), |m| m.as_str().to_string());
-    Some(Case::pass(name))
+    let mut case = Case::pass(name);
+    case.ms = duration_ms(l);
+    Some(case)
 }
 
 fn regex_lines(text: &str, suite: &Suite) -> Result<Vec<Case>, String> {
@@ -529,5 +558,38 @@ mod build_failure_names {
             a.iter().all(|c| matches!(c.status, Status::Fail(_))),
             "counts and verdicts unchanged"
         );
+    }
+}
+
+#[cfg(test)]
+mod report_time {
+    use super::*;
+
+    fn suite() -> Suite {
+        let mut s = Suite::new("s", "x", ParserKind::Regex);
+        s.pass_regex = Some(r"^test (.+) \.\.\. ok(?: <[0-9.]+s>)?$".into());
+        s.fail_regex = Some(r"^test (.+) \.\.\. FAILED(?: <[0-9.]+s>)?$".into());
+        s
+    }
+
+    #[test]
+    fn a_result_line_with_a_time_reads_as_a_pass_or_failure_with_its_duration() {
+        let log = "test a::b ... ok <0.120s>\ntest a::c ... FAILED <3.000s>\n\
+                   test a::d ... ok\ntest a::e ... FAILED\ntest a::f ... ignored\n";
+        let r = regex_lines(log, &suite()).unwrap();
+        let got: Vec<_> = r.iter().map(|c| (c.name.as_str(), c.ms)).collect();
+        assert_eq!(
+            got,
+            [
+                ("a::b", Some(120)),
+                ("a::c", Some(3000)),
+                ("a::d", None),
+                ("a::e", None)
+            ]
+        );
+        assert_eq!(r[0].status, Status::Pass);
+        assert!(matches!(r[1].status, Status::Fail(_)));
+        assert_eq!(r[2].status, Status::Pass);
+        assert!(matches!(r[3].status, Status::Fail(_)));
     }
 }
