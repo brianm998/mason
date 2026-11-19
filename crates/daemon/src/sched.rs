@@ -1470,7 +1470,7 @@ impl Broker {
     }
 
     /// Holder grant times and class queue depth per waiting task (at most one pass old).
-    pub fn waits_holders(&self) -> Arc<BTreeMap<TaskId, (Vec<u64>, u32, u32)>> {
+    pub fn waits_holders(&self) -> Arc<WaitHolders> {
         self.waits_holders
             .read()
             .unwrap_or_else(|e| e.into_inner())
