@@ -569,7 +569,7 @@ public final class MonitorModel {
         return prefs.bool(Keys.pause(project: project, mode: mode)) ?? false
     }
     /// Bumped when a preference the views read through a method (not a property) changes.
-    public private(set) var prefsRevision = 0
+    public internal(set) var prefsRevision = 0
     /// Bumped when the announcer's settings (kept in the announcer, not here) change.
     public private(set) var announcerRevision = 0
     public func announcerSettingsChanged() { announcerRevision &+= 1 }
