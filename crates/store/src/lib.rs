@@ -4111,7 +4111,7 @@ pub fn rank_slowest(
     for t in &mut all {
         t.suite_total_ms = totals[&(t.project.clone(), t.suite.clone())];
     }
-    all.sort_by(|a, b| b.median_ms.cmp(&a.median_ms));
+    all.sort_by_key(|b| std::cmp::Reverse(b.median_ms));
     all.truncate(limit);
     all
 }
