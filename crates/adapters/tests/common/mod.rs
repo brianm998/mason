@@ -3,6 +3,20 @@
 
 use std::path::PathBuf;
 
+/// A scratch directory. On Unix it lives under `/tmp`, because the paths must
+/// stay short enough for an AF_UNIX socket; Windows has no `/tmp`, so it uses
+/// the platform temp dir.
+pub fn short_tempdir() -> std::io::Result<tempfile::TempDir> {
+    #[cfg(unix)]
+    {
+        tempfile::tempdir_in("/tmp")
+    }
+    #[cfg(windows)]
+    {
+        tempfile::tempdir()
+    }
+}
+
 /// The `step-host` binary. It belongs to another package, so cargo only builds
 /// it for `cargo test --workspace`; build it on demand otherwise.
 pub fn step_host_bin() -> PathBuf {

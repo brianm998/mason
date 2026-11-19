@@ -16,6 +16,7 @@ public struct PhoneRootView: View {
     @Environment(\.colorScheme) private var scheme
     @State private var nav = PhoneNav()
     @State private var adding = false
+    @State private var windowHeight: CGFloat = 800
     @State private var improving = false
     #if !canImport(AppKit)
     @Environment(\.scenePhase) private var scenePhase
@@ -46,9 +47,10 @@ public struct PhoneRootView: View {
     private var stack: some View {
         NavigationStack(path: Binding(get: { nav.stack }, set: { nav.replace($0) })) {
             VStack(spacing: 0) {
-                BannersView(model: model)
+                BannersView(model: model, windowHeight: windowHeight)
                 PhoneSidebarScreen(model: model) { nav.select($0) }
             }
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { windowHeight = $0 }
             .phoneChrome(model: model, title: "MASON", open: openAttention, add: { adding = true }, improve: { improving = true })
             .navigationDestination(for: Page.self) { page in
                 PhoneDetailScreen(model: model, page: page)
