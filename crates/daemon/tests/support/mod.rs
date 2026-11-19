@@ -5,6 +5,7 @@
 //! file pointing at the scripted stand-in for `claude`, and a daemon config.
 
 pub mod lw;
+#[cfg(unix)]
 pub mod slots;
 
 use mason_core::*;
@@ -64,8 +65,10 @@ pub fn world_limit() -> usize {
         })
 }
 
+#[cfg(unix)]
 struct Slot(#[allow(dead_code)] Option<slots::Held>);
 
+#[cfg(unix)]
 impl Slot {
     fn take() -> Slot {
         Slot(slots::take(
@@ -73,6 +76,17 @@ impl Slot {
             world_limit(),
             Duration::from_secs(600),
         ))
+    }
+}
+
+/// Windows has no flock-based slots; the daemon tests only build there, never run.
+#[cfg(not(unix))]
+struct Slot;
+
+#[cfg(not(unix))]
+impl Slot {
+    fn take() -> Slot {
+        Slot
     }
 }
 
