@@ -28,6 +28,8 @@ pub struct DaemonConfig {
     /// directories in `h/` before moving them to `t/<task>/hosts/` (default a day;
     /// `MASON_HOST_GRACE_MS` sets it for the exit script).
     pub host_grace: Duration,
+    /// How long a step host may sit launching before `launch-frozen` is raised.
+    pub launch_frozen: Duration,
     /// How many days moved host directories are kept before they are deleted (default 90;
     /// 0 keeps them for ever). `retention_days` in `[daemon]` of `daemon.toml`.
     pub retention_days: u64,
@@ -505,6 +507,13 @@ impl DaemonConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .map_or(Duration::from_secs(24 * 3600), Duration::from_millis),
+            launch_frozen: std::env::var("MASON_LAUNCH_FROZEN_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .map_or(
+                    Duration::from_millis(crate::attention::LAUNCH_FROZEN_MS),
+                    Duration::from_millis,
+                ),
             retention_days: DEFAULT_RETENTION_DAYS,
             heartbeat: Duration::from_secs(1),
             watch_tick: Duration::from_secs(5),

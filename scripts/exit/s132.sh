@@ -14,6 +14,6 @@ if command -v sips >/dev/null; then
 fi
 # iOS stays opaque
 if command -v sips >/dev/null; then
-  [ "$(sips -g hasAlpha clients/swift/ios/MasonIOS/AppIcon-1024.png | awk '/hasAlpha/{print $2}')" = no ]
+  [ "$(sips -g hasAlpha clients/swift/ios/MasonIOS/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png | awk '/hasAlpha/{print $2}')" = no ]
 fi
 echo "s132 OK"

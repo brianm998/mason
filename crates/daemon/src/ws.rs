@@ -46,6 +46,7 @@ struct Sub {
     editor_step: String,
     cpu_span_ms: u64,
     disk_span_ms: u64,
+    row_bodies: bool,
 }
 
 impl Default for Sub {
@@ -57,6 +58,7 @@ impl Default for Sub {
             editor_step: String::new(),
             cpu_span_ms: 0,
             disk_span_ms: 0,
+            row_bodies: false,
         }
     }
 }
@@ -147,7 +149,8 @@ fn compute(d: &Daemon, sub: &Sub) -> (u64, Vec<View>) {
     let Ok(w) = d.world() else {
         return (seq, vec![]);
     };
-    let ctx = Ctx::new(d, &w);
+    let mut ctx = Ctx::new(d, &w);
+    ctx.row_bodies = sub.row_bodies;
     let views = sub
         .views
         .iter()
@@ -297,6 +300,7 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket, peer: Option<crate::lan::P
                     editor_step: sub.editor_step.clone(),
                     cpu_span_ms: sub.cpu_span_ms,
                     disk_span_ms: sub.disk_span_ms,
+                    row_bodies: sub.row_bodies,
                 },
             );
             // Never an empty snapshot: wait for room, and failing that close, so
@@ -361,8 +365,7 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket, peer: Option<crate::lan::P
     let mut gen: u64 = 0;
     let mut pending = false;
     let mut dirty = false;
-    let mut shown: HashMap<std::mem::Discriminant<mason_protocol::view::Body>, u64> =
-        HashMap::new();
+    let mut shown = Shown::default();
     macro_rules! rebuild {
         () => {
             if pending {
@@ -444,6 +447,7 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket, peer: Option<crate::lan::P
                             editor_step: s.editor_step,
                             cpu_span_ms: s.cpu_span_ms,
                             disk_span_ms: s.disk_span_ms,
+                            row_bodies: s.row_bodies,
                         });
                         gen += 1;
                         // What the client did not have (or what follows the task it
@@ -455,6 +459,10 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket, peer: Option<crate::lan::P
                                 || (*k == ViewKind::CpuHistory && old.cpu_span_ms != sub.cpu_span_ms)
                                 || (*k == ViewKind::DiskHistory && old.disk_span_ms != sub.disk_span_ms)
                         }).collect();
+                        // A view asked for again, or for another project, goes out whole.
+                        if old.project != sub.project || !first.is_empty() {
+                            shown.hash.clear();
+                        }
                         if !first.is_empty() {
                             spawn_first(&d, &out_tx, Sub { views: first, ..sub.clone() }, gen);
                         }
@@ -634,24 +642,52 @@ fn spawn_first(d: &Arc<Daemon>, out: &tokio::sync::mpsc::UnboundedSender<Out>, s
     });
 }
 
+type Kind = std::mem::Discriminant<mason_protocol::view::Body>;
+
+/// What a session has been sent: the newest seq and a hash of the last encoding, per view kind.
+#[derive(Default)]
+struct Shown {
+    seq: HashMap<Kind, u64>,
+    hash: HashMap<Kind, u64>,
+}
+
+/// The hash of a view's encoded bytes (the seq left out, so only the content counts).
+fn view_hash(v: View) -> (u64, View) {
+    use std::hash::{Hash, Hasher};
+    let m = server(S::View(ViewUpdate {
+        seq: 0,
+        view: Some(v),
+    }));
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    encode_server(&m, Encoding::Protobuf).hash(&mut h);
+    let S::View(u) = m.body.expect("built above") else {
+        unreachable!("built above")
+    };
+    (h.finish(), u.view.expect("built above"))
+}
+
 /// Send views, skipping any older than one of that kind already sent (two jobs can
-/// finish out of order).
+/// finish out of order) and any identical to the last one sent.
 async fn send_views(
     d: &Daemon,
     sock: &mut WebSocket,
     seq: u64,
     views: Vec<View>,
-    shown: &mut HashMap<std::mem::Discriminant<mason_protocol::view::Body>, u64>,
+    shown: &mut Shown,
     e: Encoding,
 ) -> bool {
     for v in views {
         let Some(kind) = v.body.as_ref().map(std::mem::discriminant) else {
             continue;
         };
-        if shown.get(&kind).is_some_and(|s| *s > seq) {
+        if shown.seq.get(&kind).is_some_and(|s| *s > seq) {
             continue;
         }
-        shown.insert(kind, seq);
+        shown.seq.insert(kind, seq);
+        let (h, v) = view_hash(v);
+        if shown.hash.insert(kind, h) == Some(h) {
+            continue;
+        }
         if !send(
             d,
             sock,
@@ -683,6 +719,7 @@ async fn push_views(d: &Arc<Daemon>, sock: &mut WebSocket, sub: &Sub, e: Encodin
             editor_step: sub.editor_step.clone(),
             cpu_span_ms: sub.cpu_span_ms,
             disk_span_ms: sub.disk_span_ms,
+            row_bodies: sub.row_bodies,
         },
     );
     let Ok((seq, views)) = d.view_pool.run(move || compute(&d2, &s2)).await else {
@@ -792,15 +829,22 @@ fn call_for(c: &Command) -> Result<Call, String> {
         ),
         Cmd::Skip(s) => {
             let mut body = json!({"reason": c.reason, "owner": c.actor, "deferred": s.deferred});
+            let mut action = "skip_test";
             match &s.scope {
                 Some(skip::Scope::Suite(x)) => body["suite"] = json!(x),
                 Some(skip::Scope::Step(x)) => body["step"] = json!(x),
-                None => return Err("name a suite or a step to skip".into()),
+                Some(skip::Scope::AllTests(true)) => {
+                    body["all"] = json!(true);
+                    action = "skip_all_tests";
+                }
+                Some(skip::Scope::AllTests(false)) | None => {
+                    return Err("name a suite or a step to skip".into())
+                }
             }
             post(
                 format!("/tasks/{}/skip", s.task),
                 Some(body),
-                Some((s.task, "skip_test")),
+                Some((s.task, action)),
             )
         }
         Cmd::LandNow(t) => post(

@@ -571,7 +571,7 @@ pub fn detect(project: &str, s: &Stats, f: &Facts, t: &Thresholds) -> Vec<Findin
             String::new(),
             "Switches are past their expiry and still there".to_string(),
             format!(
-                "These overrides or quarantines expired and have not been removed or renewed: {}.",
+                "These overrides expired and have not been removed or renewed: {}.",
                 list(&f.expired_switches, 6)
             ),
             format!("expired entries: {}", list(&f.expired_switches, 6)),
