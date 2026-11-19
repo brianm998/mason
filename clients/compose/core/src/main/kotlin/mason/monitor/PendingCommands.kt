@@ -55,6 +55,7 @@ data class PendingCommand(
             "land_now" -> "Landing…" to "Landing requested"
             "force" -> "Forcing…" to "Forced"
             "skip_test" -> "Skipping…" to "Skipped"
+            "skip_all_tests" -> "Skipping all testing…" to "Immune to testing"
             "answer" -> "Sending answer…" to "Answer sent"
             "block" -> "Adding blocker…" to "Blocker added"
             "unblock" -> "Releasing…" to "Released"
@@ -74,7 +75,7 @@ data class PendingCommand(
             c.reject != null -> "reject" to c.reject!!.task
             c.explore_anyway != null -> "explore_anyway" to c.explore_anyway!!.task
             c.answer != null -> "answer" to c.answer!!.task
-            c.skip != null -> "skip_test" to c.skip!!.task
+            c.skip != null -> (if (c.skip!!.all_tests == true) "skip_all_tests" else "skip_test") to c.skip!!.task
             c.land_now != null -> "land_now" to c.land_now!!.task
             c.force != null -> "force" to c.force!!.task
             c.unblock != null -> "unblock" to c.unblock!!.task

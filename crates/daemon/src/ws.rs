@@ -792,15 +792,22 @@ fn call_for(c: &Command) -> Result<Call, String> {
         ),
         Cmd::Skip(s) => {
             let mut body = json!({"reason": c.reason, "owner": c.actor, "deferred": s.deferred});
+            let mut action = "skip_test";
             match &s.scope {
                 Some(skip::Scope::Suite(x)) => body["suite"] = json!(x),
                 Some(skip::Scope::Step(x)) => body["step"] = json!(x),
-                None => return Err("name a suite or a step to skip".into()),
+                Some(skip::Scope::AllTests(true)) => {
+                    body["all"] = json!(true);
+                    action = "skip_all_tests";
+                }
+                Some(skip::Scope::AllTests(false)) | None => {
+                    return Err("name a suite or a step to skip".into())
+                }
             }
             post(
                 format!("/tasks/{}/skip", s.task),
                 Some(body),
-                Some((s.task, "skip_test")),
+                Some((s.task, action)),
             )
         }
         Cmd::LandNow(t) => post(
