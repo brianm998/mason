@@ -24,6 +24,24 @@ for e in exes:
     tests += sum(1 for x in r.stdout.splitlines() if x.endswith(": test"))
 print(f"test executables: {len(exes)}, tests: {tests}")
 assert len(exes) <= 13, "the daemon's tests are not merged"
-assert tests >= 931, "tests were dropped (931 before the merge)"
+# 931 is the macOS count. Four daemon tests are cfg(target_os = "macos"):
+# taskcache.rs the_real_clone_keeps_mtimes; jobs.rs
+# with_pty_the_command_runs_under_script_with_its_own_exit_code and
+# a_stopped_pty_run_leaves_no_command_behind; update.rs
+# installed_binaries_are_adhoc_signed_with_a_mason_identifier.
+mac_only = ["the_real_clone_keeps_mtimes",
+            "with_pty_the_command_runs_under_script_with_its_own_exit_code",
+            "a_stopped_pty_run_leaves_no_command_behind",
+            "installed_binaries_are_adhoc_signed_with_a_mason_identifier"]
+names = ""
+for e in exes:
+    names += subprocess.run([e, "--list"], capture_output=True, text=True, cwd="crates/daemon", check=True).stdout
+if sys.platform == "darwin":
+    expected = 931
+    assert all(n in names for n in mac_only), "macOS-only tests are missing"
+else:
+    expected = 931 - len(mac_only)
+    assert not any(n in names for n in mac_only), "macOS-only tests listed on this platform"
+assert tests >= expected, f"tests were dropped ({expected} expected on this platform)"
 PY
 echo "s475 OK"
