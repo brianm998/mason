@@ -1451,4 +1451,30 @@ class MonitorCoreTest {
         assertEquals("macOS: 5 jobs · 1 queued · 1 running (build) · 2 passed · 1 failed", Format.jobsText("macOS", j))
         assertEquals("CI: 1 job · 1 passed", Format.jobsText("CI", JobCounts(succeeded = 1)))
     }
+
+    @Test fun tileShowsCurrentTaskForProposedAndStuck() {
+        for (state in listOf("proposed", "needs_attention")) {
+            val m = model()
+            val c = StateCount(state = state, count = 2, wants_you = true)
+            m.sidebar = SidebarView(sections = listOf(
+                section(state, rows = listOf(row(1, state), row(2, state))),
+                section("queued", rows = listOf(row(3, "queued"))),
+            ))
+            assertEquals(false, m.tileShowsCurrentTask(c), "$state on Home")
+            m.go(Page.Task(3))
+            assertEquals(false, m.tileShowsCurrentTask(c), "$state: a task in another state")
+            m.go(Page.Task(1))
+            assertEquals(true, m.tileShowsCurrentTask(c), "$state: first task")
+            m.go(Page.Task(2))
+            assertEquals(true, m.tileShowsCurrentTask(c), "$state: second task")
+            m.goHome()
+            assertEquals(false, m.tileShowsCurrentTask(c), "$state back on Home")
+            m.go(Page.Task(2))
+            m.sidebar = SidebarView(sections = listOf(
+                section(state, rows = listOf(row(1, state))),
+                section("queued", rows = listOf(row(2, "queued"), row(3, "queued"))),
+            ))
+            assertEquals(false, m.tileShowsCurrentTask(c), "$state: the shown task left the state")
+        }
+    }
 }
