@@ -243,7 +243,7 @@ fun HomePage(model: MonitorModel) {
                         Text(r.title, style = theme.linked(theme.body()))
                         r.wait?.let { WaitBadge(it.cause) }
                         Text(
-                            if (r.why_waiting.isEmpty()) Format.duration(r.in_state_ms) else "${r.why_waiting}, ${Format.duration(r.in_state_ms)}",
+                            if (r.why_waiting.isEmpty()) Format.duration(r.inState(model.daemonNow())) else "${r.why_waiting}, ${Format.duration(r.inState(model.daemonNow()))}",
                             style = theme.small(color = if (r.slow) theme.slow else theme.muted),
                         )
                     }
@@ -410,7 +410,7 @@ private fun TaskDetail(model: MonitorModel, d: TaskDetailView, loading: Boolean 
     }
     Column(verticalArrangement = Arrangement.spacedBy(theme.spacingSmall)) {
         Text("${r.key} ${r.title}", style = theme.title(), modifier = Modifier.testTag("detail:${r.id}"))
-        Text("${r.project}, ${r.state.replace('_', ' ')}, ${Format.duration(r.in_state_ms)} in this state", style = theme.body(color = theme.muted))
+        Text("${r.project}, ${r.state.replace('_', ' ')}, ${Format.duration(r.inState(model.daemonNow()))} in this state", style = theme.body(color = theme.muted))
         if (r.why_waiting.isNotEmpty()) {
             Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), verticalAlignment = Alignment.CenterVertically) {
                 r.wait?.let { WaitBadge(it.cause) }
@@ -956,7 +956,7 @@ private fun StageRows(model: MonitorModel, name: String) {
                 ProgressCells(model, r.progress, r.slow)
                 Text("${r.project} ${r.key}  ${r.title}", style = theme.body(), modifier = Modifier.weight(1f).clickable { model.go(Page.Task(r.id)) })
                 Text(
-                    listOf(r.step, SectionPages.suiteProgress(r), r.why_waiting, Format.duration(r.in_state_ms), r.display.ifEmpty { r.model })
+                    listOf(r.step, SectionPages.suiteProgress(r), r.why_waiting, Format.duration(r.inState(model.daemonNow())), r.display.ifEmpty { r.model })
                         .filter { it.isNotEmpty() }.joinToString(" · "),
                     style = theme.small(color = if (r.slow) theme.slow else theme.muted),
                 )

@@ -456,6 +456,26 @@ final class MonitorCoreTests: XCTestCase {
         XCTAssertEqual(m.countText(m.sidebar!.sections[0]), "2")
     }
 
+    func testTimeInStateCountsFromStateSinceAndBodySearchTogglesRowBodies() {
+        var r = TaskRow(); r.inStateMs = 120_000; r.stateSinceMs = 5_000_000
+        XCTAssertEqual(r.inState(now: 5_090_000), 90_000, "from state_since_ms and the daemon clock")
+        XCTAssertEqual(r.inState(now: 4_000_000), 0, "never negative")
+        r.stateSinceMs = 0
+        XCTAssertEqual(r.inState(now: 9_000_000), 120_000, "an older daemon: its own figure")
+        let m = MonitorModel()
+        var subscribed = 0
+        m.subscribe = { subscribed += 1 }
+        m.search.inBody = true
+        XCTAssertEqual(subscribed, 0, "no text yet: no bodies needed")
+        m.search.text = "x"
+        XCTAssertEqual(subscribed, 1, "body search on")
+        m.search.text = "xy"
+        XCTAssertEqual(subscribed, 1, "still on: no change")
+        m.search.inBody = false
+        XCTAssertEqual(subscribed, 2, "body search off")
+        XCTAssertFalse(m.search.wantsRowBodies)
+    }
+
     func testACappedSectionSaysSoInItsHeaderAndSearchSaysWhereItLooked() {
         let m = MonitorModel()
         var a = TaskRow(); a.id = 9; a.title = "newest"
@@ -539,6 +559,22 @@ final class MonitorCoreTests: XCTestCase {
         m.setCompileLimit(0)
         if case .setLimit(let l)? = sent[4].body { XCTAssertEqual(l.resource, "compile"); XCTAssertEqual(l.units, 5) } else { XCTFail() }
         if case .setLimit(let l)? = sent[5].body { XCTAssertEqual(l.units, 1, "the stepper never asks for zero compiles") } else { XCTFail() }
+    }
+
+    func testSkipAllTestingSendsAnAllTestsSkipTrackedAsItsOwnAction() {
+        let m = MonitorModel()
+        var sent: [Mason_V1_Command] = []
+        m.sender = { sent.append($0) }
+        m.makeTestImmune(7)
+        XCTAssertEqual(sent.count, 1)
+        if case .skip(let s)? = sent[0].body {
+            XCTAssertEqual(s.task, 7)
+            if case .allTests(let all)? = s.scope { XCTAssertTrue(all) } else { XCTFail("not an all-tests skip") }
+        } else { XCTFail() }
+        XCTAssertEqual(PendingCommand.describe(sent[0])?.action, "skip_all_tests")
+        var step = Mason_V1_Command()
+        step.skip = .with { $0.task = 7; $0.step = "test" }
+        XCTAssertEqual(PendingCommand.describe(step)?.action, "skip_test")
     }
 
     func testTheCpuGateStepperSendsASetGateAndStaysWithinTenToAHundred() {

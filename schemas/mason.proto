@@ -76,7 +76,10 @@ message Subscribe {
   uint64 cpu_span_ms = 5;
   // The span for DISK_HISTORY, in ms (0: an hour).
   uint64 disk_span_ms = 6;
-}
+  // Send the body of every sidebar row. When false, rows in the history sections
+  // (landed, canceled, deferred, failed) have an empty body; active sections keep theirs.
+  // Set only while the sidebar's body search is on. Additive (s561).
+  bool row_bodies = 7;}
 
 message Ping {
   uint64 nonce = 1;
@@ -190,6 +193,10 @@ message Skip {
   oneof scope {
     string suite = 2;
     string step = 3;
+    // Make the task immune to testing: every suite and step that tests is skipped for it,
+    // landing's test tiers included (the lint tier and the build floor still run). Needs the
+    // `skip_all_tests` action. Additive.
+    bool all_tests = 5;
   }
   bool deferred = 4;
 }
@@ -532,6 +539,14 @@ message TaskRow {
   // what it is doing (the check first, then the tool call, or idle). Additive.
   string check = 28;
   string doing = 29;
+  // The owner made the task immune to testing (`Skip.all_tests`): no test runs for it, from
+  // develop's checks to landing, and the full run is owed as a debt. Additive.
+  bool test_immune = 30;
+  // When the task entered its state, in daemon time (0: not known). Clients work out the
+  // time in state from it and their clock offset; `in_state_ms` is rounded to whole
+  // minutes for older clients. Additive (s561).
+  uint64 state_since_ms = 31;
+
 }
 
 // One party in a wait: a task, or a `mason run` lease that belongs to no task (a person's

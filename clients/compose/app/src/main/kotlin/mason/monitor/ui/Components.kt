@@ -602,6 +602,7 @@ fun ActionButtons(model: MonitorModel, row: TaskRow, hasApprovalView: Boolean = 
 
 private fun label(a: String) = when (a) {
     "skip_test" -> "Skip test"
+    "skip_all_tests" -> "Skip all testing"
     "land_now" -> "Land now"
     "explore_anyway" -> "Explore anyway"
     "open_session" -> "Open session"
@@ -621,6 +622,7 @@ private fun run(model: MonitorModel, row: TaskRow, a: String) {
         "land_now" -> model.landNow(row.id)
         "force" -> model.force(row.id)
         "skip_test" -> model.skipTest(row.id, row.step)
+        "skip_all_tests" -> model.makeTestImmune(row.id)
         "open_session" -> model.openSession(row.id)
     }
 }

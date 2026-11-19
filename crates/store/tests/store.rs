@@ -1031,6 +1031,16 @@ fn force_skips_and_expired_switches_are_read_from_what_is_recorded() {
 }
 
 #[test]
+fn expired_switches_ignores_quarantine_rows() {
+    let (_d, p) = db();
+    let s = Store::open(&p).unwrap();
+    s.put_quarantine("unit", "t::slow", "brian", 20, "flaky", 10)
+        .unwrap();
+    assert_eq!(s.expired_switches(25).unwrap().len(), 0);
+    assert_eq!(s.ledger().unwrap().len(), 1);
+}
+
+#[test]
 fn tracker_overrides_and_the_relationship_are_kept_and_dropped() {
     let (_d, p) = db();
     let s = Store::open(&p).unwrap();

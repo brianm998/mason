@@ -41,7 +41,7 @@ public final class LiveState {
 @Observable
 public final class MonitorModel {
     // From the daemon.
-    public var header: HeaderView? { didSet { prunePauseCollapse() } }
+    public var header: HeaderView? { didSet { prunePauseCollapse(); pruneDismissed() } }
     public var sidebar: SidebarView? { didSet { sidebarRevision &+= 1; linkRevision &+= 1 } }
     /// Bumped on every new sidebar, so derived layouts know when to be rebuilt.
     @ObservationIgnored var sidebarRevision: UInt64 = 0
@@ -295,7 +295,10 @@ public final class MonitorModel {
 
     // The user's.
     public private(set) var history = NavHistory()
-    public var search = SearchState()
+    public var search = SearchState() {
+        // The daemon leaves history-row bodies out unless a body search needs them.
+        didSet { if oldValue.wantsRowBodies != search.wantsRowBodies { subscribe?() } }
+    }
     public var textScale: Double { didSet { prefs.setDouble(textScale, for: Keys.scale) } }
     /// The panel's width before text-zoom scaling; always inside the token limits.
     public private(set) var sidebarWidth: Double
@@ -388,7 +391,7 @@ public final class MonitorModel {
     /// Called with every command result (the tools read them; the app shows errors).
     @ObservationIgnored public var onResult: ((Mason_V1_CommandResult) -> Void)?
 
-    private let prefs: Preferences
+    let prefs: Preferences
     @ObservationIgnored public var sender: ((Mason_V1_Command) -> Void)?
     @ObservationIgnored public var subscribe: (() -> Void)?
 
@@ -576,7 +579,7 @@ public final class MonitorModel {
         return prefs.bool(Keys.pause(project: project, mode: mode)) ?? false
     }
     /// Bumped when a preference the views read through a method (not a property) changes.
-    public private(set) var prefsRevision = 0
+    public internal(set) var prefsRevision = 0
     /// Bumped when the announcer's settings (kept in the announcer, not here) change.
     public private(set) var announcerRevision = 0
     public func announcerSettingsChanged() { announcerRevision &+= 1 }
@@ -744,6 +747,11 @@ public final class MonitorModel {
     public func force(_ task: UInt64) { command { $0.force = .with { $0.task = task } } }
     public func skipTest(_ task: UInt64, step: String) {
         command { $0.skip = .with { $0.task = task; $0.step = step } }
+    }
+    /// Make a task immune to testing (a fast track): no test runs for it from develop's checks
+    /// through landing, and the full run is owed as a debt.
+    public func makeTestImmune(_ task: UInt64) {
+        command { $0.skip = .with { $0.task = task; $0.allTests = true } }
     }
     public func answer(task: UInt64, _ text: String, cardHash: String) {
         command { $0.answer = .with { $0.task = task; $0.answer = text; $0.cardHash = cardHash } }
@@ -1267,6 +1275,15 @@ extension Double {
     }
 }
 
+extension Mason_V1_TaskRow {
+    /// How long the task has been in its state at daemon time `now` (ms): from `stateSinceMs`,
+    /// or the daemon's own figure (`inStateMs`) when it did not send one.
+    public func inState(now: UInt64) -> UInt64 {
+        if stateSinceMs == 0 { return inStateMs }
+        return now > stateSinceMs ? now - stateSinceMs : 0
+    }
+}
+
 /// The search box and its three checkboxes: name, title, body.
 public struct SearchState: Equatable, Sendable {
     public var text = ""
@@ -1277,6 +1294,9 @@ public struct SearchState: Equatable, Sendable {
     public init() {}
 
     public var isActive: Bool { !text.trimmingCharacters(in: .whitespaces).isEmpty }
+
+    /// Whether the daemon must send history rows with their bodies: only while a body search runs.
+    public var wantsRowBodies: Bool { inBody && isActive }
 
     public func matches(_ r: TaskRow) -> Bool {
         let q = text.trimmingCharacters(in: .whitespaces).lowercased()

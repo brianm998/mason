@@ -168,6 +168,10 @@ pub fn sweep_once(d: &Arc<Daemon>) -> Vec<String> {
     // failure is logged and retried next pass.
     crate::hostarchive::pass(&d.cfg, &w, crate::daemon::now_ms());
 
+    // 4d. Overrides past their expiry are inert (reads ignore them) but the introspection
+    // detector reports them, so delete them. Housekeeping: files nothing, retried next pass.
+    let _ = d.store.expire_overrides(crate::daemon::now_ms());
+
     // 5. Projections that no longer match the log (every tenth pass; it replays everything).
     if st.passes.is_multiple_of(10) {
         if let Err(e) = d.store.verify() {
