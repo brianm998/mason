@@ -160,7 +160,9 @@ level = "unit"
     assert!(lines[0].ends_with("cargo test --workspace"), "{calls}");
     let rest = lines[1..].join("\n");
     assert!(
-        rest.contains("-p a --doc --test two")
+        // Doc tests are their own group (decision 0609).
+        rest.contains("-p a --test two")
+            && rest.contains("-p a --doc")
             && !rest.contains("--lib")
             && !rest.contains("--test one"),
         "only the unfinished targets ran again: {calls}"
