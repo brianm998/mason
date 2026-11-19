@@ -28,7 +28,7 @@ pub fn content_tree(wt: &Path) -> Option<String> {
         next_seq()
     ));
     let run = |args: &[&str]| -> Option<String> {
-        let o = std::process::Command::new("git")
+        let o = mason_landing::git::command()
             .arg("-C")
             .arg(wt)
             .args(args)

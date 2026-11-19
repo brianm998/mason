@@ -85,7 +85,7 @@ pub const SSH_OPTIONS: &str =
 /// The repository's `core.sshCommand`, if it has one.
 pub fn configured_ssh(cwd: &Path) -> Option<String> {
     let o = proc::output(
-        Command::new("git")
+        command()
             .args(["config", "--get", "core.sshCommand"])
             .current_dir(cwd),
         default_deadline(),
@@ -166,7 +166,7 @@ fn fetch_lock(cwd: &Path) -> std::sync::Arc<std::sync::Mutex<()>> {
 
 fn fetch_key(cwd: &Path) -> PathBuf {
     let common = proc::output(
-        Command::new("git")
+        command()
             .args(["rev-parse", "--git-common-dir"])
             .current_dir(cwd),
         default_deadline(),
@@ -189,6 +189,58 @@ pub fn run(cwd: &Path, args: &[&str]) -> Result<String, GitError> {
     run_for(cwd, args, d)
 }
 
+/// The git to run, resolved once per process. On macOS `git` on PATH is usually
+/// `/usr/bin/git`, the xcrun shim: every call costs two execs and a directory-services
+/// lookup, which a test suite starting thousands of them a minute turns into a hang.
+/// `MASON_GIT` overrides; otherwise macOS asks `xcrun -f git` once; otherwise `git`.
+pub fn program() -> &'static Path {
+    static GIT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    GIT.get_or_init(|| {
+        let xcrun = if cfg!(target_os = "macos") {
+            Command::new("/usr/bin/xcrun")
+                .args(["-f", "git"])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        } else {
+            None
+        };
+        resolve_program(std::env::var_os("MASON_GIT"), xcrun)
+    })
+}
+
+/// The choice behind [`program`], from its inputs.
+pub fn resolve_program(over: Option<std::ffi::OsString>, xcrun: Option<String>) -> PathBuf {
+    if let Some(o) = over.filter(|o| !o.is_empty()) {
+        return PathBuf::from(o);
+    }
+    if let Some(x) = xcrun {
+        let p = PathBuf::from(&x);
+        if p.is_absolute() && p != Path::new("/usr/bin/git") && is_executable(&p) {
+            return p;
+        }
+    }
+    PathBuf::from("git")
+}
+
+fn is_executable(p: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        p.is_file()
+    }
+}
+
+/// A `git` command using the resolved [`program`].
+pub fn command() -> Command {
+    Command::new(program())
+}
+
 /// Like [`run`], with a deadline of the caller's choosing.
 pub fn run_for(cwd: &Path, args: &[&str], limit: Duration) -> Result<String, GitError> {
     let err = |code, stderr: String, timed_out| GitError {
@@ -201,7 +253,7 @@ pub fn run_for(cwd: &Path, args: &[&str], limit: Duration) -> Result<String, Git
     let _held = lock
         .as_ref()
         .map(|l| l.lock().unwrap_or_else(|e| e.into_inner()));
-    let mut cmd = Command::new("git");
+    let mut cmd = command();
     cmd.args(["-c", "user.name=MASON", "-c", "user.email=mason@localhost"])
         .args(["-c", "commit.gpgsign=false", "-c", "core.editor=true"]);
     if is_network(subcommand(args)) {
@@ -453,5 +505,54 @@ mod auth_tests {
             " ! [rejected] a -> a (non-fast-forward)\nerror: failed to push some refs"
         )
         .is_none());
+    }
+}
+
+#[cfg(test)]
+mod program_tests {
+    use super::*;
+    use std::ffi::OsString;
+
+    #[test]
+    fn override_wins() {
+        let p = resolve_program(Some(OsString::from("/x/git")), Some("/bin/sh".into()));
+        assert_eq!(p, PathBuf::from("/x/git"));
+    }
+
+    #[test]
+    fn falls_back_to_path_without_xcrun() {
+        assert_eq!(resolve_program(None, None), PathBuf::from("git"));
+        assert_eq!(
+            resolve_program(None, Some("relative/git".into())),
+            PathBuf::from("git")
+        );
+        assert_eq!(
+            resolve_program(None, Some("/nonexistent/git".into())),
+            PathBuf::from("git")
+        );
+    }
+
+    #[test]
+    fn the_shim_is_rejected() {
+        assert_eq!(
+            resolve_program(None, Some("/usr/bin/git".into())),
+            PathBuf::from("git")
+        );
+    }
+
+    #[test]
+    fn an_executable_xcrun_answer_is_used() {
+        let p = resolve_program(None, Some("/bin/sh".into()));
+        assert_eq!(p, PathBuf::from("/bin/sh"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn on_macos_the_resolved_git_is_not_the_shim() {
+        let p = program();
+        if p != Path::new("git") && std::env::var_os("MASON_GIT").is_none() {
+            assert!(p.is_absolute());
+            assert_ne!(p, Path::new("/usr/bin/git"));
+        }
     }
 }
