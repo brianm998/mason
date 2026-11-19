@@ -4071,6 +4071,21 @@ mod open_session_tests {
         p.display().to_string()
     }
 
+    /// Run the session, retrying only when the fake never ran (it writes
+    /// `<provider>.cwd` first) and the spawn failed with 127: a spawn racing a
+    /// sibling test's fork can fail with ETXTBSY.
+    fn run_retrying(s: &serde_json::Value, dir: &std::path::Path, provider: &str) -> i32 {
+        let mut code = run_session(s);
+        for _ in 0..50 {
+            if code != 127 || dir.join(format!("{provider}.cwd")).exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            code = run_session(s);
+        }
+        code
+    }
+
     fn check(provider: &str, resume: &str) {
         let d = tempfile::tempdir().unwrap();
         let wt = d.path().join("wt");
@@ -4078,7 +4093,7 @@ mod open_session_tests {
         let bin = fake(d.path(), provider);
         let s = json!({"worktree": wt, "provider": provider, "session": "sid-1",
             "argv": [bin, resume, "sid-1"]});
-        assert_eq!(run_session(&s), 0);
+        assert_eq!(run_retrying(&s, d.path(), provider), 0);
         let cwd = std::fs::read_to_string(d.path().join(format!("{provider}.cwd"))).unwrap();
         assert_eq!(cwd.trim(), wt.canonicalize().unwrap().display().to_string());
         let args = std::fs::read_to_string(d.path().join(format!("{provider}.args"))).unwrap();
@@ -4100,7 +4115,7 @@ mod open_session_tests {
         let d = tempfile::tempdir().unwrap();
         let bin = fake(d.path(), "codex");
         let s = json!({"worktree": d.path(), "provider": "codex", "session": null, "argv": [bin]});
-        assert_eq!(run_session(&s), 0);
+        assert_eq!(run_retrying(&s, d.path(), "codex"), 0);
         let args = std::fs::read_to_string(d.path().join("codex.args")).unwrap();
         assert_eq!(args.trim(), "");
     }
