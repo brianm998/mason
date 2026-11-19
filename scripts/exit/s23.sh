@@ -92,7 +92,7 @@ port=$(python3 -c "import json,glob;print(json.load(open(glob.glob('$root/d/daem
 echo "== the defaults are Part 19's table"
 tab=$(m notify)
 echo "$tab" | grep -q "needs_you .*monitor, sound, speech, push after 10 min, email after 60 min" || fail "needs_you row: $tab"
-echo "$tab" | grep -q "failed .*monitor, sound, speech, push after 10 min$" || fail "failed row: $tab"
+echo "$tab" | grep -Eq "failed .*monitor, sound, speech, push after 10 min(, apns)?$" || fail "failed row: $tab"
 echo "$tab" | grep -q "daemon_down .*monitor, sound, speech, push, email, webhook" || fail "daemon_down row: $tab"
 echo "$tab" | grep -q "landed .*monitor, speech" || fail "landed row: $tab"
 

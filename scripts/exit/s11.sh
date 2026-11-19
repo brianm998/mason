@@ -35,12 +35,12 @@ stop_demo
 # sample on a busy shared runner is not a design failure (decision 0633).
 N=10
 echo "== 2a. a state change reaches a local client in under 250 ms (median of $N)"
-start_demo
 pass=0
-for i in $(seq 1 $N); do
+for i in $(seq 1 $N); do  # the demo plays once, so each run gets a fresh one
+  start_demo
   if "$bin/conformance" latency --port "$(port)" --limit-ms 250; then pass=$((pass + 1)); fi
+  stop_demo
 done
-stop_demo
 # the median is under the limit exactly when more than half the runs are
 [ "$pass" -gt $((N / 2)) ] || { echo "the median latency is over 250 ms ($pass of $N runs under)" >&2; exit 1; }
 
@@ -80,11 +80,17 @@ cat > "$root/imbalance.toml" <<'TOML'
 description = "a balanced feature"
 swift = "todo"
 compose = "todo"
+ios = "todo"
+android = "todo"
+android_reason = "not in the Android phone app yet"
 
 [feature.two]
 description = "an imbalanced one"
 swift = "done"
 compose = "todo"
+ios = "todo"
+android = "todo"
+android_reason = "not in the Android phone app yet"
 TOML
 if out=$("$bin/conformance" features "$root/imbalance.toml" 2>&1); then echo "the planted imbalance passed the feature check" >&2; exit 1; fi
 echo "$out" | head -4
