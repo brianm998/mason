@@ -533,4 +533,5 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s643**: The skipped-batch fast-tier tests now form their batch by `max_size = 2` with a 20m window and create skip debts before admission, so a slow machine can no longer split the pair.
 - **s644**: `sched::tests::ten_compiles_behind_a_waiting_exclusive_lease_all_name_it` compares task ids on the wait view instead of searching a Debug string that holds epoch-millisecond timestamps.
 - **s651**: The red `ten_compiles_behind_a_waiting_exclusive_lease_all_name_it` at 386e8e4b was the test matching "510" in epoch-ms text, which 159f33a7 already replaced with a task-id check; this stage records that and adds a repeat-run exit script.
+- **s652**: the resume test for a log cut off in the third of five executables now expects `-p a --test two` and `-p a --doc` as separate reruns, matching `affected::render`, since cargo cannot combine `--doc` with a target flag.
 <!-- status:end -->
