@@ -190,6 +190,10 @@ message Skip {
   oneof scope {
     string suite = 2;
     string step = 3;
+    // Make the task immune to testing: every suite and step that tests is skipped for it,
+    // landing's test tiers included (the lint tier and the build floor still run). Needs the
+    // `skip_all_tests` action. Additive.
+    bool all_tests = 5;
   }
   bool deferred = 4;
 }
@@ -532,6 +536,9 @@ message TaskRow {
   // what it is doing (the check first, then the tool call, or idle). Additive.
   string check = 28;
   string doing = 29;
+  // The owner made the task immune to testing (`Skip.all_tests`): no test runs for it, from
+  // develop's checks to landing, and the full run is owed as a debt. Additive.
+  bool test_immune = 30;
 }
 
 // One party in a wait: a task, or a `mason run` lease that belongs to no task (a person's

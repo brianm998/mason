@@ -742,6 +742,7 @@ struct ActionButtons: View {
     func label(_ a: String) -> String {
         switch a {
         case "skip_test": return "Skip test"
+        case "skip_all_tests": return "Skip all testing"
         case "land_now": return "Land now"
         case "explore_anyway": return "Explore anyway"
         case "open_session": return "Open session"
@@ -762,6 +763,7 @@ struct ActionButtons: View {
         case "land_now": model.landNow(row.id)
         case "force": model.force(row.id)
         case "skip_test": model.skipTest(row.id, step: row.step)
+        case "skip_all_tests": model.makeTestImmune(row.id)
         case "open_session": model.openSession(row.id)
         default: break
         }
