@@ -3,6 +3,7 @@ package mason.monitor
 
 import mason.v1.BatchLine
 import mason.v1.TaskLanding
+import mason.v1.TaskRow
 
 /** What a Land now button on the landing queue is about: one task, or a whole running batch. */
 sealed class LandNowTarget {
