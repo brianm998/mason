@@ -208,7 +208,7 @@ public final class MonitorConnection {
         switch model.page {
         case .task(let id): views.append(.taskDetail); taskId = id
         case .landing: views.append(.landing)
-        case .home, .section("cpu"): views.append(.cpuHistory)
+        case .home, .section("cpu"), .section("disk"): views.append(contentsOf: [.cpuHistory, .diskHistory])
         case .pipeline: views.append(.editor)
         case .health:
             model.raw("GET", "/resources")
@@ -223,6 +223,7 @@ public final class MonitorConnection {
         s.task = taskId
         s.editorStep = model.editorStep
         s.cpuSpanMs = model.cpu.span.ms
+        s.diskSpanMs = model.disk.span.ms
         var m = Mason_V1_ClientMessage()
         m.subscribe = s
         write(m)
