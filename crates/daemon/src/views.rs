@@ -1297,6 +1297,7 @@ impl<'a> Ctx<'a> {
                     parked: ids(&b.parked),
                     note: b.note.clone(),
                     running: live.contains(&b.id),
+                    allowed_actions: batch_actions(&b.phase, live.contains(&b.id)),
                     ci: self
                         .d
                         .landing
@@ -1358,6 +1359,7 @@ impl<'a> Ctx<'a> {
                         phase_total: LANDING_PHASES,
                         phase_ms: self.now.saturating_sub(b.at),
                         ci_state: ci.clone(),
+                        allowed_actions: batch_actions(&b.phase, true),
                         ..Default::default()
                     });
                 }
@@ -1377,6 +1379,7 @@ impl<'a> Ctx<'a> {
                     title: t.title.clone(),
                     project: p.id.clone(),
                     status: "queued".into(),
+                    allowed_actions: vec!["land_now".into()],
                     position,
                     why: queued_why(
                         frozen,
@@ -1726,6 +1729,17 @@ mod batch_phase_tests {
     use super::*;
 
     #[test]
+    fn land_now_is_offered_until_the_batch_starts_promoting() {
+        for phase in ["forming", "merged", "verifying"] {
+            assert_eq!(batch_actions(phase, true), ["land_now"], "{phase}");
+        }
+        for phase in ["promoting", "landed", "parked", "failed", "red"] {
+            assert!(batch_actions(phase, true).is_empty(), "{phase}");
+        }
+        assert!(batch_actions("verifying", false).is_empty(), "not running");
+    }
+
+    #[test]
     fn suites_are_phase_two_of_four() {
         assert_eq!(batch_phase("verifying"), (2, "running suites"));
         assert_eq!(batch_phase("forming"), (0, "forming"));
@@ -1950,5 +1964,15 @@ mod index_tests {
         let ids: Vec<u64> = ix.of_task(TaskId(1)).iter().map(|r| r.id.0).collect();
         assert_eq!(ids, vec![2, 5]);
         assert_eq!(ix.last_start[&TaskId(1)], 30);
+    }
+}
+
+/// What the owner may do to a batch (or a task in it): Land now, while it runs and has not
+/// started promoting.
+fn batch_actions(phase: &str, running: bool) -> Vec<String> {
+    if running && matches!(phase, "forming" | "merged" | "verifying" | "red") {
+        vec!["land_now".into()]
+    } else {
+        vec![]
     }
 }

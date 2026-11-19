@@ -43,6 +43,9 @@ data class PendingCommand(
         /** How many later sidebar or task views are waited for before the action is offered again. */
         const val VIEWS_TO_WAIT = 3
 
+        /** A batch's place among the task ids a pending command is kept under: batch and task ids are both small numbers, so a batch's is lifted clear of every task's. */
+        fun batchKey(batch: Long): Long = (1L shl 62) or batch
+
         fun verbs(action: String): Pair<String, String> = when (action) {
             "approve" -> "Approving…" to "Approved"
             "reject" -> "Rejecting…" to "Rejected"
@@ -52,7 +55,7 @@ data class PendingCommand(
             "undefer" -> "Restoring…" to "Restored"
             "revive" -> "Reviving…" to "Revived"
             "explore_anyway" -> "Exploring…" to "Asked to explore"
-            "land_now" -> "Landing…" to "Landing requested"
+            "land_now", "land_now_batch" -> "Landing…" to "Landing requested"
             "force" -> "Forcing…" to "Forced"
             "skip_test" -> "Skipping…" to "Skipped"
             "skip_all_tests" -> "Skipping all testing…" to "Immune to testing"
@@ -77,6 +80,7 @@ data class PendingCommand(
             c.answer != null -> "answer" to c.answer!!.task
             c.skip != null -> (if (c.skip!!.all_tests == true) "skip_all_tests" else "skip_test") to c.skip!!.task
             c.land_now != null -> "land_now" to c.land_now!!.task
+            c.land_now_batch != null -> "land_now_batch" to batchKey(c.land_now_batch!!.batch)
             c.force != null -> "force" to c.force!!.task
             c.unblock != null -> "unblock" to c.unblock!!.task
             c.block != null -> "block" to c.block!!.task

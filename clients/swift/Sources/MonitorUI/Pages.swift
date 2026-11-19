@@ -148,7 +148,7 @@ struct HomePage: View {
                     section("Landing queue", theme: theme, open: { model.go(.landing) }) {
                         let items = model.landing?.items ?? []
                         if !items.isEmpty {
-                            LandingItems(model: model, items: items)
+                            LandingItems(model: model, items: items, batches: model.landing?.batches ?? [])
                         } else {
                             let queue = model.home?.stages.first { $0.state == "landing" }?.rows ?? []
                             if queue.isEmpty { Text("Nothing is landing.").font(theme.body()).foregroundStyle(theme.muted) }
@@ -650,12 +650,15 @@ struct LandingPage: View {
                         }
                     }
                     if !l.items.isEmpty {
-                        section("Landing tasks", theme: theme) { LandingItems(model: model, items: l.items) }
+                        section("Landing tasks", theme: theme) { LandingItems(model: model, items: l.items, batches: []) }
                     }
                     section("Batches", theme: theme) {
                         if l.batches.isEmpty { Text("No batch has formed yet.").font(theme.body()).foregroundStyle(theme.muted) }
                         ForEach(l.batches, id: \.id) { b in
-                            Text(batchText(b)).font(theme.body())
+                            HStack(spacing: theme.spacing) {
+                                Text(batchText(b)).font(theme.body())
+                                LandNowButton(model: model, target: .batch(b.id), shown: model.canLandNow(batch: b))
+                            }
                             if b.hasCi {
                                 HStack(spacing: theme.spacing) {
                                     Text(batchCiText(b.ci)).font(theme.body())
@@ -927,6 +930,8 @@ struct HealthConnectionLine: View {
 struct LandingItems: View {
     let model: MonitorModel
     let items: [Mason_V1_TaskLanding]
+    /// The batches whose Land now is drawn here too (Home; the Landing page lists its own).
+    let batches: [Mason_V1_BatchLine]
     @Environment(\.theme) private var theme
 
     var body: some View {
@@ -934,16 +939,55 @@ struct LandingItems: View {
         VStack(alignment: .leading, spacing: theme.spacing) {
             if !g.landing.isEmpty {
                 Text("Landing now").font(theme.body()).foregroundStyle(theme.muted)
+                ForEach(landNowBatches(batches), id: \.id) { b in
+                    HStack(spacing: theme.spacing) {
+                        Text("Batch #\(b.id) \(b.phase): \(b.tasks.map { "#\($0)" }.joined(separator: " "))").font(theme.body())
+                        LandNowButton(model: model, target: .batch(b.id), shown: model.canLandNow(batch: b))
+                    }
+                }
                 ForEach(g.landing, id: \.task) { i in
-                    TaskLink(title: landingItemText(i), font: theme.body()) { model.go(.task(i.task)) }
+                    HStack(spacing: theme.spacing) {
+                        TaskLink(title: landingItemText(i), font: theme.body()) { model.go(.task(i.task)) }
+                        LandNowButton(model: model, target: .task(i.task), shown: model.canLandNow(i))
+                    }
                 }
             }
             if !g.queued.isEmpty {
                 Text("Queued").font(theme.body()).foregroundStyle(theme.muted)
                 ForEach(g.queued, id: \.task) { i in
-                    TaskLink(title: landingItemText(i), font: theme.body()) { model.go(.task(i.task)) }
+                    HStack(spacing: theme.spacing) {
+                        TaskLink(title: landingItemText(i), font: theme.body()) { model.go(.task(i.task)) }
+                        LandNowButton(model: model, target: .task(i.task), shown: model.canLandNow(i))
+                    }
                 }
             }
+        }
+    }
+}
+
+/// The running batches that offer Land now.
+func landNowBatches(_ batches: [Mason_V1_BatchLine]) -> [Mason_V1_BatchLine] {
+    batches.filter { $0.running && $0.allowedActions.contains("land_now") }
+}
+
+/// The Land now button of the landing queue: owner devices only (`shown`), one-line confirm,
+/// then the pending-command label ("Landing…", "Landing requested") until the queue changes.
+struct LandNowButton: View {
+    let model: MonitorModel
+    let target: LandNowTarget
+    let shown: Bool
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        if shown {
+            let pending = model.landNowLabel(target)
+            Button(pending ?? "Land now") { model.askLandNow(target) }
+                .disabled(pending != nil)
+                .accessibilityIdentifier("landnow:\(target.pendingKey.task)")
+                .alert(target.confirmText, isPresented: Binding(get: { model.landNowAsk == target }, set: { if !$0 { model.cancelLandNow() } })) {
+                    Button("Land now") { model.confirmLandNow() }
+                    Button("Cancel", role: .cancel) { model.cancelLandNow() }
+                }
         }
     }
 }
