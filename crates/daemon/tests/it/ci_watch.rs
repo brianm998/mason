@@ -67,6 +67,9 @@ impl Source for Base {
     fn log_tail(&self, job: u64) -> Option<String> {
         Some(format!("log of job {job}\nFAILED test_x"))
     }
+    fn annotations(&self, _job: u64) -> Option<String> {
+        Some("The job has exceeded the maximum execution time of 1h0m0s".into())
+    }
 }
 
 fn rules() -> Rules {
@@ -457,4 +460,44 @@ fn it_reads_recorded_github_responses_and_follows_the_log_redirect() {
     assert!(t[0].body.contains("FAILED test_x"), "{}", t[0].body);
     assert_eq!(freezes(&d).len(), 1);
     drop(s);
+}
+
+#[test]
+fn a_shard_that_fails_once_then_times_out_is_filed_once_and_cleared_by_a_green() {
+    let (_s, d, pid) = start();
+    let (b, r) = (Base::default(), rules());
+    let p = d.project(pid).unwrap();
+    let shard = "exit-scripts (ubuntu-latest, 1)";
+    b.run(1, "CI", "success", &[(shard, "success")]);
+    pass(&d, pid, &r, &b, 10_000).unwrap();
+    b.run(2, "CI", "failure", &[(shard, "failure")]);
+    pass(&d, pid, &r, &b, 20_000).unwrap();
+    // The host reports a timed-out job as `cancelled` inside a run that finished `failure`.
+    for (i, id) in [3u64, 4, 5].into_iter().enumerate() {
+        b.run(id, "CI", "failure", &[(shard, "cancelled")]);
+        pass(&d, pid, &r, &b, 30_000 + i as u64).unwrap();
+        let saved =
+            mason_daemon::ci_watch::decode(&d.store.ci_watch_state(&p.id).unwrap().unwrap());
+        let t = mason_core::ci_watch::timeouts(&saved.state, &r);
+        assert_eq!(t[0].1, i + 1, "the status shows the timeout count");
+        assert_eq!(
+            titled(&d, "exceeds its time limit").len(),
+            usize::from(i >= 1)
+        );
+    }
+    let t = titled(&d, "exceeds its time limit");
+    assert_eq!(t.len(), 1, "{:?}", tasks(&d));
+    assert!(t[0]
+        .title
+        .contains(&format!("CI/{shard} exceeds its time limit on main")));
+    assert!(t[0].body.contains("maximum execution time of 1h0m0s"));
+    // A run superseded by a newer push (run `cancelled`) says nothing.
+    b.run(6, "CI", "cancelled", &[(shard, "cancelled")]);
+    pass(&d, pid, &r, &b, 40_000).unwrap();
+    // A green clears the line.
+    b.run(7, "CI", "success", &[(shard, "success")]);
+    pass(&d, pid, &r, &b, 50_000).unwrap();
+    let saved = mason_daemon::ci_watch::decode(&d.store.ci_watch_state(&p.id).unwrap().unwrap());
+    assert!(mason_core::ci_watch::timeouts(&saved.state, &r).is_empty());
+    assert_eq!(titled(&d, "exceeds its time limit").len(), 1);
 }
