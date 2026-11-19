@@ -53,3 +53,30 @@ fn a_skipped_batch_whose_unit_tests_pass_lands_and_a_batch_with_testing_does_not
     wait_for("the tested task to land", 120, || w.landed(u));
     assert!(w.on_main("x/red.fast"));
 }
+
+#[test]
+fn an_immune_batch_runs_no_test_tier_and_lands_what_the_fast_tier_would_have_parked() {
+    // The same pair as above, red together in the fast tier; both made immune to testing (a
+    // fast track whose testing happens later), so no tier runs and the floor's build lands them.
+    let w = world_built_fast("window = \"2s\"\nmax_size = 5\n", &[], true);
+    let left = w.task("left", &[("x/joint.a", "1")]);
+    let right = w.task("right", &[("x/joint.b", "1")]);
+    for t in [left, right] {
+        mason_daemon::suites::skip(
+            &w.d,
+            t,
+            mason_daemon::suites::ALL_TESTS,
+            "fast track",
+            "brian",
+            false,
+        )
+        .unwrap();
+    }
+    wait_for("both to land", 120, || w.landed(left) && w.landed(right));
+    assert!(w.on_main("x/joint.a") && w.on_main("x/joint.b"));
+    // The full run is still owed.
+    for t in [left, right] {
+        let debts = w.d.store.debts(Some(t.0), false).unwrap();
+        assert!(debts.iter().any(|x| x.scope == "tests:all"), "{debts:?}");
+    }
+}
