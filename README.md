@@ -535,4 +535,6 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s651**: The red `ten_compiles_behind_a_waiting_exclusive_lease_all_name_it` at 386e8e4b was the test matching "510" in epoch-ms text, which 159f33a7 already replaced with a task-id check; this stage records that and adds a repeat-run exit script.
 - **s652**: the resume test for a log cut off in the third of five executables now expects `-p a --test two` and `-p a --doc` as separate reruns, matching `affected::render`, since cargo cannot combine `--doc` with a target flag.
 - **s655**: CI/lint red on develop: restore the SPDX header on scripts/exit/s638.sh so check-spdx.sh passes.
+- **s656**: The red CI/monitor-compose run 44570141981 names no failing step in the supplied log tail (only post-job Gradle cache cleanup), so no code changed and decision 0649 records how to classify it from the full log.
+- **s663**: the skipped-batch fast-tier landing test now forms its batch by size, writes the skip debt before admission and waits for the first batch to finish, so it no longer flakes under load.
 <!-- status:end -->
