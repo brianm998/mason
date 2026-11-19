@@ -3773,7 +3773,11 @@ mod tests {
         // Compare task ids, not a Debug string: that carries epoch-ms values, which can
         // contain "510" by chance.
         for (t, w) in &v.tasks {
-            assert!(w.holders.iter().all(|p| p.task != 510), "#{t}: {:?}", w.holders);
+            assert!(
+                w.holders.iter().all(|p| p.task != 510),
+                "#{t}: {:?}",
+                w.holders
+            );
             assert!(w.blocker.as_ref().is_none_or(|p| p.task != 510), "#{t}");
             assert!(
                 w.chain
