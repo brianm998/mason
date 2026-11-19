@@ -526,4 +526,5 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s636**: The hold-across-a-kill test waits for the stored rate-limit window to pass before asserting the account is "ok".
 - **s639**: the open_session tests in crates/cli retry a 127 spawn failure when the fake provider never ran, which removes the likely ETXTBSY flake behind s320 on the Linux shard.
 - **s640**: The s11, s23 and s426 exit gates now use medians of ten runs and condition waits instead of single wall-clock samples, with the 250 ms and 100 ms targets unchanged.
+- **s644**: `sched::tests::ten_compiles_behind_a_waiting_exclusive_lease_all_name_it` compares task ids on the wait view instead of searching a Debug string that holds epoch-millisecond timestamps.
 <!-- status:end -->
