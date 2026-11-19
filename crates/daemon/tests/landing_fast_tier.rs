@@ -47,10 +47,13 @@ fn a_skipped_batch_whose_unit_tests_pass_lands_and_a_batch_with_testing_does_not
     let t = w.task("fine", &[("x/ok.txt", "1")]);
     skip_testing(&w, t);
     wait_for("it to land", 120, || w.landed(t));
+    // The push is read back through the origin: look until it shows, not once.
+    wait_for("its file on main", 120, || w.on_main("x/ok.txt"));
     assert!(w.on_main("x/ok.txt"));
     // Not skipped: only the floor runs, so the tier's red does not stop it.
     let u = w.task("tested", &[("x/red.fast", "1")]);
     wait_for("the tested task to land", 120, || w.landed(u));
+    wait_for("its file on main", 120, || w.on_main("x/red.fast"));
     assert!(w.on_main("x/red.fast"));
 }
 
