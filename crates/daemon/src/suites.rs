@@ -857,13 +857,31 @@ impl Who {
     }
 }
 
-/// An open debt that skips this suite or its whole step.
+/// The debt scope of a task made immune to testing: every suite and every step that tests
+/// is skipped for it, from develop's checks to landing, and the full run is owed.
+pub const ALL_TESTS: &str = "tests:all";
+
+/// An open debt that skips this suite or its whole step (or all of the task's testing).
 pub(crate) fn skip_for(d: &Daemon, task: TaskId, suite: &str, step: &str) -> Option<u64> {
     d.store
         .debts(Some(task.0), true)
         .ok()?
         .into_iter()
-        .find(|x| x.scope == format!("suite:{suite}") || x.scope == format!("step:{step}"))
+        .find(|x| {
+            x.scope == ALL_TESTS
+                || x.scope == format!("suite:{suite}")
+                || x.scope == format!("step:{step}")
+        })
+        .map(|x| x.id)
+}
+
+/// The open debt that makes the task immune to testing, if it has one.
+pub(crate) fn immune(d: &Daemon, task: TaskId) -> Option<u64> {
+    d.store
+        .debts(Some(task.0), true)
+        .ok()?
+        .into_iter()
+        .find(|x| x.scope == ALL_TESTS)
         .map(|x| x.id)
 }
 
@@ -2889,7 +2907,8 @@ fn run_new_tests_at_base(
 
 /// Skip a suite or a whole step by force, now or ahead of time. The task's
 /// running suite is stopped within a moment, green lanes keep their results,
-/// the closing verdict is downgraded, and a debt is recorded.
+/// the closing verdict is downgraded, and a debt is recorded. `tests:all` makes the
+/// task immune to testing: every check, suite and test tier is skipped for it until it lands.
 pub fn skip(
     d: &Arc<Daemon>,
     task: TaskId,
@@ -2901,9 +2920,31 @@ pub fn skip(
     let w = d.world().map_err(|e| e.to_string())?;
     let t = w.tasks.get(&task).ok_or("no such task")?;
     let project = d.project(t.project).ok_or("no such project")?.id.clone();
+    if scope == ALL_TESTS {
+        if matches!(t.state, State::Landed | State::Canceled) {
+            return Err("the task is done; there is no testing left to skip".into());
+        }
+        if let Some(id) = immune(d, task) {
+            return Err(format!(
+                "the task is already immune to testing (debt #{id})"
+            ));
+        }
+        return d
+            .store
+            .add_debt(
+                task.0,
+                &project,
+                ALL_TESTS,
+                reason,
+                owner,
+                deferred,
+                now_ms(),
+            )
+            .map_err(|e| e.to_string());
+    }
     let (kind, name) = scope
         .split_once(':')
-        .ok_or("scope is `suite:NAME` or `step:NAME`")?;
+        .ok_or("scope is `suite:NAME`, `step:NAME` or `tests:all`")?;
     let def = d
         .pinned_def(&t.def)
         .unwrap_or_else(|| d.current_def(t.project));
@@ -2950,8 +2991,15 @@ pub fn landing_scope(def: &Definition, state: State, scope: &str) -> String {
     }
 }
 
-/// The suites a debt's scope names in `def`.
+/// The suites a debt's scope names in `def`. Immunity (`tests:all`) owes the Test step's
+/// suites, or every suite when there is no Test step.
 fn debt_suites(def: &Definition, scope: &str) -> Vec<Suite> {
+    if scope == ALL_TESTS {
+        return match test_step_name(def) {
+            Some(test) => debt_suites(def, &format!("step:{test}")),
+            None => def.testing.suites.clone(),
+        };
+    }
     let (kind, name) = scope.split_once(':').unwrap_or(("", ""));
     match kind {
         "suite" => def.testing.suite(name).cloned().into_iter().collect(),

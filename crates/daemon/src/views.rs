@@ -101,6 +101,8 @@ pub struct Ctx<'a> {
     pub row_bodies: bool,
     /// The same waits as data, with the queue-held summary (s527).
     wait_view: std::sync::Arc<crate::waitview::WaitsView>,
+    /// Tasks the owner made immune to testing (an open `tests:all` debt), read once per build.
+    immune: std::collections::HashSet<u64>,
 }
 
 type LogCache = std::collections::HashMap<u64, (Vec<crate::http::LogStamp>, String)>;
@@ -208,6 +210,14 @@ impl<'a> Ctx<'a> {
             waits: d.broker.waits_snapshot(),
             row_bodies: true,
             wait_view: d.broker.wait_view(),
+            immune: d
+                .store
+                .debts(None, true)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|x| x.scope == crate::suites::ALL_TESTS)
+                .map(|x| x.task)
+                .collect(),
         }
     }
 
@@ -267,6 +277,15 @@ impl<'a> Ctx<'a> {
         }
         if t.state.is_step() && t.route.is_some_and(Route::skipped_exploring) {
             a.push("explore_anyway");
+        }
+        // Immunity to testing (a fast track: tests skipped from develop's checks to landing)
+        // can be set once, at any point from approval until the task lands.
+        let open = !matches!(
+            t.state,
+            State::Proposed | State::Deferred | State::Canceled | State::Landed
+        );
+        if open && !self.immune.contains(&t.id.0) {
+            a.push("skip_all_tests");
         }
         a.into_iter().map(String::from).collect()
     }
@@ -500,6 +519,7 @@ impl<'a> Ctx<'a> {
             model_use,
             progress: self.progress(t),
             allowed_actions: self.allowed_actions(t),
+            test_immune: self.immune.contains(&t.id.0),
             blockers: t.blockers.iter().map(|b| b.0).collect(),
             last_run: crate::http::latest_run(self.w, t.id),
             check: live

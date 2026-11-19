@@ -645,6 +645,8 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     fun landNow(task: Long) = send(Command(land_now = TaskRef(task = task)))
     fun force(task: Long) = send(Command(force = TaskRef(task = task)))
     fun skipTest(task: Long, step: String) = send(Command(skip = Skip(task = task, step = step)))
+    /** Make a task immune to testing (a fast track): no test runs for it through landing; the full run is owed. */
+    fun makeTestImmune(task: Long) = send(Command(skip = Skip(task = task, all_tests = true)))
     fun answer(task: Long, text: String, cardHash: String) =
         send(Command(answer = Answer(task = task, answer = text, card_hash = cardHash)))
     fun addTask(project: String, title: String, body: String) =

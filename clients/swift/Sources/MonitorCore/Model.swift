@@ -748,6 +748,11 @@ public final class MonitorModel {
     public func skipTest(_ task: UInt64, step: String) {
         command { $0.skip = .with { $0.task = task; $0.step = step } }
     }
+    /// Make a task immune to testing (a fast track): no test runs for it from develop's checks
+    /// through landing, and the full run is owed as a debt.
+    public func makeTestImmune(_ task: UInt64) {
+        command { $0.skip = .with { $0.task = task; $0.allTests = true } }
+    }
     public func answer(task: UInt64, _ text: String, cardHash: String) {
         command { $0.answer = .with { $0.task = task; $0.answer = text; $0.cardHash = cardHash } }
     }

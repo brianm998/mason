@@ -507,4 +507,5 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s607**: Exit scripts s449, s484, s485, s486 and s508 ran `cargo test --test <module>` against test targets that were merged into the daemon's single `it` executable, so they failed on the Linux exit-scripts shard 4; they now name `--test it`.
 - **s611**: `scripts/exit/s580.sh` gets the missing SPDX-License-Identifier line, so the CI/lint SPDX check passes again.
 - **s612**: A waiter with holders is flagged stuck past max(wait_m, its queue position x the longest holder run), and the whole-queue bound moves to the aged-wait note.
+- **s627**: The red CI/monitor-compose run 44399898483 could not be classified because the supplied log tail is only post-job Gradle cache cleanup; no code changed and the decision (0620) records what to read in the full log.
 <!-- status:end -->

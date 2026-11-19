@@ -813,6 +813,17 @@ public nonisolated struct Mason_V1_Skip: Sendable {
     set {scope = .step(newValue)}
   }
 
+  /// Make the task immune to testing: every suite and step that tests is skipped for it,
+  /// landing's test tiers included (the lint tier and the build floor still run). Needs the
+  /// `skip_all_tests` action. Additive.
+  public var allTests: Bool {
+    get {
+      if case .allTests(let v)? = scope {return v}
+      return false
+    }
+    set {scope = .allTests(newValue)}
+  }
+
   public var deferred: Bool = false
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
@@ -820,6 +831,10 @@ public nonisolated struct Mason_V1_Skip: Sendable {
   public nonisolated enum OneOf_Scope: Equatable, Sendable {
     case suite(String)
     case step(String)
+    /// Make the task immune to testing: every suite and step that tests is skipped for it,
+    /// landing's test tiers included (the lint tier and the build floor still run). Needs the
+    /// `skip_all_tests` action. Additive.
+    case allTests(Bool)
 
   }
 
@@ -1751,6 +1766,13 @@ public nonisolated struct Mason_V1_TaskRow: @unchecked Sendable {
   public var doing: String {
     get {_storage._doing}
     set {_uniqueStorage()._doing = newValue}
+  }
+
+  /// The owner made the task immune to testing (`Skip.all_tests`): no test runs for it, from
+  /// develop's checks to landing, and the full run is owed as a debt. Additive.
+  public var testImmune: Bool {
+    get {_storage._testImmune}
+    set {_uniqueStorage()._testImmune = newValue}
   }
 
   /// When the task entered its state, in daemon time (0: not known). Clients work out the
@@ -5015,7 +5037,7 @@ nonisolated extension Mason_V1_ApproveHold: SwiftProtobuf.Message, SwiftProtobuf
 
 nonisolated extension Mason_V1_Skip: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Skip"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}task\0\u{1}suite\0\u{1}step\0\u{1}deferred\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}task\0\u{1}suite\0\u{1}step\0\u{1}deferred\0\u{3}all_tests\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -5041,6 +5063,14 @@ nonisolated extension Mason_V1_Skip: SwiftProtobuf.Message, SwiftProtobuf._Messa
         }
       }()
       case 4: try { try decoder.decodeSingularBoolField(value: &self.deferred) }()
+      case 5: try {
+        var v: Bool?
+        try decoder.decodeSingularBoolField(value: &v)
+        if let v = v {
+          if self.scope != nil {try decoder.handleConflictingOneOf()}
+          self.scope = .allTests(v)
+        }
+      }()
       default: break
       }
     }
@@ -5063,11 +5093,14 @@ nonisolated extension Mason_V1_Skip: SwiftProtobuf.Message, SwiftProtobuf._Messa
       guard case .step(let v)? = self.scope else { preconditionFailure() }
       try visitor.visitSingularStringField(value: v, fieldNumber: 3)
     }()
-    case nil: break
+    default: break
     }
     if self.deferred != false {
       try visitor.visitSingularBoolField(value: self.deferred, fieldNumber: 4)
     }
+    try { if case .allTests(let v)? = self.scope {
+      try visitor.visitSingularBoolField(value: v, fieldNumber: 5)
+    } }()
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -6502,7 +6535,7 @@ nonisolated extension Mason_V1_TodoItem: SwiftProtobuf.Message, SwiftProtobuf._M
 
 nonisolated extension Mason_V1_TaskRow: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".TaskRow"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}key\0\u{1}title\0\u{1}project\0\u{1}state\0\u{1}activity\0\u{3}why_waiting\0\u{3}enqueued_ms\0\u{3}in_state_ms\0\u{1}model\0\u{1}progress\0\u{3}allowed_actions\0\u{1}blockers\0\u{1}typical\0\u{1}slow\0\u{1}step\0\u{1}body\0\u{1}blocks\0\u{1}display\0\u{3}model_use\0\u{1}proposal\0\u{1}issue\0\u{3}issue_url\0\u{3}blocker_links\0\u{3}last_run\0\u{3}owner_session\0\u{1}wait\0\u{1}check\0\u{1}doing\0\u{3}state_since_ms\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}key\0\u{1}title\0\u{1}project\0\u{1}state\0\u{1}activity\0\u{3}why_waiting\0\u{3}enqueued_ms\0\u{3}in_state_ms\0\u{1}model\0\u{1}progress\0\u{3}allowed_actions\0\u{1}blockers\0\u{1}typical\0\u{1}slow\0\u{1}step\0\u{1}body\0\u{1}blocks\0\u{1}display\0\u{3}model_use\0\u{1}proposal\0\u{1}issue\0\u{3}issue_url\0\u{3}blocker_links\0\u{3}last_run\0\u{3}owner_session\0\u{1}wait\0\u{1}check\0\u{1}doing\0\u{3}test_immune\0\u{3}state_since_ms\0")
 
   fileprivate class _StorageClass {
     var _id: UInt64 = 0
@@ -6534,6 +6567,7 @@ nonisolated extension Mason_V1_TaskRow: SwiftProtobuf.Message, SwiftProtobuf._Me
     var _wait: Mason_V1_WaitInfo? = nil
     var _check: String = String()
     var _doing: String = String()
+    var _testImmune: Bool = false
     var _stateSinceMs: UInt64 = 0
 
       // This property is used as the initial default value for new instances of the type.
@@ -6574,6 +6608,7 @@ nonisolated extension Mason_V1_TaskRow: SwiftProtobuf.Message, SwiftProtobuf._Me
       _wait = source._wait
       _check = source._check
       _doing = source._doing
+      _testImmune = source._testImmune
       _stateSinceMs = source._stateSinceMs
     }
   }
@@ -6622,7 +6657,8 @@ nonisolated extension Mason_V1_TaskRow: SwiftProtobuf.Message, SwiftProtobuf._Me
         case 27: try { try decoder.decodeSingularMessageField(value: &_storage._wait) }()
         case 28: try { try decoder.decodeSingularStringField(value: &_storage._check) }()
         case 29: try { try decoder.decodeSingularStringField(value: &_storage._doing) }()
-        case 30: try { try decoder.decodeSingularUInt64Field(value: &_storage._stateSinceMs) }()
+        case 30: try { try decoder.decodeSingularBoolField(value: &_storage._testImmune) }()
+        case 31: try { try decoder.decodeSingularUInt64Field(value: &_storage._stateSinceMs) }()
         default: break
         }
       }
@@ -6722,8 +6758,11 @@ nonisolated extension Mason_V1_TaskRow: SwiftProtobuf.Message, SwiftProtobuf._Me
       if !_storage._doing.isEmpty {
         try visitor.visitSingularStringField(value: _storage._doing, fieldNumber: 29)
       }
+      if _storage._testImmune != false {
+        try visitor.visitSingularBoolField(value: _storage._testImmune, fieldNumber: 30)
+      }
       if _storage._stateSinceMs != 0 {
-        try visitor.visitSingularUInt64Field(value: _storage._stateSinceMs, fieldNumber: 30)
+        try visitor.visitSingularUInt64Field(value: _storage._stateSinceMs, fieldNumber: 31)
       }
     }
     try unknownFields.traverse(visitor: &visitor)
@@ -6763,6 +6802,7 @@ nonisolated extension Mason_V1_TaskRow: SwiftProtobuf.Message, SwiftProtobuf._Me
         if _storage._wait != rhs_storage._wait {return false}
         if _storage._check != rhs_storage._check {return false}
         if _storage._doing != rhs_storage._doing {return false}
+        if _storage._testImmune != rhs_storage._testImmune {return false}
         if _storage._stateSinceMs != rhs_storage._stateSinceMs {return false}
         return true
       }

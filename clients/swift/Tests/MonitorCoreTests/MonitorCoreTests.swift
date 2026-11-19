@@ -561,6 +561,22 @@ final class MonitorCoreTests: XCTestCase {
         if case .setLimit(let l)? = sent[5].body { XCTAssertEqual(l.units, 1, "the stepper never asks for zero compiles") } else { XCTFail() }
     }
 
+    func testSkipAllTestingSendsAnAllTestsSkipTrackedAsItsOwnAction() {
+        let m = MonitorModel()
+        var sent: [Mason_V1_Command] = []
+        m.sender = { sent.append($0) }
+        m.makeTestImmune(7)
+        XCTAssertEqual(sent.count, 1)
+        if case .skip(let s)? = sent[0].body {
+            XCTAssertEqual(s.task, 7)
+            if case .allTests(let all)? = s.scope { XCTAssertTrue(all) } else { XCTFail("not an all-tests skip") }
+        } else { XCTFail() }
+        XCTAssertEqual(PendingCommand.describe(sent[0])?.action, "skip_all_tests")
+        var step = Mason_V1_Command()
+        step.skip = .with { $0.task = 7; $0.step = "test" }
+        XCTAssertEqual(PendingCommand.describe(step)?.action, "skip_test")
+    }
+
     func testTheCpuGateStepperSendsASetGateAndStaysWithinTenToAHundred() {
         let m = MonitorModel()
         var sent: [Mason_V1_Command] = []
