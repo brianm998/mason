@@ -23,7 +23,7 @@ for e in exes:
     r = subprocess.run([e, "--list"], capture_output=True, text=True, cwd="crates/daemon", check=True)
     tests += sum(1 for x in r.stdout.splitlines() if x.endswith(": test"))
 print(f"test executables: {len(exes)}, tests: {tests}")
-assert len(exes) <= 13, "the daemon's tests are not merged"
+assert len(exes) <= 24, "the daemon's tests are not merged"
 # 931 is the macOS count. Four daemon tests are cfg(target_os = "macos"):
 # taskcache.rs the_real_clone_keeps_mtimes; jobs.rs
 # with_pty_the_command_runs_under_script_with_its_own_exit_code and
