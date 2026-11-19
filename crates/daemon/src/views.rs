@@ -1970,7 +1970,7 @@ mod index_tests {
 /// What the owner may do to a batch (or a task in it): Land now, while it runs and has not
 /// started promoting.
 fn batch_actions(phase: &str, running: bool) -> Vec<String> {
-    if running && matches!(phase, "forming" | "merged" | "verifying" | "red") {
+    if running && matches!(phase, "forming" | "merged" | "verifying") {
         vec!["land_now".into()]
     } else {
         vec![]
