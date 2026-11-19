@@ -831,9 +831,7 @@ fn form_and_start(
             // Land now (also when pressed while the task was in a batch that did not land it)
             // gets a batch of its own without waiting for the window, but not past a freeze.
             Some("now" | crate::suites::LAND_NOW_RUNNING)
-                if freeze
-                    .as_ref()
-                    .is_none_or(|f| f.fix_task == Some(w.task.0)) =>
+                if freeze.as_ref().is_none_or(|f| f.fix_task == Some(w.task.0)) =>
             {
                 singles.push((w.clone(), "now".to_string()))
             }
