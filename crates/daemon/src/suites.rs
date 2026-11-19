@@ -810,9 +810,6 @@ impl Members {
         if let Some(why) = self.forced(d) {
             return Some(why);
         }
-        if let Some(why) = self.land_now(d) {
-            return Some(why);
-        }
         let debts: Option<Vec<u64>> = self
             .tasks
             .iter()
@@ -821,6 +818,12 @@ impl Members {
         debts
             .and_then(|v| v.first().copied())
             .map(|id| format!("skipped by the owner (debt #{id})"))
+    }
+
+    /// As [`Members::stop`], and Land now stops the run too. The builds of the batch's floor
+    /// are not stopped by it (`stop` only): what lands must still build.
+    pub fn stop_running(&self, d: &Daemon, suite: &str) -> Option<String> {
+        self.stop(d, suite).or_else(|| self.land_now(d))
     }
 }
 
@@ -882,7 +885,7 @@ impl Who {
         Arc::new(move || {
             let Some((t, run)) = task else {
                 // A batch's run: stopped by what the owner did to its members.
-                return if members.stop(&d, &suite).is_some() {
+                return if members.stop_running(&d, &suite).is_some() {
                     Stop::Skipped
                 } else {
                     Stop::No
@@ -3961,7 +3964,7 @@ pub fn run_over(
                 outcome: SuiteOutcome::Skipped,
                 notes,
                 ..
-            } => out.notes.push(match members.stop(d, name) {
+            } => out.notes.push(match members.stop_running(d, name) {
                 Some(why) => {
                     if members.land_now(d).is_some() {
                         members.note_stopped(&format!("suite:{name}"));

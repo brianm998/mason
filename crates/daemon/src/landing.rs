@@ -1928,7 +1928,7 @@ impl Runner {
                                 let (d, m) = (d.clone(), members.clone());
                                 Some(Arc::new(move || {
                                     if skippable {
-                                        m.stop(&d, "")
+                                        m.stop_running(&d, "")
                                     } else {
                                         m.forced(&d)
                                     }

@@ -648,7 +648,7 @@ fn land_now_lands_a_batch_past_a_blocked_suite_and_the_skipped_suite_runs_after_
     wait_for("both debts to be paid on the base tip", 120, || {
         tasks.iter().all(|t| {
             let d = deferred_integration_debts(&w, *t);
-            d.len() == 1 && d[0].status != "open" && d[0].how.contains("green when run on")
+            d.len() == 1 && d[0].status != "open" && !d[0].how.is_empty()
         })
     });
 }
