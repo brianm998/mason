@@ -392,7 +392,8 @@ mod tests {
         assert_eq!(
             p.rerun,
             vec![
-                "-p a --doc --test two".to_string(),
+                "-p a --test two".to_string(),
+                "-p a --doc".to_string(),
                 "-p b-x --bins".to_string()
             ]
         );
@@ -400,7 +401,8 @@ mod tests {
         assert!(!p.reused.contains("two::t"), "the cut-off one runs whole");
         assert_eq!(p.note(), "lost host after 2 of 5 executables; reran 3");
         let cmd = command("cargo test {tests_for_change}", &p);
-        assert!(cmd.contains("cargo test -p a --doc --test two"), "{cmd}");
+        assert!(cmd.contains("cargo test -p a --test two"), "{cmd}");
+        assert!(cmd.contains("cargo test -p a --doc"), "{cmd}");
         assert!(cmd.contains("cargo test -p b-x --bins"), "{cmd}");
     }
 
