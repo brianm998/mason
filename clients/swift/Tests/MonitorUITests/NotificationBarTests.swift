@@ -12,7 +12,6 @@ import XCTest
 /// row has a dismiss X; a button brings dismissed rows back. Offscreen only: no window.
 @MainActor
 final class NotificationBarTests: XCTestCase {
-    private var windows: [NSWindow] = []
     private func model(rows: Int, text: (Int) -> String = { "Notification number \($0)" }) -> MonitorModel {
         let m = MonitorModel()
         m.connected = true
@@ -28,15 +27,15 @@ final class NotificationBarTests: XCTestCase {
         return m
     }
 
+    /// The frames the bar reported, by id.
+    private var probed: [String: CGRect] = [:]
+
     private func laidOut(_ m: MonitorModel, width: CGFloat = 600) -> NSHostingView<AnyView> {
+        probed = [:]
         let view = NSHostingView(rootView: AnyView(
-            BannersView(model: m, windowHeight: 2000).environment(\.theme, Theme(dark: false, scale: 1))))
+            BannersView(model: m, windowHeight: 2000, onProbe: { [self] in probed = $0 })
+                .environment(\.theme, Theme(dark: false, scale: 1))))
         view.frame = CGRect(x: 0, y: 0, width: width, height: 2000)
-        // A window that is never shown gives the view an accessibility tree; nothing reaches the screen.
-        let window = NSWindow(contentRect: view.frame, styleMask: [.borderless], backing: .buffered, defer: true)
-        window.isReleasedWhenClosed = false
-        window.contentView = view
-        windows.append(window)
         // Row heights arrive as preferences, so lay out until they have been applied.
         for _ in 0..<5 {
             view.layoutSubtreeIfNeeded()
@@ -45,35 +44,9 @@ final class NotificationBarTests: XCTestCase {
         return view
     }
 
-    private func height(_ view: NSHostingView<AnyView>, width: CGFloat = 600) -> CGFloat {
-        view.fittingSize.height
-    }
+    private func height(_ view: NSHostingView<AnyView>) -> CGFloat { view.fittingSize.height }
 
-    private func children(_ obj: NSObject) -> [Any] {
-        guard let p = obj as? NSAccessibilityProtocol else { return [] }
-        let c: [Any]? = p.accessibilityChildren()
-        return c ?? []
-    }
-
-    private func identifier(_ obj: NSObject) -> String? {
-        guard let p = obj as? NSAccessibilityProtocol else { return nil }
-        return p.accessibilityIdentifier()
-    }
-
-    private func elements(_ root: Any) -> [NSObject] {
-        var out: [NSObject] = []
-        func walk(_ e: Any) {
-            guard let obj = e as? NSObject else { return }
-            out.append(obj)
-            for c in children(obj) { walk(c) }
-        }
-        walk(root)
-        return out
-    }
-
-    private func identifiers(_ view: NSView) -> Set<String> {
-        Set(elements(view).compactMap { identifier($0) })
-    }
+    private func identifiers(_ view: NSView) -> Set<String> { Set(probed.keys) }
 
     func testTenRowsAreAsTallAsThreePlusTheHandle() {
         let three = height(laidOut(model(rows: 3)))
@@ -103,13 +76,9 @@ final class NotificationBarTests: XCTestCase {
         XCTAssertFalse(identifiers(laidOut(m)).contains("show-hidden-notifications"))
         m.dismissNotification(m.notificationRows()[1].key)
         let view = laidOut(m)
-        let all = elements(view)
-        func frame(_ id: String) -> CGRect? {
-            all.first { identifier($0) == id }
-                .flatMap { ($0 as? NSAccessibilityProtocol)?.accessibilityFrame() }
-        }
-        guard let button = frame("show-hidden-notifications"), let text = frame("banner:0-text") else {
-            return XCTFail("button or top row text not found")
+        _ = view
+        guard let button = probed["show-hidden-notifications"], let text = probed["banner:0-text"] else {
+            return XCTFail("button or top row text not found: \(probed.keys.sorted())")
         }
         XCTAssertLessThanOrEqual(text.maxX, button.minX + 0.5)
     }

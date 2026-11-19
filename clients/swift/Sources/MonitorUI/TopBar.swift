@@ -144,11 +144,25 @@ private struct ButtonWidth: PreferenceKey {
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
 }
 
+/// Where the parts of the bar are, by accessibility id, for tests that render it offscreen.
+private struct Probe: PreferenceKey {
+    static var defaultValue: [String: CGRect] = [:]
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) { value.merge(nextValue()) { $1 } }
+}
+
+private extension View {
+    func probe(_ id: String) -> some View {
+        background(GeometryReader { g in Color.clear.preference(key: Probe.self, value: [id: g.frame(in: .global)]) })
+    }
+}
+
 struct BannersView: View {
     @Environment(\.theme) var theme
     let model: MonitorModel
     /// The window's height, for the cap on the scrolling bar.
     var windowHeight: CGFloat = 800
+    /// Called with the frames of the bar's parts (tests only).
+    var onProbe: (([String: CGRect]) -> Void)?
     @State private var heights: [String: CGFloat] = [:]
     @State private var buttonWidth: CGFloat = 0
     @State private var dragStart: CGFloat?
@@ -190,6 +204,7 @@ struct BannersView: View {
                         ScrollView(.vertical) { stack(rows, hidden: hidden) }
                             .frame(height: scrollHeight(rows))
                             .accessibilityIdentifier("notifications-scroll")
+                            .probe("notifications-scroll")
                         resizeHandle(rows)
                     }
                 } else {
@@ -204,10 +219,12 @@ struct BannersView: View {
                     .fixedSize()
                     .background(GeometryReader { Color.clear.preference(key: ButtonWidth.self, value: $0.size.width) })
                     .accessibilityIdentifier("show-hidden-notifications")
+                    .probe("show-hidden-notifications")
             }
         }
         .onPreferenceChange(RowHeights.self) { heights = $0 }
         .onPreferenceChange(ButtonWidth.self) { buttonWidth = $0 }
+        .onPreferenceChange(Probe.self) { onProbe?($0) }
     }
 
     private func stack(_ rows: [NotificationRow], hidden: Int) -> some View {
@@ -245,6 +262,7 @@ struct BannersView: View {
                 }
             }
             .accessibilityIdentifier("notifications-resize")
+            .probe("notifications-resize")
     }
 
     private func set(height: CGFloat, rows: [NotificationRow]) {
@@ -263,6 +281,7 @@ struct BannersView: View {
                 .touchTarget().hint("Dismiss")
                 .accessibilityLabel("Dismiss")
                 .accessibilityIdentifier("dismiss:\(row.key)")
+                .probe("dismiss:\(row.key)")
         }
         .padding(.leading, theme.spacingLarge).padding(.trailing, theme.spacingLarge + inset)
         .padding(.vertical, pending ? theme.spacingSmall : theme.spacing)
@@ -287,6 +306,7 @@ struct BannersView: View {
             bannerImage(row.daemonKind.flatMap { BannerIcons.id(forDaemonKind: $0) } ?? row.icon)
             Text(row.text).font(theme.body(.medium)).frame(maxWidth: .infinity, alignment: .leading)
                 .accessibilityIdentifier(row.uiID + "-text")
+                .probe(row.uiID + "-text")
             if let button = row.button { Button(button) { press(row) }.accessibilityIdentifier(row.uiID) }
         }
         .accessibilityIdentifier(row.button == nil ? row.uiID : row.uiID + "-banner")
@@ -341,6 +361,7 @@ struct BannersView: View {
                 .touchTarget().hint("Collapse")
                 .accessibilityLabel("Collapse")
                 .accessibilityIdentifier("collapse-pause:\(index)")
+                .probe("collapse-pause:\(index)")
         }
         .accessibilityIdentifier("banner:\(index)")
     }
