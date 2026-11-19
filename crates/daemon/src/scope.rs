@@ -175,7 +175,8 @@ pub fn narrow_for(wt: &Path, paths: &[String], tests: bool, smoke: bool) -> Opti
     if !tests {
         return changed_packages(wt, paths).map(Narrow::Packages);
     }
-    if paths.is_empty() {
+    // No path left for this suite (docs and client files only) runs the smoke set alone.
+    if paths.is_empty() && !smoke {
         return None;
     }
     let out = std::process::Command::new("cargo")
@@ -297,6 +298,30 @@ mod tests {
         );
         assert_eq!(pick(&d, &["docs/only.md"]), None);
         assert_eq!(pick(&d, &[]), None);
+    }
+
+    #[test]
+    fn no_path_left_runs_the_smoke_set_alone_and_only_with_smoke() {
+        let d = fixture();
+        write(&d.path().join(SMOKE_FILE), "-p mason-core --lib\n");
+        for args in [&["init", "-q"][..], &["add", "-A"]] {
+            let ok = std::process::Command::new("git")
+                .args(args)
+                .current_dir(d.path())
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok);
+        }
+        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let smoke = Some(Narrow::Targets(vec!["-p mason-core --lib".to_string()]));
+        // Client files are dropped before this, so docs and exit scripts are all that is left.
+        let docs = v(&["docs/stages/s1.md", "scripts/exit/s1.sh"]);
+        assert_eq!(narrow_for(d.path(), &docs, true, true), smoke);
+        assert_eq!(narrow_for(d.path(), &v(&[SMOKE_FILE]), true, true), smoke);
+        assert_eq!(narrow_for(d.path(), &[], true, true), smoke);
+        assert_eq!(narrow_for(d.path(), &[], true, false), None);
+        assert_eq!(narrow_for(d.path(), &v(&["Makefile"]), true, true), None);
     }
 
     #[test]

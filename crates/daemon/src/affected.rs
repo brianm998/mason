@@ -127,7 +127,10 @@ pub fn packages(meta: &Value, root: &Path) -> Option<Vec<Pkg>> {
 /// `exit-scripts` suite runs those). Decision 0173 kept the cargo suite for docs-only changes;
 /// decision 0539 replaces that with the smoke set here and the whole run at the batch.
 fn ignorable(path: &str) -> bool {
-    path.starts_with("docs/") || path.ends_with(".md") || path.starts_with("scripts/exit/")
+    path.starts_with("docs/")
+        || path.ends_with(".md")
+        || path.starts_with("scripts/exit/")
+        || path == crate::scope::SMOKE_FILE
 }
 
 /// Does a change touch only paths no cargo test of ours reads ([`ignorable`])? Empty: no.
@@ -539,6 +542,18 @@ mod tests {
         ] {
             assert_eq!(fx.pick(&[p]), Pick::All, "{p}");
         }
+    }
+
+    #[test]
+    fn the_smoke_file_alone_selects_nothing_of_its_own_and_makefile_runs_whole() {
+        let fx = Fx::new();
+        assert_eq!(
+            fx.pick(&[".mason/smoke-tests.txt"]),
+            Pick::Some(BTreeMap::new())
+        );
+        assert!(reads_none(&[".mason/smoke-tests.txt".to_string()]));
+        assert_eq!(fx.pick(&["Makefile"]), Pick::All);
+        assert_eq!(fx.pick(&["Cargo.toml"]), Pick::All);
     }
 
     #[test]
