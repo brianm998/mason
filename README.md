@@ -524,6 +524,12 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s634**: The cargo-workspace suite now runs libtest with `--report-time`, the regex parser reads each test's `<N.NNNs>` time, the store keeps the last 10 times per test, and `mason report` lists the 20 slowest tests with their share of the suite.
 - **s635**: The landing queue's items and running batches have a Land now button (Swift macOS/iPad/iPhone, Compose desktop/Android) that stops a running batch's remaining local suites and CI wait, keeps the freeze and the build floor, lands every member, and records what it stopped as deferred debts that run on the base after the merge.
 - **s636**: The hold-across-a-kill test waits for the stored rate-limit window to pass before asserting the account is "ok".
+- **s637**: The red CI/monitor-compose run 44453947626 names no failing step in the supplied log tail (only post-job Gradle cache cleanup), so no code changed and decision 0630 records how to classify it from the full log.
+- **s638**: Gate the daemon tests' flock slot support behind cfg(unix) so `cargo build --workspace --all-targets` compiles on Windows.
 - **s639**: the open_session tests in crates/cli retry a 127 spawn failure when the fake provider never ran, which removes the likely ETXTBSY flake behind s320 on the Linux shard.
 - **s640**: The s11, s23 and s426 exit gates now use medians of ten runs and condition waits instead of single wall-clock samples, with the 250 ms and 100 ms targets unchanged.
+- **s641**: The s597 exit test no longer contains the literal `--test limits`, so s576's stale-target guard stops matching it and s576 reaches its cargo tests.
+- **s642**: The test's own fetch and worktree removal retry when they lose a race with the daemon's background git work, and its `on_main` reads wait for the push to show; no assertion changed.
+- **s643**: The skipped-batch fast-tier tests now form their batch by `max_size = 2` with a 20m window and create skip debts before admission, so a slow machine can no longer split the pair.
+- **s644**: `sched::tests::ten_compiles_behind_a_waiting_exclusive_lease_all_name_it` compares task ids on the wait view instead of searching a Debug string that holds epoch-millisecond timestamps.
 <!-- status:end -->
