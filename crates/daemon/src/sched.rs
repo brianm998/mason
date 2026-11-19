@@ -490,7 +490,7 @@ pub struct WaitAlert {
 const KERNEL_WAIT_SAYS_AFTER: Duration = Duration::from_secs(60);
 
 /// Per waiting task: its holders' grant times and the waiting count of its class.
-type WaitHolders = BTreeMap<TaskId, (Vec<u64>, u32, u32)>;
+pub type WaitHolders = BTreeMap<TaskId, (Vec<u64>, u32, u32)>;
 
 struct DiskCfg {
     source: Arc<dyn DiskSource>,
