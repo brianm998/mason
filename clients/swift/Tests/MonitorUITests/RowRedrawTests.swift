@@ -57,10 +57,17 @@ final class RowRedrawTests: XCTestCase {
         return p
     }
 
+    private var hostWindows: [NSWindow] = []
+
     private func host(_ m: MonitorModel) -> NSHostingView<AnyView> {
         let h = NSHostingView(rootView: AnyView(
             SidebarPane(model: m, width: 360).environment(\.theme, Theme(dark: false, scale: 1))))
         h.frame = NSRect(x: 0, y: 0, width: 360, height: 20_000)
+        // A window that is never ordered in: a window-less host evaluates no bodies on the CI runner.
+        let w = NSWindow(contentRect: h.frame, styleMask: [.titled], backing: .buffered, defer: true)
+        w.isReleasedWhenClosed = false
+        w.contentView = h
+        hostWindows.append(w)
         h.layoutSubtreeIfNeeded()
         return h
     }
