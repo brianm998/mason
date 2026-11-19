@@ -516,5 +516,6 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s626**: The s121/s132 exit scripts use the icon's asset-catalog path and s475's 931-test gate is platform-aware (927 on non-macOS), turning CI/exit-scripts green on Linux.
 - **s627**: The red CI/monitor-compose run 44399898483 could not be classified because the supplied log tail is only post-job Gradle cache cleanup; no code changed and the decision (0620) records what to read in the full log.
 - **s628**: The mason-adapters codex and conformance tests make scratch directories through a shared helper that uses `/tmp` on Unix and the platform temp dir on Windows, so CI/windows passes again.
+- **s629**: s451 and s572 now skip their gradle runs under MASON_SKIP_COMPOSE, and s469-real is listed in docs/real-checks.md with a RESULT line, so s299 and s450 pass on the Linux shard.
 - **s630**: The s602 exit test now clears `MASON_EXIT_SHARD` before running its scratch runner, so it no longer fails with "expected exit 1, got 0" on CI shard 4/6; s630 checks it under that shard.
 <!-- status:end -->
