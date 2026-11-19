@@ -38,7 +38,8 @@ pub fn parse_log(log: &str) -> Vec<(String, u64)> {
     for line in log.lines() {
         if let Some(k) = exe_key(line) {
             current = Some(k);
-        } else if let (Some(ms), Some(k)) = (finished_ms(line), current.take()) {
+        } else if let Some(ms) = finished_ms(line) {
+            let Some(k) = current.take() else { continue };
             match out.iter_mut().find(|(n, _)| *n == k) {
                 Some(e) => e.1 += ms,
                 None => out.push((k, ms)),
