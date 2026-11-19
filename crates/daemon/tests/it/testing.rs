@@ -376,16 +376,12 @@ fn a_force_skip_stops_a_running_suite_keeps_green_lanes_and_records_a_debt() {
                 })
                 .unwrap_or(false)
     });
-    let started = std::time::Instant::now();
     let debt = mason_daemon::suites::skip(&d, t, "suite:slow", "not worth a minute", "brian", true)
         .unwrap();
     // Remove the flag so the deferred run, after landing, is quick.
     std::fs::remove_file(&flag).unwrap();
-    wait_state(&d, t, State::Landed, 60);
-    assert!(
-        started.elapsed() < Duration::from_secs(40),
-        "the running suite was stopped"
-    );
+    // The suite sleeps 60 s; landing within this wait means it was stopped, not waited out.
+    wait_state(&d, t, State::Landed, 50);
     let (v, note) = closing(&d, t);
     assert_eq!(v, "unverified", "{note}");
     assert!(
