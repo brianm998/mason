@@ -21,6 +21,7 @@ extension MonitorModel {
         case "landing": return "Landing queue"
         case "queued": return "Queued"
         case "cpu": return "CPU"
+        case "disk": return "Disk"
         case "compilation": return "Compilation"
         case "exploring": return "Exploring"
         case "developing": return "Developing"

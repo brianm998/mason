@@ -3864,7 +3864,7 @@ mod reuse_tests {
     }
 
     fn git_in(dir: &Path, args: &[&str]) -> String {
-        let out = std::process::Command::new("git")
+        let out = mason_landing::git::command()
             .args([
                 "-c",
                 "user.name=t",

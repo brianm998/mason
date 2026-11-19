@@ -488,15 +488,18 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s577**: The s553 exit test named a deleted `base_red` test target and failed CI/exit-scripts; it now runs `--test it a_skip_with_no_step_name`.
 - **s579**: The fixsync test for a merge in progress now runs its conflicting merge with an identity and no editor or prompt, and asserts MERGE_HEAD and an unmerged entry exist before calling sync, reporting the merge's output if the setup fails.
 - **s580**: The daemon tests' orphan sweep is now compiled only on unix, with a no-op elsewhere, so the Windows `--all-targets` build no longer fails on the `nix` crate.
+- **s582**: Daemon test worlds are capped across every process on the machine by flock lock files, and git is resolved once per process to the real binary instead of the xcrun shim.
 - **s583**: The ci_cancels_superseded_runs test now asserts the current `cancel-in-progress: ${{ github.ref != 'refs/heads/develop' }}` rule, so CI/test on develop is green again.
 - **s584**: The smoke list named the crate `mason`, which is now `mason-pipeline`, so every cargo-workspace run failed before a test ran; it now names `mason-pipeline`, and an exit script checks each `-p` name in the smoke list against the workspace.
 - **s585**: `testImagesAreBuiltOnceAndThenServedFromTheCache` empties the shared mascot cache first, so it no longer fails when an earlier test has already built `icon:queued@24`.
 - **s589**: A command that runs under a step host and holds slots is counted as holding them by the next daemon (read from the host's own directory before the first grant), so a restart can no longer let the queue grant the same slots again.
+- **s591**: The macOS and iOS monitors show Home's Disk section (free space per volume over time, span picker, hover or tap tip, legend with a show/hide checkbox per volume when there are several) to the right of the CPU section at about 3:2, stacked below it on a narrow width, matching the Compose client.
 - **s593**: s551's exit script now runs its test in the merged `it` binary instead of the retired `ci_watch` target.
 - **s596**: s12.sh step 1 now captures `swift test` output to a file and checks its exit status, instead of `grep | head -1` under pipefail.
 - **s597**: Exit scripts s476, s484 and s502 now name daemon tests where they live (the `it` test binary's apns and limits modules, and tests/it/testing.rs), so ubuntu exit-scripts shard 3 can pass.
 - **s598**: scripts/exit/s13.sh no longer hides Gradle's exit status and prints each failing Compose testcase, and the Compose connection tests wait on signals from their fake sockets instead of sleeping against a deadline.
 - **s599**: The smoke list now runs `-p mason-daemon --test it` instead of the missing `landing_floor` target, and an exit test checks that every `--test` name in the list is a real target.
+- **s601**: Two daemon integration tests no longer fail on CI by reading another test's step-host launch or a non-paused announcement.
 - **s602**: `run-exit-scripts.sh` ends with a `FAILED scripts: ...` line naming every failing script, and `s585.sh` prints `s585: ok` when it skips.
 - **s603**: The notify claim test counts only `paused` announcements and prints the claim on failure, so other alerts in a whole-workspace run no longer turn it red.
 - **s605**: `scripts/exit/s576.sh` now puts `--exclude` before `--`, so grep no longer reports a missing file `--exclude=s576.sh` and the self-exclusion applies; `s605.sh` guards the whole class.
