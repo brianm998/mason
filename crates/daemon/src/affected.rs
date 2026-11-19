@@ -344,29 +344,34 @@ pub fn select(
     Pick::Some(out)
 }
 
-/// `-p pkg --lib --bins --doc --test a --test b` for each package, in name order.
+/// `-p pkg --lib --bins --test a --test b` for each package, in name order. Doc tests go in a
+/// group of their own (`-p pkg --doc`): cargo refuses "--doc" next to any other target selector
+/// ("can't mix --doc with other target selecting options").
 pub fn render(groups: &BTreeMap<String, Group>) -> Vec<String> {
-    groups
-        .iter()
-        .filter_map(|(name, g)| {
-            let mut s = format!("-p {name}");
-            if !g.whole {
-                if !(g.lib || g.bins || g.doc || !g.tests.is_empty()) {
-                    return None;
-                }
-                for (on, flag) in [(g.lib, "--lib"), (g.bins, "--bins"), (g.doc, "--doc")] {
-                    if on {
-                        s.push(' ');
-                        s.push_str(flag);
-                    }
-                }
-                for t in &g.tests {
-                    s.push_str(&format!(" --test {t}"));
+    let mut out = vec![];
+    for (name, g) in groups {
+        let mut s = format!("-p {name}");
+        if g.whole {
+            out.push(s);
+            continue;
+        }
+        if g.lib || g.bins || !g.tests.is_empty() {
+            for (on, flag) in [(g.lib, "--lib"), (g.bins, "--bins")] {
+                if on {
+                    s.push(' ');
+                    s.push_str(flag);
                 }
             }
-            Some(s)
-        })
-        .collect()
+            for t in &g.tests {
+                s.push_str(&format!(" --test {t}"));
+            }
+            out.push(s);
+        }
+        if g.doc {
+            out.push(format!("-p {name} --doc"));
+        }
+    }
+    out
 }
 
 /// Add the lines of a smoke file (`-p pkg --test name`, `#` comments) to `groups`. A line this
@@ -594,6 +599,27 @@ mod tests {
         );
         assert_eq!(render(&g), vec!["-p leaf --test own", "-p top --lib"]);
         assert_eq!(raw, vec!["--workspace"]);
+    }
+
+    #[test]
+    fn doc_tests_render_in_their_own_group() {
+        let mut g = BTreeMap::new();
+        let raw = add_smoke(&mut g, "-p top --test x --doc\n-p leaf --lib --doc\n");
+        assert!(raw.is_empty());
+        assert_eq!(
+            render(&g),
+            vec!["-p leaf --lib", "-p leaf --doc", "-p top --test x", "-p top --doc"]
+        );
+        let mut d = BTreeMap::new();
+        add_smoke(&mut d, "-p a --doc\n");
+        assert_eq!(render(&d), vec!["-p a --doc"]);
+        for line in render(&g).iter().chain(render(&d).iter()) {
+            assert!(
+                !(line.contains("--doc")
+                    && (line.contains("--lib") || line.contains("--bins") || line.contains("--test"))),
+                "{line}"
+            );
+        }
     }
 
     #[test]
