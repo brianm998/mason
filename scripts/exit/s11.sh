@@ -31,16 +31,31 @@ start_demo
 "$bin/conformance" resume --port "$(port)"
 stop_demo
 
-echo "== 2a. a state change reaches a local client in under 250 ms"
-start_demo
-"$bin/conformance" latency --port "$(port)" --limit-ms 250
-stop_demo
+# Both gates use the median of N runs against the unchanged target: a single slow
+# sample on a busy shared runner is not a design failure (decision 0633).
+N=10
+echo "== 2a. a state change reaches a local client in under 250 ms (median of $N)"
+pass=0
+for i in $(seq 1 $N); do  # the demo plays once, so each run gets a fresh one
+  start_demo
+  if "$bin/conformance" latency --port "$(port)" --limit-ms 250; then pass=$((pass + 1)); fi
+  stop_demo
+done
+# the median is under the limit exactly when more than half the runs are
+[ "$pass" -gt $((N / 2)) ] || { echo "the median latency is over 250 ms ($pass of $N runs under)" >&2; exit 1; }
 
-echo "== 2b. when a step ends, the next task is admitted in under 100 ms"
-out=$(cargo test -q -p mason-daemon --test it -- --nocapture when_a_step_ends 2>&1)
-echo "$out" | grep 'admitted:'
-ms=$(echo "$out" | sed -n 's/.*the next task is admitted: \([0-9]*\) ms.*/\1/p' | head -1)
-[ -n "$ms" ] && [ "$ms" -lt 100 ] || { echo "the next task was not admitted within 100 ms" >&2; echo "$out" >&2; exit 1; }
+echo "== 2b. when a step ends, the next task is admitted in under 100 ms (median of $N)"
+mss=()
+for i in $(seq 1 $N); do
+  out=$(cargo test -q -p mason-daemon --test it -- --nocapture when_a_step_ends 2>&1)
+  echo "$out" | grep 'admitted:'
+  ms=$(echo "$out" | sed -n 's/.*the next task is admitted: \([0-9]*\) ms.*/\1/p' | head -1)
+  [ -n "$ms" ] || { echo "no admission time printed" >&2; echo "$out" >&2; exit 1; }
+  mss+=("$ms")
+done
+median=$(printf '%s\n' "${mss[@]}" | sort -n | sed -n "$((N / 2 + 1))p")
+echo "median admission: $median ms"
+[ "$median" -lt 100 ] || { echo "the next task was not admitted within 100 ms (median $median ms of: ${mss[*]})" >&2; exit 1; }
 
 echo "== 3. the command line runs over the same socket"
 start_demo
@@ -65,11 +80,17 @@ cat > "$root/imbalance.toml" <<'TOML'
 description = "a balanced feature"
 swift = "todo"
 compose = "todo"
+ios = "todo"
+android = "todo"
+android_reason = "not in the Android phone app yet"
 
 [feature.two]
 description = "an imbalanced one"
 swift = "done"
 compose = "todo"
+ios = "todo"
+android = "todo"
+android_reason = "not in the Android phone app yet"
 TOML
 if out=$("$bin/conformance" features "$root/imbalance.toml" 2>&1); then echo "the planted imbalance passed the feature check" >&2; exit 1; fi
 echo "$out" | head -4

@@ -513,13 +513,16 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s607**: Exit scripts s449, s484, s485, s486 and s508 ran `cargo test --test <module>` against test targets that were merged into the daemon's single `it` executable, so they failed on the Linux exit-scripts shard 4; they now name `--test it`.
 - **s611**: `scripts/exit/s580.sh` gets the missing SPDX-License-Identifier line, so the CI/lint SPDX check passes again.
 - **s612**: A waiter with holders is flagged stuck past max(wait_m, its queue position x the longest holder run), and the whole-queue bound moves to the aged-wait note.
+- **s616**: `affected::render` puts `--doc` in a group of its own, so no cargo invocation mixes `--doc` with `--lib`, `--bins` or `--test`.
 - **s626**: The s121/s132 exit scripts use the icon's asset-catalog path and s475's 931-test gate is platform-aware (927 on non-macOS), turning CI/exit-scripts green on Linux.
 - **s627**: The red CI/monitor-compose run 44399898483 could not be classified because the supplied log tail is only post-job Gradle cache cleanup; no code changed and the decision (0620) records what to read in the full log.
 - **s628**: The mason-adapters codex and conformance tests make scratch directories through a shared helper that uses `/tmp` on Unix and the platform temp dir on Windows, so CI/windows passes again.
 - **s629**: s451 and s572 now skip their gradle runs under MASON_SKIP_COMPOSE, and s469-real is listed in docs/real-checks.md with a RESULT line, so s299 and s450 pass on the Linux shard.
 - **s630**: The s602 exit test now clears `MASON_EXIT_SHARD` before running its scratch runner, so it no longer fails with "expected exit 1, got 0" on CI shard 4/6; s630 checks it under that shard.
+- **s632**: The per-task test step and `run_check` drop the changed paths the impact map sends only to other suites (`clients/swift/**`) before narrowing a suite, so a client-only change runs the smoke set instead of all cargo tests.
 - **s633**: when a cargo-workspace suite's host is lost, the fresh host runs only the test executables whose `test result:` line the lost run's log did not reach, and the verdict reads the finished blocks of the lost log plus the fresh output, so a red stays red and `min_tests` counts both.
 - **s635**: The landing queue's items and running batches have a Land now button (Swift macOS/iPad/iPhone, Compose desktop/Android) that stops a running batch's remaining local suites and CI wait, keeps the freeze and the build floor, lands every member, and records what it stopped as deferred debts that run on the base after the merge.
 - **s636**: The hold-across-a-kill test waits for the stored rate-limit window to pass before asserting the account is "ok".
 - **s639**: the open_session tests in crates/cli retry a 127 spawn failure when the fake provider never ran, which removes the likely ETXTBSY flake behind s320 on the Linux shard.
+- **s640**: The s11, s23 and s426 exit gates now use medians of ten runs and condition waits instead of single wall-clock samples, with the 250 ms and 100 ms targets unchanged.
 <!-- status:end -->

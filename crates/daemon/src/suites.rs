@@ -1218,6 +1218,43 @@ fn untouched_by(def: &Definition, suite: &Suite, paths: &[String]) -> bool {
     )
 }
 
+/// Split a change's `paths` for `suite`: those it may read, and those the impact map sends only
+/// to other suites (`clients/swift/**` goes only to `swift-clients`). A path the map does not
+/// name, or one under `.mason/`, stays with the suite. Narrowing then looks at the first list
+/// only, so a client-only change does not send a cargo suite to run whole (#616).
+pub(crate) fn split_for_suite(
+    def: &Definition,
+    suite: &Suite,
+    paths: &[String],
+) -> (Vec<String>, Vec<String>) {
+    paths
+        .iter()
+        .cloned()
+        .partition(|p| !untouched_by(def, suite, std::slice::from_ref(p)))
+}
+
+/// The dropped paths as a note: "clients/swift/** left out: the impact map sends it only to
+/// other suites". Empty when nothing was dropped.
+pub(crate) fn left_out_note(dropped: &[String]) -> String {
+    if dropped.is_empty() {
+        return String::new();
+    }
+    let mut dirs: Vec<String> = dropped
+        .iter()
+        .map(|p| match p.split('/').collect::<Vec<_>>().as_slice() {
+            [a, b, _, ..] => format!("{a}/{b}/**"),
+            _ => p.clone(),
+        })
+        .collect();
+    dirs.sort();
+    dirs.dedup();
+    format!(
+        "{} left out: the impact map sends {} only to other suites",
+        dirs.join(", "),
+        if dropped.len() == 1 { "it" } else { "them" }
+    )
+}
+
 /// The newest stored baseline of this suite at an ancestor of `base`, with the same
 /// definition hash, when nothing between the two touches the suite (s478).
 fn reusable_baseline(
@@ -2202,7 +2239,8 @@ fn narrow_for_step(c: &Ctx, suite: &Suite) -> Option<(Suite, String)> {
 /// list can be found. Like a test-unit narrowing, it records no evidence.
 fn narrow_packages_for_step(c: &Ctx, suite: &Suite) -> Option<(Suite, String)> {
     let dc = suite.dev_command.as_ref()?;
-    let paths = worktree_paths(&c.wt, &c.project.base_ref())?;
+    let all = worktree_paths(&c.wt, &c.project.base_ref())?;
+    let (paths, dropped) = split_for_suite(&c.def, suite, &all);
     // A `{tests_for_change}` command narrows to test targets and adds the smoke set (decision
     // 0539); a `{packages}` one to whole packages.
     let n = crate::scope::narrow_for(&c.wt, &paths, crate::scope::wants_tests(dc), true);
@@ -2222,10 +2260,16 @@ fn narrow_packages_for_step(c: &Ctx, suite: &Suite) -> Option<(Suite, String)> {
     }
     s.min_tests = 1;
     s.narrowed = true;
+    let left = left_out_note(&dropped);
     let note = format!(
-        "{}: narrowed to {}; the landing batch runs it whole",
+        "{}: narrowed to {}{}; the landing batch runs it whole",
         suite.name,
-        n.describe()
+        n.describe(),
+        if left.is_empty() {
+            String::new()
+        } else {
+            format!(" ({left})")
+        }
     );
     Some((s, note))
 }
@@ -4191,6 +4235,52 @@ mod reuse_tests {
             entries: vec![("crates/**".into(), vec!["cargo".into()])],
         };
         def
+    }
+
+    #[test]
+    fn paths_the_impact_map_sends_elsewhere_are_left_out_of_a_suite() {
+        let mut def = Definition::empty();
+        def.testing.impact = ImpactMap {
+            entries: vec![
+                ("crates/**".into(), vec!["cargo".into()]),
+                ("docs/**".into(), vec!["cargo".into()]),
+                (
+                    "scripts/exit/**".into(),
+                    vec!["cargo".into(), "exit".into()],
+                ),
+                ("clients/swift/**".into(), vec!["swift".into()]),
+            ],
+        };
+        let suite = Suite::new("cargo", "cargo test", ParserKind::Tap);
+        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let (kept, dropped) = split_for_suite(
+            &def,
+            &suite,
+            &v(&[
+                "clients/swift/A.swift",
+                "docs/stages/s1.md",
+                "scripts/exit/s1.sh",
+                "Makefile",
+                ".mason/smoke-tests.txt",
+                "crates/store/src/lib.rs",
+            ]),
+        );
+        assert_eq!(
+            kept,
+            v(&[
+                "docs/stages/s1.md",
+                "scripts/exit/s1.sh",
+                "Makefile",
+                ".mason/smoke-tests.txt",
+                "crates/store/src/lib.rs"
+            ])
+        );
+        assert_eq!(dropped, v(&["clients/swift/A.swift"]));
+        assert_eq!(
+            left_out_note(&dropped),
+            "clients/swift/** left out: the impact map sends it only to other suites"
+        );
+        assert_eq!(left_out_note(&[]), "");
     }
 
     fn git_in(dir: &Path, args: &[&str]) -> String {
