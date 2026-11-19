@@ -5,6 +5,27 @@ import mason.v1.*
 import kotlin.test.*
 
 class MonitorCoreTest {
+    @Test
+    fun timeInStateCountsFromStateSinceAndBodySearchTogglesRowBodies() {
+        val r = TaskRow(in_state_ms = 120_000, state_since_ms = 5_000_000)
+        val m = MonitorModel()
+        m.anchor(5_090_000, local = 1_000_000)
+        assertEquals(90_000, r.inState(m.daemonNow(1_000_000)))
+        assertEquals(0, r.inState(4_000_000))
+        assertEquals(120_000, r.copy(state_since_ms = 0).inState(9_000_000))
+        var subscribed = 0
+        m.subscribe = { subscribed += 1 }
+        m.search = m.search.copy(inBody = true)
+        assertEquals(0, subscribed)
+        m.search = m.search.copy(text = "x")
+        assertEquals(1, subscribed)
+        m.search = m.search.copy(text = "xy")
+        assertEquals(1, subscribed)
+        m.search = m.search.copy(inBody = false)
+        assertEquals(2, subscribed)
+        assertFalse(m.search.wantsRowBodies)
+    }
+
     // ---- fixtures ----
 
     private fun row(id: Long, state: String, title: String = "t", project: String = "web", body: String = "", actions: List<String> = emptyList()) =
