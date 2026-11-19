@@ -608,7 +608,12 @@ mod tests {
         assert!(raw.is_empty());
         assert_eq!(
             render(&g),
-            vec!["-p leaf --lib", "-p leaf --doc", "-p top --test x", "-p top --doc"]
+            vec![
+                "-p leaf --lib",
+                "-p leaf --doc",
+                "-p top --test x",
+                "-p top --doc"
+            ]
         );
         let mut d = BTreeMap::new();
         add_smoke(&mut d, "-p a --doc\n");
@@ -616,7 +621,9 @@ mod tests {
         for line in render(&g).iter().chain(render(&d).iter()) {
             assert!(
                 !(line.contains("--doc")
-                    && (line.contains("--lib") || line.contains("--bins") || line.contains("--test"))),
+                    && (line.contains("--lib")
+                        || line.contains("--bins")
+                        || line.contains("--test"))),
                 "{line}"
             );
         }
