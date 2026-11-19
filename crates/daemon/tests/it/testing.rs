@@ -382,7 +382,10 @@ fn a_force_skip_stops_a_running_suite_keeps_green_lanes_and_records_a_debt() {
     std::fs::remove_file(&flag).unwrap();
     // The suite sleeps 60 s; landing within this wait means it was stopped, not waited out.
     wait_state(&d, t, State::Landed, 50);
-    assert!(sleeping.exists(), "the slow suite was running when it was skipped");
+    assert!(
+        sleeping.exists(),
+        "the slow suite was running when it was skipped"
+    );
     let (v, note) = closing(&d, t);
     assert_eq!(v, "unverified", "{note}");
     assert!(
