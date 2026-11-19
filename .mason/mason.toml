@@ -58,11 +58,11 @@ next = "land"
 # point `command` and `dev_command` at `python3 -I scripts/test-parallel.py -- {project_test}` (and
 # `{packages}`) and set MASON_TEST_JOBS if the machine has headroom; decision 0243 says why it is off.
 [suite.cargo-workspace]
-build = "{project_test} --no-run"
+build = "RUSTC_BOOTSTRAP=1 {project_test} --no-run"
 # `RUSTC_BOOTSTRAP=1` lets stable libtest accept `--report-time`, so each result line ends in
-# `<1.234s>` (s634); it is set on the run only, never on the build step.
+# `<1.234s>` (s634); it is set on build, run and rerun alike, because cargo keys its rebuild fingerprint on it and a run that differs from its build recompiles the workspace.
 command = "RUSTC_BOOTSTRAP=1 {project_test} -- -Z unstable-options --report-time"
-rerun = "{project_test} -- --exact {tests}"
+rerun = "RUSTC_BOOTSTRAP=1 {project_test} -- --exact {tests}"
 # The affected tests, not the whole workspace (decision 0539, superseding 0205). `{tests_for_change}`
 # is the test targets a change can affect, found by a static source scan (crates/daemon/src/affected.rs):
 # a changed test file runs itself, a changed `src` file runs its crate's unit tests and the targets
@@ -72,7 +72,7 @@ rerun = "{project_test} -- --exact {tests}"
 # once per landing batch (`[[tier]] batch` in landing.toml).
 # `: {packages}` is a no-op that a daemon older than s546 needs to accept the key.
 dev_command = ": {packages}; RUSTC_BOOTSTRAP=1 {project_test} {tests_for_change} -- -Z unstable-options --report-time"
-dev_build = ": {packages}; {project_test} {tests_for_change} --no-run"
+dev_build = ": {packages}; RUSTC_BOOTSTRAP=1 {project_test} {tests_for_change} --no-run"
 narrow_packages = true
 parser = "regex"
 pass_regex = '^test (.+) \.\.\. ok(?: <[0-9.]+s>)?$'
