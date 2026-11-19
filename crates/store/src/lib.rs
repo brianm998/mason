@@ -1305,6 +1305,69 @@ impl Store {
         })
     }
 
+    /// Record how long each test of a finished run took (s634). The last [`TEST_TIME_RUNS`]
+    /// are kept per project, suite and test; `times` is `(test, ms)`.
+    pub fn record_test_times(
+        &self,
+        project: &str,
+        suite: &str,
+        times: &[(String, u64)],
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        if times.is_empty() {
+            return Ok(());
+        }
+        let (p, s, t) = (project.to_string(), suite.to_string(), times.to_vec());
+        self.write(move |c| {
+            let mut ins = c.prepare(
+                "INSERT INTO test_times(project, suite, test, ms, at_ms) VALUES (?1,?2,?3,?4,?5)",
+            )?;
+            for (name, ms) in &t {
+                ins.execute(params![p, s, name, *ms as i64, now_ms as i64])?;
+            }
+            c.execute(
+                "DELETE FROM test_times WHERE project = ?1 AND suite = ?2 AND rowid NOT IN \
+                 (SELECT rowid FROM (SELECT rowid, ROW_NUMBER() OVER \
+                   (PARTITION BY test ORDER BY at_ms DESC, rowid DESC) AS n \
+                   FROM test_times WHERE project = ?1 AND suite = ?2) WHERE n <= ?3)",
+                params![p, s, TEST_TIME_RUNS as i64],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// The tests with the longest median time over their recorded runs (s634), longest first,
+    /// at most `limit`. `project` narrows to one project. Each is
+    /// `(project, suite, test, median_ms, runs, suite_total_ms)`, the last being the sum of the
+    /// medians of every test of that suite (what the share is taken of).
+    pub fn slowest_tests(
+        &self,
+        project: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<SlowTest>, StoreError> {
+        let p = project.map(str::to_string);
+        self.read(move |c| {
+            let mut st = c.prepare(
+                "SELECT project, suite, test, ms FROM test_times \
+                 WHERE ?1 IS NULL OR project = ?1 ORDER BY project, suite, test, at_ms DESC",
+            )?;
+            let rows = st.query_map(params![p], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?.max(0) as u64,
+                ))
+            })?;
+            let mut by: std::collections::BTreeMap<(String, String, String), Vec<u64>> =
+                Default::default();
+            for row in rows.filter_map(Result::ok) {
+                by.entry((row.0, row.1, row.2)).or_default().push(row.3);
+            }
+            Ok(rank_slowest(by, limit))
+        })
+    }
+
     /// What a build or run of a suite is expected to take at most (s385): the longest of its
     /// last five, plus a quarter. `None` with fewer than two on record.
     pub fn suite_estimate(
@@ -3997,4 +4060,58 @@ fn marks_of(t: &str) -> std::collections::BTreeMap<String, u64> {
             Some((k.to_string(), v.parse().ok()?))
         })
         .collect()
+}
+
+/// How many runs of a test its time is kept for (s634).
+pub const TEST_TIME_RUNS: usize = 10;
+
+/// One entry of [`Store::slowest_tests`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SlowTest {
+    pub project: String,
+    pub suite: String,
+    pub test: String,
+    pub median_ms: u64,
+    pub runs: usize,
+    pub suite_total_ms: u64,
+}
+
+/// The median of the newest `TEST_TIME_RUNS` of `times` (newest first).
+pub fn test_median(times: &[u64]) -> u64 {
+    let mut v: Vec<u64> = times.iter().copied().take(TEST_TIME_RUNS).collect();
+    v.sort_unstable();
+    match v.len() {
+        0 => 0,
+        n if n % 2 == 1 => v[n / 2],
+        n => (v[n / 2 - 1] + v[n / 2]) / 2,
+    }
+}
+
+/// Rank tests (each with its times, newest first) by median, longest first, ties by name.
+pub fn rank_slowest(
+    by: std::collections::BTreeMap<(String, String, String), Vec<u64>>,
+    limit: usize,
+) -> Vec<SlowTest> {
+    let mut totals: std::collections::BTreeMap<(String, String), u64> = Default::default();
+    let mut all: Vec<SlowTest> = by
+        .into_iter()
+        .map(|((project, suite, test), t)| {
+            let median_ms = test_median(&t);
+            *totals.entry((project.clone(), suite.clone())).or_default() += median_ms;
+            SlowTest {
+                project,
+                suite,
+                test,
+                median_ms,
+                runs: t.len().min(TEST_TIME_RUNS),
+                suite_total_ms: 0,
+            }
+        })
+        .collect();
+    for t in &mut all {
+        t.suite_total_ms = totals[&(t.project.clone(), t.suite.clone())];
+    }
+    all.sort_by(|a, b| b.median_ms.cmp(&a.median_ms));
+    all.truncate(limit);
+    all
 }

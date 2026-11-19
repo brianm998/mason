@@ -59,7 +59,9 @@ next = "land"
 # `{packages}`) and set MASON_TEST_JOBS if the machine has headroom; decision 0243 says why it is off.
 [suite.cargo-workspace]
 build = "{project_test} --no-run"
-command = "{project_test}"
+# `RUSTC_BOOTSTRAP=1` lets stable libtest accept `--report-time`, so each result line ends in
+# `<1.234s>` (s634); it is set on the run only, never on the build step.
+command = "RUSTC_BOOTSTRAP=1 {project_test} -- -Z unstable-options --report-time"
 rerun = "{project_test} -- --exact {tests}"
 # The affected tests, not the whole workspace (decision 0539, superseding 0205). `{tests_for_change}`
 # is the test targets a change can affect, found by a static source scan (crates/daemon/src/affected.rs):
@@ -69,12 +71,12 @@ rerun = "{project_test} -- --exact {tests}"
 # runs it too, plus the smoke set in `.mason/smoke-tests.txt` (owner-edited). The whole suite runs
 # once per landing batch (`[[tier]] batch` in landing.toml).
 # `: {packages}` is a no-op that a daemon older than s546 needs to accept the key.
-dev_command = ": {packages}; {project_test} {tests_for_change}"
+dev_command = ": {packages}; RUSTC_BOOTSTRAP=1 {project_test} {tests_for_change} -- -Z unstable-options --report-time"
 dev_build = ": {packages}; {project_test} {tests_for_change} --no-run"
 narrow_packages = true
 parser = "regex"
-pass_regex = '^test (.+) \.\.\. ok$'
-fail_regex = '^test (.+) \.\.\. FAILED$'
+pass_regex = '^test (.+) \.\.\. ok(?: <[0-9.]+s>)?$'
+fail_regex = '^test (.+) \.\.\. FAILED(?: <[0-9.]+s>)?$'
 min_tests = 100
 level = "unit"
 uses = { test-suite = 1 }

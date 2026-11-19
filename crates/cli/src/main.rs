@@ -3661,6 +3661,19 @@ fn print_report(r: &serde_json::Value) {
         r["flaky"]["sightings"],
         r["open_debts"].as_array().map_or(0, Vec::len)
     );
+    let slow = r["slowest_tests"].as_array().cloned().unwrap_or_default();
+    if !slow.is_empty() {
+        println!("slowest tests (median of the last runs, share of the suite's tests):");
+        for t in &slow {
+            println!(
+                "  {:>8}  {:>5}%  {}::{}",
+                format!("{:.2}s", t["median_ms"].as_f64().unwrap_or(0.0) / 1000.0),
+                t["share_percent"],
+                t["suite"].as_str().unwrap_or(""),
+                t["test"].as_str().unwrap_or("")
+            );
+        }
+    }
 }
 
 /// The per-project numbers of the digest (s255): p90 beside the median, send-backs per landed

@@ -333,6 +333,20 @@ fn record_time(who: &Who, suite: &str, phase: &str, ran: &Ran) {
     }
 }
 
+/// Record each test's own time from a finished run, whole or narrowed (s634). Tests whose
+/// output carried no time are left out.
+fn record_test_times(who: &Who, suite: &str, results: &Results) {
+    let times: Vec<(String, u64)> = results
+        .cases
+        .iter()
+        .filter_map(|c| c.ms.map(|ms| (c.name.clone(), ms)))
+        .collect();
+    let _ = who
+        .d
+        .store
+        .record_test_times(&who.project, suite, &times, now_ms());
+}
+
 /// What a build or run of `suite` is expected to take at most, from its recorded times (s385).
 fn estimate(who: &Who, suite: &str, phase: &str) -> Option<u64> {
     who.d
@@ -1510,6 +1524,7 @@ fn run_suite(
             Stop::No => {}
         }
         let j = judge_ran_with(suite, &ran, cwd, who.plugin_parser(suite).as_deref());
+        record_test_times(who, &suite.name, &j.results);
         let out = |extra: &str| {
             format!(
                 "{extra}Last output of `{}`:\n{}",
