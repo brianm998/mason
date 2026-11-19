@@ -12,6 +12,8 @@ pub enum Status {
 pub struct Case {
     pub name: String,
     pub status: Status,
+    /// How long it took, when the parser could read that (libtest's `--report-time`).
+    pub ms: Option<u64>,
 }
 
 impl Case {
@@ -19,18 +21,21 @@ impl Case {
         Case {
             name: name.into(),
             status: Status::Pass,
+            ms: None,
         }
     }
     pub fn fail(name: impl Into<String>, why: impl Into<String>) -> Case {
         Case {
             name: name.into(),
             status: Status::Fail(why.into()),
+            ms: None,
         }
     }
     pub fn skip(name: impl Into<String>) -> Case {
         Case {
             name: name.into(),
             status: Status::Skip,
+            ms: None,
         }
     }
 }

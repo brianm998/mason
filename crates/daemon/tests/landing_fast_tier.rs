@@ -28,11 +28,10 @@ fn skip_testing(w: &W, t: TaskId) {
 #[test]
 fn a_skipped_batch_whose_merge_breaks_a_unit_test_is_parked_naming_that_test() {
     // Each change is fine alone; together (`joint.a` and `joint.b`) the fast tier is red.
-    let w = world_built_fast("window = \"2s\"\nmax_size = 5\n", &[], true);
-    let left = w.task("left", &[("x/joint.a", "1")]);
-    let right = w.task("right", &[("x/joint.b", "1")]);
-    skip_testing(&w, left);
-    skip_testing(&w, right);
+    // The batch forms when the second task is admitted (max_size), never on the timer.
+    let w = world_built_fast("window = \"20m\"\nmax_size = 2\n", &[], true);
+    let left = w.task_with("left", &[("x/joint.a", "1")], skip_testing);
+    let right = w.task_with("right", &[("x/joint.b", "1")], skip_testing);
     wait_for("both to go back", 120, || {
         w.sent_back(left).is_some() && w.sent_back(right).is_some()
     });
@@ -47,10 +46,13 @@ fn a_skipped_batch_whose_unit_tests_pass_lands_and_a_batch_with_testing_does_not
     let t = w.task("fine", &[("x/ok.txt", "1")]);
     skip_testing(&w, t);
     wait_for("it to land", 120, || w.landed(t));
+    // The push is read back through the origin: look until it shows, not once.
+    wait_for("its file on main", 120, || w.on_main("x/ok.txt"));
     assert!(w.on_main("x/ok.txt"));
     // Not skipped: only the floor runs, so the tier's red does not stop it.
     let u = w.task("tested", &[("x/red.fast", "1")]);
     wait_for("the tested task to land", 120, || w.landed(u));
+    wait_for("its file on main", 120, || w.on_main("x/red.fast"));
     assert!(w.on_main("x/red.fast"));
 }
 
@@ -58,10 +60,8 @@ fn a_skipped_batch_whose_unit_tests_pass_lands_and_a_batch_with_testing_does_not
 fn an_immune_batch_runs_no_test_tier_and_lands_what_the_fast_tier_would_have_parked() {
     // The same pair as above, red together in the fast tier; both made immune to testing (a
     // fast track whose testing happens later), so no tier runs and the floor's build lands them.
-    let w = world_built_fast("window = \"2s\"\nmax_size = 5\n", &[], true);
-    let left = w.task("left", &[("x/joint.a", "1")]);
-    let right = w.task("right", &[("x/joint.b", "1")]);
-    for t in [left, right] {
+    let w = world_built_fast("window = \"20m\"\nmax_size = 2\n", &[], true);
+    let immune = |w: &W, t: TaskId| {
         mason_daemon::suites::skip(
             &w.d,
             t,
@@ -71,7 +71,9 @@ fn an_immune_batch_runs_no_test_tier_and_lands_what_the_fast_tier_would_have_par
             false,
         )
         .unwrap();
-    }
+    };
+    let left = w.task_with("left", &[("x/joint.a", "1")], immune);
+    let right = w.task_with("right", &[("x/joint.b", "1")], immune);
     wait_for("both to land", 120, || w.landed(left) && w.landed(right));
     assert!(w.on_main("x/joint.a") && w.on_main("x/joint.b"));
     // The full run is still owed.

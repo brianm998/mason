@@ -5,6 +5,7 @@
 //! file pointing at the scripted stand-in for `claude`, and a daemon config.
 
 pub mod lw;
+#[cfg(unix)]
 pub mod slots;
 
 use mason_core::*;
@@ -28,6 +29,10 @@ pub fn bin(package: &str, name: &str) -> PathBuf {
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
         let ok = std::process::Command::new(cargo)
             .args(["build", "-q", "-p", package, "--bin", name])
+            // The suite's runner gives this process RUSTC_BOOTSTRAP=1 for `--report-time`
+            // (s634); build scripts rerun when it changes, so a build that kept it would
+            // recompile the workspace the suite's build just compiled without it.
+            .env_remove("RUSTC_BOOTSTRAP")
             .status()
             .unwrap()
             .success();
@@ -64,8 +69,10 @@ pub fn world_limit() -> usize {
         })
 }
 
+#[cfg(unix)]
 struct Slot(#[allow(dead_code)] Option<slots::Held>);
 
+#[cfg(unix)]
 impl Slot {
     fn take() -> Slot {
         Slot(slots::take(
@@ -73,6 +80,17 @@ impl Slot {
             world_limit(),
             Duration::from_secs(600),
         ))
+    }
+}
+
+/// Windows has no flock-based slots; the daemon tests only build there, never run.
+#[cfg(not(unix))]
+struct Slot;
+
+#[cfg(not(unix))]
+impl Slot {
+    fn take() -> Slot {
+        Slot
     }
 }
 
