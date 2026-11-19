@@ -271,6 +271,7 @@ impl Daemon {
                 rcfg.disk_stall_ms,
             );
             broker.set_policy(crate::policyd::Sampler::start(), rcfg.syspolicyd_max_pct);
+            broker.set_thermal(crate::thermal::Sampler::start(), rcfg.thermal_min_pct);
         }
         broker.set_disk(disk, disk_paths, rcfg.disk_floor_gb, disk_every);
         let targets = crate::targets::Targets::new(
@@ -1317,6 +1318,7 @@ impl Daemon {
             if read_at.is_none_or(|t| t.elapsed() >= crate::hung::EVERY) {
                 read_at = Some(std::time::Instant::now());
                 crate::hung::check(&d, &mut tracker, now_ms());
+                crate::hostedcheck::stop_unwanted(&d);
             }
             let c = d.broker.compilation();
             let mut now = format!("{} {}", c.limit, c.used);

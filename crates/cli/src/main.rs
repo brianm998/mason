@@ -138,7 +138,7 @@ mason: command-line client for the MASON pipeline
   mason targets list [--json]         simulators, emulators and phones, and who has each
   mason resources limit <resource> <units>   change a limit while things run (llm:claude, compile, ...)
   mason resources gate <name> <value>   change a compile gate while masond runs, kept across restarts (compile_cpu_max,
-                                      compile_settle_s, compile_jobs, compile_idle_kill_s, syspolicyd_max_pct, stall_ms,
+                                      compile_settle_s, compile_jobs, compile_idle_kill_s, syspolicyd_max_pct, thermal_min_pct, stall_ms,
                                       memory.floor_mb, disk.floor_gb)
   mason resources gate <name> --reset   go back to resources.toml, or the default
   mason hook bash [--needs compile]   optional Claude Code PreToolUse hook: builds go through the queue
@@ -4038,7 +4038,8 @@ fn print_ci_watch(project: &str, w: &Value) {
     }
 }
 
-#[cfg(test)]
+// The fake provider is a unix shell script, so these tests only build on unix.
+#[cfg(all(test, unix))]
 mod open_session_tests {
     use super::*;
     use serde_json::json;

@@ -300,8 +300,8 @@ fn a_scoped_run_check_runs_the_narrowed_command_and_the_test_step_still_runs_it_
 }
 
 /// s523: after a red full run, an unscoped `run_check` re-runs only the failing tests and the
-/// changed packages (in the small lane); after a green run it is full again; `full: true` is
-/// always full.
+/// changed packages; after a green run it runs what the change affects;
+/// `full: true` is always full.
 #[test]
 fn after_a_red_full_run_an_unscoped_check_reruns_only_the_failures_and_the_changed_crates() {
     // The failing test is named by the full command and by the re-run, until `hello.txt` exists.
@@ -321,13 +321,13 @@ fn after_a_red_full_run_an_unscoped_check_reruns_only_the_failures_and_the_chang
     let turns = json!([
         {"sh": "mkdir -p crates/pk/src && printf '[package]\\nname = \"pk\"\\nversion = \"0.1.0\"\\nedition = \"2021\"\\n' > crates/pk/Cargo.toml && : > crates/pk/src/lib.rs && git add -A && git -c user.name=t -c user.email=t@t commit -qm crate"},
         // Full, red: no hello.txt yet.
-        run,
+        {"call": {"tool": "run_check", "args": {"name": "tests", "full": true}}},
         // Narrowed to the one failure and the changed crate; still red.
         run,
         {"sh": "echo hello > crates/pk/hello.txt && git add -A && git -c user.name=t -c user.email=t@t commit -qm fix"},
         // Narrowed again (the last run was red); green.
         run,
-        // Green last time: full.
+        // Green last time: what the change affects.
         run,
         {"call": {"tool": "run_check", "args": {"name": "tests", "full": true}}},
         {"call": {"tool": "submit_change", "args": {"summary": "change", "head": "$HEAD"}}}
@@ -363,4 +363,128 @@ fn after_a_red_full_run_an_unscoped_check_reruns_only_the_failures_and_the_chang
     );
     assert!(logs.contains("RAN-RERUN a::b"), "{logs}");
     assert!(logs.contains("RAN-DEV -p pk"), "{logs}");
+}
+
+/// An unscoped `run_check` runs what the change affects, not the whole suite (2026-11-18: 87 of
+/// 111 develop checks ran every test binary), and the test step still runs it all.
+#[test]
+fn an_unscoped_run_check_runs_what_the_change_affects_and_the_test_step_runs_it_all() {
+    // The change is inside one crate, so the packages it touches can be named.
+    let def = narrowable().replace(r#""hello.txt" = ["only"]"#, r#""crates/**" = ["only"]"#);
+    let checks = CHECKS.replace("hello.txt", "crates/pk/hello.txt");
+    let turns = json!([
+        {"sh": "mkdir -p crates/pk/src && printf '[package]\\nname = \"pk\"\\nversion = \"0.1.0\"\\nedition = \"2021\"\\n' > crates/pk/Cargo.toml && : > crates/pk/src/lib.rs && echo hello > crates/pk/hello.txt && git add -A && git -c user.name=t -c user.email=t@t commit -qm change"},
+        {"call": {"tool": "run_check", "args": {"name": "tests"}}},
+        {"call": {"tool": "submit_change", "args": {"summary": "change", "head": "$HEAD"}}}
+    ]);
+    let s = Scratch::new("false", json!({"steps": {"develop": vec![turns]}}));
+    s.push_files(
+        &[
+            (".mason/mason.toml", def.as_str()),
+            ("checks.sh", checks.as_str()),
+            (
+                "Cargo.toml",
+                "[workspace]\nmembers = [\"crates/pk\"]\nresolver = \"2\"\n",
+            ),
+        ],
+        "project setup",
+    );
+    let d = s.start();
+    let t = file_task_as(
+        &d,
+        "Default",
+        "Please do it.",
+        true,
+        TrustSource::Owner,
+        false,
+    );
+    wait_state(&d, t, State::Landed, 120);
+    let logs = render_logs(&d, t.0);
+    assert!(logs.contains("RAN-DEV -p pk"), "{logs}");
+    assert!(logs.contains("Ran what your change affects"), "{logs}");
+    // The test step ran the whole suite.
+    assert!(logs.contains("RAN-FULL"), "{logs}");
+}
+
+/// A change only to paths no test of a `{tests_for_change}` suite reads (docs, markdown, exit
+/// scripts) runs none of it in `run_check`; the test step still runs it whole.
+#[test]
+fn a_docs_only_change_runs_no_cargo_style_suite_in_run_check() {
+    let def = narrowable()
+        .replace(
+            r#"command = "echo RAN-FULL; sh checks.sh""#,
+            r#"command = "echo RAN-FULL; printf '1..3\\nok 1\\nok 2\\nok 3\\n'""#,
+        )
+        .replace(
+            r#"dev_command = "echo RAN-DEV {packages}; sh checks.sh""#,
+            r#"dev_command = "echo RAN-DEV {tests_for_change}; printf '1..3\\nok 1\\nok 2\\nok 3\\n'""#,
+        )
+        .replace(r#""hello.txt" = ["only"]"#, r#""docs/**" = ["only"]"#);
+    let turns = json!([
+        {"sh": "mkdir -p docs && echo note > docs/note.md && git add -A && git -c user.name=t -c user.email=t@t commit -qm docs"},
+        {"call": {"tool": "run_check", "args": {"name": "tests"}}},
+        {"call": {"tool": "submit_change", "args": {"summary": "docs", "head": "$HEAD"}}}
+    ]);
+    let (_s, d) = start(vec![turns], &def);
+    let t = file_task_as(&d, "Docs", "Please do it.", true, TrustSource::Owner, false);
+    wait_state(&d, t, State::Landed, 120);
+    let logs = render_logs(&d, t.0);
+    assert!(
+        logs.contains("only: not run, none of its tests reads what you changed"),
+        "{logs}"
+    );
+    assert!(!logs.contains("RAN-DEV"), "{logs}");
+    assert!(logs.contains("RAN-FULL"), "{logs}");
+}
+
+/// Only a check filtered to named tests takes the small lane. Narrowed by change or package it
+/// can still be a whole integration binary, so it keeps the test step's own lane (2026-11-18).
+#[test]
+fn only_a_name_filtered_check_takes_the_small_lane() {
+    let def = narrowable()
+        .replace(
+            r#"rerun = "echo RAN-RERUN {tests}; sh checks.sh""#,
+            r#"rerun = "echo RAN-RERUN {tests} HELD=$MASON_HELD; sh checks.sh""#,
+        )
+        .replace(
+            r#"dev_command = "echo RAN-DEV {packages}; sh checks.sh""#,
+            r#"dev_command = "echo RAN-DEV {packages} HELD=$MASON_HELD; sh checks.sh""#,
+        )
+        .replace(
+            "[step.test]",
+            "[resource.test-small]\ncount = 1\n\n[step.test]",
+        );
+    let turns = json!([
+        {"sh": "echo hello > hello.txt && git add -A && git -c user.name=t -c user.email=t@t commit -qm change"},
+        {"call": {"tool": "run_check", "args": {"name": "tests", "tests": ["foo"]}}},
+        {"call": {"tool": "run_check", "args": {"name": "tests", "packages": ["pk-one"]}}},
+        {"call": {"tool": "submit_change", "args": {"summary": "change", "head": "$HEAD"}}}
+    ]);
+    let (_s, d) = start(vec![turns], &def);
+    let t = file_task_as(
+        &d,
+        "Lanes",
+        "Please do it.",
+        true,
+        TrustSource::Owner,
+        false,
+    );
+    wait_state(&d, t, State::Landed, 120);
+    let logs = render_logs(&d, t.0);
+    let line = |tag: &str| {
+        logs.lines()
+            .find(|l| l.contains(tag))
+            .unwrap_or_else(|| panic!("no {tag} line in {logs}"))
+            .to_string()
+    };
+    let rerun = line("RAN-RERUN foo");
+    let dev = line("RAN-DEV -p pk-one");
+    assert!(
+        rerun.contains("test-small") && !rerun.contains("test-suite"),
+        "{rerun}"
+    );
+    assert!(
+        dev.contains("test-suite") && !dev.contains("test-small"),
+        "{dev}"
+    );
 }
