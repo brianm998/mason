@@ -866,6 +866,9 @@ fn whole_later_world(extra: &str, log: &std::path::Path) -> (Scratch, Arc<mason_
         "project setup",
     );
     let d = start(&s);
+    let pid = d.project_id_by_name("scratch").unwrap();
+    let cfg = mason_daemon::landing::load_config(&d, pid);
+    assert!(cfg.is_ok(), "landing config: {cfg:?}");
     (s, d)
 }
 
