@@ -1784,6 +1784,10 @@ mod tests {
             ],
             runs_on: "ubuntu-latest".into(),
             tree_key: "treekey+abc".into(),
+            shards: 0,
+            only: vec![],
+            shard_lists: vec![],
+            shard_command: None,
         }
     }
 
