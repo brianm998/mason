@@ -2388,6 +2388,7 @@ impl Store {
 
     /// Keep what a batch verification run found, for the exact base tip, task heads and
     /// filter (s705). `tasks` is the sorted `id@head` list made by [`batch_run_key`].
+    #[allow(clippy::too_many_arguments)]
     pub fn put_batch_run(
         &self,
         project: &str,
