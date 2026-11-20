@@ -660,6 +660,12 @@ pub struct ProjectCfg {
     /// this many seconds takes the `test-small` lane (`small_run_s`, default 180; 0 turns it
     /// off) (s649).
     pub small_run_s: u64,
+    /// A landing batch leaves out the cargo test targets that are green on the same inputs
+    /// (`reuse_green`, default off) (s707, decision 0700).
+    pub reuse_green: bool,
+    /// With `reuse_green`, a batch runs every target and checks the recorded keys when none
+    /// did in this many hours (`reuse_full_hours`, default 24) (s707).
+    pub reuse_full_hours: u64,
     /// Globs of shared files that are expected to change often; they never hold a task back
     /// (`hold_back_ignore`) (s398).
     pub hold_back_ignore: Vec<String>,
@@ -1286,6 +1292,7 @@ impl ProjectCfg {
             ("auto_retry", self.auto_retry.to_string()),
             ("diagnose", self.diagnose.to_string()),
             ("priority_jump", self.priority_jump.to_string()),
+            ("reuse_green", self.reuse_green.to_string()),
         ]
     }
 
@@ -1408,6 +1415,14 @@ pub fn parse_project(id: &str, text: &str) -> Result<ProjectCfg, String> {
         },
         clarity_classifier: s("clarity_classifier").filter(|c| !c.trim().is_empty()),
         card_rewriter: s("card_rewriter").filter(|c| !c.trim().is_empty()),
+        reuse_green: doc
+            .get("reuse_green")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        reuse_full_hours: doc
+            .get("reuse_full_hours")
+            .and_then(|v| v.as_integer())
+            .map_or(24, |n| n.max(0) as u64),
         small_run_s: doc
             .get("small_run_s")
             .and_then(|v| v.as_integer())
