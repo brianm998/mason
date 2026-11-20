@@ -1114,7 +1114,11 @@ impl Broker {
     pub fn thermal_smc(&self) -> (Option<f32>, Option<u64>, Option<String>) {
         let mut st = lock(&self.st);
         self.cpu_gate(&mut st);
-        (st.thermal_die, st.thermal_limited_ms, st.thermal_why.clone())
+        (
+            st.thermal_die,
+            st.thermal_limited_ms,
+            st.thermal_why.clone(),
+        )
     }
 
     /// Read the CPU and stall sources afresh. Every plan is made right after
@@ -1149,7 +1153,8 @@ impl Broker {
         // Hot when the speed limit is low, the die is at its maximum, or power limiting has gone
         // on for 30 s. The scheduler's gate is a speed against a minimum, so a die or power-limit
         // reading is carried as a minimum just above the speed; `thermal_why` has the real reason.
-        let hot = readings.and_then(|(sp, die, lim)| crate::thermal::hot(sp, die, lim, min_pct, max_c));
+        let hot =
+            readings.and_then(|(sp, die, lim)| crate::thermal::hot(sp, die, lim, min_pct, max_c));
         let thermal = readings
             .and_then(|(sp, _, _)| sp.or(hot.map(|_| 100)))
             .filter(|_| min_pct > 0 || max_c > 0)

@@ -67,7 +67,8 @@ impl FakeThermal {
     }
     /// Inject a die temperature in °C.
     pub fn set_die(&self, c: f32) {
-        self.die_dc.store((c * 10.0).round() as u32, Ordering::SeqCst);
+        self.die_dc
+            .store((c * 10.0).round() as u32, Ordering::SeqCst);
     }
     /// Inject how long power limiting has been on, in ms.
     pub fn set_limited_ms(&self, ms: u32) {
@@ -227,10 +228,12 @@ impl Tracker {
                 .filter(|(t, _)| now.saturating_sub(*t) <= HOLD_MS)
                 .map(|(_, c)| *c)
                 .fold(None, |m: Option<f32>, c| Some(m.map_or(c, |m| m.max(c)))),
-            limited_ms: self.limit_known.then(|| match (self.limited_since, self.limited_last) {
-                (Some(s), Some(l)) => l.saturating_sub(s),
-                _ => 0,
-            }),
+            limited_ms: self
+                .limit_known
+                .then(|| match (self.limited_since, self.limited_last) {
+                    (Some(s), Some(l)) => l.saturating_sub(s),
+                    _ => 0,
+                }),
         }
     }
 }
