@@ -230,6 +230,9 @@ fun Cell(state: CellState, tint: Color, border: Color, modifier: Modifier = Modi
 fun tileCountColor(theme: Theme, count: Int, wants: Boolean, connected: Boolean): Color =
     if (wants) theme.attention else if (connected && count == 0) theme.muted else theme.text
 
+/** The states whose tile fills red only while one of their tasks is shown. */
+fun tileFillsOnlyWhenShown(state: String): Boolean = state == "proposed" || state == "needs_attention"
+
 /**
  * A count tile: a large count over a one-line label, sized to its label so a narrow window
  * squeezes other text and never a tile or label; tinted when the state wants the owner;
@@ -240,6 +243,9 @@ fun tileCountColor(theme: Theme, count: Int, wants: Boolean, connected: Boolean)
 fun CountTile(model: MonitorModel, count: StateCount) {
     val theme = LocalTheme.current
     val wants = count.wants_you && model.connected
+    // Proposed and stuck fill only while one of their tasks is the one shown; the rest fill
+    // whenever they want the owner.
+    val filled = wants && (!tileFillsOnlyWhenShown(count.state) || model.tileShowsCurrentTask(count))
     val label = model.tileLabel(count)
     val shape = RoundedCornerShape(theme.radius)
     TooltipArea(tooltip = {
@@ -252,7 +258,7 @@ fun CountTile(model: MonitorModel, count: StateCount) {
             modifier = Modifier
                 .height(theme.tileHeight)
                 .widthIn(min = theme.tileMinWidth)
-                .background(if (wants) theme.attentionTint else theme.surface, shape)
+                .background(if (filled) theme.attentionTint else theme.surface, shape)
                 .border(BorderStroke(1.dp, if (wants) theme.attention else theme.border), shape)
                 .pointerInput(count.state) {
                     // Reveal on the first release; a second press within the AWT multi-click

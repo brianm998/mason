@@ -84,6 +84,7 @@ pub mod stopsig;
 pub mod suites;
 pub mod sweep;
 pub mod targets;
+pub mod targettimes;
 pub mod taskcache;
 pub mod thermal;
 pub mod tiermap;
