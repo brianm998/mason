@@ -55,6 +55,13 @@ pub fn parse_host_id(id: &str) -> Option<(u64, u64)> {
     Some((task.parse().ok()?, run.parse().ok()?))
 }
 
+/// `b<batch>-<rest>` -> batch.
+pub fn parse_batch_host_id(id: &str) -> Option<u64> {
+    let rest = id.strip_prefix('b')?;
+    let (batch, _) = rest.split_once('-')?;
+    batch.parse().ok()
+}
+
 /// Run one pass. Returns the kinds of bugs it filed.
 pub fn sweep_once(d: &Arc<Daemon>) -> Vec<String> {
     let mut filed = vec![];
@@ -111,10 +118,19 @@ pub fn sweep_once(d: &Arc<Daemon>) -> Vec<String> {
         if h.state != HostState::Running {
             continue;
         }
-        let Some((task, run)) = parse_host_id(&h.info.id) else {
+        let batch = parse_batch_host_id(&h.info.id);
+        let open = if let Some(b) = batch {
+            // A batch host is wanted only while its batch is unfinished in this daemon.
+            d.store
+                .batches(None, 200)
+                .unwrap_or_default()
+                .iter()
+                .any(|r| r.id == b && r.finished_at.is_none())
+        } else if let Some((task, run)) = parse_host_id(&h.info.id) {
+            w.open_run(TaskId(task)) == Some(StepRunId(run))
+        } else {
             continue;
         };
-        let open = w.open_run(TaskId(task)) == Some(StepRunId(run));
         let now = Instant::now();
         let stopping = {
             let mut log = d.stop_log.lock().unwrap_or_else(|e| e.into_inner());
@@ -213,6 +229,13 @@ mod tests {
 
     #[test]
     fn host_ids_name_their_task_and_run() {
+        assert_eq!(
+            super::parse_batch_host_id("b421-r1-bis6-7-u-cargo-workspace"),
+            Some(421)
+        );
+        assert_eq!(super::parse_batch_host_id("t12r34-1"), None);
+        assert_eq!(super::parse_batch_host_id("bx-1"), None);
+        assert_eq!(super::parse_batch_host_id("b12"), None);
         assert_eq!(parse_host_id("t12r34-1"), Some((12, 34)));
         assert_eq!(parse_host_id("t3r9-test"), Some((3, 9)));
         assert_eq!(parse_host_id("t3r9"), Some((3, 9)));
