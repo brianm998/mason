@@ -243,25 +243,65 @@ pub mod orphans {
             .unwrap_or_default()
     }
 
-    /// Whether a scratch root that exists is left over from a test that is gone.
-    fn root_is_dead(root: &Path) -> bool {
+    /// What the sweep makes of a scratch root that exists.
+    #[derive(PartialEq, Debug)]
+    enum Fate {
+        /// Its owner holds it (or may be starting up): never touched.
+        Alive,
+        /// Its owner is gone: stop what runs under it, then remove it.
+        Dead,
+        /// No lock and over a day old (an older test binary's): removed only if no process
+        /// references it, and nothing is stopped.
+        Stale,
+    }
+
+    fn fate(root: &Path) -> Fate {
         match lock_state(root) {
-            Lock::Held => false,
-            Lock::Free => true,
-            Lock::Starting | Lock::Missing => age(root) > LOCKLESS_AGE,
+            Lock::Held => Fate::Alive,
+            Lock::Free => Fate::Dead,
+            Lock::Starting | Lock::Missing if age(root) > LOCKLESS_AGE => Fate::Stale,
+            Lock::Starting | Lock::Missing => Fate::Alive,
         }
     }
 
+    /// Remove a dead root, its `owner.lock` last: a removal cut short (the test binary ended)
+    /// leaves a free lock with a pid in it, so the next sweep still knows the root is dead.
+    fn remove_root(root: &Path) {
+        let lock = root.join("owner.lock");
+        for e in std::fs::read_dir(root).into_iter().flatten().flatten() {
+            let path = e.path();
+            if path == lock {
+                continue;
+            }
+            if e.file_type().is_ok_and(|t| t.is_dir()) {
+                let _ = std::fs::remove_dir_all(&path);
+            } else {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+        let _ = std::fs::remove_file(&lock);
+        let _ = std::fs::remove_dir(root);
+    }
+
     /// Stop step hosts and test daemons whose scratch root is gone or whose owner is gone
-    /// (with their children and the groups those lead), then remove the dead roots. A root
-    /// whose lock is held is never touched.
+    /// (with their children and the groups those lead), then remove the dead roots, and
+    /// lock-less roots over a day old that no process references. A root whose lock is held
+    /// is never touched.
     pub fn sweep_now() {
+        for root in sweep_processes() {
+            remove_root(&root);
+        }
+    }
+
+    /// Stop what runs under dead roots, as `sweep_now`, and return the roots to remove.
+    fn sweep_processes() -> Vec<PathBuf> {
         use nix::sys::signal::{kill, killpg, Signal};
         use nix::unistd::{getpgrp, getpid, Pid};
         let table = process_table();
         let (me, my_group) = (getpid().as_raw(), getpgrp().as_raw());
         let mut dead: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
         let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+        let mut stale: Vec<PathBuf> = Vec::new();
         let tmp = std::fs::read_dir("/tmp").into_iter().flatten().flatten();
         for e in tmp {
             let name = e.file_name();
@@ -270,10 +310,27 @@ pub mod orphans {
                 continue;
             }
             let root = e.path();
-            if root.is_dir() && root_is_dead(&root) {
-                dead.insert(root.clone());
+            if !root.is_dir() {
+                continue;
             }
-            seen.insert(root);
+            match fate(&root) {
+                Fate::Alive => {}
+                Fate::Dead => {
+                    dead.insert(root.clone());
+                    seen.insert(root);
+                }
+                Fate::Stale => {
+                    // Referenced by any process, under either spelling of /tmp: left alone.
+                    let a = format!("{}/", root.display());
+                    let b = format!("/private{a}");
+                    let used = table
+                        .iter()
+                        .any(|p| p.command.contains(&a) || p.command.contains(&b));
+                    if !used {
+                        stale.push(root);
+                    }
+                }
+            }
         }
         for p in &table {
             if let Some(root) = scratch_root_of(&p.command) {
@@ -300,15 +357,21 @@ pub mod orphans {
             }
             let _ = kill(Pid::from_raw(p.pid), Signal::SIGKILL);
         }
-        for root in dead.iter().filter(|r| seen.contains(*r)) {
-            let _ = std::fs::remove_dir_all(root);
-        }
+        stale.extend(dead.into_iter().filter(|r| seen.contains(r)));
+        stale
     }
 
-    /// `sweep_now`, once per test binary, before its first world.
+    /// The sweep, once per test binary, before its first world. Processes are stopped before
+    /// the first world starts; the roots, which can be many and large, are removed on a
+    /// thread of their own, so no test waits for the disk.
     pub fn sweep_orphans() {
         static ONCE: std::sync::Once = std::sync::Once::new();
-        ONCE.call_once(sweep_now);
+        ONCE.call_once(|| {
+            let roots = sweep_processes();
+            if !roots.is_empty() {
+                std::thread::spawn(move || roots.iter().for_each(|r| remove_root(r)));
+            }
+        });
     }
 
     /// A shell `while` loop that blocks until `release` exists, and ends early when `dir` is

@@ -17,9 +17,11 @@ cargo_pid=$!
 # Partway: the test binary is the `it` binary (cargo may be wrapped, so not necessarily its
 # child) that holds a new root's owner.lock, with a host under that root. Other runs on this
 # machine make roots too; their lock pids name other binaries or are not `it` runs of ours.
+# Wait on the run itself, not a clock: on a loaded machine the world first waits up to ten
+# minutes for a shared world slot. A run that ends without one is reported below.
 root=""
 tpid=""
-for _ in $(seq 1 1200); do
+while kill -0 "$cargo_pid" 2>/dev/null; do
   for r in $(ls -d /tmp/ms* 2>/dev/null | sort | comm -13 "$before" -); do
     p=$(cat "$r/owner.lock" 2>/dev/null)
     [ -n "$p" ] || continue
@@ -37,7 +39,7 @@ for _ in $(seq 1 1200); do
   done
   sleep 0.5
 done
-[ -n "$root" ] || { echo "s675: no blocking world appeared"; kill "$cargo_pid" 2>/dev/null; exit 1; }
+[ -n "$root" ] || { echo "s675: the run ended before a blocking world appeared"; tail -20 "$out"; exit 1; }
 echo "killing the run whose root is $root"
 # SIGKILL the test binary (and cargo), not its hosts.
 kill -KILL "$tpid" 2>/dev/null
