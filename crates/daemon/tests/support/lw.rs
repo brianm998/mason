@@ -193,6 +193,42 @@ pub fn world_built_fast(landing_toml: &str, files: &[(&str, &str)], fast: bool) 
     W { s, d }
 }
 
+/// What `integration`'s `rerun` runs (#682): it says which tests it was asked for, then
+/// checks as the suite does.
+const RERUN: &str = r#"#!/bin/sh
+echo "rerun asked for: $*"
+exec sh checks.sh integration
+"#;
+
+/// `world`, with `integration` given a `build` (`sh build.sh integration`) and a `rerun`
+/// (`sh rerun.sh {tests}`), the way `cargo-workspace` has one.
+pub fn world_rerun(landing_toml: &str, files: &[(&str, &str)]) -> W {
+    let s = Scratch::new("true", json!({"steps": {}}));
+    s.write_project("scratch", "true", "");
+    let header = "[suite.integration]\ncommand = \"sh checks.sh integration\"\n";
+    let mut definition = def();
+    assert!(definition.contains(header));
+    definition = definition.replacen(
+        header,
+        "[suite.integration]\nbuild = \"sh build.sh integration\"\ncommand = \"sh checks.sh integration\"\nrerun = \"sh rerun.sh {tests}\"\n",
+        1,
+    );
+    let mut all: Vec<(&str, &str)> = vec![
+        (".mason/mason.toml", &definition),
+        (".mason/landing.toml", landing_toml),
+        ("checks.sh", CHECKS),
+        ("build.sh", BUILDS),
+        ("rerun.sh", RERUN),
+        ("shared.txt", "base\n"),
+    ];
+    all.extend_from_slice(files);
+    s.push_files(&all, "project setup");
+    sh(&s.repo, &["fetch", "-q", "origin"]);
+    let d = s.start_with(|c| c.env_retry = Duration::from_millis(200));
+    mason_daemon::attention::pause(&d, "", "claims", "test", 3600).unwrap();
+    W { s, d }
+}
+
 impl W {
     /// A task already in its landing step, with a branch carrying `files`.
     pub fn task(&self, title: &str, files: &[(&str, &str)]) -> TaskId {

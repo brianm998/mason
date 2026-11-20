@@ -83,3 +83,67 @@ fn two_tasks_each_red_alone_over_a_green_base_both_go_back() {
     }
     assert!(!w.on_main("x/left/red.integration") && !w.on_main("x/right/red.integration"));
 }
+
+/// The logs of a batch's runs, by file name (#682).
+fn batch_logs(w: &W) -> Vec<(String, String)> {
+    let b = w.d.store.batches(Some("scratch"), 10).unwrap();
+    let id = b.iter().map(|b| b.id).min().unwrap();
+    let dir =
+        w.d.cfg
+            .task_dir(0)
+            .parent()
+            .unwrap()
+            .join("batches")
+            .join(id.to_string());
+    let mut out = vec![];
+    for e in std::fs::read_dir(dir).unwrap().flatten() {
+        let n = e.file_name().to_string_lossy().to_string();
+        if n.ends_with(".log") {
+            let t = std::fs::read_to_string(e.path()).unwrap_or_default();
+            out.push((n, t));
+        }
+    }
+    out.sort();
+    out
+}
+
+#[test]
+fn a_red_batch_reruns_and_bisects_on_the_failing_tests_and_runs_the_whole_suite_twice() {
+    // #682: the red run names its failing test; the rerun and every bisect run only that test.
+    let w = world_rerun(TOML, &[]);
+    let t1 = w.task("one", &[("x/one.txt", "1")]);
+    let t2 = w.task("two", &[("x/red.integration", "boom")]);
+    let t3 = w.task("three", &[("x/three.txt", "3")]);
+    let t4 = w.task("four", &[("x/four.txt", "4")]);
+    wait_for("the innocent three to land", 180, || {
+        w.landed(t1) && w.landed(t3) && w.landed(t4)
+    });
+    wait_for("the culprit to go back", 60, || w.sent_back(t2).is_some());
+    assert!(!w.on_main("x/red.integration"));
+    let logs = batch_logs(&w);
+    let names: Vec<&str> = logs.iter().map(|(n, _)| n.as_str()).collect();
+    // A whole-suite run is one that was not asked for named tests.
+    let whole: Vec<&str> = logs
+        .iter()
+        .filter(|(n, t)| {
+            n.ends_with("-integration.log") && t.contains("1..1") && !t.contains("rerun asked for")
+        })
+        .map(|(n, _)| n.as_str())
+        .collect();
+    assert_eq!(whole.len(), 2, "whole-suite logs: {whole:?} of {names:?}");
+    let bis: Vec<&(String, String)> = logs
+        .iter()
+        .filter(|(n, _)| n.contains("-bis") && n.contains("-n-"))
+        .collect();
+    assert!(!bis.is_empty(), "{names:?}");
+    for (n, t) in bis {
+        assert!(t.contains("rerun asked for: integration"), "{n}: {t}");
+    }
+    wait_for("the note", 30, || {
+        w.d.store
+            .batches(Some("scratch"), 10)
+            .unwrap()
+            .iter()
+            .any(|b| b.note.contains("bisected on 1 failing test"))
+    });
+}
