@@ -1367,6 +1367,120 @@ impl Store {
         })
     }
 
+    /// A green run of a test executable built from the input key `key` (s707). A key already
+    /// recorded red stays red: a red then a green on the same inputs is a flaky test, not a
+    /// proof.
+    #[allow(clippy::too_many_arguments)]
+    pub fn put_target_green(
+        &self,
+        project: &str,
+        suite: &str,
+        target: &str,
+        key: &str,
+        tests: usize,
+        tree: &str,
+        task: u64,
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        let (p, s, t, k, tr) = (
+            project.to_string(),
+            suite.to_string(),
+            target.to_string(),
+            key.to_string(),
+            tree.to_string(),
+        );
+        self.write(move |c| {
+            c.execute(
+                "INSERT INTO target_runs(project, suite, target, key, state, tests, tree, task, at_ms) \
+                 VALUES (?1,?2,?3,?4,'green',?5,?6,?7,?8) \
+                 ON CONFLICT(project, suite, target, key) DO NOTHING",
+                params![p, s, t, k, tests as i64, tr, task as i64, now_ms as i64],
+            )?;
+            // Only the newest keys of a target are kept.
+            c.execute(
+                "DELETE FROM target_runs WHERE project = ?1 AND suite = ?2 AND target = ?3 AND rowid NOT IN \
+                 (SELECT rowid FROM target_runs WHERE project = ?1 AND suite = ?2 AND target = ?3 \
+                  ORDER BY at_ms DESC, rowid DESC LIMIT 40)",
+                params![p, s, t],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// A red run of a test executable built from `key`: never reused, and a later green on the
+    /// same key does not make it reusable (s707).
+    #[allow(clippy::too_many_arguments)]
+    pub fn put_target_red(
+        &self,
+        project: &str,
+        suite: &str,
+        target: &str,
+        key: &str,
+        tree: &str,
+        task: u64,
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        let (p, s, t, k, tr) = (
+            project.to_string(),
+            suite.to_string(),
+            target.to_string(),
+            key.to_string(),
+            tree.to_string(),
+        );
+        self.write(move |c| {
+            c.execute(
+                "INSERT OR REPLACE INTO target_runs(project, suite, target, key, state, tests, tree, task, at_ms) \
+                 VALUES (?1,?2,?3,?4,'red',0,?5,?6,?7)",
+                params![p, s, t, k, tr, task as i64, now_ms as i64],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// `(tests, tree, task)` of the green run of this target on exactly these inputs, if one
+    /// is recorded and no red or flaky run of them is (s707).
+    pub fn target_green(
+        &self,
+        project: &str,
+        suite: &str,
+        target: &str,
+        key: &str,
+    ) -> Result<Option<(usize, String, u64)>, StoreError> {
+        let (p, s, t, k) = (
+            project.to_string(),
+            suite.to_string(),
+            target.to_string(),
+            key.to_string(),
+        );
+        self.read(move |c| {
+            c.query_row(
+                "SELECT tests, tree, task FROM target_runs \
+                 WHERE project = ?1 AND suite = ?2 AND target = ?3 AND key = ?4 AND state = 'green'",
+                params![p, s, t, k],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)? as usize,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, i64>(2)? as u64,
+                    ))
+                },
+            )
+            .optional()
+        })
+    }
+
+    /// Forget every recorded key of a suite: a full run that was red where a reuse said green
+    /// shows the key computation cannot be trusted (s707).
+    pub fn clear_target_runs(&self, project: &str, suite: &str) -> Result<usize, StoreError> {
+        let (p, s) = (project.to_string(), suite.to_string());
+        self.write(move |c| {
+            c.execute(
+                "DELETE FROM target_runs WHERE project = ?1 AND suite = ?2",
+                params![p, s],
+            )
+        })
+    }
+
     /// The median run time of each recorded test executable of a suite (s649).
     pub fn target_medians(
         &self,

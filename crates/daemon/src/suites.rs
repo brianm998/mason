@@ -819,6 +819,9 @@ struct Who {
     /// For a landing batch's run (`task` is `None`): the tasks it verifies, whose skips and
     /// forces stop it.
     members: Members,
+    /// The reuse plan of the suite now running (s707): what it ran is recorded as green or red
+    /// against its input keys.
+    reuse: Option<Arc<crate::reuse::Plan>>,
 }
 
 /// The tasks of a landing batch, and the name of the definition's Test step. A batch's
@@ -1758,6 +1761,16 @@ fn run_suite(
                 let _ = d
                     .store
                     .note_passing(&suite.name, &j.results.names(), now_ms());
+                // Each target this run built and ran is green on its input key (s707).
+                if let Some(plan) = &who.reuse {
+                    plan.record_green(
+                        &d.store,
+                        &j.output,
+                        &tree.tree,
+                        who.task.map_or(0, |t| t.0 .0),
+                        now_ms(),
+                    );
+                }
                 // A narrowed run proves only the tests it ran: no evidence for the tree, and no
                 // record that the suite is green at its base (s386).
                 if !suite.narrowed {
@@ -1814,6 +1827,16 @@ fn run_suite(
                 }
             }
             Verdict::Red { failures, why } => {
+                // A red target is never reused on these inputs, even if a rerun is green (s707).
+                if let Some(plan) = &who.reuse {
+                    plan.record_red(
+                        &d.store,
+                        &j.output,
+                        &tree.tree,
+                        who.task.map_or(0, |t| t.0 .0),
+                        now_ms(),
+                    );
+                }
                 let rerun = if failures.is_empty() {
                     None
                 } else {
@@ -2238,6 +2261,7 @@ pub fn run_alone(
         env: vec![],
         trust_base: true,
         members: Members::default(),
+        reuse: None,
     };
     let _ = std::fs::create_dir_all(log_dir);
     let project_test = d
@@ -2565,6 +2589,54 @@ fn added_lines(diff: &str) -> Vec<u32> {
     out
 }
 
+/// The `CARGO_TARGET_DIR=path` a suite's commands set, when it is a plain path.
+fn target_dir_hint(suite: &Suite) -> Option<PathBuf> {
+    [Some(suite.command.as_str()), suite.build.as_deref()]
+        .into_iter()
+        .flatten()
+        .flat_map(|t| t.split_whitespace())
+        .find_map(|w| w.strip_prefix("CARGO_TARGET_DIR="))
+        .map(|v| v.trim_matches(|c| c == '"' || c == '\''))
+        .filter(|v| !v.is_empty() && !v.contains('$'))
+        .map(PathBuf::from)
+}
+
+/// The plan for leaving out of a narrowed run the targets that are green on the same inputs
+/// (s707), after the suite's build. `None` when the suite cannot be narrowed by target, the
+/// workspace cannot be read, or the suite has known-red tests (a quarantined test is not
+/// green, so nothing is reused or recorded around it).
+fn reuse_plan(who: &Who, c: &Ctx, suite: &Suite, groups: &[String]) -> Option<crate::reuse::Plan> {
+    let dc = suite.dev_command.as_deref()?;
+    if !crate::scope::wants_tests(dc)
+        || !crate::knownred::known_for(&who.d.store, &suite.name).is_empty()
+    {
+        return None;
+    }
+    let env: Vec<(String, String)> = std::env::vars().collect();
+    let hint = target_dir_hint(suite);
+    let ws = crate::reuse::Workspace::open(&c.wt, hint.as_deref(), &env)?;
+    let tag = format!(
+        "{}\n{dc}\n{}\n{}",
+        suite.name,
+        suite.dev_build.as_deref().unwrap_or(""),
+        suite.build.as_deref().unwrap_or("")
+    );
+    let store = &who.d.store;
+    Some(crate::reuse::plan(
+        &ws,
+        &who.project,
+        &suite.name,
+        groups,
+        &tag,
+        &|label, key| {
+            store
+                .target_green(&who.project, &suite.name, label, key)
+                .ok()
+                .flatten()
+        },
+    ))
+}
+
 /// Is `suite` already green for this exact tree? Then `run_suite` reuses that result without
 /// running anything, so it needs no lease (s380).
 fn proven(d: &Daemon, tree: &Tree, suite: &str) -> bool {
@@ -2753,6 +2825,7 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
         env: vec![],
         trust_base: true,
         members: Members::default(),
+        reuse: None,
     };
     let head = |rev: &str| git::run(&c.wt, &["rev-parse", rev]).map(|s| s.trim().to_string());
     let (Ok(tree_hash), Ok(head_sha)) = (head("HEAD^{tree}"), head("HEAD")) else {
@@ -2916,6 +2989,8 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
             .as_deref()
             .and_then(|g| small_run(&who, c, &suite, g));
         let ran_beside = side.remove(&name);
+        let mut suite = suite;
+        let mut reused_whole: Option<usize> = None;
         if per_suite && ran_beside.is_none() {
             c.release_lease();
             let reused = matches!(d.store.evidence(&tree.tree, &suite.name), Ok(Some(_)));
@@ -2977,6 +3052,28 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
                     }
                 }
             }
+            // A target green on exactly these inputs is left out of the run (s707).
+            who.reuse = None;
+            if let (Some(g), true) = (groups.as_deref(), reused_whole.is_none()) {
+                if let Some(plan) = reuse_plan(&who, c, &suite, g) {
+                    if let Some(note) = plan.note() {
+                        details.push(note.clone());
+                        notes.push(note);
+                    }
+                    if plan.all_reused() {
+                        reused_whole = Some(plan.reused.len());
+                    } else if !plan.reused.is_empty() {
+                        if let Some(dc) = suite.dev_command.as_deref() {
+                            suite.command = crate::scope::expand(
+                                dc,
+                                &crate::scope::Narrow::Targets(plan.groups.clone()),
+                                false,
+                            );
+                        }
+                    }
+                    who.reuse = Some(Arc::new(plan));
+                }
+            }
             let mut needs = run_needs(&c.def, &c.step, &suite);
             let mut label = None;
             if let Some(ms) = small {
@@ -2995,7 +3092,7 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
             // A skipped suite holds nothing: `run_suite` sees the skip before it runs. Nor does
             // one already green for this exact tree, which `run_suite` reuses without running
             // (s380): it must not wait in the queue to learn that.
-            if !proven(d, &tree, &name) {
+            if !proven(d, &tree, &name) && reused_whole.is_none() {
                 if let Leased::Gone = lease_suite(
                     c,
                     needs,
@@ -3009,6 +3106,11 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
         }
         let ran = match ran_beside {
             Some(r) => r,
+            None if reused_whole.is_some() => SuiteRun::Done {
+                outcome: SuiteOutcome::Reused,
+                results: None,
+                notes: vec![],
+            },
             None => run_suite(
                 &who,
                 &c.project.path,
@@ -3020,6 +3122,7 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
                 &mut on_wait,
             ),
         };
+        who.reuse = None;
         if per_suite {
             c.release_lease();
         }
@@ -3924,6 +4027,7 @@ pub fn pay(d: &Arc<Daemon>, debt: u64) -> Result<String, String> {
         env: vec![],
         trust_base: true,
         members: Members::default(),
+        reuse: None,
     };
     let tree_hash = git::run(&wt, &["rev-parse", "HEAD^{tree}"])
         .map(|s| s.trim().to_string())
@@ -4241,6 +4345,7 @@ pub fn ledger_run(d: &Arc<Daemon>, task: TaskId) -> Result<String, String> {
         env: vec![],
         trust_base: true,
         members: Members::default(),
+        reuse: None,
     };
     let tree = Tree {
         tree: git::run(&wt, &["rev-parse", "HEAD^{tree}"])
@@ -4340,6 +4445,89 @@ pub struct OverRun {
     pub failing: std::collections::BTreeMap<String, Vec<String>>,
 }
 
+static LAST_FULL: std::sync::Mutex<Vec<(String, u64)>> = std::sync::Mutex::new(Vec::new());
+
+/// Is a full run (every target, reuse off) due for this project? True at the first batch after
+/// the daemon starts and again once `hours` have passed since the last one; 0 hours: always.
+fn full_run_due(project: &str, hours: u64) -> bool {
+    let g = LAST_FULL.lock().unwrap_or_else(|e| e.into_inner());
+    match g.iter().find(|(p, _)| p == project) {
+        None => true,
+        Some((_, at)) => now_ms().saturating_sub(*at) >= hours.saturating_mul(3_600_000),
+    }
+}
+
+fn note_full_run(project: &str) {
+    let mut g = LAST_FULL.lock().unwrap_or_else(|e| e.into_inner());
+    g.retain(|(p, _)| p != project);
+    g.push((project.to_string(), now_ms()));
+}
+
+/// A batch's reuse (s707): build every package's targets, then leave out of the run those green
+/// on the same inputs (`full`: none, but each is recorded). `None` runs the suite as it is.
+fn batch_reuse(
+    who: &Who,
+    p: &crate::config::ProjectCfg,
+    def: &Definition,
+    suite: &Suite,
+    wt: &Path,
+    full: bool,
+) -> Option<(Suite, crate::reuse::Plan)> {
+    let d = &who.d;
+    let test = d
+        .project_id_by_name(&p.id)
+        .and_then(|pid| crate::jobs::test_commands(d, def, pid, None))
+        .map(|t| t.test);
+    let s = with_project_test(suite, test.as_deref()).ok()?;
+    let dc = s
+        .dev_command
+        .as_deref()
+        .filter(|c| crate::scope::wants_tests(c))?;
+    let env: Vec<(String, String)> = std::env::vars().collect();
+    let ws = crate::reuse::Workspace::open(wt, target_dir_hint(&s).as_deref(), &env)?;
+    let groups: Vec<String> = ws
+        .pkg_names()
+        .into_iter()
+        .map(|n| format!("-p {n}"))
+        .collect();
+    if groups.is_empty() || !crate::knownred::known_for(&d.store, &s.name).is_empty() {
+        return None;
+    }
+    let all = crate::scope::Narrow::Targets(groups.clone());
+    if let Some(db) = s.dev_build.as_deref().or(s.build.as_deref()) {
+        let b = crate::scope::expand(db, &all, true);
+        if !matches!(run_build(who, &s, &b, 0, wt), Built::Ok) {
+            return None;
+        }
+    }
+    let tag = format!(
+        "{}\n{dc}\n{}\n{}",
+        s.name,
+        s.dev_build.as_deref().unwrap_or(""),
+        s.build.as_deref().unwrap_or("")
+    );
+    let plan = crate::reuse::plan(&ws, &p.id, &s.name, &groups, &tag, &|label, key| {
+        if full {
+            return None;
+        }
+        d.store
+            .target_green(&p.id, &s.name, label, key)
+            .ok()
+            .flatten()
+    });
+    let mut run = s.clone();
+    if !plan.reused.is_empty() {
+        run.command = crate::scope::expand(
+            dc,
+            &crate::scope::Narrow::Targets(plan.groups.clone()),
+            false,
+        );
+        run.min_tests = 1;
+        run.narrowed = true;
+    }
+    Some((run, plan))
+}
+
 /// Run the named suites in `wt` (a batch's integration worktree, at the tree
 /// to be landed) once, as the landing engine does over a batch's union diff.
 /// They belong to no task, so a skip is read from `members`: the run stops when every member
@@ -4362,6 +4550,7 @@ pub fn run_over(
     sink: Option<StepRunId>,
     base_excuses: bool,
     members: &Members,
+    reuse: bool,
 ) -> OverRun {
     let lock = d.repo_lock(d.project_id_by_name(&p.id).unwrap_or(ProjectId(0)));
     let tree_hash = git::run(wt, &["rev-parse", "HEAD^{tree}"])
@@ -4382,6 +4571,7 @@ pub fn run_over(
         env: vec![],
         trust_base: base_excuses,
         members: members.clone(),
+        reuse: None,
     };
     let _ = std::fs::create_dir_all(log_dir);
     let mut out = OverRun {
@@ -4399,7 +4589,54 @@ pub fn run_over(
             ));
             continue;
         };
-        match run_suite(&who, &p.path, &lock, def, suite, wt, &tree, &mut |_| {}) {
+        // Targets green on the same inputs are left out, except on the periodic full run that
+        // checks the keys (s707).
+        let mut who = who.clone();
+        let mut left_out: Option<Suite> = None;
+        let full = reuse && p.reuse_green && full_run_due(&p.id, p.reuse_full_hours);
+        if reuse && p.reuse_green {
+            match batch_reuse(&who, p, def, suite, wt, full) {
+                Some((s, plan)) => {
+                    if let Some(note) = plan.note() {
+                        out.notes.push(note);
+                    }
+                    if plan.all_reused() {
+                        continue;
+                    }
+                    if !plan.reused.is_empty() {
+                        left_out = Some(s);
+                    }
+                    who.reuse = Some(Arc::new(plan));
+                }
+                None => {}
+            }
+        }
+        let suite = left_out.as_ref().unwrap_or(suite);
+        let res = run_suite(&who, &p.path, &lock, def, suite, wt, &tree, &mut |_| {});
+        if full && !matches!(res, SuiteRun::Gone) {
+            note_full_run(&p.id);
+        }
+        // A red on the full run where reuse had said green points at the key computation: every
+        // recorded key of the suite is dropped and the note says so.
+        if full
+            && matches!(
+                res,
+                SuiteRun::Product { .. }
+                    | SuiteRun::Done {
+                        outcome: SuiteOutcome::Failed,
+                        ..
+                    }
+            )
+        {
+            if let Ok(n) = d.store.clear_target_runs(&p.id, name) {
+                if n > 0 {
+                    out.notes.push(format!(
+                        "{name}: red on the full run with reuse off: if a reuse recorded one of its targets green, the input key missed an input (file a bug against crates/daemon/src/reuse.rs); {n} recorded keys dropped"
+                    ));
+                }
+            }
+        }
+        match res {
             SuiteRun::Done {
                 outcome:
                     SuiteOutcome::Proven

@@ -2505,6 +2505,7 @@ impl Runner {
                     self.sink(),
                     true,
                     &self.members(def),
+                    true,
                 );
                 stop.store(true, std::sync::atomic::Ordering::SeqCst);
                 r
@@ -4131,6 +4132,7 @@ impl Runner {
             // `commit` is the tree under test: only a known-red test may excuse a red.
             false,
             &crate::suites::Members::default(),
+            false,
         );
         {
             let _g = lock.lock().unwrap_or_else(|e| e.into_inner());

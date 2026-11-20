@@ -70,6 +70,7 @@ pub mod release;
 pub mod report;
 pub mod rerun;
 pub mod resume;
+pub mod reuse;
 pub mod runtimes;
 pub mod sched;
 pub mod schedule;

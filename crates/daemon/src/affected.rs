@@ -130,7 +130,7 @@ pub fn packages(meta: &Value, root: &Path) -> Option<Vec<Pkg>> {
 /// Paths that no cargo test of ours reads as input: docs, markdown, and the exit scripts (the
 /// `exit-scripts` suite runs those). Decision 0173 kept the cargo suite for docs-only changes;
 /// decision 0539 replaces that with the smoke set here and the whole run at the batch.
-fn ignorable(path: &str) -> bool {
+pub(crate) fn ignorable(path: &str) -> bool {
     path.starts_with("docs/")
         || path.ends_with(".md")
         || path.starts_with("scripts/exit/")
