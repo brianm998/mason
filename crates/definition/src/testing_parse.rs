@@ -39,6 +39,8 @@ pub const SUITE_KEYS: &[&str] = &[
     "narrow_each",
     "narrow_never",
     "narrow_packages",
+    "narrow_smoke",
+    "whole_later",
     "resume_after_loss",
 ];
 const ENV_KEYS: &[&str] = &[
@@ -146,6 +148,7 @@ fn narrow(
     base: &str,
     [command, tests, root, split, each]: [Option<String>; 5],
     never: Vec<String>,
+    smoke: Vec<String>,
     out: &mut Vec<Problem>,
 ) -> Option<Narrow> {
     let any = command.is_some()
@@ -154,6 +157,12 @@ fn narrow(
         || split.is_some()
         || each.is_some()
         || !never.is_empty();
+    if !any && !smoke.is_empty() {
+        out.push(Problem::new(
+            format!("{base}.narrow_smoke"),
+            "needs `narrow_command` and `narrow_tests`: it names units of a narrowed run",
+        ));
+    }
     if !any {
         return None;
     }
@@ -190,6 +199,7 @@ fn narrow(
         command,
         each,
         never,
+        smoke,
     })
 }
 
@@ -207,6 +217,7 @@ pub fn parse(doc: &DocumentMut, out: &mut Vec<Problem>) -> Testing {
         // The `narrow_*` keys (s386), put together once the table is read.
         let mut nw: [Option<String>; 5] = Default::default();
         let mut never: Vec<String> = vec![];
+        let mut smoke: Vec<String> = vec![];
         for (k, v) in tbl.iter() {
             let path = format!("{base}.{k}");
             match k {
@@ -275,6 +286,18 @@ pub fn parse(doc: &DocumentMut, out: &mut Vec<Problem>) -> Testing {
                 "narrow_split" => nw[3] = string(v, &path, out),
                 "narrow_each" => nw[4] = string(v, &path, out),
                 "narrow_never" => never = strings(v, &path, out),
+                "narrow_smoke" => smoke = strings(v, &path, out),
+                "whole_later" => {
+                    if let Some(w) = string(v, &path, out) {
+                        match mason_testing::WholeLater::from_name(&w) {
+                            Some(w) => s.whole_later = Some(w),
+                            None => out.push(Problem::new(
+                                &path,
+                                "must be \"batch\" (a landing tier runs the suite whole) or \"ci\" (the base's CI does)",
+                            )),
+                        }
+                    }
+                }
                 other => out.push(unknown_key(&base, other, SUITE_KEYS)),
             }
         }
@@ -287,7 +310,7 @@ pub fn parse(doc: &DocumentMut, out: &mut Vec<Problem>) -> Testing {
                 "required: how its output is read, so a pass can be proven",
             ));
         }
-        s.narrow = narrow(&base, nw, never, out);
+        s.narrow = narrow(&base, nw, never, smoke, out);
         if s.narrow_packages && s.dev_command.is_none() {
             out.push(Problem::new(
                 format!("{base}.narrow_packages"),
