@@ -824,6 +824,23 @@ impl GitHub {
             .collect())
     }
 
+    /// The messages of a job's check-run annotations, one per line. A job that hit its time
+    /// limit carries "The job has exceeded the maximum execution time of 1h0m0s". Best
+    /// effort: `None` if they cannot be read.
+    pub fn job_annotations(&self, job: u64) -> Option<String> {
+        let v = self
+            .json(Request::get(
+                &self.url(&format!("/check-runs/{job}/annotations?per_page=50")),
+            ))
+            .ok()?;
+        let text: Vec<&str> = v
+            .as_array()?
+            .iter()
+            .filter_map(|a| a["message"].as_str())
+            .collect();
+        Some(text.join("\n"))
+    }
+
     /// The last `lines` lines of a job's log. GitHub answers with a redirect to a signed
     /// address, which is read without the token. Best effort: `None` if it cannot be read.
     pub fn job_log_tail(&self, job: u64, lines: usize) -> Option<String> {
