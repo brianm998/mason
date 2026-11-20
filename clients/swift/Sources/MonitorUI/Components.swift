@@ -1305,8 +1305,8 @@ struct QueueHoldBanner: View {
             LinkedText(model: model, text: hold.summary, font: theme.body(.semibold), color: theme.attention)
                 .accessibilityIdentifier("home:queue-hold")
             if hold.hasParty && hold.party.lease {
-                Text(QueueWait.lease(hold.party, now: model.daemonNow()))
-                    .font(theme.small()).foregroundStyle(theme.muted)
+                LinkedText(model: model, text: QueueWait.lease(hold.party, now: model.daemonNow()),
+                           font: theme.small(), color: theme.muted)
                     .accessibilityIdentifier("home:queue-hold:lease")
             }
             ForEach(hold.tasks.filter { _ in hold.kind == "red" }.prefix(8), id: \.self) { t in
