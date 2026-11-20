@@ -2199,9 +2199,6 @@ fn lease(c: &Ctx, needs: Needs) -> bool {
 
 /// The step's `MASON_*` variables, with `MASON_HELD` naming what is leased for the
 /// command about to run (not just the step's own `uses`).
-/// The narrowed copy of `suite` for this task's test step (s386), with a note naming what it
-/// runs, or `None` to run it whole: no `narrow_*` keys, the change unreadable, or
-/// [`mason_testing::narrow::select`] picks nothing or most of it.
 /// What the test step does with one suite once narrowing is applied.
 enum StepNarrow {
     Whole,
@@ -2233,6 +2230,10 @@ fn narrow_step(c: &Ctx, suite: &Suite) -> StepNarrow {
     narrow_units_for_step(c, suite, later).unwrap_or(StepNarrow::Whole)
 }
 
+/// The narrowed copy of `suite` for this task's test step (s386), with a note naming what it
+/// runs, or `None` to run it whole: no `narrow_*` keys, the change unreadable, or
+/// [`mason_testing::narrow::select`] picks nothing or most of it. With `whole_later`, see
+/// [`mason_testing::narrow::select_later`].
 fn narrow_units_for_step(
     c: &Ctx,
     suite: &Suite,

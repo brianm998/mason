@@ -841,7 +841,7 @@ const WHOLE_LATER_LANDING: &str =
 fn whole_later_world(extra: &str, log: &std::path::Path) -> (Scratch, Arc<mason_daemon::Daemon>) {
     let definition = def(
         &format!(
-            "narrow_command = \"echo narrowed {{{{tests}}}} >> {l}; echo 1..1; echo ok 1 - picked\"\n\
+            "narrow_command = \"echo narrowed {{tests}} >> {l}; echo 1..1; echo ok 1 - picked\"\n\
              narrow_tests = \"tests/*_test.sh\"\n\
              narrow_root = \"tests/\"\n\
              whole_later = \"batch\"\n{extra}",
