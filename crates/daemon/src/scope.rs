@@ -143,8 +143,17 @@ pub fn expand(template: &str, n: &Narrow, build: bool) -> String {
     let both = |s: &str, v: &str| s.replace("{packages}", v).replace(TESTS_FOR_CHANGE, v);
     // The doc-test flag with `--no-run` is an error ("can't skip running doc tests"): a build
     // does not compile doc tests, they compile when they run.
+    // A test filter after `--` belongs to the run only: a build puts `--no-run` before it, and
+    // the filter would otherwise reach the test binary.
     let group = |g: &str| {
         if build {
+            let g = match g
+                .find(" -- ")
+                .or_else(|| g.strip_suffix(" --").map(|h| h.len()))
+            {
+                Some(i) => &g[..i],
+                None => g,
+            };
             g.replace(" --doc", "")
         } else {
             g.to_string()
