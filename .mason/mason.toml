@@ -77,8 +77,10 @@ rerun = "{project_test} -- --exact {tests}"
 # executable's tests, keeps this shard's and runs them with `--exact`, printing libtest's lines
 # unchanged, so `pass_regex` and `min_tests` judge the merged output as they do one run's. A local run
 # ignores both keys; a narrowed run (`dev_command`) is not split.
-shards = 8
-shard_command = '''RUSTDOC="$PWD/scripts/rustdoc-bootstrap.sh" python3 -I scripts/test-shard.py -- {project_test} --config 'target."cfg(unix)".runner=["env","RUSTC_BOOTSTRAP=1"]' -- -Z unstable-options --report-time'''
+# Commented out until the daemon that reads these keys is running: a definition with a key the
+# running daemon does not know is invalid, so it could not land with the code (s729). Uncomment both.
+# shards = 8
+# shard_command = '''RUSTDOC="$PWD/scripts/rustdoc-bootstrap.sh" python3 -I scripts/test-shard.py -- {project_test} --config 'target."cfg(unix)".runner=["env","RUSTC_BOOTSTRAP=1"]' -- -Z unstable-options --report-time'''
 # The affected tests, not the whole workspace (decision 0539, superseding 0205). `{tests_for_change}`
 # is the test targets a change can affect, found by a static source scan (crates/daemon/src/affected.rs):
 # a changed test file runs itself, a changed `src` file runs its crate's unit tests and the targets
