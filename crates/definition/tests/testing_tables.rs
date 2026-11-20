@@ -678,3 +678,32 @@ fn remote_and_runs_on_parse_and_their_mistakes_are_named() {
         assert!(p.iter().any(|x| x.contains(want)), "{extra}: {p:?}");
     }
 }
+
+#[test]
+fn shards_parse_and_need_a_shard_command() {
+    // #701
+    let base = r#"rerun = "cargo nextest run {tests}""#;
+    let d = parse(&with(
+        base,
+        &format!("{base}\nshards = 8\nshard_command = \"python3 -I scripts/test-shard.py -- cargo test\""),
+    ))
+    .unwrap();
+    let s = d.testing.suite("unit").unwrap();
+    assert_eq!(s.shards, 8);
+    assert!(s
+        .shard_command
+        .as_deref()
+        .is_some_and(|c| c.contains("test-shard")));
+    let plain = parse(&with(base, base)).unwrap();
+    let s = plain.testing.suite("unit").unwrap();
+    assert_eq!((s.shards, s.shard_command.as_deref()), (0, None));
+    for (extra, want) in [
+        ("shards = 8", "needs `shard_command`"),
+        ("shards = 0\nshard_command = \"x\"", "from 1 to 64"),
+        ("shards = 65\nshard_command = \"x\"", "from 1 to 64"),
+        ("shards = \"eight\"", "from 1 to 64"),
+    ] {
+        let p = problems(&with(base, &format!("{base}\n{extra}")));
+        assert!(p.iter().any(|x| x.contains(want)), "{extra}: {p:?}");
+    }
+}

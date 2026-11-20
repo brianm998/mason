@@ -12,6 +12,9 @@ use mason_testing::{
 use std::collections::BTreeMap;
 use toml_edit::{DocumentMut, Item};
 
+/// GitHub allows 256 jobs in a matrix; a suite is split far less than that.
+pub const MAX_SHARDS: i64 = 64;
+
 pub const SUITE_KEYS: &[&str] = &[
     "command",
     "build",
@@ -44,6 +47,8 @@ pub const SUITE_KEYS: &[&str] = &[
     "resume_after_loss",
     "remote",
     "runs_on",
+    "shards",
+    "shard_command",
 ];
 const ENV_KEYS: &[&str] = &[
     "type",
@@ -282,6 +287,14 @@ pub fn parse(doc: &DocumentMut, out: &mut Vec<Problem>) -> Testing {
                     Some(b) => s.remote = b,
                     None => out.push(Problem::new(&path, "must be true or false")),
                 },
+                "shards" => match v.as_integer() {
+                    Some(n) if (1..=MAX_SHARDS).contains(&n) => s.shards = n as u32,
+                    _ => out.push(Problem::new(
+                        &path,
+                        format!("must be a whole number from 1 to {MAX_SHARDS}"),
+                    )),
+                },
+                "shard_command" => s.shard_command = string(v, &path, out),
                 "runs_on" => {
                     if let Some(r) = string(v, &path, out) {
                         if r.trim().is_empty() {
@@ -326,6 +339,13 @@ pub fn parse(doc: &DocumentMut, out: &mut Vec<Problem>) -> Testing {
             out.push(Problem::new(
                 format!("{base}.parser"),
                 "required: how its output is read, so a pass can be proven",
+            ));
+        }
+        if s.shards > 1 && s.shard_command.is_none() {
+            out.push(Problem::new(
+                format!("{base}.shards"),
+                "needs `shard_command`, what each runner runs for its share of the tests (it reads \
+                 `.mason/run.json` and `MASON_SHARD`, as scripts/test-shard.py does)",
             ));
         }
         s.narrow = narrow(&base, nw, never, smoke, out);
