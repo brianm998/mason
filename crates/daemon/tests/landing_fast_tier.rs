@@ -49,6 +49,16 @@ fn a_skipped_batch_whose_unit_tests_pass_lands_and_a_batch_with_testing_does_not
     // The push is read back through the origin: look until it shows, not once.
     wait_for("its file on main", 120, || w.on_main("x/ok.txt"));
     assert!(w.on_main("x/ok.txt"));
+    // The daemon's idle debt pass pays this task's `step:test` debt about a minute after start,
+    // in this repo, while the next task is made. Order it: pay it here, now, then check it is closed.
+    for d in w.d.store.debts(Some(t.0), true).unwrap() {
+        if d.scope == "step:test" {
+            // "already paid" (the daemon got there first) is fine; the check below decides.
+            let _ = mason_daemon::suites::pay(&w.d, d.id);
+        }
+    }
+    let open = w.d.store.debts(Some(t.0), true).unwrap();
+    assert!(open.iter().all(|d| d.scope != "step:test"), "{open:?}");
     // Let the first batch finish tearing down before the next task's worktree is made.
     let pid = w.d.project_id_by_name("scratch").unwrap();
     wait_for("the first batch to finish", 120, || {
