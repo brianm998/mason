@@ -124,6 +124,11 @@ pub struct Suite {
     /// the lost run did not reach (#621). A suite whose `dev_command` takes `{tests_for_change}`
     /// does it without this key.
     pub resume_after_loss: bool,
+    /// `remote = false` keeps the suite on this machine whatever the global switch says (#698).
+    pub remote: bool,
+    /// `runs_on = "macos-15"`: the runner kind when the suite runs on GitHub Actions; without
+    /// it the project's `[remote] runs_on`.
+    pub runs_on: Option<String>,
 }
 
 /// The `narrow_*` keys of a suite (s386): where its tests live, how one is named, and the
@@ -205,6 +210,8 @@ impl Suite {
             narrow_packages: false,
             whole_later: None,
             resume_after_loss: false,
+            remote: true,
+            runs_on: None,
         }
     }
 }

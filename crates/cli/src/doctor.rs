@@ -274,6 +274,92 @@ fn check_tracker(p: &ProjectCfg, status: Option<&serde_json::Value>, out: &mut V
     }
 }
 
+/// What a project needs for remote runs (#703), read from the base branch's workflows and the
+/// repository's settings on GitHub. Failures here make runs of this project stay on this Mac.
+fn check_remote_run(p: &ProjectCfg, out: &mut Vec<Finding>) {
+    use mason_adapter_api::http::{Curl, Http};
+    use mason_adapters::github::{GitHub, TokenRef};
+    let Some(r) = p.services.remote.as_ref() else {
+        return;
+    };
+    let files = mason_adapters::github::workflow_files_at(&p.path, &p.base_ref());
+    let live = TokenRef::parse(&r.token).map(|t| {
+        let http: std::sync::Arc<dyn Http> = std::sync::Arc::new(Curl {
+            timeout_s: 30,
+            http2: false,
+        });
+        GitHub::new(http, &r.api, &r.repo, t)
+    });
+    let (repo, actions) = match live {
+        Ok(gh) => (
+            gh.repository().map_err(|e| e.detail),
+            gh.actions_readable().map_err(|e| e.detail),
+        ),
+        Err(e) => (Err(e.clone()), Err(e)),
+    };
+    out.extend(remote_run_findings(
+        &p.id,
+        &p.base_ref(),
+        &r.repo,
+        &r.workflow,
+        &files,
+        repo,
+        actions,
+    ));
+}
+
+/// The findings for remote runs, from what was read. Pure, so it is tested on fake answers.
+fn remote_run_findings(
+    name: &str,
+    base: &str,
+    repo_slug: &str,
+    workflow: &str,
+    files: &[(String, String)],
+    repo: Result<serde_json::Value, String>,
+    actions: Result<(), String>,
+) -> Vec<Finding> {
+    use mason_adapters::runref::{self, PushProtection};
+    let mut out = vec![];
+    let problems = runref::workflow_problems(files, workflow);
+    if problems.is_empty() {
+        out.push(ok(format!(
+            "project {name}: {workflow} on {base} runs on `mason/run/**`, and no other workflow does"
+        )));
+    }
+    for x in problems {
+        out.push(fail(format!("project {name}: remote runs: {x}")));
+    }
+    match repo {
+        Err(e) => out.push(warn(format!(
+            "project {name}: could not read {repo_slug} on GitHub ({e}); the token, its Actions access and push protection are unchecked, so runs stay on this Mac"
+        ))),
+        Ok(v) => {
+            match runref::push_problem(&v) {
+                None => out.push(ok(format!("project {name}: the token can push to {repo_slug}"))),
+                Some(x) => out.push(fail(format!("project {name}: remote runs: {x}"))),
+            }
+            match actions {
+                Ok(()) => out.push(ok(format!("project {name}: the token can read Actions on {repo_slug}"))),
+                Err(e) => out.push(fail(format!(
+                    "project {name}: remote runs: the token cannot read Actions on {repo_slug} ({e}); give it Actions read access"
+                ))),
+            }
+            match runref::push_protection(&v) {
+                PushProtection::Enabled => out.push(ok(format!(
+                    "project {name}: secret-scanning push protection is on for {repo_slug}"
+                ))),
+                PushProtection::Disabled => out.push(warn(format!(
+                    "project {name}: secret-scanning push protection is off for {repo_slug}. A task's work in progress is public once it is pushed to a run ref; turn it on at https://github.com/{repo_slug}/settings/security_analysis"
+                ))),
+                PushProtection::Unknown => out.push(warn(format!(
+                    "project {name}: GitHub did not say whether secret-scanning push protection is on for {repo_slug} (the token may not see settings); check https://github.com/{repo_slug}/settings/security_analysis"
+                ))),
+            }
+        }
+    }
+    out
+}
+
 fn check_project(p: &ProjectCfg, out: &mut Vec<Finding>) {
     let name = &p.id;
     if !p.path.join(".git").exists() && !p.path.is_dir() {
@@ -621,6 +707,7 @@ pub fn run(data_dir: &Path, config_dir: &Path) -> Vec<Finding> {
                 check_providers(p, config_dir, &mut out);
                 check_tracker(p, live.as_ref(), &mut out);
                 check_remote_access(p, &mut out);
+                check_remote_run(p, &mut out);
             }
         }
         Err(errs) => errs
@@ -665,6 +752,83 @@ pub fn run(data_dir: &Path, config_dir: &Path) -> Vec<Finding> {
 
 #[cfg(test)]
 mod tests {
+    fn files(v: &[(&str, &str)]) -> Vec<(String, String)> {
+        v.iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect()
+    }
+    const RUN: &str = "on:\n  push:\n    branches: [\"mason/run/**\"]\n";
+    const CI: &str = "on:\n  push:\n    branches: [develop]\n";
+
+    fn findings(
+        f: &[(&str, &str)],
+        repo: serde_json::Value,
+        actions: Result<(), String>,
+    ) -> Vec<super::Finding> {
+        super::remote_run_findings(
+            "p",
+            "origin/main",
+            "o/r",
+            "mason-run.yml",
+            &files(f),
+            Ok(repo),
+            actions,
+        )
+    }
+
+    #[test]
+    fn remote_checks_name_the_missing_trigger_and_pass_a_good_setup() {
+        let good = serde_json::json!({"permissions": {"push": true},
+            "security_and_analysis": {"secret_scanning_push_protection": {"status": "enabled"}}});
+        let out = findings(
+            &[("mason-run.yml", RUN), ("ci.yml", CI)],
+            good.clone(),
+            Ok(()),
+        );
+        assert!(
+            out.iter().all(|f| f.level == super::Level::Ok),
+            "{:?}",
+            out.iter().map(|f| &f.text).collect::<Vec<_>>()
+        );
+        let out = findings(&[("ci.yml", CI)], good.clone(), Ok(()));
+        assert!(out.iter().any(|f| f.level == super::Level::Fail
+            && f.text.contains("no .github/workflows/mason-run.yml")));
+        let out = findings(
+            &[("mason-run.yml", "on:\n  pull_request:\n")],
+            good.clone(),
+            Ok(()),
+        );
+        assert!(out
+            .iter()
+            .any(|f| f.level == super::Level::Fail && f.text.contains("mason/run/**")));
+        let out = findings(
+            &[("mason-run.yml", RUN), ("ci.yml", "on: push\n")],
+            good,
+            Ok(()),
+        );
+        assert!(out
+            .iter()
+            .any(|f| f.level == super::Level::Fail && f.text.contains("ci.yml also runs")));
+    }
+
+    #[test]
+    fn push_protection_off_warns_with_the_settings_link_and_token_gaps_fail() {
+        let off = serde_json::json!({"permissions": {"push": true},
+            "security_and_analysis": {"secret_scanning_push_protection": {"status": "disabled"}}});
+        let out = findings(&[("mason-run.yml", RUN)], off, Err("403".into()));
+        assert!(out.iter().any(|f| f.level == super::Level::Warn
+            && f.text
+                .contains("https://github.com/o/r/settings/security_analysis")));
+        assert!(out
+            .iter()
+            .any(|f| f.level == super::Level::Fail && f.text.contains("read Actions")));
+        let ro = serde_json::json!({"permissions": {"push": false}});
+        let out = findings(&[("mason-run.yml", RUN)], ro, Ok(()));
+        assert!(out
+            .iter()
+            .any(|f| f.level == super::Level::Fail && f.text.contains("cannot push")));
+    }
+
     #[test]
     fn doctor_reports_the_shell_or_what_to_install() {
         let mut out = vec![];

@@ -1045,6 +1045,16 @@ fn acquire_needs_as(
     label: Option<&str>,
 ) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
     let d = &c.d;
+    // A project whose runs go to GitHub holds runner pool units for them, not this machine's
+    // slots (#700). A daemon that restarted counted the units of its run still out: they are
+    // this step's, and its lease takes them over.
+    let needs = match crate::remote::pool_needs(d, &c.project.id, &needs) {
+        Some(n) => {
+            d.broker.take_over_remote(&format!("task {}", c.task.0));
+            n
+        }
+        None => needs,
+    };
     // Device pools are sized by what the provider lists, never by a default.
     if needs.amounts.keys().any(|n| n.starts_with("device:")) {
         d.targets.declare_all(d);
@@ -1924,6 +1934,7 @@ impl TestChecks {
                 holds: uses.clone(),
                 label: format!("#{} check", self.task),
                 stop: None,
+                place: None,
             }
         };
         let mut lines: Vec<String> = vec![];
@@ -2485,6 +2496,7 @@ impl TestChecks {
                 holds: uses.clone(),
                 label: format!("#{} check", self.task),
                 stop: None,
+                place: None,
             }
         };
         let merges = self.reds.merges();

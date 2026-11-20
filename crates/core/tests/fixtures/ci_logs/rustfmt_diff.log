@@ -1,0 +1,14 @@
+2026-11-20T01:02:00.1234567Z ##[group]Run cargo fmt --all -- --check
+2026-11-20T01:02:01.1234567Z env:
+2026-11-20T01:02:02.1234567Z   CARGO_TERM_COLOR: always
+2026-11-20T01:02:03.1234567Z ##[endgroup]
+2026-11-20T01:02:04.1234567Z Diff in /home/runner/work/mason/crates/core/src/lib.rs:12:
+2026-11-20T01:02:05.1234567Z -use b;
+2026-11-20T01:02:06.1234567Z +use a;
+2026-11-20T01:02:07.1234567Z  use c;
+2026-11-20T01:02:08.1234567Z ##[error]Process completed with exit code 1.
+2026-11-20T01:02:09.1234567Z ##[group]Post job cleanup.
+2026-11-20T01:02:10.1234567Z Post job cleanup.
+2026-11-20T01:02:11.1234567Z [command]/usr/bin/git config --local --unset-all http.https://github.com/.extraheader
+2026-11-20T01:02:12.1234567Z ##[endgroup]
+2026-11-20T01:02:13.1234567Z Node.js 20 actions are deprecated.

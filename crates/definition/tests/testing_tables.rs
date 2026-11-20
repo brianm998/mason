@@ -653,3 +653,28 @@ fn a_dead_empty_impact_entry_warns_and_an_override_does_not() {
     .is_empty());
     assert!(warn("\"docs/**\" = []\n\"src/**\" = [\"unit\"]").is_empty());
 }
+
+#[test]
+fn remote_and_runs_on_parse_and_their_mistakes_are_named() {
+    // #698
+    let base = r#"rerun = "cargo nextest run {tests}""#;
+    let d = parse(&with(
+        base,
+        &format!("{base}\nremote = false\nruns_on = \"macos-15\""),
+    ))
+    .unwrap();
+    let s = d.testing.suite("unit").unwrap();
+    assert!(!s.remote);
+    assert_eq!(s.runs_on.as_deref(), Some("macos-15"));
+    let plain = parse(&with(base, base)).unwrap();
+    let s = plain.testing.suite("unit").unwrap();
+    assert!(s.remote && s.runs_on.is_none());
+    for (extra, want) in [
+        ("runs_on = \"\"", "runs_on"),
+        ("runs_on = 3", "must be a string"),
+        ("remote = \"yes\"", "must be true or false"),
+    ] {
+        let p = problems(&with(base, &format!("{base}\n{extra}")));
+        assert!(p.iter().any(|x| x.contains(want)), "{extra}: {p:?}");
+    }
+}

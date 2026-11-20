@@ -46,9 +46,6 @@ fn a_skipped_batch_whose_merge_breaks_a_unit_test_is_parked_naming_that_test() {
 }
 
 #[test]
-// Owner, 2026-11-20: off until fixed. It never finishes: it blocks in `suites::pay` and held a
-// test-suite slot for over 75 minutes in every full workspace run, debt payment and s06 run.
-#[ignore = "hangs in suites::pay (2026-11-20); re-enable once the debt payment returns"]
 fn a_skipped_batch_whose_unit_tests_pass_lands_and_a_batch_with_testing_does_not_run_the_tier() {
     // The batch forms when the task is admitted (max_size), never on the timer.
     let w = world_built_fast("window = \"20m\"\nmax_size = 1\n", &[], true);

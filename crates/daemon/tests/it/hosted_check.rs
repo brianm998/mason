@@ -32,6 +32,7 @@ fn spec(
         stop: None,
         holds: Default::default(),
         label: String::new(),
+        place: None,
     }
 }
 
