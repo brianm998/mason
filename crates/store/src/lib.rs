@@ -1385,6 +1385,60 @@ impl Store {
         })
     }
 
+    /// Record how long each test executable of a finished run took (s649): `(target, ms)`. The
+    /// last [`TEST_TIME_RUNS`] are kept per project, suite and target.
+    pub fn record_target_times(
+        &self,
+        project: &str,
+        suite: &str,
+        times: &[(String, u64)],
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        if times.is_empty() {
+            return Ok(());
+        }
+        let (p, s, t) = (project.to_string(), suite.to_string(), times.to_vec());
+        self.write(move |c| {
+            let mut ins = c.prepare(
+                "INSERT INTO target_times(project, suite, target, ms, at_ms) VALUES (?1,?2,?3,?4,?5)",
+            )?;
+            for (name, ms) in &t {
+                ins.execute(params![p, s, name, *ms as i64, now_ms as i64])?;
+            }
+            c.execute(
+                "DELETE FROM target_times WHERE project = ?1 AND suite = ?2 AND rowid NOT IN \
+                 (SELECT rowid FROM (SELECT rowid, ROW_NUMBER() OVER \
+                   (PARTITION BY target ORDER BY at_ms DESC, rowid DESC) AS n \
+                   FROM target_times WHERE project = ?1 AND suite = ?2) WHERE n <= ?3)",
+                params![p, s, TEST_TIME_RUNS as i64],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// The median run time of each recorded test executable of a suite (s649).
+    pub fn target_medians(
+        &self,
+        project: &str,
+        suite: &str,
+    ) -> Result<std::collections::BTreeMap<String, u64>, StoreError> {
+        let (p, s) = (project.to_string(), suite.to_string());
+        self.read(move |c| {
+            let mut st = c.prepare(
+                "SELECT target, ms FROM target_times WHERE project = ?1 AND suite = ?2 \
+                 ORDER BY target, at_ms DESC",
+            )?;
+            let rows = st.query_map(params![p, s], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?.max(0) as u64))
+            })?;
+            let mut by: std::collections::BTreeMap<String, Vec<u64>> = Default::default();
+            for (t, ms) in rows.filter_map(Result::ok) {
+                by.entry(t).or_default().push(ms);
+            }
+            Ok(by.into_iter().map(|(t, v)| (t, test_median(&v))).collect())
+        })
+    }
+
     /// The tests with the longest median time over their recorded runs (s634), longest first,
     /// at most `limit`. `project` narrows to one project. Each is
     /// `(project, suite, test, median_ms, runs, suite_total_ms)`, the last being the sum of the
