@@ -4618,17 +4618,17 @@ mod alone_tests {
         let t = vec!["a::b".to_string(), "c::d".to_string()];
         assert_eq!(
             rerun_command(s, &t, false),
-            "cargo test -- --exact a::b c::d"
+            "cargo test -- --exact 'a::b' 'c::d'"
         );
         assert_eq!(
             rerun_command(s, &t, true),
-            "cargo test -- --exact a::b c::d --test-threads=1"
+            "cargo test -- --exact 'a::b' 'c::d' --test-threads=1"
         );
         // Without a `--` there is nowhere to put a libtest flag.
         let d = def(Some("run {tests}"));
         assert_eq!(
             rerun_command(d.testing.suite("cw").unwrap(), &t, true),
-            "run a::b c::d"
+            "run 'a::b' 'c::d'"
         );
     }
 }
