@@ -161,7 +161,10 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
     #[test]
     fn short_selected_targets_are_small() {
         let m = med(&[("mason_core", 20_000), ("other", 30_000), ("it", 536_000)]);
-        let g = vec!["-p mason-core --lib".to_string(), "-p x --test other".to_string()];
+        let g = vec![
+            "-p mason-core --lib".to_string(),
+            "-p x --test other".to_string(),
+        ];
         assert_eq!(small_estimate_ms(&g, &m, 180), Some(50_000));
         assert_eq!(label(70_000), "small run, est. 70 s");
     }
@@ -169,9 +172,15 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
     #[test]
     fn a_long_unrecorded_or_off_selection_is_not_small() {
         let m = med(&[("mason_core", 20_000), ("it", 536_000)]);
-        let long = vec!["-p mason-core --lib".to_string(), "-p d --test it".to_string()];
+        let long = vec![
+            "-p mason-core --lib".to_string(),
+            "-p d --test it".to_string(),
+        ];
         assert_eq!(small_estimate_ms(&long, &m, 180), None);
-        let unknown = vec!["-p mason-core --lib".to_string(), "-p d --test new".to_string()];
+        let unknown = vec![
+            "-p mason-core --lib".to_string(),
+            "-p d --test new".to_string(),
+        ];
         assert_eq!(small_estimate_ms(&unknown, &m, 180), None);
         let pkgs = vec!["-p mason-core".to_string()];
         assert_eq!(small_estimate_ms(&pkgs, &m, 180), None);

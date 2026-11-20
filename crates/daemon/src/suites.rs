@@ -367,11 +367,7 @@ fn small_run(who: &Who, c: &Ctx, suite: &Suite, groups: &[String]) -> Option<u64
     if !c.def.resources.contains_key(crate::jobs::TEST_SMALL) {
         return None;
     }
-    let medians = who
-        .d
-        .store
-        .target_medians(&who.project, &suite.name)
-        .ok()?;
+    let medians = who.d.store.target_medians(&who.project, &suite.name).ok()?;
     crate::targettimes::small_estimate_ms(groups, &medians, c.project.small_run_s)
 }
 
@@ -2683,7 +2679,9 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
             None => (suite, None),
         };
         // A narrowed run of short targets takes the small lane; a whole run never does (s649).
-        let small = groups.as_deref().and_then(|g| small_run(&who, c, &suite, g));
+        let small = groups
+            .as_deref()
+            .and_then(|g| small_run(&who, c, &suite, g));
         let ran_beside = side.remove(&name);
         if per_suite && ran_beside.is_none() {
             c.release_lease();
@@ -2695,7 +2693,13 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
             {
                 let needs = needs_of(&crate::jobs::build_uses(), None);
                 who.env = held_env(c, &needs);
-                match lease_suite(c, needs, &who.check(&name), estimate(&who, &name, "build"), None) {
+                match lease_suite(
+                    c,
+                    needs,
+                    &who.check(&name),
+                    estimate(&who, &name, "build"),
+                    None,
+                ) {
                     Leased::Gone => return,
                     // Nothing is built; the suite's run below reports the skip.
                     Leased::Skipped => {}
@@ -2747,7 +2751,10 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
                 needs.amounts = crate::jobs::small_lane(&c.def, needs.amounts);
                 if needs.amounts != before {
                     let l = crate::targettimes::label(ms);
-                    notes.push(format!("{name}: {l}: queued for {}", crate::jobs::TEST_SMALL));
+                    notes.push(format!(
+                        "{name}: {l}: queued for {}",
+                        crate::jobs::TEST_SMALL
+                    ));
                     label = Some(l);
                 }
             }
@@ -2756,15 +2763,13 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
             // one already green for this exact tree, which `run_suite` reuses without running
             // (s380): it must not wait in the queue to learn that.
             if !proven(d, &tree, &name) {
-                if let Leased::Gone =
-                    lease_suite(
-                        c,
-                        needs,
-                        &who.check(&name),
-                        estimate(&who, &name, "run"),
-                        label.as_deref(),
-                    )
-                {
+                if let Leased::Gone = lease_suite(
+                    c,
+                    needs,
+                    &who.check(&name),
+                    estimate(&who, &name, "run"),
+                    label.as_deref(),
+                ) {
                     return;
                 }
             }
