@@ -563,10 +563,12 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s684**: an `[impact]` value may be `{ suites = [...], override = true }`, which replaces less specific entries for the paths it matches, so a narrow `= []` finally takes a path out of a broader glob.
 - **s685**: The `[impact]` table now names `.github`, `packaging`, `scripts`, `.cargo`, `.mason` data files and other paths that used to run every suite whole, `mason definition check` and the daemon's definition load list tracked files no glob matches, and the test notes name the unmapped path.
 - **s686**: The skipped-batch landing test now waits for the first batch's teardown before paying its debt, fixing a flake where the payment raced the worktree prune.
+- **s687**: The flaky skipped-batch fast-tier test now prints both tasks' reasons and the fast tier's output when it fails, so the next red shows whether the test name was never read or the run was cut; no assertion changed.
 - **s689**: A suite can say `whole_later = "batch"` (or `"ci"`) and list `narrow_smoke` units, so the test step runs only the smoke units plus its pick, or nothing, where it used to run the whole suite.
 - **s691**: Landing now runs the lint tier before the batch suites and parks the tasks whose diff touches a file the lint (or a red `ci_gates` fmt test) names, instead of bisecting the whole suite; the test step gains a fast `fmt` suite.
 - **s692**: A red landing batch whose run named its failing tests now reruns just those tests (one at a time) and bisects with a build plus just those tests through the suite's `rerun` template, falling back to whole-suite runs when no names were read, the red was a build, or the suite has no `rerun`; the remainder still gets one whole-suite run before it lands.
 - **s693**: A landing batch merges each task's pinned head instead of its live branch, drops members whose run ended, and refuses to land a task whose head differs from the tested one.
 - **s696**: CI/lint: the SPDX header of scripts/exit/s653.sh is corrected from Apache-2.0 to GPL-3.0-or-later so check-spdx passes on develop.
 - **s697**: The red CI/monitor-compose run 44697853075 names no failing step in the supplied log tail (only post-job Gradle cache cleanup), so no code changed and decision 0690 records how to classify it from the full log.
+- **s704**: The swift and gradle exit scripts s645 and s662 now skip when their skip variable is set, and the live-token cost test waits for the cost instead of a fixed sleep.
 <!-- status:end -->
