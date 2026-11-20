@@ -2481,11 +2481,7 @@ pub fn run_alone(
         failed: Default::default(),
         notes: vec![],
         failing: Default::default(),
-<<<<<<< HEAD
         ..Default::default()
-=======
-        unfinished: Default::default(),
->>>>>>> origin/develop
     };
     for (name, tests) in failing {
         let red = |out: &mut OverRun, note: String| {
@@ -4847,11 +4843,7 @@ pub fn run_over(
         failed: Default::default(),
         notes: vec![],
         failing: Default::default(),
-<<<<<<< HEAD
         ..Default::default()
-=======
-        unfinished: Default::default(),
->>>>>>> origin/develop
     };
     for name in suites {
         let Some(suite) = def.testing.suite(name) else {

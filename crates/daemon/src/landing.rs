@@ -2620,11 +2620,7 @@ impl Runner {
             failed: BTreeSet::new(),
             notes: vec![],
             failing: Default::default(),
-<<<<<<< HEAD
             ..Default::default()
-=======
-            unfinished: Default::default(),
->>>>>>> origin/develop
         };
         // Names that are not suites (CI job names) have nothing to run locally.
         let local: Vec<String> = suites
@@ -2651,11 +2647,7 @@ impl Runner {
                         failed: BTreeSet::new(),
                         notes: vec![e],
                         failing: Default::default(),
-<<<<<<< HEAD
                         ..Default::default()
-=======
-                        unfinished: Default::default(),
->>>>>>> origin/develop
                     };
                 }
             };
@@ -2743,11 +2735,7 @@ impl Runner {
                     failed: BTreeSet::new(),
                     notes: vec![e],
                     failing: Default::default(),
-<<<<<<< HEAD
                     ..Default::default()
-=======
-                    unfinished: Default::default(),
->>>>>>> origin/develop
                 };
             }
         };
@@ -2828,11 +2816,7 @@ impl Runner {
             failed: BTreeSet::new(),
             notes: vec![],
             failing: Default::default(),
-<<<<<<< HEAD
             ..Default::default()
-=======
-            unfinished: Default::default(),
->>>>>>> origin/develop
         };
         // Force lands past verification, CI included.
         if self.kind == "force" || self.forced() {
@@ -2847,11 +2831,7 @@ impl Runner {
                 failed: l.failed,
                 notes: l.notes,
                 failing: Default::default(),
-<<<<<<< HEAD
                 ..Default::default()
-=======
-                unfinished: Default::default(),
->>>>>>> origin/develop
             };
         }
         let mut r = self.run_local(def, suites, wt, base, log_dir, prefix);
@@ -2953,11 +2933,7 @@ impl Runner {
             failed: BTreeSet::new(),
             notes: vec![],
             failing: Default::default(),
-<<<<<<< HEAD
             ..Default::default()
-=======
-            unfinished: Default::default(),
->>>>>>> origin/develop
         };
         let paths: Vec<String> =
             match git::run(wt, &["diff", "--name-only", &format!("{base}..HEAD")]) {
@@ -3114,11 +3090,7 @@ impl Runner {
             failed: BTreeSet::new(),
             notes: vec![],
             failing: Default::default(),
-<<<<<<< HEAD
             ..Default::default()
-=======
-            unfinished: Default::default(),
->>>>>>> origin/develop
         };
         let Some(tier) = self.cfg.tier("lint") else {
             return out;
@@ -3219,11 +3191,7 @@ impl Runner {
             failed: BTreeSet::new(),
             notes: vec![],
             failing: Default::default(),
-<<<<<<< HEAD
             ..Default::default()
-=======
-            unfinished: Default::default(),
->>>>>>> origin/develop
         };
         let paths: Vec<String> =
             match git::run(wt, &["diff", "--name-only", &format!("{base}..HEAD")]) {
@@ -3236,11 +3204,7 @@ impl Runner {
                         failed: BTreeSet::new(),
                         notes: vec![why],
                         failing: Default::default(),
-<<<<<<< HEAD
                         ..Default::default()
-=======
-                        unfinished: Default::default(),
->>>>>>> origin/develop
                     };
                 }
             };
@@ -3288,11 +3252,7 @@ impl Runner {
             failed: BTreeSet::new(),
             notes: vec![],
             failing: Default::default(),
-<<<<<<< HEAD
             ..Default::default()
-=======
-            unfinished: Default::default(),
->>>>>>> origin/develop
         };
         let tree = git::run(wt, &["rev-parse", "HEAD^{tree}"])
             .map(|s| s.trim().to_string())
