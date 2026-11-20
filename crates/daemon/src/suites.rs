@@ -2327,7 +2327,7 @@ fn lease(c: &Ctx, needs: Needs) -> bool {
 /// What the test step does with one suite once narrowing is applied.
 enum StepNarrow {
     Whole,
-    Run(Suite, String),
+    Run(Box<Suite>, String),
     /// The suite is not run; the note says why (it runs whole later).
     NotRun(String),
 }
@@ -2347,7 +2347,7 @@ fn whole_later_holds(c: &Ctx, suite: &Suite) -> Option<mason_testing::WholeLater
 fn narrow_step(c: &Ctx, suite: &Suite) -> StepNarrow {
     if suite.narrow_packages {
         return match narrow_packages_for_step(c, suite) {
-            Some((s, n)) => StepNarrow::Run(s, n),
+            Some((s, n)) => StepNarrow::Run(Box::new(s), n),
             None => StepNarrow::Whole,
         };
     }
@@ -2430,7 +2430,7 @@ fn narrow_units_for_step(
             w.name()
         ),
     };
-    Some(StepNarrow::Run(s, note))
+    Some(StepNarrow::Run(Box::new(s), note))
 }
 
 /// Why nothing runs for a suite whose pick is empty and which has no smoke units.
@@ -2853,7 +2853,7 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
                 // Said in the closing note too: a narrowed green is not the whole suite's.
                 details.push(note.clone());
                 notes.push(note);
-                narrowed
+                *narrowed
             }
             StepNarrow::NotRun(note) => {
                 // It runs whole at landing: the step has nothing to prove, and says so.
