@@ -58,7 +58,11 @@ next = "land"
 # point `command` and `dev_command` at `python3 -I scripts/test-parallel.py -- {project_test}` (and
 # `{packages}`) and set MASON_TEST_JOBS if the machine has headroom; decision 0243 says why it is off.
 [suite.cargo-workspace]
-build = "{project_test} --no-run"
+# The whole suite takes 22-35 min (landing.toml) and the 1800 s default killed it at 30 on a busy
+# machine, seven times in b387-b418 (s702, decision 0695). The per-task narrowed runs are far
+# shorter and are not affected in practice; a run that hangs still ends here.
+timeout = "60m"
+build ="{project_test} --no-run"
 # Per-test times (s634, decision 0627): libtest's `--report-time` ends each result line in
 # `<1.234s>`. Stable libtest accepts it only with RUSTC_BOOTSTRAP=1 in the test process's own
 # environment, so the variable goes to the test executables through a cargo `runner` and to the

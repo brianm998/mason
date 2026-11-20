@@ -3671,6 +3671,13 @@ fn print_report(r: &serde_json::Value) {
     {
         println!("  {v:>4}  {k}");
     }
+    let b = &r["batches"];
+    if b["total"].as_u64().is_some_and(|n| n > 0) {
+        println!(
+            "landing batches: {}  landed {}  red {}  timed out {} (twice {})",
+            b["total"], b["landed"], b["red"], b["timed_out"], b["timed_out_twice"]
+        );
+    }
     println!(
         "host losses {}  flaky sightings {}  open debts {}",
         r["host_losses"],

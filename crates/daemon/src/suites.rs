@@ -761,7 +761,7 @@ fn judge_ran_with(suite: &Suite, ran: &Ran, cwd: &Path, plugin: Option<&PluginPa
             let verdict = if ran.timed_out {
                 Verdict::Red {
                     failures: results.failed_names(),
-                    why: "it ran out of time".into(),
+                    why: RAN_OUT_OF_TIME.into(),
                 }
             } else {
                 judge(&results, suite.min_tests, exit)
@@ -1976,6 +1976,12 @@ fn run_suite(
                             };
                         }
                         let mut extra = format!("`{}` is red ({why}).", suite.name);
+                        if why == RAN_OUT_OF_TIME && tests.is_empty() {
+                            let still = still_running(&j.output);
+                            if !still.is_empty() {
+                                extra.push_str(&format!("\n{STILL_RUNNING}{}.", still.join(", ")));
+                            }
+                        }
                         if !tests.is_empty() {
                             extra.push_str(&format!(" Failing: {}.", tests.join(", ")));
                         }
@@ -2176,6 +2182,10 @@ fn run_tests_alone(
     if ran.stop != Stop::No {
         return None;
     }
+    // A test that hangs is still not green (s702): it stays on the list.
+    if ran.timed_out {
+        return Some(tests.to_vec());
+    }
     let j = judge_ran_with(suite, &ran, cwd, who.plugin_parser(suite).as_deref());
     if j.results.executed() == 0 {
         // It ran nothing, so it proved nothing: not flaky.
@@ -2237,6 +2247,7 @@ pub fn run_alone(
         failed: Default::default(),
         notes: vec![],
         failing: Default::default(),
+        unfinished: Default::default(),
     };
     for (name, tests) in failing {
         let red = |out: &mut OverRun, note: String| {
@@ -4233,7 +4244,56 @@ pub fn ledger_run(d: &Arc<Daemon>, task: TaskId) -> Result<String, String> {
     Ok(report.join("; "))
 }
 
+/// The `why` of a run that was stopped at its time limit (s702).
+pub const RAN_OUT_OF_TIME: &str = "it ran out of time";
+
+/// Starts the line of a timed-out run's feedback that names the tests still running at the kill.
+const STILL_RUNNING: &str = "Still running at the kill: ";
+
+/// The tests libtest reported as "has been running for over N seconds" that never printed a
+/// result: what a run killed at its limit was still doing (s702).
+pub fn still_running(output: &str) -> Vec<String> {
+    let mut slow: Vec<String> = vec![];
+    let mut done: std::collections::BTreeSet<&str> = Default::default();
+    for l in output.lines() {
+        let Some(rest) = l.trim().strip_prefix("test ") else {
+            continue;
+        };
+        if let Some((name, _)) = rest.split_once(" has been running for over ") {
+            if !slow.iter().any(|n| n == name) {
+                slow.push(name.to_string());
+            }
+        } else if let Some((name, _)) = rest.split_once(" ... ") {
+            done.insert(name);
+        }
+    }
+    slow.retain(|n| !done.contains(n.as_str()));
+    slow
+}
+
+/// The names a timed-out run's feedback lists as still running, when the feedback is a timeout's
+/// (`None` otherwise).
+fn timeout_names(feedback: &str) -> Option<Vec<String>> {
+    feedback
+        .lines()
+        .any(|l| l.starts_with('`') && l.contains(&format!("({RAN_OUT_OF_TIME})")))
+        .then(|| {
+            feedback
+                .lines()
+                .find_map(|l| l.strip_prefix(STILL_RUNNING))
+                .map(|r| {
+                    r.trim_end_matches('.')
+                        .split(", ")
+                        .filter(|n| !n.is_empty())
+                        .map(String::from)
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+}
+
 /// What running suites over a batch's integration branch said.
+#[derive(Default)]
 pub struct OverRun {
     pub green: bool,
     /// The suites that were red.
@@ -4243,6 +4303,10 @@ pub struct OverRun {
     /// The failing tests of each red suite that named some (a red that read none, a build
     /// failure or a timeout has no entry): what a rerun or a bisect can run alone (#682).
     pub failing: std::collections::BTreeMap<String, Vec<String>>,
+    /// The suites that were stopped at their time limit with no failing test named, each with
+    /// the tests still running at the kill (possibly none read): a timeout is not a red to
+    /// bisect (s702).
+    pub unfinished: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 /// Run the named suites in `wt` (a batch's integration worktree, at the tree
@@ -4294,6 +4358,7 @@ pub fn run_over(
         failed: Default::default(),
         notes: vec![],
         failing: Default::default(),
+        unfinished: Default::default(),
     };
     for name in suites {
         let Some(suite) = def.testing.suite(name) else {
@@ -4338,6 +4403,11 @@ pub fn run_over(
             } => {
                 out.green = false;
                 out.failed.insert(name.clone());
+                if failing.is_empty() {
+                    if let Some(names) = timeout_names(&feedback) {
+                        out.unfinished.insert(name.clone(), names);
+                    }
+                }
                 if !failing.is_empty() {
                     out.failing.insert(name.clone(), failing);
                 }
@@ -4707,5 +4777,31 @@ mod alone_tests {
             rerun_command(d.testing.suite("cw").unwrap(), &t, true),
             "run 'a::b' 'c::d'"
         );
+    }
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+
+    #[test]
+    fn the_tests_still_running_at_the_kill_are_the_slow_ones_with_no_result() {
+        let out = "test a ... ok\ntest b has been running for over 60 seconds\ntest c has been running for over 60 seconds\ntest b has been running for over 120 seconds\ntest c ... ok <61.2s>\n";
+        assert_eq!(still_running(out), vec!["b".to_string()]);
+        assert!(still_running("1..1\nok 1 - x\n").is_empty());
+    }
+
+    #[test]
+    fn a_timeout_feedback_gives_its_names_and_another_red_gives_none() {
+        let f = format!(
+            "`s` is red ({RAN_OUT_OF_TIME}).\n{STILL_RUNNING}a::b, c.\nLast output of `s`:\n"
+        );
+        assert_eq!(
+            timeout_names(&f),
+            Some(vec!["a::b".to_string(), "c".to_string()])
+        );
+        let none = format!("`s` is red ({RAN_OUT_OF_TIME}).\nLast output of `s`:\n");
+        assert_eq!(timeout_names(&none), Some(vec![]));
+        assert_eq!(timeout_names("`s` is red (3 tests failed).\n"), None);
     }
 }
