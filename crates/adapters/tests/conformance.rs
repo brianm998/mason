@@ -3,6 +3,10 @@
 //! Both adapters through the same conformance kit: the scripted fake, and the
 //! Claude adapter driving a stand-in CLI that speaks the real stream format.
 
+#![cfg(unix)]
+// Unix-only: the contract and step-host sockets are AF_UNIX. Windows coverage comes with the
+// IPC port.
+
 use mason_adapter_api::conformance::{progress_calls, run_all, valid_plan, Harness, Scenario};
 use mason_adapter_api::contract::ContractHandle;
 use mason_adapter_api::{

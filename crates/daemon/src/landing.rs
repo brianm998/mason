@@ -1697,6 +1697,7 @@ impl Runner {
                             rounds,
                             Some(&mapped),
                             &mapped,
+                            None,
                         );
                         if let Some(e) = self.take_service_error() {
                             break 'outer Err(e);
@@ -1727,6 +1728,33 @@ impl Runner {
                             // A red floor is rerun as the floor, a build, not as the whole
                             // runs of the suites it names: no names, no suites, the floor.
                             let rerun = if floor { vec![] } else { again.clone() };
+                            // The red run named its failing tests: rerun just those first,
+                            // one at a time, so a red that came from load shows as green. Still
+                            // red is a product red, and the ladder goes on to the search. Green
+                            // is confirmed by the whole rerun below: nothing lands on a
+                            // filtered run alone.
+                            if !floor && crate::suites::can_run_alone(&def, &vr.failed, &vr.failing)
+                            {
+                                let n: usize = vr.failing.values().map(Vec::len).sum();
+                                self.say(&format!(
+                                    "batch #{batch_id} is red: rerunning the {n} failing test(s) alone"
+                                ));
+                                let r1 = self.run_alone(
+                                    &def,
+                                    &vr.failing,
+                                    &int_wt,
+                                    &log_dir,
+                                    &format!("b{batch_id}-r{rounds}xn"),
+                                    false,
+                                    true,
+                                );
+                                if let Some(e) = self.take_service_error() {
+                                    break 'outer Err(e);
+                                }
+                                if !r1.green {
+                                    continue;
+                                }
+                            }
                             self.real_ci_red
                                 .store(false, std::sync::atomic::Ordering::SeqCst);
                             self.floor_red
@@ -1788,6 +1816,11 @@ impl Runner {
                                 self.park(&mut parked, &mut active, &[id], batch_id, &vr);
                                 continue 'outer;
                             }
+                            // The failing tests the red run named, when every red suite
+                            // has some and a `rerun` template: the search runs just those.
+                            let alone = (!floor
+                                && crate::suites::can_run_alone(&def, &vr.failed, &vr.failing))
+                            .then_some(&vr.failing);
                             let (found, runs) = self.pin_red(
                                 &def,
                                 &batch,
@@ -1799,6 +1832,7 @@ impl Runner {
                                 rounds,
                                 None,
                                 &vr.failed.iter().cloned().collect::<Vec<_>>(),
+                                alone,
                             );
                             if let Some(e) = self.take_service_error() {
                                 break 'outer Err(e);
@@ -1811,7 +1845,11 @@ impl Runner {
                                 batch_id,
                                 &vr,
                             ) {
-                                Settled::Parked(n) => {
+                                Settled::Parked(mut n) => {
+                                    if let Some(a) = alone {
+                                        let k: usize = a.values().map(Vec::len).sum();
+                                        n = format!("{n} (bisected on {k} failing test(s))");
+                                    }
                                     split_note = n.clone();
                                     note = n;
                                     continue 'outer;
@@ -1874,6 +1912,7 @@ impl Runner {
             self.point("batch_verified");
             // A union that builds shows the base builds: an alert about it is over.
             self.d.landing.clear(self.pid, "redbase");
+            let _ = self.d.store.clear_freeze(&self.project().id);
 
             // -- promote
             self.record(
@@ -2333,6 +2372,7 @@ impl Runner {
             green: true,
             failed: BTreeSet::new(),
             notes: vec![],
+            failing: Default::default(),
         };
         // Names that are not suites (CI job names) have nothing to run locally.
         let local: Vec<String> = suites
@@ -2354,6 +2394,7 @@ impl Runner {
                         green: false,
                         failed: BTreeSet::new(),
                         notes: vec![e],
+                        failing: Default::default(),
                     };
                 }
             };
@@ -2378,6 +2419,55 @@ impl Runner {
                 r
             })
         }
+    }
+
+    /// Run only the failing tests of each suite (#682): what a rerun and a bisect need when
+    /// the red run already named them. `build`: build each suite first (a bisect subset is a
+    /// fresh tree); `serial`: one test at a time. Proves less than a whole run, so nothing
+    /// lands on it alone.
+    #[allow(clippy::too_many_arguments)]
+    fn run_alone(
+        &self,
+        def: &mason_definition::Definition,
+        failing: &std::collections::BTreeMap<String, Vec<String>>,
+        wt: &Path,
+        log_dir: &Path,
+        prefix: &str,
+        build: bool,
+        serial: bool,
+    ) -> crate::suites::OverRun {
+        let names: Vec<String> = failing.keys().cloned().collect();
+        let _lease = match self.hold(def, suites_needs(def, &names), true) {
+            Ok(l) => l,
+            Err(e) => {
+                self.fail_service(e.clone());
+                return crate::suites::OverRun {
+                    green: false,
+                    failed: BTreeSet::new(),
+                    notes: vec![e],
+                    failing: Default::default(),
+                };
+            }
+        };
+        let n = self.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|sc| {
+            sc.spawn(|| self.mirror(&stop));
+            let r = crate::suites::run_alone(
+                &self.d,
+                self.project(),
+                def,
+                failing,
+                wt,
+                log_dir,
+                &format!("{prefix}-{n}"),
+                self.sink(),
+                build,
+                serial,
+            );
+            stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            r
+        })
     }
 
     /// The batch's tasks, for what the owner does to them while it verifies.
@@ -2435,6 +2525,7 @@ impl Runner {
             green: true,
             failed: BTreeSet::new(),
             notes: vec![],
+            failing: Default::default(),
         };
         // Force lands past verification, CI included.
         if self.kind == "force" || self.forced() {
@@ -2546,6 +2637,7 @@ impl Runner {
             green: true,
             failed: BTreeSet::new(),
             notes: vec![],
+            failing: Default::default(),
         };
         let paths: Vec<String> =
             match git::run(wt, &["diff", "--name-only", &format!("{base}..HEAD")]) {
@@ -2659,6 +2751,7 @@ impl Runner {
             green: true,
             failed: BTreeSet::new(),
             notes: vec![],
+            failing: Default::default(),
         };
         let Some(tier) = self.cfg.tier("lint") else {
             return out;
@@ -2756,6 +2849,7 @@ impl Runner {
             green: true,
             failed: BTreeSet::new(),
             notes: vec![],
+            failing: Default::default(),
         };
         let paths: Vec<String> =
             match git::run(wt, &["diff", "--name-only", &format!("{base}..HEAD")]) {
@@ -2767,6 +2861,7 @@ impl Runner {
                         green: false,
                         failed: BTreeSet::new(),
                         notes: vec![why],
+                        failing: Default::default(),
                     };
                 }
             };
@@ -2813,6 +2908,7 @@ impl Runner {
             green: true,
             failed: BTreeSet::new(),
             notes: vec![],
+            failing: Default::default(),
         };
         let tree = git::run(wt, &["rev-parse", "HEAD^{tree}"])
             .map(|s| s.trim().to_string())
@@ -3625,7 +3721,45 @@ impl Runner {
             "landing",
             &format!("{}: {why}", self.project().id),
         );
+        self.freeze_base(why);
         self.d.poke();
+    }
+
+    /// A red base freezes landing (only a fix passes) and files one urgent fix task, so the
+    /// next batches do not each re-verify the same red and fail their tasks' land step with
+    /// the same reason. A freeze already in force (CI's or post-land's) is left alone. A green
+    /// union later lifts it.
+    fn freeze_base(&self, why: &str) {
+        let d = &self.d;
+        let p = self.project();
+        let held = d
+            .store
+            .freezes()
+            .ok()
+            .is_some_and(|v| v.iter().any(|f| f.project == p.id));
+        if held {
+            return;
+        }
+        let fix = d
+            .emit(EventKind::TaskFiled {
+                project: self.pid,
+                title: "Fix the base: it is red on its own".to_string(),
+                body: format!("{why}."),
+                priority: Priority::Urgent,
+                trust: TrustSource::Owner,
+                explored: false,
+                proposed: false,
+                blockers: vec![],
+                not_before: None,
+            })
+            .ok()
+            .and_then(|a| {
+                a.effects.iter().find_map(|e| match e {
+                    Effect::TaskCreated { task } => Some(task.0),
+                    _ => None,
+                })
+            });
+        let _ = d.store.set_freeze(&p.id, why, fix, now_ms());
     }
 
     /// Split a red batch (decision 0387): run the suites over subsets of it (the integration
@@ -3645,6 +3779,7 @@ impl Runner {
         rounds: usize,
         mapped: Option<&[String]>,
         failed: &[String],
+        alone: Option<&std::collections::BTreeMap<String, Vec<String>>>,
     ) -> (plan::Pin, Vec<SplitRun>) {
         let ids: Vec<u64> = active.iter().map(|t| t.id).collect();
         let mut runs: Vec<SplitRun> = vec![];
@@ -3671,21 +3806,35 @@ impl Runner {
                     .collect::<Vec<_>>()
                     .join(", ")
             };
+            let how = alone.map_or(String::new(), |a| {
+                format!(
+                    "bisecting on {} failing test(s); ",
+                    a.values().map(Vec::len).sum::<usize>()
+                )
+            });
             self.say(&format!(
-                "batch #{batch_id} is red: splitting it to find the task (run {tried}: {which})"
+                "batch #{batch_id} is red: {how}splitting it to find the task (run {tried}: {which})"
             ));
             let prefix = format!("b{batch_id}-r{rounds}-bis{tried}");
-            let r = match mapped {
-                Some(m) => self.run_local(def, m, int_wt, &a.base_tip, log_dir, &prefix),
-                // The base alone (`plan::pin` asks when every task was red alone): a base
-                // has no diff to select suites by, so it runs the ones that were red.
-                None if subset.is_empty() => {
-                    self.verify(def, failed, int_wt, &a.base_tip, log_dir, &prefix)
-                }
-                None => {
-                    let s = self.suites_for(def, batch, &a);
-                    self.verify(def, &s, int_wt, &a.base_tip, log_dir, &prefix)
-                }
+            // Build the subset and run only the failing tests. A build that fails or a run
+            // that cannot tell names no test: that is no proof of the same red, so the
+            // whole suites run, as before.
+            let small =
+                alone.map(|a| self.run_alone(def, a, int_wt, log_dir, &prefix, true, false));
+            let r = match small {
+                Some(r) if r.green || !r.failing.is_empty() => r,
+                _ => match mapped {
+                    Some(m) => self.run_local(def, m, int_wt, &a.base_tip, log_dir, &prefix),
+                    // The base alone (`plan::pin` asks when every task was red alone): a base
+                    // has no diff to select suites by, so it runs the ones that were red.
+                    None if subset.is_empty() => {
+                        self.verify(def, failed, int_wt, &a.base_tip, log_dir, &prefix)
+                    }
+                    None => {
+                        let s = self.suites_for(def, batch, &a);
+                        self.verify(def, &s, int_wt, &a.base_tip, log_dir, &prefix)
+                    }
+                },
             };
             if !r.green {
                 let mut k = subset.to_vec();

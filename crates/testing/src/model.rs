@@ -324,7 +324,20 @@ pub struct Signature {
 /// outcome is the default.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ImpactMap {
+    /// Plain entries: each adds its suites to the union.
     pub entries: Vec<(String, Vec<String>)>,
+    /// Override entries (`{ suites = [...], override = true }`): for a path
+    /// they match, the most specific ones replace every less specific entry.
+    pub overrides: Vec<(String, Vec<String>)>,
+}
+
+/// How specific a glob is: the number of segments with no wildcard, then the
+/// length of the literal prefix before the first wildcard character.
+pub fn glob_specificity(glob: &str) -> (usize, usize) {
+    let g = glob.trim_start_matches("./");
+    let literal = g.split('/').filter(|s| !s.contains(['*', '?'])).count();
+    let prefix = g.find(['*', '?']).unwrap_or(g.len());
+    (literal, prefix)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -363,14 +376,28 @@ impl ImpactMap {
     /// The suites a change to `paths` needs, out of `available` (in order).
     /// No changed paths selects nothing; any unmapped path selects all.
     pub fn select(&self, paths: &[String], available: &[String]) -> Selection {
-        if self.entries.is_empty() && !paths.is_empty() {
+        if self.entries.is_empty() && self.overrides.is_empty() && !paths.is_empty() {
             return Selection::All;
         }
         let mut wanted: BTreeSet<&str> = BTreeSet::new();
         for p in paths {
             let mut mapped = false;
+            let best = self
+                .overrides
+                .iter()
+                .filter(|(g, _)| glob::matches(g, p))
+                .map(|(g, _)| glob_specificity(g))
+                .max();
+            if let Some(best) = best {
+                mapped = true;
+                for (g, suites) in &self.overrides {
+                    if glob::matches(g, p) && glob_specificity(g) == best {
+                        wanted.extend(suites.iter().map(String::as_str));
+                    }
+                }
+            }
             for (g, suites) in &self.entries {
-                if glob::matches(g, p) {
+                if glob::matches(g, p) && best.is_none_or(|b| glob_specificity(g) >= b) {
                     mapped = true;
                     wanted.extend(suites.iter().map(String::as_str));
                 }
@@ -440,6 +467,7 @@ mod tests {
                 ("api/**".into(), vec!["unit".into(), "contract".into()]),
                 ("docs/**".into(), vec![]),
             ],
+            overrides: vec![],
         }
     }
 
@@ -459,6 +487,93 @@ mod tests {
             Selection::Some(vec![]),
             "mapped to nothing on purpose"
         );
+    }
+
+    fn ov(entries: &[(&str, &[&str])], overrides: &[(&str, &[&str])]) -> ImpactMap {
+        let conv = |v: &[(&str, &[&str])]| {
+            v.iter()
+                .map(|(g, s)| (g.to_string(), names(s)))
+                .collect::<Vec<_>>()
+        };
+        ImpactMap {
+            entries: conv(entries),
+            overrides: conv(overrides),
+        }
+    }
+
+    #[test]
+    fn an_empty_override_selects_nothing_under_a_broader_list() {
+        let avail = names(&["a", "b"]);
+        let m = ov(&[("scripts/**", &["a"])], &[("scripts/exit/**", &[])]);
+        assert_eq!(
+            m.select(&names(&["scripts/exit/s1.sh"]), &avail),
+            Selection::Some(vec![])
+        );
+        assert_eq!(
+            m.select(&names(&["scripts/x.sh"]), &avail),
+            Selection::Some(names(&["a"]))
+        );
+    }
+
+    #[test]
+    fn an_override_list_replaces_a_broader_entry() {
+        let avail = names(&["a", "b"]);
+        let m = ov(&[("scripts/**", &["a"])], &[("scripts/exit/**", &["b"])]);
+        assert_eq!(
+            m.select(&names(&["scripts/exit/s1.sh"]), &avail),
+            Selection::Some(names(&["b"]))
+        );
+    }
+
+    #[test]
+    fn a_plain_entry_more_specific_than_the_override_still_adds() {
+        let avail = names(&["a", "b", "c"]);
+        let m = ov(
+            &[("scripts/**", &["a"]), ("scripts/exit/s1.sh", &["c"])],
+            &[("scripts/exit/**", &["b"])],
+        );
+        assert_eq!(
+            m.select(&names(&["scripts/exit/s1.sh"]), &avail),
+            Selection::Some(names(&["b", "c"]))
+        );
+        assert_eq!(
+            m.select(&names(&["scripts/exit/s2.sh"]), &avail),
+            Selection::Some(names(&["b"]))
+        );
+    }
+
+    #[test]
+    fn overrides_of_equal_specificity_union() {
+        let avail = names(&["a", "b"]);
+        let m = ov(&[], &[("a/*.rs", &["a"]), ("a/?.rs", &["b"])]);
+        assert_eq!(
+            m.select(&names(&["a/x.rs"]), &avail),
+            Selection::Some(names(&["a", "b"]))
+        );
+    }
+
+    #[test]
+    fn a_map_without_overrides_selects_as_the_union_did() {
+        // Star's map, copied as a fixture.
+        let m = ov(
+            &[
+                ("scripts/**", &["a", "b"]),
+                ("scripts/exit/**", &[]),
+                ("pipeline/**", &["a"]),
+                ("docs/**", &[]),
+            ],
+            &[],
+        );
+        let avail = names(&["a", "b"]);
+        for (path, want) in [
+            ("scripts/exit/s1.sh", Selection::Some(names(&["a", "b"]))),
+            ("scripts/x.sh", Selection::Some(names(&["a", "b"]))),
+            ("pipeline/x.py", Selection::Some(names(&["a"]))),
+            ("docs/x.md", Selection::Some(vec![])),
+            ("new/x.txt", Selection::All),
+        ] {
+            assert_eq!(m.select(&names(&[path]), &avail), want, "{path}");
+        }
     }
 
     #[test]

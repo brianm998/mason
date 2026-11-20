@@ -1303,3 +1303,89 @@ fn a_hot_cpu_holds_further_machine_work_but_not_the_first_or_an_agent() {
     }));
     assert_eq!(l.schedule(3, None, None).grants, vec![more]);
 }
+
+// ---- a converted all-compile request has the exclusive request's bound and backfill (s681) --
+
+/// 6 compile units, one held (a long check, estimate `holder_estimate`), a converted request for
+/// all 6 first in line, then `n` one-unit compile waiters.
+fn converted_case(
+    holder_estimate: Option<u64>,
+    waiter_estimate: Option<u64>,
+    n: u64,
+) -> (Ledger, u64, Vec<u64>) {
+    let mut l = Ledger::new();
+    l.set_capacity("compile", 6, Kind::Machine);
+    l.set_exclusive_max_wait(Some(10 * MIN));
+    let h = l.submit(
+        Rank::new(false, 1, 2, 0, 0, false),
+        Needs::of(&[("compile", 1)]),
+        "exit-script check",
+        0,
+    );
+    l.set_expected(h, holder_estimate);
+    assert_eq!(l.schedule(0, None, None).grants, vec![h]);
+    let x = l.submit(
+        Rank::new(false, 2, 2, 1, 1, false),
+        Needs::of(&[("compile", 6)]),
+        "starpipe heavy",
+        50,
+    );
+    l.set_drains_compile(x, true);
+    let ws = (0..n)
+        .map(|i| work(&mut l, 10 + i, &[("compile", 1)], waiter_estimate, 100))
+        .collect();
+    (l, x, ws)
+}
+
+#[test]
+fn converted_request_lets_short_compile_work_pass_and_holds_long_work() {
+    let (mut l, x, ws) = converted_case(Some(60 * MIN), Some(MIN), 2);
+    let long = work(&mut l, 50, &[("compile", 1)], Some(120 * MIN), 100);
+    let unknown = work(&mut l, 51, &[("compile", 1)], None, 100);
+    let p = l.schedule(100, None, None);
+    assert_eq!(p.grants, ws, "{p:?}");
+    assert!(p.waits.contains_key(&x));
+    assert!(matches!(p.waits[&long].cause, WaitCause::Behind { .. }));
+    assert!(matches!(p.waits[&unknown].cause, WaitCause::Behind { .. }));
+    assert_eq!(p.waits[&long].blocker.as_ref().map(|b| b.id), Some(x));
+}
+
+#[test]
+fn converted_request_gives_up_its_freeze_after_the_bound_then_goes_first() {
+    // The 2026-11-19 16:55 case: a 2 h holder, the request for all 6 units, 11 waiters.
+    let (mut l, x, ws) = converted_case(Some(127 * MIN), None, 11);
+    let p = l.schedule(100, None, None);
+    assert!(p.grants.is_empty(), "frozen before the bound: {p:?}");
+    // Waiters carrying an estimate are granted once the bound has passed.
+    for w in &ws {
+        l.set_expected(*w, Some(5 * MIN));
+    }
+    let p = l.schedule(11 * MIN, None, None);
+    assert_eq!(p.grants.len(), 5, "5 free units, all used: {p:?}");
+    let w = &p.waits[&x];
+    assert_eq!(w.thawed_ms, Some(11 * MIN - 50));
+    assert!(w.thawed_compile);
+    assert!(
+        explain(w, 11 * MIN).contains("until compile drains"),
+        "{}",
+        explain(w, 11 * MIN)
+    );
+    // Once compile is free it starts first, ahead of the rest of the waiters.
+    let held: Vec<u64> = l.snapshot().holders.iter().map(|h| h.id).collect();
+    for id in held {
+        l.release(id);
+    }
+    let p = l.schedule(12 * MIN, None, None);
+    assert_eq!(p.grants, vec![x], "{p:?}");
+}
+
+#[test]
+fn a_person_s_exclusive_request_keeps_its_rules_beside_converted_ones() {
+    // An exclusive request is not touched by the new rule: no thaw flag for compile.
+    let (mut l, x) = draining(Some(1_000));
+    l.set_exclusive_max_wait(Some(600));
+    let p = l.schedule(700, None, None);
+    let w = &p.waits[&x];
+    assert_eq!(w.thawed_ms, Some(650));
+    assert!(!w.thawed_compile);
+}
