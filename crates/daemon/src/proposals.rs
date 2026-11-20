@@ -227,6 +227,8 @@ pub fn file(d: &Arc<Daemon>, f: &Filing) -> Result<Filed, String> {
         return Err("body must not be empty".into());
     }
     evidence_ok(&f.evidence)?;
+    // Where a task runs is the owner's choice: an agent's filing cannot claim it (#699).
+    mason_definition::filing::refuse_run_on_claim(&mason_definition::filing::parse(&f.body))?;
     let w = d.world().map_err(|e| e.to_string())?;
     let working = d.project(f.project).ok_or("no such project")?;
     let cfg_here = working.proposals();
