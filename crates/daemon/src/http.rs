@@ -1834,7 +1834,8 @@ async fn landing_status(Shared(d): Shared<Arc<Daemon>>) -> Res {
                 .iter()
                 .map(|f| json!({"project": f.project, "reason": f.reason, "fix_task": f.fix_task, "since": f.since, "source": f.source}))
                 .collect();
-            json!({"projects": projects, "batches": batches, "freezes": freezes})
+            json!({"projects": projects, "batches": batches, "freezes": freezes,
+                   "runs": crate::place::landing_runs()})
         })
         .await
         .map_err(pool_err)?;

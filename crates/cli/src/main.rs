@@ -2562,6 +2562,18 @@ fn main() {
                     b["parked"].as_str().unwrap_or(""),
                     b["note"].as_str().unwrap_or("")
                 );
+                // Where each of the batch's runs went, with its link when it went to GitHub (#702).
+                let prefix = format!("b{}-", b["id"]);
+                for run in r["runs"].as_array().into_iter().flatten() {
+                    let id = run["id"].as_str().unwrap_or("");
+                    if id.starts_with(&prefix) {
+                        println!(
+                            "    {} ({id}): {}",
+                            run["suite"].as_str().unwrap_or("?"),
+                            run["where"].as_str().unwrap_or("?")
+                        );
+                    }
+                }
                 if b["ci"].is_object() {
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)

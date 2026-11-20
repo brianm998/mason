@@ -415,7 +415,7 @@ fn run_hosted(
     watch: Option<&Suite>,
     th: Thresholds,
     env: Vec<(String, String)>,
-    place: Option<(TaskId, &Suite)>,
+    place: Option<(Option<TaskId>, &Suite)>,
 ) -> Result<Ran, String> {
     run_hosted_resuming(
         d, project, id, cmd, cwd, limit, log_dir, check, run, watch, th, env, None, place,
@@ -440,7 +440,7 @@ fn run_hosted_resuming(
     th: Thresholds,
     env: Vec<(String, String)>,
     resume: Option<&str>,
-    place: Option<(TaskId, &Suite)>,
+    place: Option<(Option<TaskId>, &Suite)>,
 ) -> Result<Ran, String> {
     use crate::hostloss as hl;
     // Where the run goes (#697, #698). Only a task's test step asks (`place`); a landing
@@ -1086,6 +1086,12 @@ pub(crate) fn test_step_name(def: &Definition) -> Option<String> {
 }
 
 impl Who {
+    /// What the executor needs to decide where a run goes: a task's own suite names its task, a
+    /// run no task owns (a landing tier, a bisect half) follows the global switch (#702).
+    fn place<'a>(&self, suite: &'a Suite) -> Option<(Option<TaskId>, &'a Suite)> {
+        Some((self.task.map(|(t, _)| t), suite))
+    }
+
     /// The step run that shows this run's progress, if any.
     fn run(&self) -> Option<StepRunId> {
         self.task.map(|(_, r)| r).or(self.sink)
@@ -1924,7 +1930,7 @@ fn run_suite(
             who.thresholds(),
             who.env.clone(),
             resume.as_deref(),
-            who.task.map(|(t, _)| (t, suite)),
+            who.place(suite),
         ) {
             Ok(r) => r,
             Err(e) if crate::remote::environmental(&e).is_some() => {
@@ -2331,6 +2337,15 @@ fn run_suite(
             .collect::<Vec<_>>()
             .join("; ");
         let said = (!said.is_empty()).then_some(said);
+        // A run no task owns (a landing tier, a bisect half) says where it ran, for `mason landing`.
+        if who.task.is_none() {
+            crate::place::note_landing_run(
+                &who.project,
+                &id,
+                &suite.name,
+                ran.ran_on.as_deref().unwrap_or("ran on this Mac"),
+            );
+        }
         let result = match (result, &said) {
             (
                 SuiteRun::Done {
@@ -2485,7 +2500,7 @@ fn run_tests_alone(
         None,
         who.thresholds(),
         who.env.clone(),
-        who.task.map(|(t, _)| (t, suite)),
+        who.place(suite),
     )
     .ok()?;
     if ran.stop != Stop::No {

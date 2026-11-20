@@ -412,6 +412,40 @@ fn seen_json(s: &Seen) -> Value {
     })
 }
 
+/// One run of a landing batch (a tier, a rerun, a bisect half): its id, which starts `b<batch>-`,
+/// its suite and where it ran, with the run's link when it ran on GitHub (#702).
+type LandingRun = (String, String, String, String, u64);
+static LANDING_RUNS: Mutex<Vec<LandingRun>> = Mutex::new(Vec::new());
+
+/// Remember where a run no task owns ran. Newest 200 kept.
+pub fn note_landing_run(project: &str, id: &str, suite: &str, text: &str) {
+    let mut v = LANDING_RUNS.lock().unwrap_or_else(|e| e.into_inner());
+    v.retain(|r| !(r.0 == project && r.1 == id));
+    v.push((
+        project.into(),
+        id.into(),
+        suite.into(),
+        text.into(),
+        now_ms(),
+    ));
+    let n = v.len();
+    if n > 200 {
+        v.drain(..n - 200);
+    }
+}
+
+/// The recent landing runs, oldest first, for `GET /landing`.
+pub fn landing_runs() -> Vec<Value> {
+    LANDING_RUNS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .map(|(p, id, suite, text, at)| {
+            json!({"project": p, "id": id, "suite": suite, "where": text, "at": at})
+        })
+        .collect()
+}
+
 /// The recent decisions, of one task or (None) all of them.
 pub fn seen(task: Option<u64>) -> Vec<Value> {
     let m = SEEN.lock().unwrap_or_else(|e| e.into_inner());
@@ -436,6 +470,19 @@ pub fn place_of(
     p
 }
 
+/// Where a run goes that no task owns and no suite describes (a landing check, #702): the global
+/// switch, the project's `[remote]` and the setup check, and nothing of a suite's own.
+pub fn global_place(d: &Daemon, project: &str) -> Place {
+    let pid = d.project_id_by_name(project);
+    let mut f = Facts::plain(read_global(d).0);
+    f.project_runs_on = pid
+        .and_then(|p| d.project(p))
+        .and_then(|p| p.services.remote.as_ref().map(|r| r.runs_on.clone()));
+    let p = decide(&f);
+    note(project, None, "landing", "check", &p);
+    p
+}
+
 /// Each suite's effective place and where it came from, for `mason config show`.
 pub fn config_view(d: &Daemon, project: &str) -> Vec<Value> {
     let Some(pid) = d.project_id_by_name(project) else {
@@ -455,6 +502,26 @@ pub fn config_view(d: &Daemon, project: &str) -> Vec<Value> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_landing_run_is_remembered_once_with_where_it_ran() {
+        note_landing_run("p733", "b9-u-unit", "unit", "ran on this Mac");
+        note_landing_run(
+            "p733",
+            "b9-u-unit",
+            "unit",
+            "ran on GitHub (ubuntu-latest), run http://x/1",
+        );
+        let mine: Vec<Value> = landing_runs()
+            .into_iter()
+            .filter(|r| r["project"] == "p733")
+            .collect();
+        assert_eq!(mine.len(), 1, "{mine:?}");
+        assert!(mine[0]["where"]
+            .as_str()
+            .unwrap()
+            .contains("run http://x/1"));
+    }
+
     use super::*;
 
     fn row(name: &str, f: Facts, want: Place) {
