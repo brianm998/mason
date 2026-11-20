@@ -5,6 +5,8 @@
 //! a batch is held in its verify phase by a suite that blocks on a file the test controls,
 //! and every wait here is on store state, queue state or the update status, never on time.
 
+#![cfg(unix)]
+
 use crate::support;
 use mason_core::*;
 use mason_daemon::update;

@@ -76,6 +76,22 @@ impl std::fmt::Display for Transport {
 
 pub trait Http: Send + Sync {
     fn send(&self, r: &Request) -> Result<Response, Transport>;
+
+    /// Like [`Http::send`], but a 2xx answer's body is written byte for byte to `dest` (the
+    /// response then carries an empty body): for a binary download such as an artifact's zip,
+    /// which a `String` cannot hold. Any other answer is returned as `send` would.
+    fn download(&self, r: &Request, dest: &std::path::Path) -> Result<Response, Transport> {
+        let resp = self.send(r)?;
+        if !(200..300).contains(&resp.status) {
+            return Ok(resp);
+        }
+        std::fs::write(dest, resp.body.as_bytes())
+            .map_err(|e| Transport(format!("cannot write {}: {e}", dest.display())))?;
+        Ok(Response {
+            body: String::new(),
+            ..resp
+        })
+    }
 }
 
 // ---- the real thing ------------------------------------------------------------
@@ -140,6 +156,24 @@ impl Curl {
 
 impl Http for Curl {
     fn send(&self, r: &Request) -> Result<Response, Transport> {
+        self.fetch(r, None)
+    }
+
+    fn download(&self, r: &Request, dest: &std::path::Path) -> Result<Response, Transport> {
+        // A non-2xx answer (a redirect, an error) is written to `dest` too: the caller reads
+        // the headers and ignores the file then.
+        self.fetch(r, Some(dest))
+    }
+}
+
+impl Curl {
+    /// One request. With `out`, curl writes the body there (binary-safe) and the response's
+    /// own body is empty.
+    fn fetch(
+        &self,
+        r: &Request,
+        out_file: Option<&std::path::Path>,
+    ) -> Result<Response, Transport> {
         netguard::check(&r.url).map_err(|e| Transport(e.to_string()))?;
         let cfg = self.config(r)?;
         let hdr =
@@ -147,8 +181,11 @@ impl Http for Curl {
         let mut cmd = Command::new(self.program());
         cmd.args(["-sS", "--max-time", &self.timeout_s.to_string(), "-D"])
             .arg(&hdr)
-            .args(["-K", "-"])
-            .stdin(Stdio::piped())
+            .args(["-K", "-"]);
+        if let Some(f) = out_file {
+            cmd.arg("-o").arg(f);
+        }
+        cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let mut child = cmd
