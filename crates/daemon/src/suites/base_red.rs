@@ -122,6 +122,7 @@ fn profile(
             }
             let ran = run_hosted(
                 &who.d,
+                &who.project,
                 &format!("{}-bp{}-{}", who.id_prefix, short(base), suite.name),
                 &crate::jobs::pty_wrap(
                     suite.pty,
