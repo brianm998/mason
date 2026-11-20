@@ -4086,7 +4086,12 @@ pub async fn serve_until(
     std::fs::rename(&tmp, &info)?;
     tokio::spawn(crate::watchdog::run(d.clone()));
     tracing::info!(port, "masond listening on loopback");
-    axum::serve(listener, router(d))
-        .with_graceful_shutdown(shutdown)
-        .await
+    let again = d.clone();
+    let r = axum::serve(listener, router(d))
+        .with_graceful_shutdown(async move {
+            shutdown.await;
+            again.shut_down();
+        })
+        .await;
+    r
 }
