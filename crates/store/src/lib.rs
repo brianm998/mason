@@ -2612,15 +2612,20 @@ impl Store {
         })
     }
 
-    /// Batches a dead daemon left unfinished.
-    pub fn abandon_batches(&self, project: &str, now_ms: u64) -> Result<usize, StoreError> {
+    /// Mark the batches a dead daemon left unfinished as abandoned. Returns their ids.
+    pub fn abandon_batches(&self, project: &str, now_ms: u64) -> Result<Vec<u64>, StoreError> {
         let p = project.to_string();
         self.write(move |c| {
+            let mut st = c.prepare("SELECT id FROM batches WHERE project=?1 AND finished_at IS NULL")?;
+            let ids: Vec<u64> = st
+                .query_map(params![p], |r| Ok(r.get::<_, i64>(0)? as u64))?
+                .collect::<Result<_, _>>()?;
             c.execute(
                 "UPDATE batches SET phase='abandoned', note='the daemon restarted; its tasks were queued again', finished_at=?2
                  WHERE project=?1 AND finished_at IS NULL",
                 params![p, now_ms as i64],
-            )
+            )?;
+            Ok(ids)
         })
     }
 

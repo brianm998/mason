@@ -599,4 +599,5 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s729**: A suite with `shards = N` runs on N GitHub runners balanced by recorded per-test times, its shard outputs are merged and judged as one run, and a shard that never ran is made again alone.
 - **s730**: When a task's checks go to GitHub, its develop and review agents get a PATH shim directory that refuses `cargo test`, `cargo nextest run`, `swift test`, `xcodebuild test`/`test-without-building` and `gradle test`/`check` with exit 69 and points to `run_check`, while builds pass through to the real tool; the develop prompt gets one line saying so, and `MASON_REMOTE_SHIM=off` turns it off.
 - **s731**: `mason remote setup` goes to the workflow writer and `on`/`off`/`status` to the daemon handler, and unknown subcommands name all four.
+- **s732**: A batch abandoned at start-up has its `b<id>-` step hosts stopped, and the sweep stops running batch hosts whose batch is not unfinished.
 <!-- status:end -->

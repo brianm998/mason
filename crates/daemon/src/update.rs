@@ -1641,7 +1641,7 @@ fn waiting_confirm(w: &Wait) -> String {
         })
         .collect();
     format!(
-        "Updating now restarts masond while {n} landing batch{} {} running ({}). {} abandoned: its tasks go back to the landing queue and must form a new batch and pass CI again ({}). The CI run already started for {} is left to finish and its result is ignored. Step hosts keep running; nothing is lost from tasks in other steps.",
+        "Updating now restarts masond while {n} landing batch{} {} running ({}). {} abandoned: its tasks go back to the landing queue and must form a new batch and pass CI again ({}). The CI run already started for {} is stopped and its result is ignored; nothing is lost from tasks in other steps.",
         if n == 1 { "" } else { "es" },
         if n == 1 { "is" } else { "are" },
         list.join("; "),
