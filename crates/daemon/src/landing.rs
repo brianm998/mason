@@ -2563,9 +2563,8 @@ impl Runner {
         if names.is_empty() {
             return crate::suites::OverRun {
                 green: true,
-                failed: BTreeSet::new(),
                 notes: stopped,
-                failing: Default::default(),
+                ..Default::default()
             };
         }
         let _lease = match self.hold(def, suites_needs(def, &names), true) {

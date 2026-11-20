@@ -4529,6 +4529,7 @@ pub fn ledger_run(d: &Arc<Daemon>, task: TaskId) -> Result<String, String> {
 }
 
 /// What running suites over a batch's integration branch said.
+#[derive(Default)]
 pub struct OverRun {
     pub green: bool,
     /// The suites that were red.
