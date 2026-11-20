@@ -1781,7 +1781,6 @@ impl Runner {
                         }
                     }
                 }
-<<<<<<< HEAD
                 // A run killed at its time limit, with no failing test named, is not a red to
                 // search (s702): load can slow it past any limit and a subset would only finish
                 // sooner. It is rerun once whole, and held when it times out again.
@@ -1789,7 +1788,6 @@ impl Runner {
                     && vr.failing.is_empty()
                     && !vr.unfinished.is_empty()
                     && vr.failed.iter().all(|n| vr.unfinished.contains_key(n));
-=======
                 // A lint red (or a red only in the fmt/SPDX gate tests) names its files:
                 // the tasks whose diff touches one are sent back, the rest stay (s691).
                 if let Some(files) = self.lint_blame_files(
@@ -1805,7 +1803,6 @@ impl Runner {
                         continue 'outer;
                     }
                 }
->>>>>>> origin/develop
                 for rung in &self.cfg.ladder {
                     // A red the CI judged a real failure is not rerun, blamed or bisected
                     // by guesswork: the tasks hear of it now.
