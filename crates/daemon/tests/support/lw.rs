@@ -188,7 +188,11 @@ pub fn world_built_fast(landing_toml: &str, files: &[(&str, &str)], fast: bool) 
     all.extend_from_slice(files);
     s.push_files(&all, "project setup");
     sh(&s.repo, &["fetch", "-q", "origin"]);
-    let d = s.start_with(|c| c.env_retry = Duration::from_millis(200));
+    // Debts are paid by hand here: no idle pass to race the explicit payment.
+    let d = s.start_with(|c| {
+        c.env_retry = Duration::from_millis(200);
+        c.debt_interval = Duration::ZERO;
+    });
     mason_daemon::attention::pause(&d, "", "claims", "test", 3600).unwrap();
     W { s, d }
 }
