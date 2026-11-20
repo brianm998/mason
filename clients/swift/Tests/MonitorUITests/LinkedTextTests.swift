@@ -145,4 +145,47 @@ final class LinkedTextTests: XCTestCase {
         XCTAssertEqual(model.linkifyPasses, passes + 1)
         XCTAssertTrue(after.contains { if case .task(77, _) = $0 { return true } else { return false } })
     }
+
+    private func rowWaiting(_ why: String) -> TaskRow {
+        var r = TaskRow()
+        r.id = 8
+        r.key = "#8"
+        r.title = "t"
+        r.state = "queued"
+        r.whyWaiting = why
+        return r
+    }
+
+    private func knowing(_ ids: [UInt64]) -> MonitorModel {
+        let model = MonitorModel()
+        var d = TaskDetailView()
+        d.row = rowWaiting("")
+        d.row.blockers = ids
+        model.taskDetail = d
+        return model
+    }
+
+    /// s661: a section page row's detail line links the tasks its wait text names.
+    func testStageRowDetailLinksABlockingTask() {
+        let model = knowing([613])
+        let row = rowWaiting("held, blocked by #613")
+        let text = StageRows(model: model, name: "queued").detailText(row)
+        XCTAssertTrue(text.contains("held, blocked by #613"))
+        let a = LinkedText.attributed(model.linkify(text), linkColor: .blue)
+        XCTAssertEqual(links(a).map { $0.1 }, ["mason-task://613"])
+    }
+
+    /// s661: `Batch #N` is the batch's number and stays plain; the tasks in the line link.
+    func testBatchLineLinksTasksButNotTheBatch() {
+        let model = knowing([579, 390])
+        var b = Mason_V1_BatchLine()
+        b.id = 390
+        b.project = "mason"
+        b.phase = "verifying"
+        b.tasks = [579]
+        b.parked = [567]
+        model.taskDetail?.row.blockers.append(567)
+        let a = LinkedText.attributed(model.linkify(batchText(b)), linkColor: .blue)
+        XCTAssertEqual(links(a).map { $0.1 }, ["mason-task://579", "mason-task://567"])
+    }
 }
