@@ -51,9 +51,11 @@ impl Fx {
         let wt = self.root.join(format!("wt-{name}"));
         git::ensure_worktree(&self.repo, &wt, &format!("mason/{name}"), "origin/main").unwrap();
         write_commit(&wt, file, body);
+        let head = sh(&wt, &["rev-parse", "HEAD"]);
         BatchTask {
             id: name.trim_start_matches('t').parse().unwrap(),
             branch: format!("mason/{name}"),
+            head,
             removes: vec![],
         }
     }
@@ -76,6 +78,40 @@ impl Fx {
 }
 
 fn nop(_: &str) {}
+
+#[test]
+fn a_commit_made_after_the_task_was_pinned_does_not_join_the_batch() {
+    let fx = Fx::new();
+    let t1 = fx.branch("t1", "a.txt", "a\n");
+    // The branch moves on after the BatchTask was made (a retry, a resumed session).
+    let wt = fx.root.join("wt-t1");
+    write_commit(&wt, "late.txt", "late\n");
+    let late = sh(&wt, &["rev-parse", "HEAD"]);
+    assert_ne!(late, t1.head);
+    let b = fx.batch(None, true);
+    let a = b.assemble(std::slice::from_ref(&t1), &nop).unwrap();
+    assert_eq!(a.merged, vec![1]);
+    assert!(fx.int_wt.join("a.txt").is_file());
+    assert!(!fx.int_wt.join("late.txt").exists());
+    let log = sh(&fx.int_wt, &["log", "--format=%H", "-n", "20"]);
+    assert!(!log.contains(&late));
+    // And again: every round merges the same pinned commit.
+    let a = b.assemble(&[t1], &nop).unwrap();
+    assert_eq!(a.merged, vec![1]);
+    assert!(!fx.int_wt.join("late.txt").exists());
+}
+
+#[test]
+fn a_head_that_differs_from_the_tested_one_is_reported_moved() {
+    let fx = Fx::new();
+    let t1 = fx.branch("t1", "a.txt", "a\n");
+    let t2 = fx.branch("t2", "b.txt", "b\n");
+    let mut tested = std::collections::HashMap::new();
+    tested.insert(1, t1.head.clone());
+    tested.insert(2, "0000".to_string());
+    let moved = mason_landing::batch::moved_after_testing(&[t1, t2], &tested);
+    assert_eq!(moved, vec![2]);
+}
 
 #[test]
 fn a_clean_batch_merges_and_promotes() {

@@ -19,8 +19,24 @@ use std::process::Command;
 pub struct BatchTask {
     pub id: u64,
     pub branch: String,
+    /// The commit the task submitted (its branch head when it joined the queue). The batch
+    /// merges this, never the live ref, so commits made after testing cannot land.
+    pub head: String,
     /// Base lines the task removes on purpose (its submission's `removes`).
     pub removes: Vec<Removal>,
+}
+
+/// Tasks whose pinned head differs from the head the verification run tested (or that the
+/// run did not test at all): they must not land.
+pub fn moved_after_testing(
+    tasks: &[BatchTask],
+    tested: &std::collections::HashMap<u64, String>,
+) -> Vec<u64> {
+    tasks
+        .iter()
+        .filter(|t| tested.get(&t.id) != Some(&t.head))
+        .map(|t| t.id)
+        .collect()
 }
 
 /// The subject of the commit that regenerates the README status block.
@@ -192,12 +208,22 @@ impl Batch<'_> {
             ..Default::default()
         };
         for t in tasks {
-            if git::is_ancestor(wt, &t.branch, &base_tip) {
+            if git::is_ancestor(wt, &t.head, &base_tip) {
                 out.already.push(t.id);
                 continue;
             }
             let before = git::rev_parse(wt, "HEAD")?;
-            match git::run(wt, &["merge", "--no-edit", "--no-ff", &t.branch]) {
+            match git::run(
+                wt,
+                &[
+                    "merge",
+                    "--no-edit",
+                    "--no-ff",
+                    "-m",
+                    &format!("Merge branch '{}'", t.branch),
+                    &t.head,
+                ],
+            ) {
                 Ok(_) => out.merged.push(t.id),
                 Err(e) => {
                     let files = git::run(wt, &["diff", "--name-only", "--diff-filter=U"])
@@ -208,9 +234,9 @@ impl Batch<'_> {
                     }
                     if self.resolve(t.id, &files) {
                         // Whatever the resolver did, the base's landed lines must still be there.
-                        let mb = git::run(wt, &["merge-base", &t.branch, &base_tip])?;
+                        let mb = git::run(wt, &["merge-base", &t.head, &base_tip])?;
                         let lines =
-                            audit::audit(wt, &mb, &base_tip, &t.branch, None, "HEAD", &t.removes)?;
+                            audit::audit(wt, &mb, &base_tip, &t.head, None, "HEAD", &t.removes)?;
                         if lines.is_empty() {
                             out.merged.push(t.id);
                             out.resolved.push(t.id);
@@ -224,7 +250,7 @@ impl Batch<'_> {
                         let _ = git::run(wt, &["reset", "--hard", "--quiet"]);
                         // Does it conflict with the base alone, or only with batch-mates?
                         let alone_ok =
-                            git::run(wt, &["merge-tree", "--write-tree", &base_tip, &t.branch])
+                            git::run(wt, &["merge-tree", "--write-tree", &base_tip, &t.head])
                                 .is_ok();
                         if alone_ok && !out.merged.is_empty() {
                             let hit: Vec<&str> = files.lines().collect();
@@ -232,7 +258,7 @@ impl Batch<'_> {
                             for m in tasks.iter().filter(|m| out.merged.contains(&m.id)) {
                                 let theirs = git::run(
                                     wt,
-                                    &["diff", "--name-only", &format!("{base_tip}...{}", m.branch)],
+                                    &["diff", "--name-only", &format!("{base_tip}...{}", m.head)],
                                 )
                                 .unwrap_or_default();
                                 if theirs.lines().any(|f| hit.contains(&f)) {
@@ -248,7 +274,7 @@ impl Batch<'_> {
                                 files: files.trim().replace('\n', ", "),
                             });
                         } else {
-                            let base_changes = base_changes_in(wt, &t.branch, &base_tip, &files);
+                            let base_changes = base_changes_in(wt, &t.head, &base_tip, &files);
                             out.ejected.push(Ejected {
                                 id: t.id,
                                 files: files.trim().replace('\n', ", "),

@@ -60,4 +60,12 @@ class TopBarTest {
         assertEquals(85f, topBarMascotSide(100.dp, 1000.dp).value, 0.01f)
         assertEquals(50f, topBarMascotSide(96.dp, 50.dp).value, 0.01f)
     }
+
+    @Test
+    fun onlyProposedAndStuckFillWhenShown() {
+        assertEquals(true, tileFillsOnlyWhenShown("proposed"))
+        assertEquals(true, tileFillsOnlyWhenShown("needs_attention"))
+        assertEquals(false, tileFillsOnlyWhenShown("failed"))
+        assertEquals(false, tileFillsOnlyWhenShown("queued"))
+    }
 }

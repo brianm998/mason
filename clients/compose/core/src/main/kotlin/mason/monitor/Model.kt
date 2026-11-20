@@ -573,6 +573,15 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         if (sec.rows.size == 1) go(Page.Task(sec.rows[0].id))
     }
 
+    /**
+     * Whether the main view shows one of the tasks behind this tile: the page is a task page and
+     * its id is a row of the sidebar section with the tile's state.
+     */
+    fun tileShowsCurrentTask(c: StateCount): Boolean {
+        val p = page as? Page.Task ?: return false
+        return sidebar?.sections?.firstOrNull { it.state == c.state }?.rows?.any { it.id == p.id } ?: false
+    }
+
     /** The tile's tooltip; a count of exactly one says a double-click opens it. */
     fun tileTooltip(c: StateCount): String =
         if (connected && c.count == 1) c.tooltip + "\nDouble-click to open it" else c.tooltip
