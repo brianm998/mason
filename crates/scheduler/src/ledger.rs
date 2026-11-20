@@ -133,8 +133,17 @@ impl Ledger {
             label: label.to_string(),
             since: now,
             expected_ms: None,
+            drains_compile: false,
         });
         id
+    }
+
+    /// Mark a waiting request as a converted exclusive one (s681): it freezes `compile` only,
+    /// with the exclusive bound and backfill.
+    pub fn set_drains_compile(&mut self, id: u64, on: bool) {
+        if let Some(r) = self.waiting.iter_mut().find(|r| r.id == id) {
+            r.drains_compile = on;
+        }
     }
 
     /// How long a waiting request is expected to hold what it asks for (s385).

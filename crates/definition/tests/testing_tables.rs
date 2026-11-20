@@ -571,3 +571,63 @@ fn masons_own_ci_watch_is_on_with_no_freeze() {
     assert_eq!(w.gate.as_deref(), Some("CI"));
     assert_eq!(w.max_open_auto, 2);
 }
+
+// s684: an `[impact]` value may be a table `{ suites, override }`.
+fn impact_text(body: &str) -> String {
+    with(
+        "\"src/**\" = [\"unit\"]\n\"web/**\" = [\"unit\", \"e2e\"]\n",
+        &format!("{body}\n"),
+    )
+}
+
+#[test]
+fn an_override_entry_replaces_broader_impact_entries() {
+    use mason_testing::Selection;
+    let with_impact = |body: &str| impact_text(body);
+    let t = parse(&with_impact(
+        "\"scripts/**\" = [\"unit\"]\n\"scripts/exit/**\" = { suites = [], override = true }",
+    ))
+    .unwrap();
+    let all = vec!["unit".to_string(), "e2e".to_string()];
+    let pick = |p: &str| t.testing.impact.select(&[p.to_string()], &all);
+    assert_eq!(pick("scripts/exit/s1.sh"), Selection::Some(vec![]));
+    assert_eq!(pick("scripts/x.sh"), Selection::Some(vec!["unit".into()]));
+}
+
+#[test]
+fn impact_tables_name_their_mistakes() {
+    for (body, want) in [
+        ("\"a/**\" = { override = true }", "impact.a/**.suites"),
+        (
+            "\"a/**\" = { suites = [], override = \"yes\" }",
+            "impact.a/**.override",
+        ),
+        (
+            "\"a/**\" = { suites = [\"nope\"], override = true }",
+            "no suite `nope`",
+        ),
+    ] {
+        let text = impact_text(body);
+        let problems = match parse(&text) {
+            Err(e) => format!("{e:?}"),
+            Ok(d) => format!("{:?}", validate(&d, &Capabilities::now())),
+        };
+        assert!(problems.contains(want), "{body}: {problems}");
+    }
+}
+
+#[test]
+fn a_dead_empty_impact_entry_warns_and_an_override_does_not() {
+    let warn = |body: &str| {
+        let d = parse(&impact_text(body)).unwrap();
+        validate::warnings(&d, &Capabilities::now())
+    };
+    let w = warn("\"scripts/**\" = [\"unit\"]\n\"scripts/exit/**\" = []");
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert!(w[0].path.contains("scripts/exit/**") && w[0].message.contains("override = true"));
+    assert!(warn(
+        "\"scripts/**\" = [\"unit\"]\n\"scripts/exit/**\" = { suites = [], override = true }"
+    )
+    .is_empty());
+    assert!(warn("\"docs/**\" = []\n\"src/**\" = [\"unit\"]").is_empty());
+}

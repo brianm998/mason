@@ -552,5 +552,9 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s673**: Double-clicking (or tapping on the phone) the stuck or proposed tile with several tasks now opens a page listing them, because `needs_attention` and `proposed` are section pages in the Swift and Compose clients.
 - **s676**: The landing fast-tier test pays the first task's open `step:test` debt before it files the second task, so the daemon's idle debt pass can no longer overlap it; no assertion removed.
 - **s679**: The red CI/monitor-compose run 44615387131 names no failing step in the supplied log tail (only post-job Gradle cache cleanup), so no code changed and decision 0672 records how to classify it from the full log.
+- **s681**: A non-person `--exclusive` converted to all `compile` units (s552) now freezes only compile, gives up the freeze after `order.exclusive_max_wait_s`, and lets compile work done before the compile holders drain pass it.
+- **s684**: an `[impact]` value may be `{ suites = [...], override = true }`, which replaces less specific entries for the paths it matches, so a narrow `= []` finally takes a path out of a broader glob.
 - **s692**: A red landing batch whose run named its failing tests now reruns just those tests (one at a time) and bisects with a build plus just those tests through the suite's `rerun` template, falling back to whole-suite runs when no names were read, the red was a build, or the suite has no `rerun`; the remainder still gets one whole-suite run before it lands.
+- **s696**: CI/lint: the SPDX header of scripts/exit/s653.sh is corrected from Apache-2.0 to GPL-3.0-or-later so check-spdx passes on develop.
+- **s697**: The red CI/monitor-compose run 44697853075 names no failing step in the supplied log tail (only post-job Gradle cache cleanup), so no code changed and decision 0690 records how to classify it from the full log.
 <!-- status:end -->

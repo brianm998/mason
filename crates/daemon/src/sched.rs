@@ -2147,17 +2147,24 @@ impl Broker {
             Some(c) => format!("{label} [{c}]"),
             None => label.to_string(),
         };
-        let id = self.open_lease(&shown, &uses, None, expected_ms, |st, now| {
-            if person {
-                return Rank::new(true, 0, 0, now, st.rank_seq, false);
-            }
-            let (steps, priority, span) =
-                standing.map_or((0, 0, 1), |s| (s.steps_remaining, s.priority, s.span));
-            order(
-                st,
-                Rank::new(false, steps, priority, now, st.rank_seq, false).with_span(span),
-            )
-        });
+        let id = self.open_lease(
+            &shown,
+            &uses,
+            None,
+            expected_ms,
+            converted.is_some(),
+            |st, now| {
+                if person {
+                    return Rank::new(true, 0, 0, now, st.rank_seq, false);
+                }
+                let (steps, priority, span) =
+                    standing.map_or((0, 0, 1), |s| (s.steps_remaining, s.priority, s.span));
+                order(
+                    st,
+                    Rank::new(false, steps, priority, now, st.rank_seq, false).with_span(span),
+                )
+            },
+        );
         Opened {
             id,
             rank: if person { "person" } else { "pipeline" },
@@ -2207,12 +2214,19 @@ impl Broker {
             None => label.to_string(),
         };
         let shown = crate::outside::display_label(&o.pipeline, &label);
-        self.open_lease(&shown, uses, Some(o.pipeline.clone()), None, |st, now| {
-            order(
-                st,
-                Rank::new(false, o.steps, o.priority, now, st.rank_seq, false),
-            )
-        })
+        self.open_lease(
+            &shown,
+            uses,
+            Some(o.pipeline.clone()),
+            None,
+            converted.is_some(),
+            |st, now| {
+                order(
+                    st,
+                    Rank::new(false, o.steps, o.priority, now, st.rank_seq, false),
+                )
+            },
+        )
     }
 
     fn open_lease(
@@ -2221,6 +2235,7 @@ impl Broker {
         uses: &BTreeMap<String, u32>,
         pipeline: Option<String>,
         expected_ms: Option<u64>,
+        drains_compile: bool,
         rank_of: impl FnOnce(&State, u64) -> Rank,
     ) -> u64 {
         let mut st = lock(&self.st);
@@ -2238,6 +2253,7 @@ impl Broker {
         }
         let id = st.ledger.submit(rank, needs, label, now);
         st.ledger.set_expected(id, expected_ms);
+        st.ledger.set_drains_compile(id, drains_compile);
         st.meta.insert(
             id,
             Meta::External {
