@@ -68,15 +68,27 @@ final class RowRedrawTests: XCTestCase {
         w.isReleasedWhenClosed = false
         w.contentView = h
         hostWindows.append(w)
-        h.layoutSubtreeIfNeeded()
-        // Force a real draw into a bitmap: SwiftUI evaluates bodies only once drawn, and the window is never ordered in.
-        if let rep = h.bitmapImageRepForCachingDisplay(in: h.bounds) { h.cacheDisplay(in: h.bounds, to: rep) }
+        draw(h)
         return h
+    }
+
+    /// A real display and update cycle without an on-screen window: flush pending transactions, lay
+    /// out, display, and draw into a bitmap, since SwiftUI evaluates bodies only once drawn. On a
+    /// headless runner one pass is not always enough, so the run loop is turned between passes.
+    private func draw(_ h: NSView) {
+        for _ in 0..<3 {
+            CATransaction.flush()
+            h.window?.layoutIfNeeded()
+            h.layoutSubtreeIfNeeded()
+            h.displayIfNeeded()
+            if let rep = h.bitmapImageRepForCachingDisplay(in: h.bounds) { h.cacheDisplay(in: h.bounds, to: rep) }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        }
     }
 
     private func settle(_ h: NSView) {
         RunLoop.main.run(until: Date().addingTimeInterval(0.05))
-        h.layoutSubtreeIfNeeded()
+        draw(h)
     }
 
     func testSequenceAndLogChangesEvaluateNoRows() {
@@ -177,6 +189,7 @@ final class RowRedrawTests: XCTestCase {
         settle(h)
         let used = RowView.evaluations - before
         print("s237: \(used) RowView body evaluations for \(rowChanging) row-changing messages")
+        XCTAssertGreaterThan(used, 0, "the rows were drawn")
         XCTAssertLessThanOrEqual(used, 2 * rowChanging)
     }
 }

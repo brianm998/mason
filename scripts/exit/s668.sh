@@ -10,6 +10,8 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 tmp=$(mktemp -d /tmp/mason-s668.XXXXXX); trap 'rm -rf "$tmp"' EXIT
 die() { echo "s668 FAILED: $*" >&2; exit 1; }
+# CI sets these for the job's own shard; the fixtures below must not inherit them.
+unset MASON_EXIT_SHARD MASON_EXIT_PLAN MASON_EXIT_REPEAT MASON_EXIT_DEFAULT_WEIGHT MASON_EXIT_WEIGHTS
 
 # 1. over-limit, failing and passing fake scripts
 d1=$tmp/one; mkdir "$d1"
@@ -17,7 +19,7 @@ printf '#!/usr/bin/env bash\nsleep 30\n' > "$d1/s11.sh"
 printf '#!/usr/bin/env bash\nexit 3\n' > "$d1/s12.sh"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$d1/s13.sh"
 rc=0
-MASON_EXIT_DIR=$d1 MASON_EXIT_SCRIPT_LIMIT_S=2 bash scripts/run-exit-scripts.sh >"$tmp/out" 2>"$tmp/err" || rc=$?
+MASON_EXIT_DIR=$d1 MASON_EXIT_SHARD=1/1 MASON_EXIT_SCRIPT_LIMIT_S=2 bash scripts/run-exit-scripts.sh >"$tmp/out" 2>"$tmp/err" || rc=$?
 [ "$rc" -ne 0 ] || die "runner exited 0 with failing scripts"
 grep -q "FAILED: .*s11.sh (over 2 s)" "$tmp/err" || die "over-limit script not reported"
 grep -q "FAILED: .*s12.sh$" "$tmp/err" || die "failing script not reported"

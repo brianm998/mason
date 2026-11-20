@@ -480,7 +480,8 @@ fn masons_own_impact_map_selects_suites_by_path() {
                 .to_vec()
         )
     );
-    assert_eq!(pick(&["scripts/unmapped.sh"]), Selection::All);
+    // `scripts/*.sh` maps to exit-scripts (s249), so the probe sits under no glob.
+    assert_eq!(pick(&["scripts/unmapped/tool.rs"]), Selection::All);
     assert_eq!(pick(&["docs/x.md"]), one("cargo-workspace"));
     // All five (with `fmt`, s691) are bound to run_check and the test step.
     assert_eq!(all.len(), 5);

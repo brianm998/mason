@@ -50,6 +50,10 @@ pub struct Group {
     pub doc: bool,
     pub tests: BTreeSet<String>,
     pub whole: bool,
+    /// Directory test targets narrowed to some of their modules (#655): target name to its
+    /// libtest filters (`resume_loss::`). A target also in `tests` (or a `whole` group) runs
+    /// whole and its filters are dropped.
+    pub modules: BTreeMap<String, BTreeSet<String>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -258,6 +262,72 @@ fn target_text(t: &TestTarget, files: &[String], read: &dyn Fn(&str) -> Option<S
     text
 }
 
+/// A `tests/<dir>/main.rs` target seen as its `mod <name>;` modules (#655).
+struct DirTarget {
+    dir: String,
+    /// Module name and the text of its file(s), the module's own subtree only.
+    mods: Vec<(String, String)>,
+}
+
+impl DirTarget {
+    /// The module a changed path belongs to, if any: `dir/name.rs` or anything under `dir/name/`.
+    fn module_of(&self, path: &str) -> Option<&str> {
+        let rest = path.strip_prefix(&self.dir)?.strip_prefix('/')?;
+        self.mods
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .find(|n| rest == format!("{n}.rs") || rest.starts_with(&format!("{n}/")))
+    }
+}
+
+/// The modules of a directory target: the `mod name;` lines of its `main.rs` that have a file
+/// beside it and carry no `#[path]` (an included shared harness is not a module). `None` for a
+/// single-file target or one with no such module.
+fn dir_target(
+    t: &TestTarget,
+    files: &[String],
+    read: &dyn Fn(&str) -> Option<String>,
+) -> Option<DirTarget> {
+    let dir = t.src.strip_suffix("/main.rs")?;
+    let main = read(&t.src)?;
+    let mut mods = vec![];
+    let mut prev_path = false;
+    for line in main.lines() {
+        let l = line.trim();
+        let has_path = l.contains("#[path");
+        let decl = l
+            .strip_prefix("pub(crate) ")
+            .or_else(|| l.strip_prefix("pub "))
+            .unwrap_or(l);
+        let decl = decl.rsplit("] ").next().unwrap_or(decl);
+        if let Some(name) = decl
+            .strip_prefix("mod ")
+            .and_then(|r| r.strip_suffix(';'))
+            .map(str::trim)
+        {
+            let own = format!("{dir}/{name}.rs");
+            let sub = format!("{dir}/{name}/");
+            let mine: Vec<&String> = files
+                .iter()
+                .filter(|f| **f == own || (f.starts_with(&sub) && f.ends_with(".rs")))
+                .collect();
+            if !has_path && !prev_path && !mine.is_empty() {
+                let text = mine
+                    .iter()
+                    .map(|f| read(f).unwrap_or_default())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                mods.push((name.to_string(), text));
+            }
+        }
+        prev_path = l.starts_with("#[path") && !l.contains(';');
+    }
+    (!mods.is_empty()).then(|| DirTarget {
+        dir: dir.to_string(),
+        mods,
+    })
+}
+
 /// One changed `src` file: does `text` (a test target's source) depend on it?
 fn references(p: &Pkg, same_package: bool, changed_rel: &str, content: &str, text: &str) -> bool {
     // Tests that run the crate's binaries, or include its source by path, depend on all of it.
@@ -320,6 +390,17 @@ pub fn select(
     named: &str,
 ) -> Pick {
     let mut out: BTreeMap<String, Group> = BTreeMap::new();
+    // Directory targets by root file, and the modules selected in them: (package, target) to
+    // module names. Modules are a heuristic (decision 0696); the landing batch runs `it` whole.
+    let dirs: BTreeMap<String, DirTarget> = if changed.iter().all(|c| ignorable(c)) {
+        BTreeMap::new()
+    } else {
+        pkgs.iter()
+            .flat_map(|p| &p.tests)
+            .filter_map(|t| Some((t.src.clone(), dir_target(t, files, read)?)))
+            .collect()
+    };
+    let mut picked: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
     let mut src_changes: Vec<(&Pkg, String)> = vec![];
     // Packages run whole, with the targets of their dependents.
     let mut whole: BTreeSet<&str> = BTreeSet::new();
@@ -340,10 +421,22 @@ pub fn select(
         };
         let rel = path[p.dir.len() + 1..].to_string();
         if let Some(t) = p.tests.iter().find(|t| target_owns(t, path)) {
-            out.entry(p.name.clone())
-                .or_default()
-                .tests
-                .insert(t.name.clone());
+            // A module file selects that module; `main.rs` and shared files select the target.
+            let module = dirs.get(&t.src).and_then(|d| d.module_of(path));
+            match module {
+                Some(m) => {
+                    picked
+                        .entry((p.name.clone(), t.name.clone()))
+                        .or_default()
+                        .insert(m.to_string());
+                }
+                None => {
+                    out.entry(p.name.clone())
+                        .or_default()
+                        .tests
+                        .insert(t.name.clone());
+                }
+            }
         } else if rel.starts_with("src/") {
             src_changes.push((p, rel));
         } else if rel == "Cargo.toml" || rel == "build.rs" {
@@ -428,6 +521,19 @@ pub fn select(
         let fam = family(pkgs, &p.name);
         for q in pkgs.iter().filter(|q| fam.contains(q.name.as_str())) {
             for t in &q.tests {
+                if let Some(d) = dirs.get(&t.src) {
+                    // Each module on its own: neither the shared harness `main.rs` includes
+                    // nor `main.rs` itself makes every module reference the change.
+                    for (m, text) in &d.mods {
+                        if references(p, q.name == p.name, rel, &content, text) {
+                            picked
+                                .entry((q.name.clone(), t.name.clone()))
+                                .or_default()
+                                .insert(m.clone());
+                        }
+                    }
+                    continue;
+                }
                 let text = texts
                     .entry(t.src.clone())
                     .or_insert_with(|| target_text(t, files, read));
@@ -438,6 +544,25 @@ pub fn select(
                         .insert(t.name.clone());
                 }
             }
+        }
+    }
+    // More than half of a target's modules: the filter list saves little, run it whole.
+    for ((pkg, target), mods) in picked {
+        let total = pkgs
+            .iter()
+            .filter(|q| q.name == pkg)
+            .flat_map(|q| &q.tests)
+            .find(|t| t.name == target)
+            .and_then(|t| dirs.get(&t.src))
+            .map_or(0, |d| d.mods.len());
+        let g = out.entry(pkg).or_default();
+        if mods.len() * 2 > total {
+            g.tests.insert(target);
+        } else {
+            g.modules
+                .entry(target)
+                .or_default()
+                .extend(mods.iter().map(|m| format!("{m}::")));
         }
     }
     Pick::Some(out)
@@ -468,6 +593,16 @@ pub fn render(groups: &BTreeMap<String, Group>) -> Vec<String> {
         }
         if g.doc {
             out.push(format!("-p {name} --doc"));
+        }
+    }
+    // A filtered target is a group of its own, as cargo applies a filter to every target of a
+    // command; one run whole (here or by the package) drops its filter.
+    for (name, g) in groups {
+        for (t, filters) in &g.modules {
+            if !g.whole && !g.tests.contains(t) && !filters.is_empty() {
+                let f: Vec<&str> = filters.iter().map(String::as_str).collect();
+                out.push(format!("-p {name} --test {t} -- {}", f.join(" ")));
+            }
         }
     }
     out
@@ -535,6 +670,14 @@ pub fn add_smoke(groups: &mut BTreeMap<String, Group>, text: &str) -> Vec<String
         });
         if covered {
             continue;
+        }
+        // Two filtered selections of one target merge their filters.
+        if !g.lib && !g.bins && g.tests.len() == 1 {
+            let t = g.tests.iter().next().cloned().unwrap_or_default();
+            if let Some(m) = groups.get_mut(&p).and_then(|e| e.modules.get_mut(&t)) {
+                m.extend(filters);
+                continue;
+            }
         }
         let mut s = format!("-p {p}");
         if g.lib {
@@ -912,5 +1055,109 @@ mod tests {
         assert_eq!(pk[0].lib.as_deref(), Some("a_b"));
         assert_eq!(pk[0].bins, vec!["abd"]);
         assert_eq!(pk[0].tests[0].src, "crates/a/tests/t1.rs");
+    }
+
+    /// `leaf` gains a directory target `it` (`main.rs`, a `#[path]` harness, modules `mod_a`,
+    /// `mod_b`, `mod_c`); only `mod_a` names `shapes`.
+    fn with_dir_target() -> Fx {
+        let mut fx = Fx::new();
+        fx.pkgs[0].tests.push(TestTarget {
+            name: "it".into(),
+            src: "crates/leaf/tests/it/main.rs".into(),
+        });
+        let mut put = |p: &str, t: &str| {
+            fx.files.insert(p.to_string(), t.to_string());
+        };
+        put(
+            "crates/leaf/tests/it/main.rs",
+            "#[path = \"../support/mod.rs\"]\nmod support;\n\nmod mod_a;\nmod mod_b;\nmod mod_c;\n",
+        );
+        put(
+            "crates/leaf/tests/support/mod.rs",
+            "fn start() { env!(\"CARGO_BIN_EXE_masond\"); }\n",
+        );
+        put("crates/leaf/tests/it/mod_a.rs", "use leaf::shapes::area;\n");
+        put("crates/leaf/tests/it/mod_b.rs", "fn t() {}\n");
+        put("crates/leaf/tests/it/mod_c.rs", "fn t() {}\n");
+        fx
+    }
+
+    #[test]
+    fn a_src_change_selects_only_the_modules_that_reference_it() {
+        let fx = with_dir_target();
+        let r = fx.rendered(&["crates/leaf/src/shapes.rs"]);
+        assert!(
+            r.contains(&"-p leaf --test it -- mod_a::".to_string()),
+            "{r:?}"
+        );
+        assert!(!r
+            .iter()
+            .any(|l| l.contains("mod_b") || l == "-p leaf --test it"));
+    }
+
+    #[test]
+    fn a_changed_module_file_selects_that_module_only() {
+        let fx = with_dir_target();
+        assert_eq!(
+            fx.rendered(&["crates/leaf/tests/it/mod_b.rs"]),
+            vec!["-p leaf --test it -- mod_b::"]
+        );
+    }
+
+    #[test]
+    fn a_module_naming_the_package_binary_is_selected_for_any_src_change() {
+        let mut fx = with_dir_target();
+        fx.pkgs[0].bins = vec!["leafd".into()];
+        fx.files.insert(
+            "crates/leaf/tests/it/mod_c.rs".into(),
+            "fn t() { run(\"leafd\"); }\n".into(),
+        );
+        let r = fx.rendered(&["crates/leaf/src/other_mod.rs"]);
+        assert!(
+            r.iter().any(|l| l == "-p leaf --test it -- mod_c::"),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn main_rs_or_a_path_included_file_selects_the_target_whole() {
+        let fx = with_dir_target();
+        for p in [
+            "crates/leaf/tests/it/main.rs",
+            "crates/leaf/tests/support/mod.rs",
+        ] {
+            assert_eq!(fx.rendered(&[p]), vec!["-p leaf --test it"], "{p}");
+        }
+    }
+
+    #[test]
+    fn more_than_half_the_modules_select_the_target_whole() {
+        let fx = with_dir_target();
+        let r = fx.rendered(&[
+            "crates/leaf/tests/it/mod_a.rs",
+            "crates/leaf/tests/it/mod_b.rs",
+        ]);
+        assert_eq!(r, vec!["-p leaf --test it"]);
+    }
+
+    #[test]
+    fn whole_beats_filtered_and_filtered_merge() {
+        let fx = with_dir_target();
+        assert_eq!(
+            fx.rendered(&[
+                "crates/leaf/tests/it/mod_b.rs",
+                "crates/leaf/tests/it/main.rs"
+            ]),
+            vec!["-p leaf --test it"]
+        );
+        let Pick::Some(mut g) = fx.pick(&["crates/leaf/tests/it/mod_b.rs"]) else {
+            panic!()
+        };
+        let raw = add_smoke(&mut g, "-p leaf --test it -- mod_c::\n");
+        assert!(raw.is_empty(), "{raw:?}");
+        assert_eq!(render(&g), vec!["-p leaf --test it -- mod_b:: mod_c::"]);
+        let raw = add_smoke(&mut g, "-p leaf --test it\n");
+        assert!(raw.is_empty());
+        assert_eq!(render(&g), vec!["-p leaf --test it"]);
     }
 }
