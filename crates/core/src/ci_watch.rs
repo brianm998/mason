@@ -337,8 +337,9 @@ pub fn error_excerpt(log: &str, max_lines: usize) -> String {
     for (i, l) in region.iter().enumerate() {
         if is_failure_line(l) {
             any = true;
-            for k in i.saturating_sub(2)..(i + 3).min(region.len()) {
-                keep[k] = true;
+            let hi = (i + 3).min(region.len());
+            for flag in &mut keep[i.saturating_sub(2)..hi] {
+                *flag = true;
             }
         }
     }
