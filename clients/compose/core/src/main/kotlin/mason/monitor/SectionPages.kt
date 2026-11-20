@@ -19,6 +19,8 @@ object SectionPages {
         "developing" -> "Developing"
         "testing" -> "Testing"
         "review" -> "Review"
+        "needs_attention" -> "Needs you"
+        "proposed" -> "Proposed"
         else -> name
     }
 
