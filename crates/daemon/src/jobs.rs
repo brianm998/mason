@@ -1934,6 +1934,7 @@ impl TestChecks {
                 holds: uses.clone(),
                 label: format!("#{} check", self.task),
                 stop: None,
+                place: None,
             }
         };
         let mut lines: Vec<String> = vec![];
@@ -2495,6 +2496,7 @@ impl TestChecks {
                 holds: uses.clone(),
                 label: format!("#{} check", self.task),
                 stop: None,
+                place: None,
             }
         };
         let merges = self.reds.merges();

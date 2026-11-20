@@ -150,6 +150,7 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
         v["blocked_by"] = json!(t.blockers.iter().map(|b| b.0).collect::<Vec<_>>());
         v["held_by"] = crate::blockers::links_json(d, w, t);
         v["held_line"] = crate::blockers::held_line(w, t).map_or(Value::Null, |s| json!(s));
+        v["places"] = json!(crate::place::seen(Some(t.id.0)));
         if t.state == State::Canceled && t.cancel_keeps_branch {
             v["revive"] = json!(format!(
                 "`mason task revive {}` puts it back in the queue with its branch and links; `retry` does not revive a canceled task",
@@ -254,6 +255,7 @@ async fn status(Shared(d): Shared<Arc<Daemon>>) -> Res {
                         "model": crate::launchview::json_of(&m),
                     }))
                 }).collect::<Vec<_>>(),
+                "places": crate::place::seen(None),
                 "event_loop_stalls": stalls,
                 "pools": {"blocking": d2.pool.stats(), "views": d2.view_pool.stats()},
                 "worst_stall_ms": worst,
@@ -1530,7 +1532,8 @@ async fn project_config(Shared(d): Shared<Arc<Daemon>>, Path(name): Path<String>
                     "settings": p.file_settings().into_iter().map(|(k, v)| json!({"key": k, "value": v})).collect::<Vec<_>>(),
                 })
             });
-            json!({"definition": def.hash, "steps": steps, "project_file": file})
+            let places = crate::place::config_view(&d2, &name);
+            json!({"definition": def.hash, "steps": steps, "project_file": file, "places": places})
         })
         .await
         .map_err(pool_err)?;
@@ -2965,6 +2968,45 @@ async fn notify_settings_set(
     r.map(Json).map_err(|(c, m)| fail(code(c), m))
 }
 
+/// The global switch for where runs go (#698), for `mason remote status` and the Settings page.
+async fn remote_get(Shared(d): Shared<Arc<Daemon>>) -> Res {
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || crate::place::status(&d2))
+        .await
+        .map_err(pool_err)?;
+    Ok(Json(v))
+}
+
+/// Switch every run that can go to GitHub Actions on or off (`{"default": "github"|"local"}`).
+/// Owner only; read live by the next run, with no restart.
+async fn remote_set(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Json(b): Json<Value>,
+) -> Res {
+    let who = who_of(&headers);
+    owner_only(&d, &who, "change where runs go")?;
+    let to = match b["default"].as_str() {
+        Some("github") => crate::place::Global::GitHub,
+        Some("local") => crate::place::Global::Local,
+        _ => {
+            return Err(fail(
+                StatusCode::BAD_REQUEST,
+                "`default` must be \"github\" or \"local\"",
+            ))
+        }
+    };
+    let d2 = d.clone();
+    let r = d
+        .pool
+        .run(move || crate::place::set_global(&d2, to, &who))
+        .await
+        .map_err(pool_err)?;
+    r.map(Json).map_err(|(c, m)| fail(code(c), m))
+}
+
 async fn project_settings_get(Shared(d): Shared<Arc<Daemon>>, Path(name): Path<String>) -> Res {
     project_of(&d, &name)?;
     let d2 = d.clone();
@@ -3875,6 +3917,7 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
             "/notify/settings",
             get(notify_settings_get).post(notify_settings_set),
         )
+        .route("/remote", get(remote_get).post(remote_set))
         .route(
             "/projects/{name}/settings",
             get(project_settings_get).post(project_settings_set),

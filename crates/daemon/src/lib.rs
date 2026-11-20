@@ -57,6 +57,7 @@ pub mod monitor_inplace;
 pub mod notify;
 pub mod numbers;
 pub mod outside;
+pub mod place;
 pub mod plan_view;
 pub mod plugins;
 pub mod policyd;
