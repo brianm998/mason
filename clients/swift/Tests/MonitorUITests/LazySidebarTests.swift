@@ -56,6 +56,8 @@ final class LazySidebarTests: XCTestCase {
         w.contentView = h
         hostWindows.append(w)
         h.layoutSubtreeIfNeeded()
+        // Force a real draw into a bitmap: SwiftUI evaluates bodies only once drawn, and the window is never ordered in.
+        if let rep = h.bitmapImageRepForCachingDisplay(in: h.bounds) { h.cacheDisplay(in: h.bounds, to: rep) }
         return h
     }
 
