@@ -60,12 +60,12 @@ final class CountTileTests: XCTestCase {
         return (model, c)
     }
 
-    /// The tile's background just inside its top-left, rendered offscreen.
+    /// The tile's background just inside its right edge, clear of the state icon, rendered offscreen.
     private func corner(_ model: MonitorModel, _ c: StateCount, theme: Theme) -> NSColor? {
         let r = ImageRenderer(content: CountTile(model: model, count: c).environment(\.theme, theme))
         r.scale = 1
         guard let cg = r.cgImage else { return nil }
-        return NSBitmapImageRep(cgImage: cg).colorAt(x: 6, y: 6)?.usingColorSpace(.sRGB)
+        return NSBitmapImageRep(cgImage: cg).colorAt(x: cg.width - 4, y: cg.height / 2)?.usingColorSpace(.sRGB)
     }
 
     private func same(_ a: NSColor?, _ b: Color) -> Bool {
