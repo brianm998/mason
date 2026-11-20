@@ -2087,6 +2087,16 @@ impl TestChecks {
                                 suite.build = Some(crate::scope::expand(db, &n, true));
                             }
                             narrowed.push(format!("{name}: {}", n.describe()));
+                            // How a directory target's modules were picked (#656).
+                            if crate::scope::wants_tests(&dc) {
+                                if let Some((_, notes)) = kept.as_deref().and_then(|p| {
+                                    crate::scope::narrow_noted(&self.wt, p, true, false, &named)
+                                        .ok()
+                                }) {
+                                    narrowed
+                                        .extend(notes.into_iter().map(|n| format!("{name}: {n}")));
+                                }
+                            }
                         }
                         Err(why) => lines.push(format!("{name}: runs whole because {why}")),
                     }
