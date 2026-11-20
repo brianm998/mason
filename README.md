@@ -571,4 +571,5 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s696**: CI/lint: the SPDX header of scripts/exit/s653.sh is corrected from Apache-2.0 to GPL-3.0-or-later so check-spdx passes on develop.
 - **s697**: The red CI/monitor-compose run 44697853075 names no failing step in the supplied log tail (only post-job Gradle cache cleanup), so no code changed and decision 0690 records how to classify it from the full log.
 - **s704**: The swift and gradle exit scripts s645 and s662 now skip when their skip variable is set, and the live-token cost test waits for the cost instead of a fixed sleep.
+- **s709**: The github adapter test's fake world now strips the Windows `\\?\` verbatim prefix from its canonical tempdir path, so `git clone` of the local remote no longer fails with "hostname contains invalid characters".
 <!-- status:end -->
