@@ -2202,10 +2202,42 @@ fn lease(c: &Ctx, needs: Needs) -> bool {
 /// The narrowed copy of `suite` for this task's test step (s386), with a note naming what it
 /// runs, or `None` to run it whole: no `narrow_*` keys, the change unreadable, or
 /// [`mason_testing::narrow::select`] picks nothing or most of it.
-fn narrow_for_step(c: &Ctx, suite: &Suite) -> Option<(Suite, String)> {
+/// What the test step does with one suite once narrowing is applied.
+enum StepNarrow {
+    Whole,
+    Run(Suite, String),
+    /// The suite is not run; the note says why (it runs whole later).
+    NotRun(String),
+}
+
+/// The suite's `whole_later` claim, when it holds for this project now: `batch` needs a landing
+/// tier that lists the suite, `ci` a `[ci]` section. A claim that does not hold changes nothing.
+fn whole_later_holds(c: &Ctx, suite: &Suite) -> Option<mason_testing::WholeLater> {
+    let w = suite.whole_later?;
+    let claim = [(suite.name.clone(), w.name().to_string())];
+    let cfg = crate::landing::load_config(&c.d, c.project_id).ok()?;
+    let ci = c.project.services.ci.is_some();
+    mason_landing::config::whole_later_problems(&cfg, &claim, ci)
+        .is_empty()
+        .then_some(w)
+}
+
+fn narrow_step(c: &Ctx, suite: &Suite) -> StepNarrow {
     if suite.narrow_packages {
-        return narrow_packages_for_step(c, suite);
+        return match narrow_packages_for_step(c, suite) {
+            Some((s, n)) => StepNarrow::Run(s, n),
+            None => StepNarrow::Whole,
+        };
     }
+    let later = whole_later_holds(c, suite);
+    narrow_units_for_step(c, suite, later).unwrap_or(StepNarrow::Whole)
+}
+
+fn narrow_units_for_step(
+    c: &Ctx,
+    suite: &Suite,
+    later: Option<mason_testing::WholeLater>,
+) -> Option<StepNarrow> {
     let n = suite.narrow.as_ref()?;
     let base = git::run(&c.wt, &["merge-base", &c.project.base_ref(), "HEAD"]).ok()?;
     let base = base.trim();
@@ -2225,19 +2257,30 @@ fn narrow_for_step(c: &Ctx, suite: &Suite) -> Option<(Suite, String)> {
         paths: &paths,
         added: &added,
     };
-    let picked = mason_testing::narrow::select(n, &files, &change)?;
     let total = mason_testing::narrow::units(n, &files).len();
+    let (picked, case) = match later {
+        None => (mason_testing::narrow::select(n, &files, &change)?, None),
+        Some(w) => match mason_testing::narrow::select_later(n, &files, &change) {
+            mason_testing::narrow::Later::Whole => return None,
+            mason_testing::narrow::Later::Run(u, case) => (u, Some((w, case))),
+            mason_testing::narrow::Later::NotRun => {
+                let why = whole_later_why(n, &change);
+                return Some(StepNarrow::NotRun(format!(
+                    "{}: not run: {why}; runs whole at {}",
+                    suite.name,
+                    w.name()
+                )));
+            }
+        },
+    };
     let mut s = suite.clone();
     s.command = mason_testing::narrow::command(n, &picked);
     s.min_tests = 1;
     s.narrowed = true;
     let names: Vec<&str> = picked.iter().take(8).map(|u| u.name.as_str()).collect();
     let more = picked.len().saturating_sub(names.len());
-    let note = format!(
-        "{}: narrowed to {} of {} test units ({}{}); the landing batch runs it whole",
-        suite.name,
-        picked.len(),
-        total,
+    let list = format!(
+        "{}{}",
         names.join(", "),
         if more > 0 {
             format!(" and {more} more")
@@ -2245,7 +2288,39 @@ fn narrow_for_step(c: &Ctx, suite: &Suite) -> Option<(Suite, String)> {
             String::new()
         }
     );
-    Some((s, note))
+    let note = match case {
+        None => format!(
+            "{}: narrowed to {} of {} test units ({list}); the landing batch runs it whole",
+            suite.name,
+            picked.len(),
+            total
+        ),
+        Some((w, case)) => format!(
+            "{}: narrowed to {} of {} test units ({list}){}; runs whole at {}",
+            suite.name,
+            picked.len(),
+            total,
+            case.map_or(String::new(), |c| format!(" because {}", c.describe())),
+            w.name()
+        ),
+    };
+    Some(StepNarrow::Run(s, note))
+}
+
+/// Why nothing runs for a suite whose pick is empty and which has no smoke units.
+fn whole_later_why(
+    n: &mason_testing::Narrow,
+    change: &mason_testing::narrow::Change,
+) -> &'static str {
+    let never = change
+        .paths
+        .iter()
+        .any(|p| n.never.iter().any(|g| mason_testing::glob::matches(g, p)));
+    if never {
+        "a changed path matches narrow_never, but none of the suite's tests is picked and narrow_smoke is empty"
+    } else {
+        "nothing in this change reaches its tests"
+    }
 }
 
 /// The package-mode narrowing of `suite` for a task's test step (s396): its `dev_command`
@@ -2647,14 +2722,21 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
         };
         // Only the tests this change needs, when the suite says how (s386). The landing batch
         // runs it whole.
-        let suite = match narrow_for_step(c, &suite) {
-            Some((narrowed, note)) => {
+        let suite = match narrow_step(c, &suite) {
+            StepNarrow::Run(narrowed, note) => {
                 // Said in the closing note too: a narrowed green is not the whole suite's.
                 details.push(note.clone());
                 notes.push(note);
                 narrowed
             }
-            None => suite,
+            StepNarrow::NotRun(note) => {
+                // It runs whole at landing: the step has nothing to prove, and says so.
+                details.push(note.clone());
+                notes.push(note);
+                outcomes.push((name, SuiteOutcome::NotSelected));
+                continue;
+            }
+            StepNarrow::Whole => suite,
         };
         let ran_beside = side.remove(&name);
         if per_suite && ran_beside.is_none() {
