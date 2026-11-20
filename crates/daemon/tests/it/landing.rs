@@ -522,6 +522,65 @@ fn a_batch_whose_testing_was_skipped_still_runs_the_lint_check() {
     );
 }
 
+/// A `checks.sh` that appends each suite's name to `log`, and whose `lint` is red with a
+/// rustfmt-style `Diff in` line for every `x/bad.rs` in the tree, and for `y/base.rs`.
+fn lint_checks_script(log: &std::path::Path) -> String {
+    format!(
+        "#!/bin/sh\nn=\"$1\"\necho \"$n\" >> {}\necho \"1..1\"\nif [ \"$n\" = lint ]; then\n  bad=0\n  for f in x/bad.rs y/base.rs; do [ -f \"$f\" ] && {{ echo \"Diff in $f:1:\"; bad=1; }}; done\n  [ $bad = 1 ] && {{ echo \"not ok 1 - lint\"; exit 1; }}\nfi\necho \"ok 1 - $n\"\n",
+        log.display()
+    )
+}
+
+const LINT_AND_BATCH: &str = "window = \"2s\"\n[[tier]]\nname = \"batch\"\nsuites = [\"alpha\"]\n[[tier]]\nname = \"lint\"\nsuites = [\"lint\"]\n";
+
+#[test]
+fn lint_runs_before_the_batch_suite_and_parks_only_the_task_that_touches_the_file() {
+    // s691: an unformatted file was found after the whole batch suite, then bisected.
+    let probe = tempfile::tempdir().unwrap();
+    let log = probe.path().join("calls");
+    let script = lint_checks_script(&log);
+    let w = world(LINT_AND_BATCH, &[("checks.sh", &script)]);
+    let bad = w.task("unformatted", &[("x/bad.rs", "fn  main(){}")]);
+    let good = w.task("clean", &[("a/ok.txt", "1")]);
+    wait_for("the clean task to land", 120, || w.landed(good));
+    wait_for("the unformatted task to be sent back", 60, || {
+        w.sent_back(bad).is_some()
+    });
+    let why = w.sent_back(bad).unwrap();
+    assert!(why.contains("lint"), "{why}");
+    assert!(w.on_main("a/ok.txt") && !w.on_main("x/bad.rs"));
+    let calls = std::fs::read_to_string(&log).unwrap();
+    let calls: Vec<&str> = calls.lines().collect();
+    assert_eq!(calls.first(), Some(&"lint"), "lint runs first: {calls:?}");
+    assert_eq!(
+        calls.iter().filter(|c| **c == "alpha").count(),
+        1,
+        "one suite run, no bisect: {calls:?}"
+    );
+}
+
+#[test]
+fn a_lint_red_in_a_file_no_task_touches_is_not_blamed_by_file() {
+    // The file belongs to the base: the existing ladder (rerun, impact, split) handles it.
+    let probe = tempfile::tempdir().unwrap();
+    let log = probe.path().join("calls");
+    let script = lint_checks_script(&log);
+    let w = world(
+        LINT_AND_BATCH,
+        &[("checks.sh", &script), ("y/base.rs", "fn  main(){}")],
+    );
+    let t = w.task("innocent", &[("a/ok.txt", "1")]);
+    wait_for("the batch to be sent back", 120, || {
+        w.sent_back(t).is_some()
+    });
+    assert!(!w.on_main("a/ok.txt"));
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        !calls.lines().any(|c| c == "alpha"),
+        "the suite never ran over a lint red: {calls}"
+    );
+}
+
 // ---- Land now on a running batch (#615) ---------------------------------------------------
 
 fn post_api(d: &Arc<mason_daemon::Daemon>, path: String) -> (u16, serde_json::Value) {

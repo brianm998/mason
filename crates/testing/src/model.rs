@@ -117,6 +117,9 @@ pub struct Suite {
     /// In a task's test step, run `dev_command` for the changed crates and their dependents
     /// (s396), as `run_check` does. The landing batch runs `command` whole.
     pub narrow_packages: bool,
+    /// The suite runs whole again after the test step (`whole_later`): the step then narrows
+    /// harder, running only `narrow_smoke` plus the picked units where it would run whole.
+    pub whole_later: Option<WholeLater>,
     /// After a lost step host, rerun only the cargo test executables whose `test result:` line
     /// the lost run did not reach (#621). A suite whose `dev_command` takes `{tests_for_change}`
     /// does it without this key.
@@ -141,6 +144,35 @@ pub struct Narrow {
     pub each: String,
     /// A changed path matching one of these runs the suite whole (build files, shared code).
     pub never: Vec<String>,
+    /// Units added to every narrowed pick of a suite with `whole_later` (`narrow_smoke`), by
+    /// name, as `each` takes them.
+    pub smoke: Vec<String>,
+}
+
+/// Where a suite runs whole after a task's test step (`whole_later`), so the step need not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WholeLater {
+    /// In a landing tier (`batch`) of the project.
+    Batch,
+    /// On the base's CI, before the change lands.
+    Ci,
+}
+
+impl WholeLater {
+    pub fn name(self) -> &'static str {
+        match self {
+            WholeLater::Batch => "batch",
+            WholeLater::Ci => "ci",
+        }
+    }
+
+    pub fn from_name(s: &str) -> Option<WholeLater> {
+        match s {
+            "batch" => Some(WholeLater::Batch),
+            "ci" => Some(WholeLater::Ci),
+            _ => None,
+        }
+    }
 }
 
 impl Suite {
@@ -171,6 +203,7 @@ impl Suite {
             narrow: None,
             narrowed: false,
             narrow_packages: false,
+            whole_later: None,
             resume_after_loss: false,
         }
     }
@@ -349,6 +382,32 @@ pub enum Selection {
 }
 
 impl ImpactMap {
+    /// The first of `paths` no glob names: the one that makes `select` run everything.
+    pub fn first_unmapped<'a>(&self, paths: &'a [String]) -> Option<&'a str> {
+        if self.entries.is_empty() {
+            return paths.first().map(String::as_str);
+        }
+        paths
+            .iter()
+            .find(|p| {
+                !(self.entries.iter().chain(&self.overrides)).any(|(g, _)| glob::matches(g, p))
+            })
+            .map(String::as_str)
+    }
+
+    /// The files of `files` no glob names, grouped by top-level directory
+    /// (`.` for files at the root), in order.
+    pub fn unmapped_by_dir(&self, files: &[String]) -> Vec<(String, Vec<String>)> {
+        let mut out: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+        for f in files {
+            if self.first_unmapped(std::slice::from_ref(f)).is_some() {
+                let top = f.split_once('/').map_or(".", |(d, _)| d).to_string();
+                out.entry(top).or_default().push(f.clone());
+            }
+        }
+        out.into_iter().collect()
+    }
+
     /// The suites a change to `paths` needs, out of `available` (in order).
     /// No changed paths selects nothing; any unmapped path selects all.
     pub fn select(&self, paths: &[String], available: &[String]) -> Selection {

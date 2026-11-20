@@ -25,6 +25,11 @@ parallel = 1
 name   = "batch"
 suites = ["cargo-workspace"]
 
+# The exit scripts the batch can have broken, once on the merged tree (s669).
+[[tier]]
+name   = "exit"
+suites = ["exit-scripts-landing"]
+
 [on_red]
 ladder = ["rerun-failed", "blame-by-impact", "bisect"]
 
