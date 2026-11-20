@@ -1328,9 +1328,16 @@ fn adopt_earlier_green(
     d.store
         .put_evidence(&tree.tree, &suite.name, executed, passed, task.0, now)
         .ok()?;
-    let _ = d
-        .store
-        .put_task_green(task.0, &suite.name, &hash, &tree.tree, from_run, executed, passed, now);
+    let _ = d.store.put_task_green(
+        task.0,
+        &suite.name,
+        &hash,
+        &tree.tree,
+        from_run,
+        executed,
+        passed,
+        now,
+    );
     let _ = run;
     Some(format!(
         "{}: green, reused from an earlier round (step run #{from_run}; nothing since touches it)",
@@ -4519,7 +4526,9 @@ mod reuse_tests {
         let (def, a, b) = two_suite_def();
         for s in [&a, &b] {
             let h = suite_def_hash(&def, s);
-            store.put_task_green(7, &s.name, &h, &t1, 3, 5, 5, 1).unwrap();
+            store
+                .put_task_green(7, &s.name, &h, &t1, 3, 5, 5, 1)
+                .unwrap();
         }
         // Round 2 changes only a/.
         commit(dir.path(), "a/y");
