@@ -47,6 +47,7 @@ mod landing_crash;
 mod landing_floor;
 mod landing_modes;
 mod landing_split;
+mod landing_yield;
 mod lease_pid;
 mod limits;
 mod live_tokens;

@@ -268,6 +268,7 @@ async fn status(Shared(d): Shared<Arc<Daemon>>) -> Res {
                     "floor_mb": g.floor_mb,
                     "tasks_waiting": d2.broker.disk_held(),
                 })),
+                "update_wait": crate::update::status_line_of(&d2),
                 "projects": d2.projects().values().map(|p| p.id.clone()).collect::<Vec<_>>(),
                 "step_hosts_running": running,
                 "trackers": d2.projects().keys().map(|pid| crate::tracker::state_json(&d2, *pid)).collect::<Vec<_>>(),

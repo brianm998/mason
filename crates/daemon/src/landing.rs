@@ -692,7 +692,27 @@ fn coordinate(weak: &Weak<Daemon>, pid: ProjectId, first: &mut bool, last: &mut 
     if std::mem::take(first) {
         // Batches from a daemon that died did not finish; their tasks are back in the queue.
         if let Some(p) = d.project(pid) {
+            // The dead batch's tasks showed its last line: say they wait to land again.
+            for b in d.store.batches(Some(p.id.as_str()), 50).unwrap_or_default() {
+                if b.finished_at.is_none() {
+                    let tasks: Vec<u64> = b
+                        .tasks
+                        .split(',')
+                        .filter_map(|t| t.trim().parse().ok())
+                        .collect();
+                    let _ = d.store.set_progress_message(
+                        &tasks,
+                        &format!(
+                            "waiting to land again (batch #{} stopped for an update; its results are kept)",
+                            b.id
+                        ),
+                    );
+                }
+            }
             let _ = d.store.abandon_batches(&p.id, now_ms());
+            let _ = d
+                .store
+                .prune_batch_runs(now_ms().saturating_sub(2 * 24 * 3600 * 1000));
             sweep_integration(&d, pid);
             remove_refs(&d, pid, None);
         }
@@ -1053,6 +1073,8 @@ fn run_batch(
                     real_ci_red: std::sync::atomic::AtomicBool::new(false),
                     fast_tier: std::sync::atomic::AtomicBool::new(false),
                     floor_red: std::sync::atomic::AtomicBool::new(false),
+                    reused: std::sync::atomic::AtomicUsize::new(0),
+                    yielded: std::sync::atomic::AtomicBool::new(false),
                     lint_files: Mutex::new(vec![]),
                     host,
                     pr: Mutex::new(None),
@@ -1147,6 +1169,10 @@ struct Runner {
     /// Set when the last verification's red came from the build floor (`build_floor`): the
     /// ladder reruns that as a build, and looks at the base before it blames anyone.
     floor_red: std::sync::atomic::AtomicBool,
+    /// Run results taken from an earlier batch over the same base and task heads (s705).
+    reused: std::sync::atomic::AtomicUsize,
+    /// Set when a split search stopped at a run boundary because an update is taking over.
+    yielded: std::sync::atomic::AtomicBool,
     /// The files the last lint red named (rustfmt's `Diff in`, clippy's `-->`): the ladder
     /// parks the tasks whose diff touches one, before it reruns or splits anything (s691).
     lint_files: Mutex<Vec<String>>,
@@ -1439,6 +1465,22 @@ impl Runner {
         // How long to wait before assembling again when the remote cannot be fetched.
         let mut fetch_wait = Duration::from_secs(1);
 
+        // An update is waiting to take over and the batch is between runs: it stops here,
+        // its results kept, and its tasks wait in the queue to land again (s705).
+        macro_rules! yield_batch {
+            ($l:lifetime) => {{
+                for t in &active {
+                    if !deferred.contains(&t.id) {
+                        deferred.push(t.id);
+                    }
+                }
+                note = "stopped for an update; its run results are kept for the next batch over the same base and task heads".to_string();
+                self.say(&format!(
+                    "waiting to land again (batch #{batch_id} stopped for an update; its results are kept)"
+                ));
+                break $l Ok(());
+            }};
+        }
         let outcome: Result<(), String> = 'outer: loop {
             for pk in parked.iter().filter(|x| delivered.insert(x.task)) {
                 deliver(d, TaskId(pk.task), pk.verdict());
@@ -1466,6 +1508,9 @@ impl Runner {
                 if active.is_empty() {
                     break Ok(());
                 }
+            }
+            if rounds > 1 && self.yield_now() {
+                yield_batch!('outer);
             }
             // -- assemble
             let asm = {
@@ -1618,13 +1663,25 @@ impl Runner {
                 .store(false, std::sync::atomic::Ordering::SeqCst);
             self.floor_red
                 .store(false, std::sync::atomic::Ordering::SeqCst);
-            let mut vr = self.verify(
+            let run_key = mason_store::batch_run_key(
+                &active
+                    .iter()
+                    .map(|t| (t.id, t.head.clone()))
+                    .collect::<Vec<_>>(),
+            );
+            let mut vr = self.verify_kept(
                 &def,
                 &suites,
                 &int_wt,
                 &asm.base_tip,
                 &log_dir,
                 &format!("b{batch_id}-r{rounds}"),
+                &run_key,
+                &format!(
+                    "full|{}|fast={}",
+                    suites.join(","),
+                    self.fast_tier.load(std::sync::atomic::Ordering::SeqCst)
+                ),
             );
             if let Some(e) = self.take_service_error() {
                 break Err(e);
@@ -1750,6 +1807,9 @@ impl Runner {
                         if let Some(e) = self.take_service_error() {
                             break 'outer Err(e);
                         }
+                        if self.yield_now() {
+                            yield_batch!('outer);
+                        }
                         match self.settle_pin(found, &runs, &mut parked, &mut active, batch_id, &vr)
                         {
                             Settled::Parked(n) => {
@@ -1778,6 +1838,9 @@ impl Runner {
                         self.park(&mut parked, &mut active, &blamed, batch_id, &vr);
                         continue 'outer;
                     }
+                }
+                if self.yield_now() {
+                    yield_batch!('outer);
                 }
                 for rung in &self.cfg.ladder {
                     // A red the CI judged a real failure is not rerun, blamed or bisected
@@ -1822,13 +1885,15 @@ impl Runner {
                                 .store(false, std::sync::atomic::Ordering::SeqCst);
                             self.floor_red
                                 .store(false, std::sync::atomic::Ordering::SeqCst);
-                            let r2 = self.verify(
+                            let r2 = self.verify_kept(
                                 &def,
                                 &rerun,
                                 &int_wt,
                                 &asm.base_tip,
                                 &log_dir,
                                 &format!("b{batch_id}-r{rounds}x"),
+                                &run_key,
+                                &format!("rerun|{}", rerun.join(",")),
                             );
                             if let Some(e) = self.take_service_error() {
                                 break 'outer Err(e);
@@ -1899,6 +1964,9 @@ impl Runner {
                             );
                             if let Some(e) = self.take_service_error() {
                                 break 'outer Err(e);
+                            }
+                            if self.yield_now() {
+                                yield_batch!('outer);
                             }
                             match self.settle_pin(
                                 found,
@@ -2275,7 +2343,9 @@ impl Runner {
             Err(why) => crate::ssh_keys::hold_if_refused(d, &p.id, why),
             Ok(()) => false,
         };
+        let yielded = self.yielded.load(std::sync::atomic::Ordering::SeqCst);
         let phase = match (&outcome, landed.is_empty(), parked.is_empty()) {
+            _ if yielded && landed.is_empty() && parked.is_empty() => "yielded",
             (Ok(()), _, true) => "landed",
             (Ok(()), false, false) => "landed",
             (Ok(()), true, false) => "parked",
@@ -2285,6 +2355,12 @@ impl Runner {
         let final_note = match &outcome {
             Err(w) => w.clone(),
             Ok(()) => note.clone(),
+        };
+        let reused = self.reused.load(std::sync::atomic::Ordering::SeqCst);
+        let final_note = if reused > 0 {
+            format!("{final_note}; reused {reused} run result(s) from an earlier batch over the same base and task heads")
+        } else {
+            final_note
         };
         self.record(
             batch_id,
@@ -3279,6 +3355,124 @@ impl Runner {
             .map_err(|_| "every task of the batch left the landing step while it waited".into())
     }
 
+    /// An update is waiting to take over: a batch between runs stops at the next boundary
+    /// with its results kept (s705).
+    fn yield_now(&self) -> bool {
+        if self.d.landing.draining() {
+            self.yielded
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            true
+        } else {
+            self.yielded.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    /// What an earlier run found over exactly this base, these task heads and this filter.
+    /// A red is always reused; a green only when `reuse_green` (a split's subsets, whose
+    /// answer only blames, never lets anything land).
+    fn cached_run(
+        &self,
+        base: &str,
+        key: &str,
+        filter: &str,
+        reuse_green: bool,
+    ) -> Option<crate::suites::OverRun> {
+        let (green, detail) = self
+            .d
+            .store
+            .batch_run(&self.project().id, base, key, filter)
+            .ok()??;
+        if green && !reuse_green {
+            return None;
+        }
+        let v: serde_json::Value = serde_json::from_str(&detail).ok()?;
+        let strs = |x: &serde_json::Value| -> Vec<String> {
+            x.as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|s| s.as_str().map(String::from))
+                .collect()
+        };
+        let r = crate::suites::OverRun {
+            green,
+            failed: strs(&v["failed"]).into_iter().collect(),
+            notes: strs(&v["notes"]),
+            failing: v["failing"]
+                .as_object()
+                .into_iter()
+                .flatten()
+                .map(|(k, x)| (k.clone(), strs(x)))
+                .collect(),
+        };
+        self.floor_red.store(
+            v["floor"].as_bool().unwrap_or(false),
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        self.real_ci_red.store(
+            v["real_ci"].as_bool().unwrap_or(false),
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        *self.lint_files.lock().unwrap_or_else(|e| e.into_inner()) = strs(&v["lint"]);
+        self.reused
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Some(r)
+    }
+
+    /// Keep what a run found, unless the run failed for a reason of the service.
+    fn keep_run(&self, base: &str, key: &str, filter: &str, r: &crate::suites::OverRun) {
+        if self
+            .service_error
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+        {
+            return;
+        }
+        let detail = serde_json::json!({
+            "failed": r.failed,
+            "notes": r.notes,
+            "failing": r.failing,
+            "floor": self.floor_red.load(std::sync::atomic::Ordering::SeqCst),
+            "real_ci": self.real_ci_red.load(std::sync::atomic::Ordering::SeqCst),
+            "lint": *self.lint_files.lock().unwrap_or_else(|e| e.into_inner()),
+        })
+        .to_string();
+        let _ = self.d.store.put_batch_run(
+            &self.project().id,
+            base,
+            key,
+            filter,
+            r.green,
+            &detail,
+            now_ms(),
+        );
+    }
+
+    /// [`Runner::verify`], through the kept results of the batch's earlier runs.
+    #[allow(clippy::too_many_arguments)]
+    fn verify_kept(
+        &self,
+        def: &mason_definition::Definition,
+        suites: &[String],
+        wt: &Path,
+        base: &str,
+        log_dir: &Path,
+        prefix: &str,
+        key: &str,
+        filter: &str,
+    ) -> crate::suites::OverRun {
+        if let Some(r) = self.cached_run(base, key, filter, false) {
+            self.say(&format!(
+                "batch #{}: reusing the red result of an earlier run over the same tree",
+                self.batch_id.load(std::sync::atomic::Ordering::SeqCst)
+            ));
+            return r;
+        }
+        let r = self.verify(def, suites, wt, base, log_dir, prefix);
+        self.keep_run(base, key, filter, &r);
+        r
+    }
+
     fn take_service_error(&self) -> Option<String> {
         self.service_error
             .lock()
@@ -3945,6 +4139,33 @@ impl Runner {
             };
             // A base that cannot be checked out keeps the old answer (the base's), not a blame.
             let Ok(a) = a else { return subset.is_empty() };
+            if self.yield_now() {
+                // The search stops here; the caller sees it and leaves the batch.
+                return false;
+            }
+            let run_key = mason_store::batch_run_key(
+                &sub.iter()
+                    .map(|t| (t.id, t.head.clone()))
+                    .collect::<Vec<_>>(),
+            );
+            let run_filter = format!(
+                "split|alone={:?}|mapped={:?}|failed={}",
+                alone,
+                mapped,
+                failed.join(",")
+            );
+            if let Some(r) = self.cached_run(&a.base_tip, &run_key, &run_filter, true) {
+                self.say(&format!(
+                    "batch #{batch_id} is red: reusing an earlier run of {} task(s)",
+                    subset.len()
+                ));
+                if !r.green {
+                    let mut k = subset.to_vec();
+                    k.sort_unstable();
+                    runs.push((k, r.notes.clone()));
+                }
+                return !r.green;
+            }
             tried += 1;
             let which = if subset.is_empty() {
                 "the base alone".to_string()
@@ -3985,6 +4206,7 @@ impl Runner {
                     }
                 },
             };
+            self.keep_run(&a.base_tip, &run_key, &run_filter, &r);
             if !r.green {
                 let mut k = subset.to_vec();
                 k.sort_unstable();

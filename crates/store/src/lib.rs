@@ -2337,6 +2337,82 @@ impl Store {
         })
     }
 
+    /// Keep what a batch verification run found, for the exact base tip, task heads and
+    /// filter (s705). `tasks` is the sorted `id@head` list made by [`batch_run_key`].
+    pub fn put_batch_run(
+        &self,
+        project: &str,
+        base: &str,
+        tasks: &str,
+        filter: &str,
+        green: bool,
+        detail: &str,
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        let (p, b, t, f, d) = (
+            project.to_string(),
+            base.to_string(),
+            tasks.to_string(),
+            filter.to_string(),
+            detail.to_string(),
+        );
+        self.write(move |c| {
+            c.execute(
+                "INSERT OR REPLACE INTO batch_runs(project, base, tasks, filter, green, detail, at_ms) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                params![p, b, t, f, green as i64, d, now_ms as i64],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// `(green, detail)` of a recorded run of exactly this base, tasks and filter.
+    pub fn batch_run(
+        &self,
+        project: &str,
+        base: &str,
+        tasks: &str,
+        filter: &str,
+    ) -> Result<Option<(bool, String)>, StoreError> {
+        let (p, b, t, f) = (
+            project.to_string(),
+            base.to_string(),
+            tasks.to_string(),
+            filter.to_string(),
+        );
+        self.read(move |c| {
+            c.query_row(
+                "SELECT green, detail FROM batch_runs WHERE project = ?1 AND base = ?2 AND tasks = ?3 AND filter = ?4",
+                params![p, b, t, f],
+                |r| Ok((r.get::<_, i64>(0)? != 0, r.get::<_, String>(1)?)),
+            )
+            .optional()
+        })
+    }
+
+    /// Runs older than `before_ms` are forgotten.
+    pub fn prune_batch_runs(&self, before_ms: u64) -> Result<usize, StoreError> {
+        self.write(move |c| {
+            c.execute(
+                "DELETE FROM batch_runs WHERE at_ms < ?1",
+                params![before_ms as i64],
+            )
+        })
+    }
+
+    /// Say `message` on the stored progress of these tasks' step runs (a batch that stopped).
+    pub fn set_progress_message(&self, tasks: &[u64], message: &str) -> Result<(), StoreError> {
+        let (t, m) = (tasks.to_vec(), message.to_string());
+        self.write(move |c| {
+            for task in t {
+                c.execute(
+                    "UPDATE step_progress SET message = ?2 WHERE task = ?1",
+                    params![task as i64, m],
+                )?;
+            }
+            Ok(())
+        })
+    }
+
     /// Batches a dead daemon left unfinished.
     pub fn abandon_batches(&self, project: &str, now_ms: u64) -> Result<usize, StoreError> {
         let p = project.to_string();
@@ -4168,4 +4244,14 @@ pub fn rank_slowest(
     all.sort_by_key(|b| std::cmp::Reverse(b.median_ms));
     all.truncate(limit);
     all
+}
+
+/// The key of a batch's tasks in `batch_runs`: `id@head`, sorted by id, comma separated.
+pub fn batch_run_key(tasks: &[(u64, String)]) -> String {
+    let mut v: Vec<&(u64, String)> = tasks.iter().collect();
+    v.sort();
+    v.iter()
+        .map(|(i, h)| format!("{i}@{h}"))
+        .collect::<Vec<_>>()
+        .join(",")
 }

@@ -2655,6 +2655,9 @@ fn main() {
                     counts.join(", ")
                 }
             );
+            if let Some(l) = s["update_wait"].as_str() {
+                println!("update: {l}");
+            }
             println!(
                 "running: {} job(s) of {} allowed, {} step host(s)",
                 s["jobs"], s["max_concurrent"], s["step_hosts_running"]

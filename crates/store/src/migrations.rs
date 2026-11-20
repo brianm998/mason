@@ -771,6 +771,21 @@ const STEPS: &[&str] = &[
          at_ms   INTEGER NOT NULL
      );
      CREATE INDEX target_times_key ON target_times(project, suite, target, at_ms);",
+    // 56: what a landing batch's verification run found (s705, decision 0698), keyed by the
+    // project, the base tip, the batch's tasks with their branch heads and the suite or test
+    // filter the run used. A batch formed again over the same base and heads (after an update
+    // took over) reuses it instead of running again. `detail` is the daemon's own encoding of
+    // the failing suites, tests and notes. Additive.
+    "CREATE TABLE batch_runs (
+         project TEXT NOT NULL,
+         base    TEXT NOT NULL,
+         tasks   TEXT NOT NULL,
+         filter  TEXT NOT NULL,
+         green   INTEGER NOT NULL,
+         detail  TEXT NOT NULL,
+         at_ms   INTEGER NOT NULL,
+         PRIMARY KEY (project, base, tasks, filter)
+     );",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;

@@ -925,6 +925,8 @@ pub struct Wait {
     pub batches: Vec<WaitBatch>,
     /// The latest time it will go ahead anyway, as a clock time (`20:53`).
     pub deadline: String,
+    /// When the wait began, in ms since the epoch (0: unknown).
+    pub since_ms: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1574,6 +1576,44 @@ fn waiting_sentence(target: &str, w: &Wait) -> String {
     )
 }
 
+/// Pure: the line `mason status` shows while an update waits on landing batches, with how
+/// long it has waited.
+pub fn status_line(s: &Status, now_ms: u64) -> Option<String> {
+    let w = s
+        .wait
+        .as_ref()
+        .filter(|_| s.phase == "waiting for landing")?;
+    let names: Vec<String> = w
+        .batches
+        .iter()
+        .map(|b| format!("{} #{} ({})", b.project, b.id, b.phase))
+        .collect();
+    let waited = if w.since_ms == 0 {
+        String::new()
+    } else {
+        format!(
+            ", waited {} min",
+            now_ms.saturating_sub(w.since_ms) / 60_000
+        )
+    };
+    Some(format!(
+        "masond {} is built and waits for landing batch(es): {}{waited}; takes over after the current run, or at {}",
+        short(s.target.as_deref().unwrap_or_default()),
+        names.join("; "),
+        w.deadline
+    ))
+}
+
+/// [`status_line`] for the running daemon.
+pub fn status_line_of(d: &Daemon) -> Option<String> {
+    let s = d
+        .update_status
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    status_line(&s, crate::daemon::now_ms())
+}
+
 /// Pure: what taking over now does to the batches it is waiting for. Empty when nothing
 /// would be lost.
 fn waiting_confirm(w: &Wait) -> String {
@@ -1829,6 +1869,7 @@ pub fn drain_within(d: &Arc<Daemon>, cap: Duration) {
     d.update_now.store(false, Ordering::SeqCst);
     let deadline = Instant::now() + cap;
     let deadline_label = clock_after(cap);
+    let since_ms = crate::daemon::now_ms();
     let mut said = String::new();
     let done = |d: &Daemon| {
         d.update_status
@@ -1879,7 +1920,7 @@ pub fn drain_within(d: &Arc<Daemon>, cap: Duration) {
             d.update_status
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .wait = Some(wait_info(d, &deadline_label));
+                .wait = Some(wait_info(d, &deadline_label, since_ms));
             say(d, "waiting for landing", &text);
             said = text;
         }
@@ -1888,7 +1929,7 @@ pub fn drain_within(d: &Arc<Daemon>, cap: Duration) {
 }
 
 /// The unfinished batches with their tasks and windows.
-fn wait_info(d: &Daemon, deadline: &str) -> Wait {
+fn wait_info(d: &Daemon, deadline: &str, since_ms: u64) -> Wait {
     let batches = d
         .store
         .batches(None, 200)
@@ -1913,6 +1954,7 @@ fn wait_info(d: &Daemon, deadline: &str) -> Wait {
     Wait {
         batches,
         deadline: deadline.into(),
+        since_ms,
     }
 }
 
@@ -2577,6 +2619,7 @@ mod tests {
                     window_min: 20,
                 }],
                 deadline: "20:53".into(),
+                since_ms: 0,
             }),
             ..Default::default()
         }
