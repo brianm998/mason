@@ -151,6 +151,7 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
         v["held_by"] = crate::blockers::links_json(d, w, t);
         v["held_line"] = crate::blockers::held_line(w, t).map_or(Value::Null, |s| json!(s));
         v["places"] = json!(crate::place::seen(Some(t.id.0)));
+        v["run_on"] = crate::place::effective_line(d, t.id.0);
         if t.state == State::Canceled && t.cancel_keeps_branch {
             v["revive"] = json!(format!(
                 "`mason task revive {}` puts it back in the queue with its branch and links; `retry` does not revive a canceled task",
@@ -407,6 +408,21 @@ async fn add_task(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
                 ));
             }
             let filing = mason_definition::filing::parse(b["body"].as_str().unwrap_or_default());
+            mason_definition::filing::refuse_run_on_claim(&filing)
+                .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+            // Where its runs go (#699): the owner's choice, written with the filing.
+            let run_on = match b["run_on"].as_str() {
+                None => None,
+                Some(v) => {
+                    mason_definition::layers::check_override(
+                        &d2.current_def(pid),
+                        mason_definition::layers::RUN_ON,
+                        v,
+                    )
+                    .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+                    Some(v.to_string())
+                }
+            };
             let explored = b["explored"].as_bool().unwrap_or(false) || filing.explored;
             let body = filing.body;
             if body.len() > 100_000 {
@@ -464,6 +480,11 @@ async fn add_task(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
                     None
                 }
             });
+            if let (Some(t), Some(v)) = (task, run_on) {
+                d2.store
+                    .set_task_override(t, mason_definition::layers::RUN_ON, &v, "owner", now_ms())
+                    .map_err(store_err)?;
+            }
             Ok(json!({"task": task, "seq": appended.seq}))
         })
         .await
@@ -1146,6 +1167,12 @@ async fn task_override(
                 b["key"].as_str().unwrap_or_default(),
                 b["value"].as_str().unwrap_or_default(),
             );
+            if key == mason_definition::layers::RUN_ON {
+                return Err(fail(
+                    StatusCode::BAD_REQUEST,
+                    "run_on is the owner's choice: use `mason task run-on <id> github|local|default`",
+                ));
+            }
             mason_definition::layers::check_override(&def, key, value)
                 .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
             d2.store
@@ -1162,6 +1189,44 @@ async fn task_override(
         .await
         .map_err(pool_err)??;
     Ok(Json(json!({"ok": true})))
+}
+
+/// `mason task run-on <id> github|local|default` (owner only): where the task's compiles and
+/// tests run from the next suite or check on (#699). `default` removes the choice, so the task
+/// follows the global switch. A run already in progress is not moved.
+async fn task_run_on(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<u64>,
+    Json(b): Json<Value>,
+) -> Res {
+    let who = who_of(&headers);
+    let to = b["to"].as_str().unwrap_or_default().to_string();
+    let d2 = d.clone();
+    let line = d
+        .pool
+        .run(move || {
+            owner_only(&d2, &who, "choose where a task runs")?;
+            let w = d2.world().map_err(store_err)?;
+            let t = w
+                .tasks
+                .get(&TaskId(id))
+                .ok_or_else(|| fail(StatusCode::NOT_FOUND, format!("no task #{id}")))?;
+            let key = mason_definition::layers::RUN_ON;
+            if to == "default" {
+                d2.store.clear_task_override(id, key).map_err(store_err)?;
+            } else {
+                mason_definition::layers::check_override(&d2.current_def(t.project), key, &to)
+                    .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+                d2.store
+                    .set_task_override(id, key, &to, &who, now_ms())
+                    .map_err(store_err)?;
+            }
+            Ok::<_, (StatusCode, Json<Value>)>(crate::place::effective_line(&d2, id))
+        })
+        .await
+        .map_err(pool_err)??;
+    Ok(Json(json!({"ok": true, "run_on": line})))
 }
 
 /// `mason task priority <id> urgent|high|normal|low` (owner only): the task's
@@ -1579,6 +1644,12 @@ async fn overrides_add(
                     "an override must say when it expires (expires_in_s)",
                 )
             })?;
+            if key == mason_definition::layers::RUN_ON {
+                return Err(fail(
+                    StatusCode::BAD_REQUEST,
+                    "run_on belongs to one task: use `mason task run-on <id> github|local|default`",
+                ));
+            }
             mason_definition::layers::check_override(&d2.current_def(pid), key, value)
                 .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
             let now = now_ms();
@@ -3849,6 +3920,7 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/tasks/{id}/explore-anyway", post(explore_anyway))
         .route("/tasks/{id}/overrides", post(task_override))
         .route("/tasks/{id}/priority", post(task_priority))
+        .route("/tasks/{id}/run_on", post(task_run_on))
         .route("/projects/{name}/definition", get(project_definition))
         .route("/projects/{name}/extensions", get(extensions_list))
         .route(

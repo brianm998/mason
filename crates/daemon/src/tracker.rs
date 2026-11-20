@@ -848,6 +848,19 @@ pub fn sync_with_rule(
                 }
                 continue;
             }
+            // Where a task runs is the owner's choice: a tracker body cannot claim it (#699).
+            if let Err(reason) = mason_definition::filing::refuse_run_on_claim(
+                &mason_definition::filing::parse(&it.body),
+            ) {
+                if !pending.iter().any(|w| w.number == it.number) {
+                    pending.push(Waiting {
+                        number: it.number,
+                        title: it.title.clone(),
+                        reason,
+                    });
+                }
+                continue;
+            }
             let held: Vec<(u64, TaskId)> = resolved
                 .iter()
                 .filter_map(|b| match b {

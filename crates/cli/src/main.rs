@@ -2897,6 +2897,12 @@ fn main() {
                                 .collect()
                         })
                         .unwrap_or_default();
+                    let run_on = a.opt("--run-on");
+                    if let Some(r) = &run_on {
+                        if !matches!(r.as_str(), "github" | "local") {
+                            die("--run-on takes github or local (leave it out to follow the global switch)");
+                        }
+                    }
                     let title = a.pos().unwrap_or_else(|| {
                         die("give the task a title: mason task add \"Fix the thing\"")
                     });
@@ -2919,7 +2925,7 @@ fn main() {
                             )),
                         }
                     });
-                    let r = or_die(d.call("POST", "/tasks", Some(&json!({"project": project, "title": title, "body": body, "priority": priority, "proposed": proposed, "explored": explored, "after": after}))));
+                    let r = or_die(d.call("POST", "/tasks", Some(&json!({"project": project, "title": title, "body": body, "priority": priority, "proposed": proposed, "explored": explored, "after": after, "run_on": run_on}))));
                     if json_out {
                         return println!("{r:#}");
                     }
@@ -2999,6 +3005,9 @@ fn main() {
                                 l["display"].as_str().unwrap_or("")
                             );
                         }
+                    }
+                    if let Some(l) = t["run_on"]["line"].as_str() {
+                        println!("  {l}");
                     }
                     for p in t["places"].as_array().into_iter().flatten() {
                         println!(
@@ -3605,6 +3614,31 @@ fn main() {
                         r["reranked"]
                     );
                 }
+                "run-on" => {
+                    let id = task_id(&mut a);
+                    let to = a
+                        .pos()
+                        .unwrap_or_else(|| die("where? github, local or default"));
+                    finish(&a);
+                    if !matches!(to.as_str(), "github" | "local" | "default") {
+                        die("where? github, local or default");
+                    }
+                    // Owner only, as `priority` is.
+                    if std::env::var("MASON_AS").is_err() {
+                        if let Ok(u) = std::env::var("USER") {
+                            std::env::set_var("MASON_AS", u);
+                        }
+                    }
+                    let r = or_die(d.call(
+                        "POST",
+                        &format!("/tasks/{id}/run_on"),
+                        Some(&json!({"to": to})),
+                    ));
+                    println!(
+                        "Task #{id}: {} (from the next suite or check; a run in progress is not moved)",
+                        r["run_on"]["line"].as_str().unwrap_or("?")
+                    );
+                }
                 other => die(&format!("unknown task command {other:?}\n\n{HELP}")),
             }
         }
@@ -4152,6 +4186,9 @@ fn print_ci_watch(project: &str, w: &Value) {
     }
     for h in w["held_back"].as_array().into_iter().flatten() {
         println!("  {}", h["text"].as_str().unwrap_or("?"));
+    }
+    if let Some(t) = w["unconfirmed_text"].as_str() {
+        println!("  {t}");
     }
     for t in w["timeouts"].as_array().into_iter().flatten() {
         println!(
