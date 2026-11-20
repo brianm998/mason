@@ -460,8 +460,9 @@ fn masons_own_impact_map_selects_suites_by_path() {
             "Cargo.lock",
             "rust-toolchain.toml"
         ]),
-        one("cargo-workspace")
+        Selection::Some(["cargo-workspace", "fmt"].map(String::from).to_vec())
     );
+    assert_eq!(pick(&["Cargo.lock"]), one("cargo-workspace"));
     // Shared client inputs run the three build suites; `exit-scripts` (s249) runs only for a
     // change under `scripts/exit/`.
     let three = Selection::Some(
@@ -481,10 +482,10 @@ fn masons_own_impact_map_selects_suites_by_path() {
     );
     assert_eq!(pick(&["scripts/unmapped.sh"]), Selection::All);
     assert_eq!(pick(&["docs/x.md"]), one("cargo-workspace"));
-    // All four are bound to run_check and the test step.
-    assert_eq!(all.len(), 4);
-    assert_eq!(d.testing.bound(When::Development).len(), 4);
-    assert_eq!(d.testing.bound(When::TestStep).len(), 4);
+    // All five (with `fmt`, s691) are bound to run_check and the test step.
+    assert_eq!(all.len(), 5);
+    assert_eq!(d.testing.bound(When::Development).len(), 5);
+    assert_eq!(d.testing.bound(When::TestStep).len(), 5);
 }
 
 #[test]
@@ -532,6 +533,27 @@ narrow_never = ["Cargo.toml"]"#;
         let text = with(
             r#"rerun = "cargo nextest run {tests}""#,
             &format!("rerun = \"cargo nextest run {{tests}}\"\n{extra}"),
+        );
+        let p = problems(&text);
+        assert!(p.iter().any(|x| x.contains(want)), "{extra}: {p:?}");
+    }
+}
+
+#[test]
+fn whole_later_and_narrow_smoke_parse_and_their_mistakes_are_named() {
+    // #676
+    let keys = "rerun = \"x {tests}\"\nnarrow_command = \"x {tests}\"\nnarrow_tests = \"t/*.rs\"\nnarrow_smoke = [\"a\", \"b\"]\nwhole_later = \"batch\"";
+    let d = parse(&with(r#"rerun = "cargo nextest run {tests}""#, keys)).unwrap();
+    let s = d.testing.suite("unit").unwrap();
+    assert_eq!(s.whole_later, Some(mason_testing::WholeLater::Batch));
+    assert_eq!(s.narrow.as_ref().unwrap().smoke, ["a", "b"]);
+    for (extra, want) in [
+        ("whole_later = \"never\"", "must be \"batch\""),
+        ("narrow_smoke = [\"a\"]", "narrow_smoke"),
+    ] {
+        let text = with(
+            r#"rerun = "cargo nextest run {tests}""#,
+            &format!("rerun = \"x {{tests}}\"\n{extra}"),
         );
         let p = problems(&text);
         assert!(p.iter().any(|x| x.contains(want)), "{extra}: {p:?}");

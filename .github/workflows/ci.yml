@@ -76,19 +76,24 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
+        # Two legs: the daemon's `it` binary alone is about 27 minutes on a fast Mac, and
+        # the whole workspace was cut off at 40 minutes on both systems in 13-14 of 16
+        # runs (2026-11-18/19). Each leg gets 45 minutes; the limit still catches a hung test.
+        scope: [rest, daemon]
     runs-on: ${{ matrix.os }}
-    # The workspace tests alone. They took about 20 minutes by November 2026; the
-    # limit still catches a hung test.
-    timeout-minutes: 40
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace
+      - run: cargo test --workspace --exclude mason-daemon
+        if: matrix.scope == 'rest'
+      - run: cargo test -p mason-daemon
+        if: matrix.scope == 'daemon'
 
-  # The exit scripts, in six shards per system: in one job after the workspace tests
-  # they never fitted the limit, and were cut off partway through every run. Some are
-  # slow on a runner (s80 runs the holds suite three times: 11-22 minutes), so a shard
-  # gets an hour.
+  # The exit scripts, in six shards per system, assigned by weight (scripts/exit/weights.txt).
+  # On push the repetition scripts run MASON_EXIT_REPEAT=2 times instead of 10-20 (the
+  # nightly run keeps their own counts), and every script has a 900 s limit so a slow one
+  # fails by name instead of the shard being cancelled at 60 minutes (decision 0661).
   exit-scripts:
     strategy:
       fail-fast: false
@@ -108,6 +113,9 @@ jobs:
           # The monitors have jobs of their own (below); these are the Rust jobs.
           MASON_SKIP_SWIFT: "1"
           MASON_SKIP_COMPOSE: "1"
+          # Repeat counts: small on push, the scripts' own defaults in the nightly run.
+          MASON_EXIT_REPEAT: "${{ github.event_name == 'schedule' && '' || '2' }}"
+          MASON_EXIT_SCRIPT_LIMIT_S: "${{ github.event_name == 'schedule' && '3600' || '900' }}"
 
   # The macOS monitor: builds, its tests, and the conformance run against
   # `masond --demo` (no window is opened on the runner).
@@ -153,6 +161,9 @@ jobs:
           MASON_TESTS_ALREADY_RAN: "1"
           MASON_SKIP_SWIFT: "1"
           MASON_SKIP_COMPOSE: "1"
+          # Repeat counts: small on push, the scripts' own defaults in the nightly run.
+          MASON_EXIT_REPEAT: "${{ github.event_name == 'schedule' && '' || '2' }}"
+          MASON_EXIT_SCRIPT_LIMIT_S: "${{ github.event_name == 'schedule' && '3600' || '900' }}"
 
   monitor-compose-macos:
     if: github.event_name == 'schedule'

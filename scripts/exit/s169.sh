@@ -3,7 +3,7 @@
 # s169 exit test: the two formerly flaky update tests each pass 10 runs in a row.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-n=${S169_RUNS:-10}
+n=${MASON_EXIT_REPEAT:-${S169_RUNS:-10}}
 fail=0
 for name in \
   a_build_that_crashes_is_rolled_back_by_itself_with_an_alert \

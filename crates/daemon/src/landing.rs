@@ -59,6 +59,8 @@ struct Wait {
     /// The landing step run this task waits in (its progress record).
     run: StepRunId,
     branch: String,
+    /// The branch's head when the task joined the queue: the commit the batch merges.
+    head: String,
     rank: u64,
     ready_at: u64,
     footprint: Footprint,
@@ -275,6 +277,22 @@ pub fn read_config(d: &Daemon, pid: ProjectId) -> Result<LandingConfig, ConfigEr
             problems.join("; ")
         )));
     }
+    // A suite's `whole_later` is the definition's claim that landing runs it whole (#676).
+    let claims: Vec<(String, String)> = d
+        .current_def(pid)
+        .testing
+        .suites
+        .iter()
+        .filter_map(|s| Some((s.name.clone(), s.whole_later?.name().to_string())))
+        .collect();
+    let problems = config::whole_later_problems(&c, &claims, p.services.ci.is_some());
+    if !problems.is_empty() {
+        return Err(ConfigError::Refused(format!(
+            "{}: {}",
+            p.id,
+            problems.join("; ")
+        )));
+    }
     if let Some(b) = &c.base {
         if *b != p.base {
             return Err(ConfigError::Refused(format!(
@@ -322,6 +340,8 @@ pub fn submit_and_wait(c: &Ctx) -> Option<Verdict> {
         task: c.task,
         run: c.run,
         branch: c.branch.clone(),
+        head: mason_landing::git::rev_parse(&c.project.path, &c.branch)
+            .unwrap_or_else(|_| c.branch.clone()),
         rank: rank_of(priority, c.task),
         ready_at: landing_clock(d).saturating_sub(first_submit_age_s(d, c)),
         footprint: Footprint {
@@ -1033,6 +1053,7 @@ fn run_batch(
                     real_ci_red: std::sync::atomic::AtomicBool::new(false),
                     fast_tier: std::sync::atomic::AtomicBool::new(false),
                     floor_red: std::sync::atomic::AtomicBool::new(false),
+                    lint_files: Mutex::new(vec![]),
                     host,
                     pr: Mutex::new(None),
                     service_error: Mutex::new(None),
@@ -1126,6 +1147,9 @@ struct Runner {
     /// Set when the last verification's red came from the build floor (`build_floor`): the
     /// ladder reruns that as a build, and looks at the base before it blames anyone.
     floor_red: std::sync::atomic::AtomicBool,
+    /// The files the last lint red named (rustfmt's `Diff in`, clippy's `-->`): the ladder
+    /// parks the tasks whose diff touches one, before it reruns or splits anything (s691).
+    lint_files: Mutex<Vec<String>>,
     host: Option<Arc<dyn GitHostAdapter>>,
     /// The pull request the batch is about to merge (pr modes).
     pr: Mutex<Option<OpenPr>>,
@@ -1388,10 +1412,17 @@ impl Runner {
             .map(|(t, b)| BatchTask {
                 id: t.0,
                 branch: b.clone(),
+                head: self
+                    .waits
+                    .iter()
+                    .find(|w| w.task == *t)
+                    .map_or_else(|| b.clone(), |w| w.head.clone()),
                 removes: removals_in(&d.task_dir(*t)),
             })
             .collect();
         let mut parked: Vec<Parked> = vec![];
+        // The head each task had when the union was last sent to verification.
+        let mut tested: HashMap<u64, String>;
         // Tasks that conflict only with batch-mates: they stay in landing and wait for
         // the next batch (decision 0162).
         let mut deferred: Vec<u64> = vec![];
@@ -1419,6 +1450,22 @@ impl Runner {
                 .clear();
             if rounds > limit {
                 break Err(format!("gave up after {rounds} rounds: the base kept moving or the batch kept changing"));
+            }
+            // A member whose run ended (retried, canceled) leaves the batch: neither landed
+            // nor parked. The union then differs from what the last run tested, and the
+            // round verifies it again.
+            let gone: Vec<String> = active
+                .iter()
+                .filter(|t| self.left(t.id))
+                .map(|t| format!("#{}", t.id))
+                .collect();
+            if !gone.is_empty() {
+                active.retain(|t| !self.left(t.id));
+                note = format!("{} left the batch: retried or canceled", gone.join(", "));
+                self.say(&format!("batch #{batch_id}: {note}"));
+                if active.is_empty() {
+                    break Ok(());
+                }
             }
             // -- assemble
             let asm = {
@@ -1551,6 +1598,7 @@ impl Runner {
                 std::sync::atomic::Ordering::SeqCst,
             );
 
+            tested = active.iter().map(|t| (t.id, t.head.clone())).collect();
             // -- verify the union once
             let suites = if force {
                 vec![]
@@ -1714,6 +1762,21 @@ impl Runner {
                                 break 'outer Err(why);
                             }
                         }
+                    }
+                }
+                // A lint red (or a red only in the fmt/SPDX gate tests) names its files:
+                // the tasks whose diff touches one are sent back, the rest stay (s691).
+                if let Some(files) = self.lint_blame_files(
+                    &def,
+                    &vr,
+                    &int_wt,
+                    &log_dir,
+                    &format!("b{batch_id}-r{rounds}-lintblame"),
+                ) {
+                    let blamed = blame_by_files(&files, &active, &self.fps);
+                    if !blamed.is_empty() {
+                        self.park(&mut parked, &mut active, &blamed, batch_id, &vr);
+                        continue 'outer;
                     }
                 }
                 for rung in &self.cfg.ladder {
@@ -1915,6 +1978,34 @@ impl Runner {
             let _ = self.d.store.clear_freeze(&self.project().id);
 
             // -- promote
+            {
+                let gone: Vec<String> = active
+                    .iter()
+                    .filter(|t| self.left(t.id))
+                    .map(|t| format!("#{}", t.id))
+                    .collect();
+                let moved = mason_landing::batch::moved_after_testing(&active, &tested);
+                if !gone.is_empty() || !moved.is_empty() {
+                    for id in &moved {
+                        if !self.left(*id) {
+                            parked.push(Parked {
+                                task: *id,
+                                reason: "its branch moved after testing".into(),
+                                feedback: "Your branch moved after the batch tested it, so it was not landed. Submit it again.".into(),
+                                conflict: false,
+                            });
+                        }
+                    }
+                    active.retain(|t| !self.left(t.id) && !moved.contains(&t.id));
+                    if !gone.is_empty() {
+                        note = format!("{} left the batch: retried or canceled", gone.join(", "));
+                    }
+                    if active.is_empty() {
+                        break Ok(());
+                    }
+                    continue 'outer;
+                }
+            }
             self.record(
                 batch_id,
                 "promoting",
@@ -2531,6 +2622,17 @@ impl Runner {
         if self.kind == "force" || self.forced() {
             return green();
         }
+        // The lint tier runs first (s691): it takes seconds and names the files, where a red
+        // found after the batch suite cost 15-25 min and then a bisect of the whole suite.
+        let l = self.lint_checks(def, wt, log_dir, prefix);
+        if !l.green {
+            return crate::suites::OverRun {
+                green: false,
+                failed: l.failed,
+                notes: l.notes,
+                failing: Default::default(),
+            };
+        }
         let mut r = self.run_local(def, suites, wt, base, log_dir, prefix);
         // Land now stopped the tests (kept: the freeze, the merge and the build floor); what it
         // stopped is owed after the merge. What lands must still build.
@@ -2544,14 +2646,6 @@ impl Runner {
             return r;
         }
         if !r.green {
-            return r;
-        }
-        // The lint tier runs on every batch, tests skipped or not (s521).
-        let l = self.lint_checks(def, wt, log_dir, prefix);
-        if !l.green {
-            r.green = false;
-            r.failed.extend(l.failed);
-            r.notes.extend(l.notes);
             return r;
         }
         r.notes.extend(l.notes);
@@ -2735,6 +2829,48 @@ impl Runner {
         out
     }
 
+    /// The files a lint-shaped red names. A red of the lint tier has them from `lint_checks`;
+    /// a red whose only failing tests are the `ci_gates` fmt and SPDX checks has them from a
+    /// lint run now (it takes seconds). `None` for any other red.
+    fn lint_blame_files(
+        &self,
+        def: &mason_definition::Definition,
+        vr: &crate::suites::OverRun,
+        wt: &Path,
+        log_dir: &Path,
+        prefix: &str,
+    ) -> Option<Vec<String>> {
+        let tier_suites: Vec<String> = self
+            .cfg
+            .tier("lint")
+            .map(|t| t.suites.clone())
+            .unwrap_or_default();
+        if vr.failed.is_empty() {
+            return None;
+        }
+        if vr.failed.iter().all(|f| tier_suites.contains(f)) {
+            let f = self
+                .lint_files
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            return Some(f);
+        }
+        if vr.failed.iter().all(|f| is_gate_test(f)) {
+            let l = self.lint_checks(def, wt, log_dir, prefix);
+            if l.green {
+                return None;
+            }
+            let f = self
+                .lint_files
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            return Some(f);
+        }
+        None
+    }
+
     /// The lint tier (`[[tier]] name = "lint"` in `.mason/landing.toml`): the `command` of each
     /// suite it names runs in the batch's worktree on every batch, whether or not its tests
     /// were skipped; only the owner's force stops it. A red names the files and lines the
@@ -2807,6 +2943,8 @@ impl Runner {
                 Ok(o) => {
                     out.green = false;
                     out.failed.insert(name.clone());
+                    *self.lint_files.lock().unwrap_or_else(|e| e.into_inner()) =
+                        lint_files(&o.output);
                     out.notes.push(format!(
                         "{name}: the batch is not lint clean{}{}\n{}",
                         if o.timed_out { " (timed out)" } else { "" },
@@ -3714,6 +3852,17 @@ impl Runner {
         active.retain(|t| !blamed.contains(&t.id));
     }
 
+    /// True when the task's landing run is no longer its open run (retried or canceled).
+    fn left(&self, id: u64) -> bool {
+        let Some(w) = self.waits.iter().find(|w| w.task.0 == id) else {
+            return false;
+        };
+        match self.d.world() {
+            Ok(world) => world.open_run(w.task) != Some(w.run),
+            Err(_) => false,
+        }
+    }
+
     fn raise_base(&self, why: &str) {
         self.d.landing.raise(
             self.pid,
@@ -3787,7 +3936,7 @@ impl Runner {
         let mut red = |subset: &[u64]| -> bool {
             let sub: Vec<BatchTask> = active
                 .iter()
-                .filter(|t| subset.contains(&t.id))
+                .filter(|t| subset.contains(&t.id) && !self.left(t.id))
                 .cloned()
                 .collect();
             let a = {
@@ -3898,7 +4047,7 @@ impl Runner {
                     ),
                 )
             };
-            for t in g {
+            for t in g.iter().filter(|t| !self.left(**t)) {
                 parked.push(Parked {
                     task: *t,
                     reason: reason.clone(),
@@ -4119,6 +4268,60 @@ mod idle_tests {
         s.note_idle(p, false, false, d);
         assert_eq!(s.idle_ms.get(&p).copied(), None);
     }
+}
+
+/// Is this failing test one of `ci_gates`' repository checks (fmt, SPDX)?
+fn is_gate_test(name: &str) -> bool {
+    let n = name.rsplit("::").next().unwrap_or(name);
+    n == "workspace_is_fmt_clean" || n.contains("spdx")
+}
+
+/// The distinct files a lint's output names, without lines: rustfmt's `Diff in file:line`
+/// and clippy's `--> file:line:col`.
+fn lint_files(output: &str) -> Vec<String> {
+    let mut v: Vec<String> = vec![];
+    for l in output.lines() {
+        let t = l.trim();
+        let f = if let Some(r) = t.strip_prefix("--> ") {
+            r.rsplitn(3, ':').last().map(str::to_string)
+        } else if let Some(r) = t.strip_prefix("Diff in ") {
+            let r = r.split(" at line ").next().unwrap_or(r);
+            let r = r.trim_end_matches(':');
+            Some(match r.rsplit_once(':') {
+                Some((f, n)) if n.chars().all(|c| c.is_ascii_digit()) => f.to_string(),
+                _ => r.to_string(),
+            })
+        } else {
+            None
+        };
+        if let Some(f) = f {
+            if !f.is_empty() && !v.contains(&f) {
+                v.push(f);
+            }
+        }
+    }
+    v
+}
+
+/// The tasks whose diff touches one of `files` (paths match as written or by suffix, as
+/// rustfmt may print them with a leading `./`).
+fn blame_by_files(
+    files: &[String],
+    active: &[BatchTask],
+    fps: &HashMap<u64, Footprint>,
+) -> Vec<u64> {
+    let norm = |f: &str| f.trim_start_matches("./").to_string();
+    active
+        .iter()
+        .filter(|t| {
+            fps.get(&t.id).is_some_and(|fp| {
+                fp.files
+                    .iter()
+                    .any(|x| files.iter().any(|f| norm(f) == norm(x)))
+            })
+        })
+        .map(|t| t.id)
+        .collect()
 }
 
 /// The `file:line` places a lint's output points at: clippy's `--> file:line:col` and
