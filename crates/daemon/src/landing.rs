@@ -1033,6 +1033,7 @@ fn run_batch(
                     real_ci_red: std::sync::atomic::AtomicBool::new(false),
                     fast_tier: std::sync::atomic::AtomicBool::new(false),
                     floor_red: std::sync::atomic::AtomicBool::new(false),
+                    lint_files: Mutex::new(vec![]),
                     host,
                     pr: Mutex::new(None),
                     service_error: Mutex::new(None),
@@ -1126,6 +1127,9 @@ struct Runner {
     /// Set when the last verification's red came from the build floor (`build_floor`): the
     /// ladder reruns that as a build, and looks at the base before it blames anyone.
     floor_red: std::sync::atomic::AtomicBool,
+    /// The files the last lint red named (rustfmt's `Diff in`, clippy's `-->`): the ladder
+    /// parks the tasks whose diff touches one, before it reruns or splits anything (s691).
+    lint_files: Mutex<Vec<String>>,
     host: Option<Arc<dyn GitHostAdapter>>,
     /// The pull request the batch is about to merge (pr modes).
     pr: Mutex<Option<OpenPr>>,
@@ -1713,6 +1717,21 @@ impl Runner {
                                 break 'outer Err(why);
                             }
                         }
+                    }
+                }
+                // A lint red (or a red only in the fmt/SPDX gate tests) names its files:
+                // the tasks whose diff touches one are sent back, the rest stay (s691).
+                if let Some(files) = self.lint_blame_files(
+                    &def,
+                    &vr,
+                    &int_wt,
+                    &log_dir,
+                    &format!("b{batch_id}-r{rounds}-lintblame"),
+                ) {
+                    let blamed = blame_by_files(&files, &active, &self.fps);
+                    if !blamed.is_empty() {
+                        self.park(&mut parked, &mut active, &blamed, batch_id, &vr);
+                        continue 'outer;
                     }
                 }
                 for rung in &self.cfg.ladder {
@@ -2440,6 +2459,16 @@ impl Runner {
         if self.kind == "force" || self.forced() {
             return green();
         }
+        // The lint tier runs first (s691): it takes seconds and names the files, where a red
+        // found after the batch suite cost 15-25 min and then a bisect of the whole suite.
+        let l = self.lint_checks(def, wt, log_dir, prefix);
+        if !l.green {
+            return crate::suites::OverRun {
+                green: false,
+                failed: l.failed,
+                notes: l.notes,
+            };
+        }
         let mut r = self.run_local(def, suites, wt, base, log_dir, prefix);
         // Land now stopped the tests (kept: the freeze, the merge and the build floor); what it
         // stopped is owed after the merge. What lands must still build.
@@ -2453,14 +2482,6 @@ impl Runner {
             return r;
         }
         if !r.green {
-            return r;
-        }
-        // The lint tier runs on every batch, tests skipped or not (s521).
-        let l = self.lint_checks(def, wt, log_dir, prefix);
-        if !l.green {
-            r.green = false;
-            r.failed.extend(l.failed);
-            r.notes.extend(l.notes);
             return r;
         }
         r.notes.extend(l.notes);
@@ -2643,6 +2664,48 @@ impl Runner {
         out
     }
 
+    /// The files a lint-shaped red names. A red of the lint tier has them from `lint_checks`;
+    /// a red whose only failing tests are the `ci_gates` fmt and SPDX checks has them from a
+    /// lint run now (it takes seconds). `None` for any other red.
+    fn lint_blame_files(
+        &self,
+        def: &mason_definition::Definition,
+        vr: &crate::suites::OverRun,
+        wt: &Path,
+        log_dir: &Path,
+        prefix: &str,
+    ) -> Option<Vec<String>> {
+        let tier_suites: Vec<String> = self
+            .cfg
+            .tier("lint")
+            .map(|t| t.suites.clone())
+            .unwrap_or_default();
+        if vr.failed.is_empty() {
+            return None;
+        }
+        if vr.failed.iter().all(|f| tier_suites.contains(f)) {
+            let f = self
+                .lint_files
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            return Some(f);
+        }
+        if vr.failed.iter().all(|f| is_gate_test(f)) {
+            let l = self.lint_checks(def, wt, log_dir, prefix);
+            if l.green {
+                return None;
+            }
+            let f = self
+                .lint_files
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            return Some(f);
+        }
+        None
+    }
+
     /// The lint tier (`[[tier]] name = "lint"` in `.mason/landing.toml`): the `command` of each
     /// suite it names runs in the batch's worktree on every batch, whether or not its tests
     /// were skipped; only the owner's force stops it. A red names the files and lines the
@@ -2714,6 +2777,8 @@ impl Runner {
                 Ok(o) => {
                     out.green = false;
                     out.failed.insert(name.clone());
+                    *self.lint_files.lock().unwrap_or_else(|e| e.into_inner()) =
+                        lint_files(&o.output);
                     out.notes.push(format!(
                         "{name}: the batch is not lint clean{}{}\n{}",
                         if o.timed_out { " (timed out)" } else { "" },
@@ -3970,6 +4035,60 @@ mod idle_tests {
         s.note_idle(p, false, false, d);
         assert_eq!(s.idle_ms.get(&p).copied(), None);
     }
+}
+
+/// Is this failing test one of `ci_gates`' repository checks (fmt, SPDX)?
+fn is_gate_test(name: &str) -> bool {
+    let n = name.rsplit("::").next().unwrap_or(name);
+    n == "workspace_is_fmt_clean" || n.contains("spdx")
+}
+
+/// The distinct files a lint's output names, without lines: rustfmt's `Diff in file:line`
+/// and clippy's `--> file:line:col`.
+fn lint_files(output: &str) -> Vec<String> {
+    let mut v: Vec<String> = vec![];
+    for l in output.lines() {
+        let t = l.trim();
+        let f = if let Some(r) = t.strip_prefix("--> ") {
+            r.rsplitn(3, ':').last().map(str::to_string)
+        } else if let Some(r) = t.strip_prefix("Diff in ") {
+            let r = r.split(" at line ").next().unwrap_or(r);
+            let r = r.trim_end_matches(':');
+            Some(match r.rsplit_once(':') {
+                Some((f, n)) if n.chars().all(|c| c.is_ascii_digit()) => f.to_string(),
+                _ => r.to_string(),
+            })
+        } else {
+            None
+        };
+        if let Some(f) = f {
+            if !f.is_empty() && !v.contains(&f) {
+                v.push(f);
+            }
+        }
+    }
+    v
+}
+
+/// The tasks whose diff touches one of `files` (paths match as written or by suffix, as
+/// rustfmt may print them with a leading `./`).
+fn blame_by_files(
+    files: &[String],
+    active: &[BatchTask],
+    fps: &HashMap<u64, Footprint>,
+) -> Vec<u64> {
+    let norm = |f: &str| f.trim_start_matches("./").to_string();
+    active
+        .iter()
+        .filter(|t| {
+            fps.get(&t.id).is_some_and(|fp| {
+                fp.files
+                    .iter()
+                    .any(|x| files.iter().any(|f| norm(f) == norm(x)))
+            })
+        })
+        .map(|t| t.id)
+        .collect()
 }
 
 /// The `file:line` places a lint's output points at: clippy's `--> file:line:col` and
