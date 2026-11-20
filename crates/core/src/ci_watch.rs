@@ -70,12 +70,96 @@ pub fn key(workflow: &str, job: &str) -> String {
     format!("{workflow}/{job}")
 }
 
+/// The shard prefix of a matrix job named `name (os, N)`: `name (os, `. `None` for a job that
+/// does not end in a shard number.
+fn shard_prefix(job: &str) -> Option<&str> {
+    let inner = job.strip_suffix(')')?;
+    let (head, n) = inner.rsplit_once(", ")?;
+    if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some(&job[..head.len() + 2])
+}
+
+/// The key shared by the shards of one matrix job: `CI/exit-scripts (ubuntu-latest, *)` for
+/// `CI/exit-scripts (ubuntu-latest, 5)`; any other job's own key.
+pub fn group_key(workflow: &str, job: &str) -> String {
+    match shard_prefix(job) {
+        Some(p) => format!("{workflow}/{p}*)"),
+        None => key(workflow, job),
+    }
+}
+
+/// Whether `text` names the job: its own key or its shard group's.
+fn names_job(text: &str, workflow: &str, job: &str) -> bool {
+    if text.contains(&key(workflow, job)) {
+        return true;
+    }
+    match shard_prefix(job) {
+        Some(p) => text.contains(&format!("{workflow}/{p}")),
+        None => false,
+    }
+}
+
+/// What failed in a job's log: the `FAILED: scripts/exit/sNN.sh` lines of the exit-script
+/// runner, the `test x ... FAILED` names and the `error: test failed, to rerun pass '...'`
+/// lines of cargo. Sorted and without repeats; empty for any other log.
+pub fn signatures(log: &str) -> Vec<String> {
+    let mut v: BTreeSet<String> = BTreeSet::new();
+    for l in log.lines() {
+        if let Some(i) = l.find("FAILED: scripts/exit/") {
+            let rest = &l[i + "FAILED: ".len()..];
+            if let Some(w) = rest.split_whitespace().next() {
+                v.insert(w.to_string());
+            }
+        } else if let Some(i) = l.find(" ... FAILED") {
+            let head = &l[..i];
+            if let Some(j) = head.rfind("test ") {
+                let name = head[j + 5..].trim();
+                if !name.is_empty() && !name.contains(char::is_whitespace) {
+                    v.insert(name.to_string());
+                }
+            }
+        } else if let Some(i) = l.find("error: test failed, to rerun pass '") {
+            let rest = &l[i + "error: test failed, to rerun pass '".len()..];
+            if let Some(e) = rest.find('\'') {
+                let a = rest[..e].trim();
+                if !a.is_empty() {
+                    v.insert(a.to_string());
+                }
+            }
+        }
+    }
+    v.into_iter().collect()
+}
+
+/// A signature as a person says it: `scripts/exit/s486.sh` is `s486`.
+pub fn short(sig: &str) -> &str {
+    sig.strip_prefix("scripts/exit/")
+        .and_then(|s| s.strip_suffix(".sh"))
+        .unwrap_or(sig)
+}
+
+/// Whether `text` names the failure `sig`: the full signature or its short form, as a whole
+/// word (`s48` is not in `s486`).
+pub fn mentions(text: &str, sig: &str) -> bool {
+    let word = |needle: &str| {
+        let ok = |c: Option<char>| c.is_none_or(|c| !(c.is_alphanumeric() || c == '_'));
+        text.match_indices(needle).any(|(i, m)| {
+            ok(text[..i].chars().next_back()) && ok(text[i + m.len()..].chars().next())
+        })
+    };
+    word(sig) || word(short(sig))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JobRec {
     pub id: u64,
     pub name: String,
     /// `None`: not finished.
     pub conclusion: Option<String>,
+    /// What failed, read from the log of a failed job (see `signatures`).
+    pub signatures: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -111,6 +195,8 @@ pub struct JobState {
     pub pending: Vec<u64>,
     /// The latest run it was red in.
     pub last_red: RunRef,
+    /// What failed in its latest red run (scripts, tests), when the log said.
+    pub signatures: Vec<String>,
     /// The task filed (or found open) for it.
     pub ticket: Option<u64>,
     /// When it was last filed or looked at for the long-red rule.
@@ -174,11 +260,31 @@ pub struct File {
     pub proposed: bool,
     pub why: Why,
     pub at: RunRef,
+    /// What failed (scripts, tests), merged over the shards filed together.
+    pub signatures: Vec<String>,
+    /// Other shards of the same matrix job filed under this one.
+    pub also: Vec<String>,
+    /// Tasks that landed within the lookback naming one of the failures.
+    pub repeats: Vec<Repeat>,
+}
+
+/// A landed task that named a failure which is red again.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Repeat {
+    pub task: u64,
+    pub title: String,
+    pub landed_ms: u64,
+    /// The failures of the file it named.
+    pub signatures: Vec<String>,
 }
 
 impl File {
     pub fn key(&self) -> String {
         key(&self.workflow, &self.job)
+    }
+    /// The key shared by the shards of one matrix job.
+    pub fn group(&self) -> String {
+        group_key(&self.workflow, &self.job)
     }
 }
 
@@ -194,6 +300,8 @@ pub struct Ctx<'a> {
     pub recent: &'a [RecentTask],
     /// Tasks that landed with a change, to when (ms).
     pub landed: &'a BTreeMap<u64, u64>,
+    /// A failure signature to the open task or issue naming it (`None`: an issue).
+    pub named_sigs: &'a BTreeMap<String, Option<u64>>,
 }
 
 /// A task that is over (landed or closed) and recent enough to count as having covered a red.
@@ -394,7 +502,9 @@ pub fn step(state: &mut State, runs: &[RunRec], ctx: &Ctx) -> Vec<File> {
         if f.urgent && rules.freeze_on_gate {
             js.freeze = true;
         }
-        if let Some(t) = ctx.named.get(&k) {
+        let group = f.group();
+        f.signatures = js.signatures.clone();
+        if let Some(t) = ctx.named.get(&k).or_else(|| ctx.named.get(&group)) {
             // An open task or issue already names it: no second ticket.
             if js.ticket.is_none() {
                 js.ticket = *t;
@@ -402,19 +512,60 @@ pub fn step(state: &mut State, runs: &[RunRec], ctx: &Ctx) -> Vec<File> {
             js.covered = js.covered.max(f.at.run);
             return;
         }
-        // An over task covered this run (its body cites it), or, for a long red whose
-        // history is unknown, its title names the job: record it, file nothing.
+        if let Some(t) = f.signatures.iter().find_map(|s| ctx.named_sigs.get(s)) {
+            // An open task or issue names one of the scripts or tests that failed.
+            if t.is_some() {
+                js.ticket = *t;
+            }
+            js.covered = js.covered.max(f.at.run);
+            return;
+        }
+        // An over task covered this run (its body cites it and names the job or its shard
+        // group), or, for a long red whose history is unknown, its title names the job:
+        // record it, file nothing.
         if let Some(t) = ctx.recent.iter().find(|t| {
-            t.cites(f.at.run) || (f.why == Why::LongRed && js.covered == 0 && t.title.contains(&k))
+            (t.cites(f.at.run)
+                && (names_job(&t.title, &f.workflow, &f.job)
+                    || names_job(&t.body, &f.workflow, &f.job)))
+                || (f.why == Why::LongRed && js.covered == 0 && t.title.contains(&k))
         }) {
             js.ticket = Some(t.id);
             js.covered = js.covered.max(f.at.run);
             js.landed_ms = ctx.landed.get(&t.id).copied();
             return;
         }
-        if !decided.insert(k) {
+        if !decided.insert(group.clone()) {
+            // Another shard of the same job was filed in this pass: one ticket for both.
+            if let Some(g) = out
+                .iter_mut()
+                .find(|g| g.why != Why::Timeout && g.workflow == f.workflow && g.group() == group)
+            {
+                g.also.push(f.job.clone());
+                g.signatures.extend(f.signatures.iter().cloned());
+                g.signatures.sort();
+                g.signatures.dedup();
+            }
             return;
         }
+        f.repeats = ctx
+            .recent
+            .iter()
+            .filter_map(|t| {
+                let at = *ctx.landed.get(&t.id)?;
+                let sigs: Vec<String> = f
+                    .signatures
+                    .iter()
+                    .filter(|s| mentions(&t.title, s) || mentions(&t.body, s))
+                    .cloned()
+                    .collect();
+                (at <= f.at.at_ms && !sigs.is_empty()).then(|| Repeat {
+                    task: t.id,
+                    title: t.title.clone(),
+                    landed_ms: at,
+                    signatures: sigs,
+                })
+            })
+            .collect();
         if open_auto >= rules.max_open_auto {
             f.proposed = true;
         } else {
@@ -458,6 +609,7 @@ pub fn step(state: &mut State, runs: &[RunRec], ctx: &Ctx) -> Vec<File> {
                                 known: true,
                                 red_since: ctx.now_ms,
                                 last_red: job_run_ref(r, j),
+                                signatures: j.signatures.clone(),
                                 ..JobState::default()
                             },
                         );
@@ -499,6 +651,9 @@ pub fn step(state: &mut State, runs: &[RunRec], ctx: &Ctx) -> Vec<File> {
                                     proposed: false,
                                     why: Why::Timeout,
                                     at,
+                                    signatures: vec![],
+                                    also: vec![],
+                                    repeats: vec![],
                                 },
                             );
                         }
@@ -509,6 +664,7 @@ pub fn step(state: &mut State, runs: &[RunRec], ctx: &Ctx) -> Vec<File> {
                         js.timeout_filed = false;
                         let at = job_run_ref(r, j);
                         js.last_red = at.clone();
+                        js.signatures = j.signatures.clone();
                         if !js.red {
                             js.red = true;
                             js.known = false;
@@ -525,6 +681,9 @@ pub fn step(state: &mut State, runs: &[RunRec], ctx: &Ctx) -> Vec<File> {
                                         proposed: false,
                                         why: Why::Gate,
                                         at,
+                                        signatures: vec![],
+                                        also: vec![],
+                                        repeats: vec![],
                                     },
                                 );
                                 continue;
@@ -551,6 +710,9 @@ pub fn step(state: &mut State, runs: &[RunRec], ctx: &Ctx) -> Vec<File> {
                                     proposed: false,
                                     why: Why::Agreed,
                                     at,
+                                    signatures: vec![],
+                                    also: vec![],
+                                    repeats: vec![],
                                 },
                             );
                         }
@@ -601,6 +763,9 @@ pub fn step(state: &mut State, runs: &[RunRec], ctx: &Ctx) -> Vec<File> {
                 proposed: false,
                 why: Why::LongRed,
                 at,
+                signatures: vec![],
+                also: vec![],
+                repeats: vec![],
             },
         );
     }
@@ -626,7 +791,10 @@ pub fn held_back(state: &State, rules: &Rules) -> Vec<(String, u64, Option<u64>)
         }
         for (j, js) in &ws.jobs {
             if js.red && js.ticket.is_some() && held(js) {
-                v.push((key(w, j), js.last_red.run, js.ticket));
+                let item = (group_key(w, j), js.last_red.run, js.ticket);
+                if !v.contains(&item) {
+                    v.push(item);
+                }
             }
         }
     }
@@ -739,18 +907,24 @@ pub fn pending(state: &State, rules: &Rules) -> Vec<(String, usize)> {
 
 /// Record that `key` was filed as `task`.
 pub fn filed(state: &mut State, f: &File, task: Option<u64>, now_ms: u64, url: &str) {
-    if let Some(js) = state
-        .workflows
-        .get_mut(&f.workflow)
-        .and_then(|w| w.jobs.get_mut(&f.job))
-        .filter(|_| f.why != Why::Timeout)
-    {
-        js.ticket = task;
-        js.covered = js.covered.max(f.at.run);
-        js.landed_ms = None;
+    if f.why != Why::Timeout {
+        let ws = state.workflows.get_mut(&f.workflow);
+        if let Some(ws) = ws {
+            for name in std::iter::once(&f.job).chain(&f.also) {
+                if let Some(js) = ws.jobs.get_mut(name) {
+                    js.ticket = task;
+                    js.covered = js.covered.max(if *name == f.job {
+                        f.at.run
+                    } else {
+                        js.last_red.run
+                    });
+                    js.landed_ms = None;
+                }
+            }
+        }
     }
     state.filed.push(Filed {
-        key: f.key(),
+        key: f.group(),
         task,
         at: now_ms,
         urgent: f.urgent,
@@ -794,6 +968,7 @@ mod tests {
                     id: id * 10 + i as u64,
                     name: (*n).into(),
                     conclusion: Some((*c).into()),
+                    signatures: vec![],
                 })
                 .collect(),
         }
@@ -817,6 +992,7 @@ mod tests {
                 open_auto: open,
                 recent: &[],
                 landed: &BTreeMap::new(),
+                named_sigs: &BTreeMap::new(),
             },
         )
     }
@@ -918,6 +1094,7 @@ mod tests {
                     open_auto: 0,
                     recent: &[],
                     landed: &BTreeMap::new(),
+                    named_sigs: &BTreeMap::new(),
                 },
             )
         };
@@ -1330,6 +1507,7 @@ mod tests {
                 open_auto: 0,
                 recent,
                 landed,
+                named_sigs: &none(),
             },
         )
     }
@@ -1413,7 +1591,7 @@ mod tests {
         let recent = [RecentTask {
             id: 9,
             title: "something else".into(),
-            body: "Run: https://x/runs/2".into(),
+            body: "`CI/a` Run: https://x/runs/2".into(),
         }];
         assert!(go_r(&mut s, &[], 4 * H, &recent, &BTreeMap::new()).is_empty());
         let js = &s.workflows["CI"].jobs["a"];
