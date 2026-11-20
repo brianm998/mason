@@ -250,6 +250,10 @@ impl Daemon {
         // hold slots the old daemon's kernel locks no longer show (s589): count them before
         // anything can be granted.
         broker.adopt_hosts(&crate::hostedcheck::running_holds(&cfg.hosts_dir()));
+        // So do the GitHub runs a record says are still going (#700).
+        broker.adopt_remote(&crate::remote::running_holds(&crate::remote::holds_dir(
+            &cfg.hosts_dir(),
+        )));
         // The volumes that matter: the data directory, the caches, the projects and their
         // worktrees (one function, so the floor, the stall prober and the history agree).
         let home = std::env::var_os("HOME")

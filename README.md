@@ -586,4 +586,5 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s719**: The daemon's takeover_drain and update integration tests are unix-only, as the support module they import from already is, so the Windows CI test build compiles again.
 - **s720**: s640 stops re-running s426 (605 s), s664 builds its test binary once and runs it ten times, and the stale s640 weight is dropped.
 - **s721**: The `CI/test` daemon leg is split into three shards per system by test-name checksum, with a script that fails when any daemon test is in no shard or in two.
+- **s723**: Two broker pools, `gha` (16) and `gha-macos` (4), exist by default; a test step or suite lease of a project whose runs go to GitHub holds one unit of them (a macOS run one of each) in place of `compile`, `test-suite` and `test-small`, ignores the CPU, thermal, disk and memory gates, explains its wait ("waiting for a GitHub macOS runner: 4 of 4 in use (#701, ...)") and is counted as held after a daemon restart until its run record says it ended.
 <!-- status:end -->
