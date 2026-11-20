@@ -415,17 +415,38 @@ pub fn parse(doc: &DocumentMut, out: &mut Vec<Problem>) -> Testing {
         match v.as_table_like() {
             Some(tbl) => {
                 let mut entries = vec![];
+                let mut overrides = vec![];
                 for (glob, item) in tbl.iter() {
-                    entries.push((
-                        glob.to_string(),
-                        strings(item, &format!("impact.{glob}"), out),
-                    ));
+                    let path = format!("impact.{glob}");
+                    if let Some(o) = item.as_table_like() {
+                        let (mut suites, mut flag) = (None, None);
+                        for (k, v) in o.iter() {
+                            match k {
+                                "suites" => suites = Some(strings(v, &format!("{path}.suites"), out)),
+                                "override" => match v.as_bool() {
+                                    Some(b) => flag = Some(b),
+                                    None => out.push(Problem::new(
+                                        format!("{path}.override"),
+                                        "must be true or false",
+                                    )),
+                                },
+                                other => out.push(unknown_key(&path, other, &["suites", "override"])),
+                            }
+                        }
+                        match suites {
+                            None => out.push(Problem::new(format!("{path}.suites"), "required")),
+                            Some(s) if flag == Some(true) => overrides.push((glob.to_string(), s)),
+                            Some(s) => entries.push((glob.to_string(), s)),
+                        }
+                    } else {
+                        entries.push((glob.to_string(), strings(item, &path, out)));
+                    }
                 }
-                t.impact = ImpactMap { entries };
+                t.impact = ImpactMap { entries, overrides };
             }
             None => out.push(Problem::new(
                 "impact",
-                "must be a table of path globs to suite lists",
+                "must be a table of path globs to suite lists or `{ suites = [...], override = true }`",
             )),
         }
     }

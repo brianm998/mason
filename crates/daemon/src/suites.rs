@@ -4478,6 +4478,7 @@ mod reuse_tests {
         let mut def = Definition::empty();
         def.testing.impact = ImpactMap {
             entries: vec![("crates/**".into(), vec!["cargo".into()])],
+            overrides: vec![],
         };
         def
     }
@@ -4495,6 +4496,7 @@ mod reuse_tests {
                 ),
                 ("clients/swift/**".into(), vec!["swift".into()]),
             ],
+            overrides: vec![],
         };
         let suite = Suite::new("cargo", "cargo test", ParserKind::Tap);
         let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
