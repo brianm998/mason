@@ -255,6 +255,7 @@ mod tests {
     fn unmapped_files_are_listed_by_top_level_directory() {
         let impact = mason_testing::model::ImpactMap {
             entries: vec![("src/**".into(), vec!["unit".into()])],
+            overrides: vec![],
         };
         let files: Vec<String> = [
             "src/a.rs",
