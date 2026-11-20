@@ -18,6 +18,9 @@ if ! base=$(git merge-base "$base_ref" HEAD 2>/dev/null); then
 fi
 # The run_check's CPU reading is the machine's; a script that drives the gate sets its own file.
 cpu=$(mktemp); echo 0 > "$cpu"; export MASON_CPU_FILE="$cpu"
+# A changed repetition script (s80, s99, s169, ...) proves a test stable by repeating it; once is
+# enough to prove the edit still runs, and the full count would outlast the step (s668).
+export MASON_EXIT_REPEAT=${MASON_EXIT_REPEAT:-1}
 log=$(mktemp)
 trap 'rm -f "$cpu" "$log"' EXIT
 fail=0; n=0
