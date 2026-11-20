@@ -662,6 +662,13 @@ public final class MonitorModel {
         go(.task(sec.rows[0].id))
     }
 
+    /// Whether the main view shows one of the tasks behind this tile: the page is a task page and
+    /// its id is a row of the sidebar section with the tile's state.
+    public func tileShowsCurrentTask(_ c: StateCount) -> Bool {
+        guard case .task(let id) = page else { return false }
+        return sidebar?.sections.first { $0.state == c.state }?.rows.contains { $0.id == id } ?? false
+    }
+
     /// The tile's tooltip; a count of exactly one says a double-click opens it.
     public func tileTooltip(_ c: StateCount) -> String {
         connected && c.count == 1 ? c.tooltip + "\nDouble-click to open it" : c.tooltip
