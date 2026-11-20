@@ -540,6 +540,27 @@ narrow_never = ["Cargo.toml"]"#;
 }
 
 #[test]
+fn whole_later_and_narrow_smoke_parse_and_their_mistakes_are_named() {
+    // #676
+    let keys = "rerun = \"x {tests}\"\nnarrow_command = \"x {tests}\"\nnarrow_tests = \"t/*.rs\"\nnarrow_smoke = [\"a\", \"b\"]\nwhole_later = \"batch\"";
+    let d = parse(&with(r#"rerun = "cargo nextest run {tests}""#, keys)).unwrap();
+    let s = d.testing.suite("unit").unwrap();
+    assert_eq!(s.whole_later, Some(mason_testing::WholeLater::Batch));
+    assert_eq!(s.narrow.as_ref().unwrap().smoke, ["a", "b"]);
+    for (extra, want) in [
+        ("whole_later = \"never\"", "must be \"batch\""),
+        ("narrow_smoke = [\"a\"]", "narrow_smoke"),
+    ] {
+        let text = with(
+            r#"rerun = "cargo nextest run {tests}""#,
+            &format!("rerun = \"x {{tests}}\"\n{extra}"),
+        );
+        let p = problems(&text);
+        assert!(p.iter().any(|x| x.contains(want)), "{extra}: {p:?}");
+    }
+}
+
+#[test]
 fn narrow_packages_parses_and_needs_a_dev_command() {
     // s396: package-mode narrowing for a task's test step.
     let both = "dev_command = \"cargo test {packages}\"\nnarrow_packages = true";

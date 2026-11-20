@@ -277,6 +277,22 @@ pub fn read_config(d: &Daemon, pid: ProjectId) -> Result<LandingConfig, ConfigEr
             problems.join("; ")
         )));
     }
+    // A suite's `whole_later` is the definition's claim that landing runs it whole (#676).
+    let claims: Vec<(String, String)> = d
+        .current_def(pid)
+        .testing
+        .suites
+        .iter()
+        .filter_map(|s| Some((s.name.clone(), s.whole_later?.name().to_string())))
+        .collect();
+    let problems = config::whole_later_problems(&c, &claims, p.services.ci.is_some());
+    if !problems.is_empty() {
+        return Err(ConfigError::Refused(format!(
+            "{}: {}",
+            p.id,
+            problems.join("; ")
+        )));
+    }
     if let Some(b) = &c.base {
         if *b != p.base {
             return Err(ConfigError::Refused(format!(

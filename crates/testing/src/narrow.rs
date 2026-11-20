@@ -67,20 +67,68 @@ pub struct Change<'a> {
     pub added: &'a BTreeMap<String, Vec<u32>>,
 }
 
-/// The units this change needs, or `None` when the suite should run whole: a changed path
-/// matches `narrow_never`, nothing is picked, or more than half of the units would be.
-pub fn select(n: &Narrow, files: &BTreeMap<String, String>, change: &Change) -> Option<Vec<Unit>> {
+/// Why a pick is not a plain narrowing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Case {
+    /// A changed path matches `narrow_never`.
+    Never,
+    /// Nothing is picked.
+    Empty,
+    /// More than half of the units are picked.
+    Most,
+}
+
+impl Case {
+    pub fn describe(self) -> &'static str {
+        match self {
+            Case::Never => "a changed path matches narrow_never",
+            Case::Empty => "nothing in this change reaches its tests",
+            Case::Most => "most of its tests are picked",
+        }
+    }
+}
+
+enum Picked {
+    /// No test files found: nothing can be said, run whole.
+    NoUnits,
+    Plain(Vec<Unit>),
+    Fallback(Case, Vec<Unit>),
+}
+
+fn pick(n: &Narrow, files: &BTreeMap<String, String>, change: &Change) -> Picked {
     if change
         .paths
         .iter()
         .any(|p| n.never.iter().any(|g| glob::matches(g, p)))
     {
-        return None;
+        // The pick is still wanted, to run beside the smoke units.
+        let all = units(n, files);
+        if all.is_empty() {
+            return Picked::NoUnits;
+        }
+        let picked = picked_units(n, files, change, &all);
+        return Picked::Fallback(Case::Never, picked);
     }
     let all = units(n, files);
     if all.is_empty() {
-        return None;
+        return Picked::NoUnits;
     }
+    let picked = picked_units(n, files, change, &all);
+    if picked.is_empty() {
+        Picked::Fallback(Case::Empty, picked)
+    } else if picked.len() * 2 > all.len() {
+        Picked::Fallback(Case::Most, picked)
+    } else {
+        Picked::Plain(picked)
+    }
+}
+
+fn picked_units(
+    n: &Narrow,
+    files: &BTreeMap<String, String>,
+    change: &Change,
+    all: &[Unit],
+) -> Vec<Unit> {
     let stems: Vec<Regex> = change
         .paths
         .iter()
@@ -89,31 +137,75 @@ pub fn select(n: &Narrow, files: &BTreeMap<String, String>, change: &Change) -> 
         .filter(|s| s.chars().count() >= 4)
         .filter_map(|s| Regex::new(&format!(r"\b{}\b", regex::escape(&s))).ok())
         .collect();
-    let picked: Vec<Unit> =
-        all.iter()
-            .filter(|u| {
-                let edited = change.paths.contains(&u.file)
-                    && (n.split.is_none()
-                        || change.added.get(&u.file).is_some_and(|ls| {
-                            ls.iter().any(|l| (u.lines.0..=u.lines.1).contains(l))
-                        }));
-                edited || {
-                    let text = files.get(&u.file).map(String::as_str).unwrap_or("");
-                    let body: String = text
-                        .lines()
-                        .skip(u.lines.0.saturating_sub(1) as usize)
-                        .take((u.lines.1 + 1 - u.lines.0) as usize)
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    stems.iter().any(|re| re.is_match(&body))
-                }
-            })
-            .cloned()
-            .collect();
-    if picked.is_empty() || picked.len() * 2 > all.len() {
-        return None;
+    all.iter()
+        .filter(|u| {
+            let edited = change.paths.contains(&u.file)
+                && (n.split.is_none()
+                    || change
+                        .added
+                        .get(&u.file)
+                        .is_some_and(|ls| ls.iter().any(|l| (u.lines.0..=u.lines.1).contains(l))));
+            edited || {
+                let text = files.get(&u.file).map(String::as_str).unwrap_or("");
+                let body: String = text
+                    .lines()
+                    .skip(u.lines.0.saturating_sub(1) as usize)
+                    .take((u.lines.1 + 1 - u.lines.0) as usize)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                stems.iter().any(|re| re.is_match(&body))
+            }
+        })
+        .cloned()
+        .collect()
+}
+
+/// The units this change needs, or `None` when the suite should run whole: a changed path
+/// matches `narrow_never`, nothing is picked, or more than half of the units would be.
+pub fn select(n: &Narrow, files: &BTreeMap<String, String>, change: &Change) -> Option<Vec<Unit>> {
+    match pick(n, files, change) {
+        Picked::Plain(p) => Some(p),
+        _ => None,
     }
-    Some(picked)
+}
+
+/// What a test step does with a suite that runs whole later (`whole_later`, #676).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Later {
+    /// Run the suite whole (no test files were found to narrow by).
+    Whole,
+    /// Run these units: the pick, plus `narrow_smoke`, which `case` says why (`None`: a plain
+    /// narrowing).
+    Run(Vec<Unit>, Option<Case>),
+    /// Run nothing: nothing reaches the tests and there is no smoke list.
+    NotRun,
+}
+
+/// [`select`] for a suite that runs whole again later: no fallback runs it whole. An empty pick
+/// runs `narrow_smoke` alone (nothing, with no smoke list); a `narrow_never` hit runs the smoke
+/// units and the pick; a pick over half runs the pick.
+pub fn select_later(n: &Narrow, files: &BTreeMap<String, String>, change: &Change) -> Later {
+    let smoke = |mut picked: Vec<Unit>| {
+        for name in &n.smoke {
+            if !picked.iter().any(|u| &u.name == name) {
+                picked.push(Unit {
+                    name: name.clone(),
+                    file: String::new(),
+                    lines: (1, 1),
+                });
+            }
+        }
+        picked
+    };
+    match pick(n, files, change) {
+        Picked::NoUnits => Later::Whole,
+        Picked::Plain(p) => Later::Run(smoke(p), None),
+        Picked::Fallback(Case::Most, p) => Later::Run(p, Some(Case::Most)),
+        Picked::Fallback(case, p) => match smoke(p) {
+            v if v.is_empty() => Later::NotRun,
+            v => Later::Run(v, Some(case)),
+        },
+    }
 }
 
 /// The suite's narrowed command: `{tests}` becomes `narrow_each` for each unit, joined by
@@ -154,6 +246,7 @@ mod tests {
             command: "gradlew test {tests}".into(),
             each: "--tests {}".into(),
             never: vec!["app/*.kts".into()],
+            smoke: vec![],
         }
     }
 
@@ -257,6 +350,7 @@ mod tests {
             command: "xcodebuild test {tests}".into(),
             each: "-only-testing:starTests/{}".into(),
             never: vec![],
+            smoke: vec![],
         };
         let text = "import XCTest\nclass AlphaTests: XCTestCase {\n  func testA() {}\n}\nclass DropZoneTests: XCTestCase {\n  func testDrop() {}\n  func testNew() {}\n}\nclass GammaTests: XCTestCase {\n  func testG() {}\n}\nclass DeltaTests: XCTestCase {\n  func testD() { FinderStyleDropZone() }\n}\nclass EpsilonTests: XCTestCase {\n}\n";
         let f = files(&[("gui/starTests/starTests.swift", text)]);

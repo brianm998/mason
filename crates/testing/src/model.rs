@@ -117,6 +117,9 @@ pub struct Suite {
     /// In a task's test step, run `dev_command` for the changed crates and their dependents
     /// (s396), as `run_check` does. The landing batch runs `command` whole.
     pub narrow_packages: bool,
+    /// The suite runs whole again after the test step (`whole_later`): the step then narrows
+    /// harder, running only `narrow_smoke` plus the picked units where it would run whole.
+    pub whole_later: Option<WholeLater>,
     /// After a lost step host, rerun only the cargo test executables whose `test result:` line
     /// the lost run did not reach (#621). A suite whose `dev_command` takes `{tests_for_change}`
     /// does it without this key.
@@ -141,6 +144,35 @@ pub struct Narrow {
     pub each: String,
     /// A changed path matching one of these runs the suite whole (build files, shared code).
     pub never: Vec<String>,
+    /// Units added to every narrowed pick of a suite with `whole_later` (`narrow_smoke`), by
+    /// name, as `each` takes them.
+    pub smoke: Vec<String>,
+}
+
+/// Where a suite runs whole after a task's test step (`whole_later`), so the step need not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WholeLater {
+    /// In a landing tier (`batch`) of the project.
+    Batch,
+    /// On the base's CI, before the change lands.
+    Ci,
+}
+
+impl WholeLater {
+    pub fn name(self) -> &'static str {
+        match self {
+            WholeLater::Batch => "batch",
+            WholeLater::Ci => "ci",
+        }
+    }
+
+    pub fn from_name(s: &str) -> Option<WholeLater> {
+        match s {
+            "batch" => Some(WholeLater::Batch),
+            "ci" => Some(WholeLater::Ci),
+            _ => None,
+        }
+    }
 }
 
 impl Suite {
@@ -171,6 +203,7 @@ impl Suite {
             narrow: None,
             narrowed: false,
             narrow_packages: false,
+            whole_later: None,
             resume_after_loss: false,
         }
     }
