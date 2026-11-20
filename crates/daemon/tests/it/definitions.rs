@@ -712,6 +712,55 @@ fn runtime_and_per_task_overrides_change_a_running_pipeline_and_runtime_ones_exp
 }
 
 #[test]
+fn a_tasks_run_on_choice_is_read_live_and_beats_the_global_switch() {
+    use mason_daemon::place::{effective_line, set_global, task_choice, Choice, Global};
+    let s = scratch_with(Some(DEF_SKIP), happy_script());
+    let d = s.start();
+    let t = flagged(&d, "Chooses");
+    let other = flagged(&d, "Follows");
+    let now = mason_daemon::daemon::now_ms();
+    assert_eq!(task_choice(&d, Some(t.0)), None);
+    assert_eq!(task_choice(&d, None), None);
+
+    d.store
+        .set_task_override(t.0, "run_on", "github", "brian", now)
+        .unwrap();
+    assert_eq!(task_choice(&d, Some(t.0)), Some(Choice::GitHub));
+    assert_eq!(task_choice(&d, Some(other.0)), None, "only for that task");
+    assert_eq!(
+        effective_line(&d, t.0)["line"],
+        "runs on: GitHub (task choice)"
+    );
+    assert_eq!(
+        effective_line(&d, other.0)["line"],
+        "runs on: this Mac (global switch)"
+    );
+
+    // Both directions against the global switch.
+    set_global(&d, Global::GitHub, "brian").unwrap();
+    d.store
+        .set_task_override(t.0, "run_on", "local", "brian", now)
+        .unwrap();
+    assert_eq!(task_choice(&d, Some(t.0)), Some(Choice::Local));
+    assert_eq!(
+        effective_line(&d, t.0)["line"],
+        "runs on: this Mac (task choice)"
+    );
+    assert_eq!(
+        effective_line(&d, other.0)["line"],
+        "runs on: GitHub (global switch)"
+    );
+
+    // `default` is the override removed.
+    d.store.clear_task_override(t.0, "run_on").unwrap();
+    assert_eq!(task_choice(&d, Some(t.0)), None);
+    assert_eq!(
+        effective_line(&d, t.0)["line"],
+        "runs on: GitHub (global switch)"
+    );
+}
+
+#[test]
 fn a_lone_flagged_task_is_the_recorded_skip_run() {
     let s = scratch_with(Some(DEF_SKIP), happy_script());
     let d = s.start();

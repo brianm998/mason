@@ -2218,6 +2218,7 @@ impl Runner {
                                     }
                                 }))
                             },
+                            place: None,
                         };
                     // The base moved: the union is linted again, tests skipped or not (s521).
                     let lint = self.lint_checks(
@@ -2992,6 +2993,7 @@ impl Runner {
                     let (d, m) = (d.clone(), members.clone());
                     Arc::new(move || m.forced(&d))
                 }),
+                place: None,
             };
             match crate::hostedcheck::run(d, &spec) {
                 Ok(o) if o.stopped.is_some() => out.notes.push(format!(
@@ -3136,6 +3138,7 @@ impl Runner {
                     let (d, m) = (d.clone(), members.clone());
                     Arc::new(move || m.forced(&d)) as crate::hostedcheck::StopFn
                 }),
+                place: None,
             };
             match crate::hostedcheck::run(d, &spec) {
                 Ok(o) if o.stopped.is_some() => out.notes.push(format!(
@@ -3318,6 +3321,7 @@ impl Runner {
                     let (d, m, name) = (d.clone(), members.clone(), name.clone());
                     Arc::new(move || m.stop(&d, &name)) as crate::hostedcheck::StopFn
                 }),
+                place: None,
             };
             match crate::hostedcheck::run(d, &spec) {
                 Ok(o) if o.stopped.is_some() => out.notes.push(format!(

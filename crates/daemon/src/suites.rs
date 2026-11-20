@@ -413,9 +413,10 @@ fn run_hosted(
     watch: Option<&Suite>,
     th: Thresholds,
     env: Vec<(String, String)>,
+    place: Option<(TaskId, &Suite)>,
 ) -> Result<Ran, String> {
     run_hosted_resuming(
-        d, project, id, cmd, cwd, limit, log_dir, check, run, watch, th, env, None,
+        d, project, id, cmd, cwd, limit, log_dir, check, run, watch, th, env, None, place,
     )
 }
 
@@ -437,15 +438,24 @@ fn run_hosted_resuming(
     th: Thresholds,
     env: Vec<(String, String)>,
     resume: Option<&str>,
+    place: Option<(TaskId, &Suite)>,
 ) -> Result<Ran, String> {
     use crate::hostloss as hl;
-    // Where the run goes (#697). `Local` for every run until #698 decides; a remote run is
-    // returned as the same `Ran`, so it is judged by the code below this call, not by it.
+    // Where the run goes (#697, #698). Only a task's test step asks (`place`); a landing
+    // batch, a base run and a debt stay here until #702. A remote run is returned as the same
+    // `Ran`, so it is judged by the code below this call, not by it. A suite whose build runs
+    // as its own step here has none when it goes remote: the build comes first in the command.
+    let joined;
+    let mut cmd = cmd;
     if let crate::remote::Executor::GitHub { runs_on } =
-        crate::remote::executor_for(d, project, crate::remote::Kind::Suite)
+        crate::remote::executor_for(d, project, crate::remote::Kind::Suite, place)
     {
+        if let Some(b) = place.and_then(|(_, s)| s.build.as_deref()) {
+            joined = format!("{b} && {cmd}");
+            cmd = &joined;
+        }
         if let Some(ran) = run_remote(
-            d, project, id, cmd, cwd, limit, log_dir, &check, watch, &env, &runs_on,
+            d, project, id, cmd, cwd, limit, log_dir, &check, run, watch, &env, &runs_on,
         )? {
             return Ok(ran);
         }
@@ -529,6 +539,7 @@ fn run_remote(
     limit: Duration,
     log_dir: &Path,
     check: &Check,
+    run: Option<StepRunId>,
     watch: Option<&Suite>,
     env: &[(String, String)],
     runs_on: &str,
@@ -543,6 +554,13 @@ fn run_remote(
         Stop::Skipped => Some(rm::StopWhy::Skipped),
         Stop::Gone => Some(rm::StopWhy::Gone),
     };
+    // The units the run holds, on record until it ends, for a daemon that restarts (#700).
+    let task = run.and_then(|r| d.world().ok().and_then(|w| w.task_of_open_run(r)));
+    let (key, label) = match task {
+        Some(t) => (format!("task {}", t.0), format!("#{}", t.0)),
+        None => (id.to_string(), id.to_string()),
+    };
+    let _hold = rm::HoldGuard::new(&d.cfg.hosts_dir(), &spec, &key, &label, 1, log_dir);
     Ok(match rm::run_or_fallback(&site, &spec, log_dir, &stop)? {
         None => None,
         Some(rm::Outcome::Stopped(why)) => Some(Ran {
@@ -1618,6 +1636,7 @@ fn run_on_base(
             None,
             who.thresholds(),
             who.env.clone(),
+            None,
         )
         .ok()?;
         if ran.stop != Stop::No {
@@ -1850,6 +1869,7 @@ fn run_suite(
             who.thresholds(),
             who.env.clone(),
             resume.as_deref(),
+            who.task.map(|(t, _)| (t, suite)),
         ) {
             Ok(r) => r,
             Err(e) if crate::remote::environmental(&e).is_some() => {
@@ -2410,6 +2430,7 @@ fn run_tests_alone(
         None,
         who.thresholds(),
         who.env.clone(),
+        who.task.map(|(t, _)| (t, suite)),
     )
     .ok()?;
     if ran.stop != Stop::No {
@@ -2955,6 +2976,7 @@ fn run_build(who: &Who, suite: &Suite, build: &str, n: usize, cwd: &Path) -> Bui
         None,
         who.thresholds(),
         who.env.clone(),
+        None,
     ) {
         Ok(r) => r,
         Err(e) => return Built::Red(format!("Building `{}` could not run: {e}", suite.name)),
@@ -3208,6 +3230,11 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
                 .build
                 .as_ref()
                 .filter(|b| !reused && !built.contains(b))
+                // On GitHub the build is the first part of the suite's own command.
+                .filter(|_| {
+                    !crate::place::place_of(d, &c.project.id, Some(c.task.0), &suite, "suite")
+                        .is_github()
+                })
             {
                 let needs = needs_of(&crate::jobs::build_uses(), None);
                 who.env = held_env(c, &needs);
@@ -3703,6 +3730,7 @@ fn run_new_tests_at_base(
             None,
             who.thresholds(),
             who.env.clone(),
+            None,
         )
         .ok()?;
         Some(judge_ran_with(suite, &ran, &wt, who.plugin_parser(suite).as_deref()).results)
@@ -4036,12 +4064,20 @@ pub fn settle_debts(d: &Arc<Daemon>) -> usize {
     closed
 }
 
-static IDLE_RUN: AtomicBool = AtomicBool::new(false);
+/// The error of a payment that stopped waiting because its daemon is shutting down or its debt
+/// was closed by another path. The debt stays as it was; it is not marked tried.
+pub const PAY_CANCELLED: &str = "cancelled: the debt was closed or the daemon is shutting down";
 
-/// One debt payment at a time, machine-wide. Each is a full run of the skipped suites on the
-/// base branch's tip; a landing of several test-skipped tasks used to start them all at once,
-/// outside every broker limit, and the burst hung the machine.
-static PAYING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// Whether a payment of `debt` should keep waiting: the daemon runs and the debt is still open.
+fn debt_wait_goes_on(d: &Daemon, debt: u64) -> bool {
+    if d.is_shutting_down() {
+        return false;
+    }
+    match d.store.debts(None, false) {
+        Ok(rows) => rows.iter().any(|x| x.id == debt && x.status == "open"),
+        Err(_) => true,
+    }
+}
 
 /// Hold what the definition's test step `uses` (`compile` and `test-suite` for MASON) while a
 /// debt runs, ranked behind the task's own work, so a payment queues like any test step and
@@ -4084,27 +4120,27 @@ fn hold_for_debt(
             &format!("debt #{debt}"),
             rank,
             needs,
-            &|| true,
+            &|| debt_wait_goes_on(d, debt),
             &mut |_| {},
         )
         .map(Some)
-        .map_err(|_| "the wait for the test step's slots was cancelled".to_string())
+        .map_err(|_| PAY_CANCELLED.to_string())
 }
 
 /// Run the debts still open, one at a time, as work below every task: only while the compile
 /// queue is empty and a slot is free, and each debt once (a debt a run found red keeps
 /// `tried_at` and waits for the owner). Only debts whose task landed are run.
 pub fn run_idle_debts(d: &Arc<Daemon>) {
-    if IDLE_RUN.swap(true, Ordering::SeqCst) {
+    if d.idle_run.swap(true, Ordering::SeqCst) {
         return;
     }
-    struct Reset;
+    struct Reset(Arc<Daemon>);
     impl Drop for Reset {
         fn drop(&mut self) {
-            IDLE_RUN.store(false, Ordering::SeqCst);
+            self.0.idle_run.store(false, Ordering::SeqCst);
         }
     }
-    let _reset = Reset;
+    let _reset = Reset(d.clone());
     // (project, scope, tip) already run in this pass: the same suites never run twice on one
     // tip. The result is settled onto every debt the tip holds before another is chosen (s476).
     let mut ran: Vec<(String, String, String)> = vec![];
@@ -4142,6 +4178,12 @@ pub fn run_idle_debts(d: &Arc<Daemon>) {
         }
         match pay(d, row.id) {
             Ok(m) => tracing::info!(debt = row.id, "idle run: {m}"),
+            Err(e) if e == PAY_CANCELLED => {
+                tracing::info!(debt = row.id, "idle run: {e}");
+                if d.is_shutting_down() {
+                    return;
+                }
+            }
             Err(e) => {
                 let _ = d.store.debt_tried(row.id, now_ms());
                 tracing::warn!(debt = row.id, "idle run: {e}");
@@ -4153,6 +4195,10 @@ pub fn run_idle_debts(d: &Arc<Daemon>) {
 /// Look at the open debts once an hour (`debt_interval`), the first time soon after start.
 pub fn spawn_debts(d: &Arc<Daemon>) {
     let every = d.cfg.debt_interval;
+    // A zero interval turns the idle pass off (a test that pays by hand).
+    if every.is_zero() {
+        return;
+    }
     let mut first = true;
     crate::bg::spawn_loop(d, "debts", move |weak| {
         std::thread::sleep(if first {
@@ -4194,7 +4240,29 @@ pub fn pay(d: &Arc<Daemon>, debt: u64) -> Result<String, String> {
     if suites.is_empty() {
         return Err("the debt's suite no longer exists in the definition".into());
     }
-    let _one = PAYING.lock().unwrap_or_else(|e| e.into_inner());
+    // One payment at a time in this daemon. The wait ends when the daemon shuts down or the
+    // debt is closed meanwhile; there is no fixed timeout.
+    let _one = loop {
+        match d.paying.try_lock() {
+            Ok(g) => break g,
+            Err(std::sync::TryLockError::Poisoned(e)) => break e.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if d.is_shutting_down() {
+                    return Err(PAY_CANCELLED.into());
+                }
+                // Another payment may have settled this one while it waited.
+                if d.store
+                    .debts(None, false)
+                    .map_err(|e| e.to_string())?
+                    .iter()
+                    .any(|x| x.id == debt && x.status != "open")
+                {
+                    return Err(PAY_CANCELLED.into());
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+    };
     // Another payment may have settled this one while it waited.
     if d.store
         .debts(None, false)

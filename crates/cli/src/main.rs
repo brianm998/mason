@@ -27,9 +27,11 @@
 //! mason targets list [--json]
 //! mason cpu [--json] | mason resources [--json] | mason resources limit <resource> <units>
 //! mason resources gate <name> <value> | mason resources gate <name> --reset
+//! mason remote on | off | status [--json]
 //! mason doctor
 //! mason init [--yes] [--tracker T] [--agent A] [--sessions N] [--workflow W] [--suites accept|skip] [--base B] [--landing L] [--alerts LIST|none] [--no-prove]
 //! mason adopt | mason remove [--yes]
+//! mason remote setup --project P [--runs-on L]
 //! ```
 //! Global: `--data-dir D`, `--config-dir C` (or `MASON_DATA_DIR`, `MASON_CONFIG_DIR`).
 
@@ -40,6 +42,7 @@ mod definition;
 mod doctor;
 mod init;
 mod progress;
+mod remote;
 mod remove;
 mod resources;
 mod service;
@@ -126,6 +129,7 @@ mason: command-line client for the MASON pipeline
                                       opens the monitor; every question has a flag
   mason init --prove-only             file the one harmless first task, once masond knows the project
   mason adopt [--id ID] [--base B] [--test CMD]   register a project that already has .mason/ (never writes it)
+  mason remote setup --project P [--runs-on L]   write .github/workflows/mason-run.yml on a mason/setup-remote branch (nothing pushed)
   mason remove [--yes] [--id ID]      delete the project file, .mason/ and the Filing notes (lists first without --yes)
   mason run --needs compile[=N],... [--exclusive] [--label L] [--origin O] -- <cmd>...
                                       queue for the pipeline's resources, ahead of its work
@@ -142,6 +146,8 @@ mason: command-line client for the MASON pipeline
                                       compile_settle_s, compile_jobs, compile_idle_kill_s, syspolicyd_max_pct, thermal_min_pct, thermal_max_c, stall_ms,
                                       memory.floor_mb, disk.floor_gb)
   mason resources gate <name> --reset   go back to resources.toml, or the default
+  mason remote on|off|status [--json]  send every compile and test that can go to GitHub Actions there, or bring them back
+                                      (suites with remote = false, a device or exclusive always stay here)
   mason hook bash [--needs compile]   optional Claude Code PreToolUse hook: builds go through the queue
   mason definition check [FILE] [--project P]
                                       validate a definition (default .mason/mason.toml) and dry-run it;
@@ -519,6 +525,9 @@ fn main() {
             &config_dir,
         ));
     }
+    if cmd == "remote" {
+        exit(remote::run(std::mem::take(&mut a.rest), &config_dir));
+    }
     if cmd == "remove" {
         exit(remove::run(std::mem::take(&mut a.rest), &config_dir));
     }
@@ -658,6 +667,62 @@ fn main() {
                 }
             }
             Some(other) => die(&format!("unknown targets command {other:?}\n\n{HELP}")),
+        }
+        return;
+    }
+    if cmd == "remote" {
+        let sub = a.pos().unwrap_or_else(|| "status".into());
+        let to = match sub.as_str() {
+            "on" => Some("github"),
+            "off" => Some("local"),
+            "status" => None,
+            other => die(&format!("unknown remote command {other:?}\n\n{HELP}")),
+        };
+        finish(&a);
+        if let Some(to) = to {
+            // Changing where runs go is the owner's act: say who.
+            if std::env::var("MASON_AS").is_err() {
+                if let Ok(u) = std::env::var("USER") {
+                    std::env::set_var("MASON_AS", u);
+                }
+            }
+            let r = or_die(d.call("POST", "/remote", Some(&json!({"default": to}))));
+            if json_out {
+                return println!("{r:#}");
+            }
+            println!(
+                "{}",
+                if to == "github" {
+                    "remote is on: suites and checks that can run on GitHub Actions now do (the next run, no restart). `mason remote off` brings them back."
+                } else {
+                    "remote is off: every suite and check runs on this Mac again."
+                }
+            );
+        }
+        let r = or_die(d.call("GET", "/remote", None));
+        if json_out && to.is_none() {
+            return println!("{r:#}");
+        }
+        println!(
+            "default {}{}",
+            r["default"].as_str().unwrap_or("?"),
+            match (r["changed_by"].as_str(), r["changed_at"].as_i64()) {
+                (Some(who), Some(at)) => format!(" (changed by {who} at {at} ms since the epoch)"),
+                _ => String::new(),
+            }
+        );
+        if let Some(p) = r["problem"].as_str() {
+            println!("  PROBLEM: {p} (treated as local)");
+        }
+        for p in r["projects"].as_array().into_iter().flatten() {
+            println!(
+                "  {:<16} {}",
+                p["project"].as_str().unwrap_or("?"),
+                match p["runs_on"].as_str() {
+                    Some(r) => format!("can run on GitHub ({r})"),
+                    None => "no [remote]: always runs here".to_string(),
+                }
+            );
         }
         return;
     }
@@ -1202,6 +1267,17 @@ fn main() {
                                     s[k]["from"].as_str().unwrap_or("?")
                                 );
                             }
+                        }
+                    }
+                    if let Some(list) = r["places"].as_array().filter(|l| !l.is_empty()) {
+                        println!("  where suites run");
+                        for p in list {
+                            println!(
+                                "      {:<19} {}   <- {}",
+                                p["suite"].as_str().unwrap_or("?"),
+                                p["text"].as_str().unwrap_or("?"),
+                                p["from"].as_str().unwrap_or("?")
+                            );
                         }
                     }
                     // Settings of the project file itself (timeouts, idle rules, the stall
@@ -2655,6 +2731,15 @@ fn main() {
                     counts.join(", ")
                 }
             );
+            for p in s["places"].as_array().into_iter().flatten() {
+                println!(
+                    "where: #{} {} {}: {}",
+                    p["task"].as_u64().unwrap_or(0),
+                    p["kind"].as_str().unwrap_or("?"),
+                    p["name"].as_str().unwrap_or("?"),
+                    p["why"].as_str().unwrap_or("?")
+                );
+            }
             println!(
                 "running: {} job(s) of {} allowed, {} step host(s)",
                 s["jobs"], s["max_concurrent"], s["step_hosts_running"]
@@ -2809,6 +2894,12 @@ fn main() {
                                 .collect()
                         })
                         .unwrap_or_default();
+                    let run_on = a.opt("--run-on");
+                    if let Some(r) = &run_on {
+                        if !matches!(r.as_str(), "github" | "local") {
+                            die("--run-on takes github or local (leave it out to follow the global switch)");
+                        }
+                    }
                     let title = a.pos().unwrap_or_else(|| {
                         die("give the task a title: mason task add \"Fix the thing\"")
                     });
@@ -2831,7 +2922,7 @@ fn main() {
                             )),
                         }
                     });
-                    let r = or_die(d.call("POST", "/tasks", Some(&json!({"project": project, "title": title, "body": body, "priority": priority, "proposed": proposed, "explored": explored, "after": after}))));
+                    let r = or_die(d.call("POST", "/tasks", Some(&json!({"project": project, "title": title, "body": body, "priority": priority, "proposed": proposed, "explored": explored, "after": after, "run_on": run_on}))));
                     if json_out {
                         return println!("{r:#}");
                     }
@@ -2911,6 +3002,17 @@ fn main() {
                                 l["display"].as_str().unwrap_or("")
                             );
                         }
+                    }
+                    if let Some(l) = t["run_on"]["line"].as_str() {
+                        println!("  {l}");
+                    }
+                    for p in t["places"].as_array().into_iter().flatten() {
+                        println!(
+                            "  where     {} {}: {}",
+                            p["kind"].as_str().unwrap_or("?"),
+                            p["name"].as_str().unwrap_or("?"),
+                            p["why"].as_str().unwrap_or("?")
+                        );
                     }
                     if !t["progress"]["runs"].as_array().is_none_or(Vec::is_empty) {
                         for l in progress::lines(&t["progress"]).lines() {
@@ -3509,6 +3611,31 @@ fn main() {
                         r["reranked"]
                     );
                 }
+                "run-on" => {
+                    let id = task_id(&mut a);
+                    let to = a
+                        .pos()
+                        .unwrap_or_else(|| die("where? github, local or default"));
+                    finish(&a);
+                    if !matches!(to.as_str(), "github" | "local" | "default") {
+                        die("where? github, local or default");
+                    }
+                    // Owner only, as `priority` is.
+                    if std::env::var("MASON_AS").is_err() {
+                        if let Ok(u) = std::env::var("USER") {
+                            std::env::set_var("MASON_AS", u);
+                        }
+                    }
+                    let r = or_die(d.call(
+                        "POST",
+                        &format!("/tasks/{id}/run_on"),
+                        Some(&json!({"to": to})),
+                    ));
+                    println!(
+                        "Task #{id}: {} (from the next suite or check; a run in progress is not moved)",
+                        r["run_on"]["line"].as_str().unwrap_or("?")
+                    );
+                }
                 other => die(&format!("unknown task command {other:?}\n\n{HELP}")),
             }
         }
@@ -4056,6 +4183,9 @@ fn print_ci_watch(project: &str, w: &Value) {
     }
     for h in w["held_back"].as_array().into_iter().flatten() {
         println!("  {}", h["text"].as_str().unwrap_or("?"));
+    }
+    if let Some(t) = w["unconfirmed_text"].as_str() {
+        println!("  {t}");
     }
     for t in w["timeouts"].as_array().into_iter().flatten() {
         println!(

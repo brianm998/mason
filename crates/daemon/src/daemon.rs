@@ -108,6 +108,14 @@ pub struct Daemon {
     pub update_check: Mutex<crate::update::Check>,
     /// An automatic update held for the gap: `(waiting since, next window)`, both in ms.
     pub update_held: Mutex<Option<(u64, u64)>>,
+    /// One debt payment at a time in this daemon (a full run of the skipped suites on the base
+    /// tip; a burst of them at once hung the machine). Per daemon, so test worlds sharing a
+    /// process do not wait on each other.
+    pub(crate) paying: Mutex<()>,
+    /// The idle debt pass is running.
+    pub(crate) idle_run: AtomicBool,
+    /// The daemon is stopping: waits that would never be serviced end.
+    shutdown: AtomicBool,
     /// One fetch into the source mirror at a time.
     pub update_fetch: Mutex<()>,
     /// The cancellers of the owner-session turns in flight, by session id (s364).
@@ -250,6 +258,10 @@ impl Daemon {
         // hold slots the old daemon's kernel locks no longer show (s589): count them before
         // anything can be granted.
         broker.adopt_hosts(&crate::hostedcheck::running_holds(&cfg.hosts_dir()));
+        // So do the GitHub runs a record says are still going (#700).
+        broker.adopt_remote(&crate::remote::running_holds(&crate::remote::holds_dir(
+            &cfg.hosts_dir(),
+        )));
         // The volumes that matter: the data directory, the caches, the projects and their
         // worktrees (one function, so the floor, the stall prober and the history agree).
         let home = std::env::var_os("HOME")
@@ -344,6 +356,9 @@ impl Daemon {
                 ..Default::default()
             }),
             update_now: AtomicBool::new(false),
+            paying: Mutex::new(()),
+            idle_run: AtomicBool::new(false),
+            shutdown: AtomicBool::new(false),
             update_check: Default::default(),
             update_held: Default::default(),
             update_fetch: Mutex::new(()),
@@ -383,10 +398,20 @@ impl Daemon {
             crate::autoretry::spawn(&d);
             crate::closer::spawn(&d);
             crate::suites::spawn_debts(&d);
+            crate::covmap::spawn(&d);
             crate::introspect::spawn(&d);
             crate::selfguard::on_start(&d);
         }
         Ok(d)
+    }
+
+    /// Tell waits that nobody will service (a debt payment waiting for a lease) to give up.
+    pub fn shut_down(&self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_shutting_down(&self) -> bool {
+        self.shutdown.load(Ordering::SeqCst)
     }
 
     /// Something other than an event changed what a client would see (a pause,

@@ -8,6 +8,7 @@
 
 pub mod abandon;
 pub mod affected;
+pub mod agentshim;
 pub mod attention;
 pub mod autoquarantine;
 pub mod autoretry;
@@ -22,6 +23,7 @@ pub mod circling;
 pub mod closer;
 pub mod cmdreuse;
 pub mod config;
+pub mod covmap;
 pub mod cpu;
 pub mod cpuhistory;
 pub mod cputasks;
@@ -57,6 +59,7 @@ pub mod monitor_inplace;
 pub mod notify;
 pub mod numbers;
 pub mod outside;
+pub mod place;
 pub mod plan_view;
 pub mod plugins;
 pub mod policyd;

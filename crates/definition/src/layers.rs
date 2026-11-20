@@ -29,6 +29,13 @@ pub const OVERRIDABLE: &[&str] = &[
     "build",
 ];
 
+/// The task-wide override key that says where the task's compiles and tests run (#699):
+/// `github` or `local`. It is not a step attribute and no layer but the task's own may set it.
+pub const RUN_ON: &str = "run_on";
+
+/// The values `run_on` takes.
+pub const RUN_ON_VALUES: &[&str] = &["github", "local"];
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Source {
     Builtin,
@@ -120,10 +127,20 @@ pub fn check_override(
     key: &str,
     value: &str,
 ) -> Result<(String, String), String> {
+    if key == RUN_ON {
+        return if RUN_ON_VALUES.contains(&value) {
+            Ok((String::new(), RUN_ON.to_string()))
+        } else {
+            Err(format!(
+                "`{value}` is not a place to run; run_on is {} (or `default` to follow the global switch, with `mason task run-on`)",
+                RUN_ON_VALUES.join(" or ")
+            ))
+        };
+    }
     let parts: Vec<&str> = key.split('.').collect();
     let ["step", step, attr] = parts[..] else {
         return Err(format!(
-            "`{key}` is not an override key; use step.<name>.<attribute>, with attribute one of {}",
+            "`{key}` is not an override key; use step.<name>.<attribute>, with attribute one of {}, or {RUN_ON}",
             OVERRIDABLE.join(", ")
         ));
     };
@@ -397,6 +414,17 @@ mod tests {
             value: v.into(),
             owner: owner.into(),
             expires_at: exp,
+        }
+    }
+
+    #[test]
+    fn run_on_takes_github_or_local_and_nothing_else() {
+        let d = builtin();
+        assert!(check_override(&d, "run_on", "github").is_ok());
+        assert!(check_override(&d, "run_on", "local").is_ok());
+        for bad in ["", "GitHub", "remote", "default"] {
+            let e = check_override(&d, "run_on", bad).unwrap_err();
+            assert!(e.contains("github") && e.contains("local"), "{e}");
         }
     }
 

@@ -223,6 +223,7 @@ pub fn encode(s: &Saved) -> String {
                             "t_run": js.last_timeout.run, "t_job": js.last_timeout.job,
                             "t_sha": js.last_timeout.sha, "t_url": js.last_timeout.url,
                             "t_at_ms": js.last_timeout.at_ms,
+                            "absent": js.absent,
                         }),
                     )
                 })
@@ -294,6 +295,7 @@ pub fn decode(text: &str) -> Saved {
                         .map(u)
                         .collect(),
                     timeout_filed: jv["timeout_filed"].as_bool().unwrap_or(false),
+                    absent: jv["absent"].as_u64().unwrap_or(0) as u32,
                     last_timeout: RunRef {
                         run: u(&jv["t_run"]),
                         job: u(&jv["t_job"]),
@@ -690,9 +692,7 @@ fn file_task(
         Why::LongRed => "it has stayed red past the long-red threshold".to_string(),
         Why::Timeout => String::new(),
     };
-    let tail = src
-        .log_tail(f.at.job)
-        .unwrap_or_else(|| "(the log could not be read)".into());
+    let (heading, tail) = failure_text(src, f.at.job);
     let shorts: Vec<&str> = f.signatures.iter().map(|s| rules::short(s)).collect();
     let failing = if shorts.is_empty() {
         String::new()
@@ -754,7 +754,7 @@ fn file_task(
     };
     let body = format!(
         "`{key}` is red on `{base}`: {why}.{failing}{shards}{repeats}\n\nRun: {}\nCommit: {}\n\n\
-         Failed log tail:\n```\n{tail}\n```\n\nFound by the base-branch CI watch.",
+         {heading}:\n```\n{tail}\n```\n\nFound by the base-branch CI watch.",
         f.at.url, f.at.sha
     );
     let what = if shorts.is_empty() {
@@ -779,6 +779,22 @@ fn file_task(
             Priority::Normal
         },
         f.proposed,
+    )
+}
+
+/// What a red job's task quotes: the error lines of the whole log, or, if only the end of the
+/// log can be read, that tail.
+fn failure_text(src: &dyn Source, job: u64) -> (&'static str, String) {
+    if let Some(log) = src.log_long(job) {
+        let e = rules::error_excerpt(&log, LOG_LINES);
+        if !e.trim().is_empty() {
+            return ("Error lines from the failed step", e);
+        }
+    }
+    (
+        "Failed log tail",
+        src.log_tail(job)
+            .unwrap_or_else(|| "(the log could not be read)".into()),
     )
 }
 
@@ -865,6 +881,25 @@ pub(crate) fn emit_task(
 }
 
 /// The watch as the status shows it: what is watched, what waits for agreement, what was filed.
+/// The held-back part of the view. Open tickets are being fixed: a line each. Landed ones
+/// wait for a finished run: one quiet line, no banner. (A newer red run after the landing is
+/// not held back at all.)
+pub fn held_view(state: &rules::State, r: &rules::Rules) -> Value {
+    let lines = rules::held_lines(state, r);
+    let held: Vec<Value> = lines
+        .iter()
+        .filter(|l| !l.landed)
+        .map(|l| json!({"job": l.key, "run": l.run, "task": l.ticket, "text": l.open_text()}))
+        .collect();
+    let unconfirmed: Vec<Value> = lines
+        .iter()
+        .filter(|l| l.landed)
+        .map(|l| json!({"job": l.key, "run": l.run, "task": l.ticket, "text": l.name()}))
+        .collect();
+    json!({"held_back": held, "unconfirmed": unconfirmed,
+           "unconfirmed_text": rules::unconfirmed_text(&lines)})
+}
+
 pub fn view(d: &Daemon, pid: ProjectId) -> Value {
     let Some(p) = d.project(pid) else {
         return Value::Null;
@@ -907,22 +942,16 @@ pub fn view(d: &Daemon, pid: ProjectId) -> Value {
         .into_iter()
         .find(|f| f.project == p.id && f.source == "ci")
         .map(|f| json!({"reason": f.reason, "fix_task": f.fix_task, "since": f.since}));
-    let notes = rules::timeout_notes(&s.state);
-    let held: Vec<Value> = rules::held_back(&s.state, &r)
-        .into_iter()
-        .map(|(k, run, t)| {
-            let (landed, n) = notes.get(&k).copied().unwrap_or((None, 0));
-            let text = rules::held_text_timeouts(&k, run, t, landed, n, now_ms());
-            json!({"job": k, "run": run, "task": t, "text": text})
-        })
-        .collect();
+    let held = held_view(&s.state, &r);
     let timeouts: Vec<Value> = rules::timeouts(&s.state, &r)
         .into_iter()
         .map(|(k, n, filed)| json!({"job": k, "timed_out_runs": n, "agreement": r.agreement, "filed": filed}))
         .collect();
     json!({
         "enabled": true,
-        "held_back": held,
+        "held_back": held["held_back"],
+        "unconfirmed": held["unconfirmed"],
+        "unconfirmed_text": held["unconfirmed_text"],
         "workflows": watched,
         "excluded": r.exclude,
         "gate": r.gate,
@@ -939,6 +968,33 @@ pub fn view(d: &Daemon, pid: ProjectId) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct Fake(&'static str);
+    impl Source for Fake {
+        fn runs(&self, _: &str) -> Result<Vec<ActionsRun>, String> {
+            Ok(vec![])
+        }
+        fn jobs(&self, _: u64) -> Result<Vec<ActionsJob>, String> {
+            Ok(vec![])
+        }
+        fn log_tail(&self, _: u64) -> Option<String> {
+            Some("tail noise".into())
+        }
+        fn log_long(&self, _: u64) -> Option<String> {
+            Some(self.0.into())
+        }
+    }
+
+    #[test]
+    fn the_filed_text_has_the_error_line_not_the_tail() {
+        let log = include_str!("../../core/tests/fixtures/ci_logs/lint_spdx.log");
+        let (h, t) = failure_text(&Fake(log), 1);
+        assert_eq!(h, "Error lines from the failed step");
+        assert!(
+            t.contains("missing SPDX-License-Identifier: GPL-3.0-or-later in scripts/exit/s653.sh")
+        );
+        assert!(!t.contains("tail noise"));
+    }
 
     const NOTE: &str = "The job has exceeded the maximum execution time of 1h0m0s";
 

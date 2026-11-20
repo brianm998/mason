@@ -57,17 +57,32 @@ pub enum Kind {
     Check,
 }
 
-/// Where this run goes. Every run answers `Local`: #698 replaces this body with the real
-/// decision and #700 adds the runner pools. Until then nothing runs remotely unless a test
-/// forces it (`MASON_TEST_FORCE_REMOTE=1` in the daemon's own environment, which a task cannot
-/// set, and only for a project that has a `[remote]` section).
-pub fn executor_for(d: &Daemon, project: &str, _kind: Kind) -> Executor {
+/// Where this run goes: [`crate::place::decide`] for a task's suite or check (`place` names the
+/// task and the suite); every other run (a landing batch, a base run, a debt) stays here until
+/// #702. A test can force a project remote (`MASON_TEST_FORCE_REMOTE=1` in the daemon's own
+/// environment, which a task cannot set, and only for a project that has a `[remote]`).
+pub fn executor_for(
+    d: &Daemon,
+    project: &str,
+    kind: Kind,
+    place: Option<(mason_core::TaskId, &mason_testing::Suite)>,
+) -> Executor {
     if forced_for_tests() {
         if let Some(r) = remote_cfg(d, project) {
             return Executor::GitHub { runs_on: r.runs_on };
         }
     }
-    Executor::Local
+    let Some((task, suite)) = place else {
+        return Executor::Local;
+    };
+    let kind = match kind {
+        Kind::Suite => "suite",
+        Kind::Check => "check",
+    };
+    match crate::place::place_of(d, project, Some(task.0), suite, kind) {
+        crate::place::Place::GitHub { runs_on, .. } => Executor::GitHub { runs_on },
+        crate::place::Place::Local { .. } => Executor::Local,
+    }
 }
 
 fn forced_for_tests() -> bool {
@@ -499,6 +514,141 @@ pub fn parse_iso(s: &str) -> Option<u64> {
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     let days = era * 146097 + doe - 719468;
     u64::try_from(days * 86400 + h * 3600 + mi * 60 + sec).ok()
+}
+
+// ---- stale run refs ---------------------------------------------------------------------------
+
+/// A run ref older than this with no live record is a leftover of a crash or a killed run.
+pub const STALE_REF_AGE_S: u64 = 24 * 3600;
+/// The sweep looks at the remote this often, not on every pass.
+const STALE_SWEEP_EVERY_MS: u64 = 30 * 60 * 1000;
+
+/// The refs the run records under `roots` name as still in use: pushed, not collected, not
+/// deleted. Records sit next to a run's log, in a task's directory or a landing directory.
+pub fn live_run_refs(roots: &[PathBuf]) -> std::collections::HashSet<String> {
+    fn walk(dir: &Path, depth: u32, out: &mut std::collections::HashSet<String>) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            let Ok(ft) = e.file_type() else { continue };
+            if ft.is_dir() {
+                if depth > 0 {
+                    walk(&p, depth - 1, out);
+                }
+            } else if p.extension().is_some_and(|x| x == "remote") {
+                if let Some(st) = State::load(&p) {
+                    if !st.ref_deleted && !st.collected {
+                        out.insert(st.ref_name);
+                    }
+                }
+            }
+        }
+    }
+    let mut out = std::collections::HashSet::new();
+    for r in roots {
+        walk(r, 3, &mut out);
+    }
+    out
+}
+
+/// Delete the stale run refs among `refs` (`(ref name, sha)` as the remote lists them): older
+/// than [`STALE_REF_AGE_S`] by `time_of` (the commit's time, `None` when unknown, which keeps
+/// the ref) and not in `live`. `delete` removes one and says whether it did. Each deletion is
+/// logged. Returns the refs deleted.
+pub fn sweep_run_refs(
+    refs: &[(String, String)],
+    live: &std::collections::HashSet<String>,
+    now_s: u64,
+    time_of: &dyn Fn(&str) -> Option<u64>,
+    delete: &mut dyn FnMut(&str) -> bool,
+) -> Vec<String> {
+    let aged: Vec<(String, Option<u64>)> = refs
+        .iter()
+        .filter(|(r, _)| !live.contains(r))
+        .map(|(r, sha)| (r.clone(), time_of(sha)))
+        .collect();
+    let mut gone = vec![];
+    for r in mason_adapters::runref::stale_refs(&aged, live, now_s, STALE_REF_AGE_S) {
+        if delete(&r) {
+            tracing::info!(ref_name = %r, "deleted a stale run ref (older than 24 h, no live run record)");
+            gone.push(r);
+        }
+    }
+    gone
+}
+
+/// The safety sweep's part: for each project with `[remote]`, delete its stale run refs. At most
+/// every half hour; a remote that cannot be reached is tried again next time.
+pub fn sweep_stale_refs(d: &Arc<Daemon>) {
+    static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    if !any_remote(d) {
+        return;
+    }
+    let now = now_ms();
+    let last = LAST.load(std::sync::atomic::Ordering::SeqCst);
+    if last != 0 && now.saturating_sub(last) < STALE_SWEEP_EVERY_MS {
+        return;
+    }
+    LAST.store(now, std::sync::atomic::Ordering::SeqCst);
+    // Off the sweep's thread: it lists the remote and asks GitHub for each ref's age.
+    let d = d.clone();
+    std::thread::spawn(move || sweep_stale_refs_now(&d, now));
+}
+
+fn sweep_stale_refs_now(d: &Daemon, now: u64) {
+    let mut roots = vec![d.cfg.landing_dir()];
+    if let Ok(rd) = std::fs::read_dir(d.cfg.data_dir.join("t")) {
+        roots.extend(rd.flatten().map(|e| e.path()));
+    }
+    let live = live_run_refs(&roots);
+    let projects: Vec<String> = d
+        .projects()
+        .values()
+        .filter(|p| p.services.remote.is_some())
+        .map(|p| p.id.clone())
+        .collect();
+    for id in projects {
+        let Some(p) = project_cfg(d, &id) else {
+            continue;
+        };
+        let Some(site) = site_for(d, &id, &p.path) else {
+            continue;
+        };
+        let Ok(listing) = git::run(
+            &site.cwd,
+            &["ls-remote", &site.remote, "refs/heads/mason/run/*"],
+        ) else {
+            continue;
+        };
+        let refs: Vec<(String, String)> = listing
+            .lines()
+            .filter_map(|l| {
+                let (sha, r) = l.split_once('\t')?;
+                Some((r.strip_prefix("refs/heads/")?.to_string(), sha.to_string()))
+            })
+            .collect();
+        if refs.is_empty() {
+            continue;
+        }
+        let gone = sweep_run_refs(
+            &refs,
+            &live,
+            now / 1000,
+            &|sha| site.gh.commit_time(sha),
+            &mut |r| {
+                git::run(
+                    &site.cwd,
+                    &["push", &site.remote, "--delete", &format!("refs/heads/{r}")],
+                )
+                .is_ok()
+            },
+        );
+        if !gone.is_empty() {
+            tracing::info!(project = %id, count = gone.len(), "swept stale run refs");
+        }
+    }
 }
 
 // ---- running ----------------------------------------------------------------------------------
@@ -958,6 +1108,191 @@ fn poll(
     }
 }
 
+// ---- runner pools (#700) ----------------------------------------------------------------------
+
+/// Is this a macOS runner? (`macos-14`, `macos-latest`, a `macos-*-xlarge`.) GitHub counts macOS
+/// jobs separately: at most 5 at once on the free plan.
+pub fn is_macos(runs_on: &str) -> bool {
+    runs_on
+        .trim()
+        .trim_matches(['[', ']', '"'])
+        .starts_with("macos")
+}
+
+/// What a remote run holds while it is out: one `gha` unit per job, and with a macOS runner one
+/// `gha-macos` unit as well (which is how GitHub counts). A run sharded `shards` ways (#701)
+/// has that many jobs. It holds nothing of this machine.
+pub fn units_for(runs_on: &str, shards: u32) -> std::collections::BTreeMap<String, u32> {
+    let n = shards.max(1);
+    let mut u = std::collections::BTreeMap::from([(mason_scheduler::GHA.to_string(), n)]);
+    if is_macos(runs_on) {
+        u.insert(mason_scheduler::GHA_MACOS.to_string(), n);
+    }
+    u
+}
+
+/// A lease request for `needs` of a project whose suites run on GitHub: the machine's
+/// `compile`, `test-suite` and `test-small` (and the whole machine) are replaced by the runner
+/// pool units, so the run waits for no machine gate and holds none of the machine. `None`: the
+/// project's runs are local, or `needs` holds none of those.
+pub fn pool_needs(
+    d: &Daemon,
+    project: &str,
+    needs: &mason_scheduler::Needs,
+) -> Option<mason_scheduler::Needs> {
+    const MACHINE: [&str; 3] = ["compile", "test-suite", "test-small"];
+    if !needs.exclusive && !MACHINE.iter().any(|m| needs.amounts.contains_key(*m)) {
+        return None;
+    }
+    let Executor::GitHub { runs_on } = executor_for(d, project, Kind::Suite, None) else {
+        return None;
+    };
+    let mut out = mason_scheduler::Needs {
+        exclusive: false,
+        amounts: needs
+            .amounts
+            .iter()
+            .filter(|(k, _)| !MACHINE.contains(&k.as_str()))
+            .map(|(k, v)| (k.clone(), *v))
+            .collect(),
+    };
+    for (k, v) in units_for(&runs_on, 1) {
+        out.amounts.insert(k, v);
+    }
+    Some(out)
+}
+
+/// What a remote run holds, written when it starts and removed when it ends, so a daemon that
+/// restarts counts the units of runs still out.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoteHold {
+    /// `task N` when a task's step holds them (its lease takes them over when it asks again),
+    /// else the run's id.
+    pub key: String,
+    pub label: String,
+    pub units: std::collections::BTreeMap<String, u32>,
+    /// The run's record (`<id>.remote`): the run has ended when it is gone or collected.
+    pub record: PathBuf,
+}
+
+/// Where the holds are kept, beside the step hosts' directory.
+pub fn holds_dir(hosts: &Path) -> PathBuf {
+    hosts.with_file_name("remote-holds")
+}
+
+fn hold_file(dir: &Path, id: &str) -> PathBuf {
+    let clean: String = id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    dir.join(format!("{clean}.kv"))
+}
+
+/// Record `hold` for run `id`.
+pub fn write_hold(dir: &Path, id: &str, h: &RemoteHold) {
+    let _ = std::fs::create_dir_all(dir);
+    let units: Vec<String> = h.units.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    let _ = write_kv(
+        &hold_file(dir, id),
+        &[
+            ("key", h.key.clone()),
+            ("label", h.label.clone()),
+            ("units", units.join(",")),
+            ("record", h.record.display().to_string()),
+        ],
+    );
+}
+
+/// Forget the hold of run `id`: it has ended.
+pub fn remove_hold(dir: &Path, id: &str) {
+    let _ = std::fs::remove_file(hold_file(dir, id));
+}
+
+/// Has the run behind this record ended? A missing record is a run that was abandoned or
+/// never began; a collected one is done.
+pub fn record_ended(record: &Path) -> bool {
+    State::load(record).is_none_or(|s| s.collected)
+}
+
+/// The holds of runs whose record says they are still out.
+pub fn running_holds(dir: &Path) -> Vec<RemoteHold> {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return vec![];
+    };
+    let mut out: Vec<RemoteHold> = rd
+        .flatten()
+        .filter_map(|e| {
+            let kv = read_kv(&e.path()).ok()?;
+            let record = PathBuf::from(kv.get("record")?);
+            if record_ended(&record) {
+                let _ = std::fs::remove_file(e.path());
+                return None;
+            }
+            let units = kv
+                .get("units")?
+                .split(',')
+                .filter_map(|p| {
+                    let (k, v) = p.split_once('=')?;
+                    Some((k.to_string(), v.parse().ok()?))
+                })
+                .collect();
+            Some(RemoteHold {
+                key: kv.get("key")?.clone(),
+                label: kv.get("label").cloned().unwrap_or_default(),
+                units,
+                record,
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| a.record.cmp(&b.record));
+    out
+}
+
+/// A hold that is written while a remote run is out and removed when this is dropped.
+pub struct HoldGuard {
+    dir: PathBuf,
+    id: String,
+}
+
+impl HoldGuard {
+    pub fn new(
+        hosts: &Path,
+        spec: &RunSpec,
+        key: &str,
+        label: &str,
+        shards: u32,
+        dir: &Path,
+    ) -> Self {
+        let holds = holds_dir(hosts);
+        write_hold(
+            &holds,
+            &spec.id,
+            &RemoteHold {
+                key: key.to_string(),
+                label: label.to_string(),
+                units: units_for(&spec.runs_on, shards),
+                record: record_path(dir, &spec.id),
+            },
+        );
+        HoldGuard {
+            dir: holds,
+            id: spec.id.clone(),
+        }
+    }
+}
+
+impl Drop for HoldGuard {
+    fn drop(&mut self) {
+        remove_hold(&self.dir, &self.id);
+    }
+}
+
 // ---- the seams --------------------------------------------------------------------------------
 
 /// The spec of a suite or check run, from its pinned definition.
@@ -1009,6 +1344,61 @@ pub fn run_or_fallback(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_sweep_deletes_only_old_refs_with_no_live_record() {
+        use std::collections::{HashMap, HashSet};
+        let day = 24 * 3600;
+        let now = 100 * day;
+        let refs: Vec<(String, String)> = [
+            ("mason/run/p/old", "s1"),
+            ("mason/run/p/fresh", "s2"),
+            ("mason/run/p/kept", "s3"),
+            ("mason/run/p/nodate", "s4"),
+        ]
+        .iter()
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect();
+        let times: HashMap<&str, u64> = [
+            ("s1", now - 3 * day),
+            ("s2", now - 3600),
+            ("s3", now - 9 * day),
+        ]
+        .into();
+        let live: HashSet<String> = ["mason/run/p/kept".to_string()].into();
+        let mut deleted = vec![];
+        let gone = sweep_run_refs(
+            &refs,
+            &live,
+            now,
+            &|sha| times.get(sha).copied(),
+            &mut |r| {
+                deleted.push(r.to_string());
+                true
+            },
+        );
+        assert_eq!(gone, vec!["mason/run/p/old"]);
+        assert_eq!(deleted, vec!["mason/run/p/old"]);
+    }
+
+    #[test]
+    fn a_record_that_is_pushed_and_not_collected_keeps_its_ref() {
+        let d = tempfile::tempdir().unwrap();
+        let mk = |id: &str, name: &str, deleted: bool| {
+            let st = State {
+                ref_name: name.into(),
+                sha: "abc".into(),
+                ref_deleted: deleted,
+                ..State::default()
+            };
+            st.save(&record_path(d.path(), id));
+        };
+        mk("a", "mason/run/p/a", false);
+        mk("b", "mason/run/p/b", true);
+        let live = live_run_refs(&[d.path().to_path_buf()]);
+        assert!(live.contains("mason/run/p/a"));
+        assert!(!live.contains("mason/run/p/b"));
+    }
+
     use super::*;
     use mason_adapter_api::http::{Request, Response, Transport};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1687,6 +2077,43 @@ mod tests {
         let again = execute(&s2, &spec("x11"), logs.path(), &|| None).unwrap();
         assert!(matches!(again, Outcome::Done(g) if g.output == GREEN));
         assert_eq!(gh.runs_seen.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_macos_run_holds_a_unit_of_each_pool_and_a_sharded_one_holds_one_per_job() {
+        let u = units_for("macos-14", 1);
+        assert_eq!((u["gha"], u["gha-macos"]), (1, 1));
+        let u = units_for("ubuntu-latest", 3);
+        assert_eq!(u["gha"], 3);
+        assert!(!u.contains_key("gha-macos"));
+        assert_eq!(units_for("macos-latest", 3)["gha-macos"], 3);
+        assert!(is_macos("[\"macos-14\"]") && !is_macos("ubuntu-latest"));
+    }
+
+    #[test]
+    fn a_hold_is_kept_until_the_run_ends_and_is_dropped_once_its_record_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let holds = dir.path().join("remote-holds");
+        let rec = dir.path().join("a.remote");
+        let st = State {
+            sha: "abc".into(),
+            ..Default::default()
+        };
+        st.save(&rec);
+        let h = RemoteHold {
+            key: "task 4".into(),
+            label: "#4".into(),
+            units: units_for("macos-14", 1),
+            record: rec.clone(),
+        };
+        write_hold(&holds, "a", &h);
+        assert_eq!(running_holds(&holds), vec![h]);
+        State {
+            collected: true,
+            ..st
+        }
+        .save(&rec);
+        assert!(running_holds(&holds).is_empty());
     }
 
     #[test]

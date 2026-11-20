@@ -50,6 +50,10 @@ pub struct CheckSpec {
     pub holds: std::collections::BTreeMap<String, u32>,
     /// Whose run it is, as the resources list shows it: `#567 check`.
     pub label: String,
+    /// The task and suite a develop-phase `run_check` runs for, so that the one function that
+    /// decides where runs go (#698) can say. `None` for everything else (a landing re-test is
+    /// #702): it stays on this machine.
+    pub place: Option<(mason_core::TaskId, Box<mason_testing::Suite>)>,
 }
 
 /// What a step host's command holds of the machine, as recorded at its start.
@@ -458,13 +462,22 @@ fn remote_check(d: &Arc<Daemon>, spec: &CheckSpec, id: &str) -> Option<Shared> {
         return None;
     }
     let project = rm::project_of(d, &spec.cwd)?;
-    let rm::Executor::GitHub { runs_on } = rm::executor_for(d, &project, rm::Kind::Check) else {
+    let place = spec.place.as_ref().map(|(t, s)| (*t, &**s));
+    let rm::Executor::GitHub { runs_on } = rm::executor_for(d, &project, rm::Kind::Check, place)
+    else {
         return None;
+    };
+    // The suite's build is the first part of what runs there (it was not run here).
+    let cmd = match place.and_then(|(_, s)| s.build.as_deref()) {
+        Some(b) if !spec.cmd.starts_with(b) => format!("{b} && {}", spec.cmd),
+        _ => spec.cmd.clone(),
     };
     let site = rm::site_for(d, &project, &spec.cwd)?;
     let rs = rm::spec_for(
-        &project, id, None, &spec.cmd, spec.limit, &spec.env, &runs_on, &spec.tree,
+        &project, id, None, &cmd, spec.limit, &spec.env, &runs_on, &spec.tree,
     );
+    // The units it holds, on record until it ends, for a daemon that restarts (#700).
+    let _hold = rm::HoldGuard::new(&d.cfg.hosts_dir(), &rs, id, id, 1, &spec.log_dir);
     let note: Mutex<Option<String>> = Mutex::new(None);
     let stop = || {
         let n = spec.stop.as_ref().and_then(|f| f())?;

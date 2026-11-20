@@ -1,0 +1,13 @@
+2026-11-20T01:02:00.1234567Z ##[group]Run ./build.sh
+2026-11-20T01:02:01.1234567Z env:
+2026-11-20T01:02:02.1234567Z   A: 1
+2026-11-20T01:02:03.1234567Z ##[endgroup]
+2026-11-20T01:02:04.1234567Z step one done
+2026-11-20T01:02:05.1234567Z step two done
+2026-11-20T01:02:06.1234567Z step three done
+2026-11-20T01:02:07.1234567Z the thing stopped talking
+2026-11-20T01:02:08.1234567Z ##[group]Post job cleanup.
+2026-11-20T01:02:09.1234567Z Post job cleanup.
+2026-11-20T01:02:10.1234567Z [command]/usr/bin/git config --local --unset-all http.https://github.com/.extraheader
+2026-11-20T01:02:11.1234567Z ##[endgroup]
+2026-11-20T01:02:12.1234567Z Node.js 20 actions are deprecated.

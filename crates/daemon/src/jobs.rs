@@ -1045,6 +1045,16 @@ fn acquire_needs_as(
     label: Option<&str>,
 ) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
     let d = &c.d;
+    // A project whose runs go to GitHub holds runner pool units for them, not this machine's
+    // slots (#700). A daemon that restarted counted the units of its run still out: they are
+    // this step's, and its lease takes them over.
+    let needs = match crate::remote::pool_needs(d, &c.project.id, &needs) {
+        Some(n) => {
+            d.broker.take_over_remote(&format!("task {}", c.task.0));
+            n
+        }
+        None => needs,
+    };
     // Device pools are sized by what the provider lists, never by a default.
     if needs.amounts.keys().any(|n| n.starts_with("device:")) {
         d.targets.declare_all(d);
@@ -1924,6 +1934,7 @@ impl TestChecks {
                 holds: uses.clone(),
                 label: format!("#{} check", self.task),
                 stop: None,
+                place: None,
             }
         };
         let mut lines: Vec<String> = vec![];
@@ -2076,6 +2087,16 @@ impl TestChecks {
                                 suite.build = Some(crate::scope::expand(db, &n, true));
                             }
                             narrowed.push(format!("{name}: {}", n.describe()));
+                            // How a directory target's modules were picked (#656).
+                            if crate::scope::wants_tests(&dc) {
+                                if let Some((_, notes)) = kept.as_deref().and_then(|p| {
+                                    crate::scope::narrow_noted(&self.wt, p, true, false, &named)
+                                        .ok()
+                                }) {
+                                    narrowed
+                                        .extend(notes.into_iter().map(|n| format!("{name}: {n}")));
+                                }
+                            }
                         }
                         Err(why) => lines.push(format!("{name}: runs whole because {why}")),
                     }
@@ -2485,6 +2506,7 @@ impl TestChecks {
                 holds: uses.clone(),
                 label: format!("#{} check", self.task),
                 stop: None,
+                place: None,
             }
         };
         let merges = self.reds.merges();
@@ -3241,6 +3263,16 @@ fn agent_job(c: &Ctx) {
         prompt
     };
 
+    // With the task's checks on GitHub, the agent's own shell refuses test runs (#704).
+    let remote_shims = std::env::var("MASON_REMOTE_SHIM").as_deref() != Ok("off")
+        && matches!(kind, StepKind::Develop | StepKind::Review)
+        && crate::place::task_checks_on_github(&c.d, &c.project.id, c.task.0);
+    let prompt = if remote_shims && kind == StepKind::Develop {
+        format!("{prompt}\n\n{}", crate::agentshim::PROMPT_LINE)
+    } else {
+        prompt
+    };
+
     // `run_check` runs the project's tests: the command of its test step, layered exactly
     // as the test step itself resolves it (runtime and task overrides included).
     let tests_cmd = test_commands(&c.d, &c.def, c.project_id, Some(c.task));
@@ -3374,6 +3406,9 @@ fn agent_job(c: &Ctx) {
         spec.on_live = Some(Arc::new(move || crate::holds::probe_ok(&d, &acct, task)));
     }
     spec.env = c.project.agent_env.clone();
+    if remote_shims {
+        crate::agentshim::apply(&mut spec.env, &c.d.cfg.data_dir);
+    }
     // Whoever the agent runs `mason run` for: it ranks the request as this
     // task's pipeline work. Set last so a project's agent_env cannot name
     // another task.

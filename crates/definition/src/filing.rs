@@ -58,6 +58,21 @@ pub fn parse(text: &str) -> Filing {
     }
 }
 
+/// Where a task's runs go is the owner's choice (#699), made from the CLI or an owner request to
+/// the daemon, never from words in a filing. A body that claims `run_on` in its front matter is
+/// refused when it comes from a tracker or an agent, and the owner's own filing is told to use
+/// `--run-on` instead of the front matter.
+pub fn refuse_run_on_claim(filing: &Filing) -> Result<(), String> {
+    if filing.front_matter.contains_key(crate::layers::RUN_ON) {
+        return Err(
+            "`run_on` cannot be claimed in a filing; where a task runs is set only by the owner, \
+             with `mason task add --run-on` or `mason task run-on`"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
 /// Remove fenced code blocks and inline code spans: text in them is quoted, not said.
 fn without_code(text: &str) -> String {
     let mut out = String::new();
@@ -262,6 +277,14 @@ this when the task body really is the plan. Run `mason help filing` for details.
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_filing_cannot_claim_where_it_runs() {
+        let f = parse("---\nrun_on: github\n---\nDo it.");
+        assert!(refuse_run_on_claim(&f).unwrap_err().contains("run_on"));
+        assert!(refuse_run_on_claim(&parse("---\nexplored: true\n---\nx")).is_ok());
+        assert!(refuse_run_on_claim(&parse("no front matter")).is_ok());
+    }
 
     #[test]
     fn front_matter_is_split_off_and_read() {
