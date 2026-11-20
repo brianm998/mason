@@ -282,6 +282,9 @@ struct CountTile: View {
 
     var body: some View {
         let wants = count.wantsYou && model.connected
+        // Proposed and stuck fill only while one of their tasks is the one shown; the rest fill
+        // whenever they want the owner.
+        let filled = wants && (!Self.fillsOnlyWhenShown(count.state) || model.tileShowsCurrentTask(count))
         VStack(spacing: 0) {
             Text(model.tileCount(count)).font(theme.count()).foregroundStyle(tileCountColor(theme, count: count.count, wants: wants, connected: model.connected))
             Text(label).font(theme.small()).foregroundStyle(theme.muted).lineLimit(1).fixedSize()
@@ -289,7 +292,7 @@ struct CountTile: View {
         .padding(.horizontal, theme.spacing)
         .frame(minWidth: theme.tileMinWidth, minHeight: theme.tileHeight, maxHeight: theme.tileHeight)
         .fixedSize(horizontal: true, vertical: false)
-        .background(RoundedRectangle(cornerRadius: theme.radius).fill(wants ? theme.attentionTint : theme.surface))
+        .background(RoundedRectangle(cornerRadius: theme.radius).fill(filled ? theme.attentionTint : theme.surface))
         .overlay(RoundedRectangle(cornerRadius: theme.radius).stroke(wants ? theme.attention : theme.border, lineWidth: 1))
         // An overlay, not part of the layout: Part 17 sizes a tile by its label and text size
         // alone, so a count of any width and the icon never change it.
@@ -308,6 +311,8 @@ struct CountTile: View {
     }
 
     var label: String { model.tileLabel(count) }
+
+    static func fillsOnlyWhenShown(_ state: String) -> Bool { state == "proposed" || state == "needs_attention" }
 }
 
 struct Pill: ViewModifier {
