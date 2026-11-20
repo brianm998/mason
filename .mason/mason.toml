@@ -48,7 +48,7 @@ count = 2
 type = "test"
 category = "testing"
 uses = { compile = 1, test-suite = 1 }
-suites = ["cargo-workspace", "swift-clients", "compose-clients", "exit-scripts"]
+suites = ["cargo-workspace", "swift-clients", "compose-clients", "exit-scripts", "fmt"]
 max_rounds = 3
 on_red = "develop"
 next = "land"
@@ -117,6 +117,19 @@ min_tests = 1
 level = "unit"
 uses = { test-suite = 1 }
 
+# A fast formatting gate for the test step (s691): no build, no slot, a few seconds. An unformatted
+# change goes back from its own test step, and `run_check` shows the develop agent the `Diff in`
+# lines. Its own suite, so a skip of `cargo-workspace` does not skip it. The landing `lint` tier
+# runs the same check again over the union.
+[suite.fmt]
+command = '''if cargo fmt --all -- --check; then echo "test fmt_clean ... ok"; else echo "test fmt_clean ... FAILED"; exit 1; fi'''
+parser = "regex"
+pass_regex = '^test (.+) \.\.\. ok$'
+fail_regex = '^test (.+) \.\.\. FAILED$'
+min_tests = 1
+level = "unit"
+uses = {}
+
 # Run by the landing `lint` tier (.mason/landing.toml) over every batch, not by the test step: six
 # lint errors and five unformatted files landed in two days because neither the batch's tests nor
 # the rebuild of a skipped batch ran them (s521).
@@ -147,7 +160,7 @@ when = ["development", "test_step"]
 # select the cargo suite, which then runs only the smoke set per task (decisions 0173, 0539); the
 # landing batch runs it whole.
 [impact]
-"crates/**" = ["cargo-workspace"]
+"crates/**" = ["cargo-workspace", "fmt"]
 "Cargo.*" = ["cargo-workspace"]
 "rust-toolchain.toml" = ["cargo-workspace"]
 "scripts/exit/**" = ["cargo-workspace", "exit-scripts"]
