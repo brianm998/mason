@@ -771,7 +771,21 @@ const STEPS: &[&str] = &[
          at_ms   INTEGER NOT NULL
      );
      CREATE INDEX target_times_key ON target_times(project, suite, target, at_ms);",
-    // 56: what a landing batch's verification run found (s705, decision 0698), keyed by the
+    // (#677) a task's own greens per suite and definition hash, kept across rounds so a later
+    // round can reuse one when nothing since touches the suite (#677). Evidence is by tree
+    // and loses which task, round and definition it came from.
+    "CREATE TABLE task_greens (
+         task     INTEGER NOT NULL,
+         suite    TEXT NOT NULL,
+         def_hash TEXT NOT NULL,
+         tree     TEXT NOT NULL,
+         step_run INTEGER NOT NULL,
+         executed INTEGER NOT NULL,
+         passed   INTEGER NOT NULL,
+         at       INTEGER NOT NULL,
+         PRIMARY KEY (task, suite, tree)
+     );",
+    // 57: what a landing batch's verification run found (s705, decision 0698), keyed by the
     // project, the base tip, the batch's tasks with their branch heads and the suite or test
     // filter the run used. A batch formed again over the same base and heads (after an update
     // took over) reuses it instead of running again. `detail` is the daemon's own encoding of

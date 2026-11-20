@@ -1278,6 +1278,55 @@ impl Store {
         })
     }
 
+    /// Remember that `task` saw `suite` (defined as `def_hash`) green on `tree`, in step run
+    /// `step_run`. Kept for the whole task so a later round can reuse it (#677).
+    #[allow(clippy::too_many_arguments)]
+    pub fn put_task_green(
+        &self,
+        task: u64,
+        suite: &str,
+        def_hash: &str,
+        tree: &str,
+        step_run: u64,
+        executed: usize,
+        passed: usize,
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        let (s, h, t) = (suite.to_string(), def_hash.to_string(), tree.to_string());
+        self.write(move |c| {
+            c.execute(
+                "INSERT OR REPLACE INTO task_greens(task, suite, def_hash, tree, step_run, executed, passed, at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                params![task as i64, s, h, t, step_run as i64, executed as i64, passed as i64, now_ms as i64],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// The task's earlier greens of this suite with this definition hash, newest first:
+    /// `(tree, step_run, executed, passed)`.
+    pub fn task_greens(
+        &self,
+        task: u64,
+        suite: &str,
+        def_hash: &str,
+    ) -> Result<Vec<(String, u64, usize, usize)>, StoreError> {
+        let (s, h) = (suite.to_string(), def_hash.to_string());
+        self.read(move |c| {
+            let mut st = c.prepare(
+                "SELECT tree, step_run, executed, passed FROM task_greens WHERE task = ?1 AND suite = ?2 AND def_hash = ?3 ORDER BY at DESC, rowid DESC",
+            )?;
+            let rows = st.query_map(params![task as i64, s, h], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)? as u64,
+                    r.get::<_, i64>(2)? as usize,
+                    r.get::<_, i64>(3)? as usize,
+                ))
+            })?;
+            rows.collect()
+        })
+    }
+
     /// `(executed, passed, task)` if this tree already passed this suite.
     /// How long one finished build or run of a suite took (s385). The last ten are kept per
     /// project, suite and phase (`build` or `run`).
