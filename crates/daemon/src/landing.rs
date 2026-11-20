@@ -2631,8 +2631,12 @@ impl Runner {
             })
             .cloned()
             .collect();
+        let (local, stopped) = self.without_stopped(def, local);
+        let notes = stopped;
         if local.is_empty() {
-            green()
+            let mut g = green();
+            g.notes = notes;
+            g
         } else {
             let _lease = match self.hold(def, suites_needs(def, &local), true) {
                 Ok(l) => l,
@@ -2649,7 +2653,7 @@ impl Runner {
             };
             let n = self.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let stop = std::sync::atomic::AtomicBool::new(false);
-            std::thread::scope(|sc| {
+            let mut r = std::thread::scope(|sc| {
                 sc.spawn(|| self.mirror(&stop));
                 let r = crate::suites::run_over(
                     &self.d,
@@ -2666,8 +2670,35 @@ impl Runner {
                 );
                 stop.store(true, std::sync::atomic::Ordering::SeqCst);
                 r
-            })
+            });
+            r.notes.splice(0..0, notes);
+            r
         }
+    }
+
+    /// Split off the suites the owner has already stopped for the whole batch (every member
+    /// skipped them, a member is forced, or Land now): they run nothing, so they must not
+    /// queue for a slot. Returns the rest and a note per stopped suite, as `run_over` writes.
+    fn without_stopped(
+        &self,
+        def: &mason_definition::Definition,
+        names: Vec<String>,
+    ) -> (Vec<String>, Vec<String>) {
+        let members = self.members(def);
+        let mut rest = vec![];
+        let mut notes = vec![];
+        for name in names {
+            match members.stop_running(&self.d, &name) {
+                Some(why) => {
+                    if members.land_now(&self.d).is_some() {
+                        members.note_stopped(&format!("suite:{name}"));
+                    }
+                    notes.push(format!("{name}: {why}"));
+                }
+                None => rest.push(name),
+            }
+        }
+        (rest, notes)
     }
 
     /// Run only the failing tests of each suite (#682): what a rerun and a bisect need when
@@ -2686,6 +2717,14 @@ impl Runner {
         serial: bool,
     ) -> crate::suites::OverRun {
         let names: Vec<String> = failing.keys().cloned().collect();
+        let (names, stopped) = self.without_stopped(def, names);
+        if names.is_empty() {
+            return crate::suites::OverRun {
+                green: true,
+                notes: stopped,
+                ..Default::default()
+            };
+        }
         let _lease = match self.hold(def, suites_needs(def, &names), true) {
             Ok(l) => l,
             Err(e) => {
