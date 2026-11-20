@@ -413,9 +413,58 @@ pub fn service_problems(c: &LandingConfig, remote: bool, host: bool, ci: bool) -
     p
 }
 
+/// What a suite's `whole_later` claims must hold of the landing config (#676): `batch` needs a
+/// tier of the project that lists the suite, `ci` needs a `[ci]` section in the project file.
+/// `claims` is each such suite's name with its claim (`batch` or `ci`).
+pub fn whole_later_problems(
+    c: &LandingConfig,
+    claims: &[(String, String)],
+    ci_configured: bool,
+) -> Vec<String> {
+    let mut p = vec![];
+    for (suite, claim) in claims {
+        match claim.as_str() {
+            "batch" => {
+                let listed = c
+                    .tiers
+                    .iter()
+                    .filter(|t| t.name != "post-land")
+                    .any(|t| t.suites.iter().any(|s| s == suite));
+                if !listed {
+                    p.push(format!(
+                        "suite `{suite}` says whole_later = \"batch\", but no landing tier lists it: add it to a `[[tier]]` in .mason/landing.toml, or the test step must run it whole"
+                    ));
+                }
+            }
+            "ci" if !ci_configured => p.push(format!(
+                "suite `{suite}` says whole_later = \"ci\", but the project has no `[ci]` section: the base's CI is what would run it whole"
+            )),
+            _ => {}
+        }
+    }
+    p
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn whole_later_batch_needs_a_tier_that_lists_the_suite() {
+        let c = parse("[[tier]]\nname = \"batch\"\nsuites = [\"desktop\"]\n").unwrap();
+        let claim = |s: &str, w: &str| vec![(s.to_string(), w.to_string())];
+        assert!(whole_later_problems(&c, &claim("desktop", "batch"), false).is_empty());
+        let p = whole_later_problems(&c, &claim("gui", "batch"), false);
+        assert!(
+            p.iter().any(|x| x.contains("no landing tier lists it")),
+            "{p:?}"
+        );
+        assert!(whole_later_problems(&c, &claim("gui", "ci"), true).is_empty());
+        assert_eq!(
+            whole_later_problems(&c, &claim("gui", "ci"), false).len(),
+            1
+        );
+    }
 
     const FULL: &str = r#"
 mode = "direct"

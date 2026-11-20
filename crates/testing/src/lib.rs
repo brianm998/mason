@@ -31,7 +31,7 @@ pub mod verdict;
 pub use live::{Counts, LiveCount};
 pub use model::{
     Binding, DeviceType, EnvKind, Environment, ImpactMap, Narrow, ParserKind, Selection, Signature,
-    Suite, Testing, When,
+    Suite, Testing, When, WholeLater,
 };
 pub use results::{Case, Results, Status};
 pub use verdict::{

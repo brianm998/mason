@@ -835,6 +835,78 @@ fn a_task_test_step_runs_only_the_tests_its_change_needs_and_proves_nothing_for_
     assert!(note.contains("narrowed to 1 of 3 test units"), "{note}");
 }
 
+const WHOLE_LATER_LANDING: &str =
+    "mode = \"direct\"\nwindow = \"1s\"\nmax_size = 1\n[[tier]]\nname = \"batch\"\nsuites = [\"checks\"]\n";
+
+fn whole_later_world(extra: &str, log: &std::path::Path) -> (Scratch, Arc<mason_daemon::Daemon>) {
+    let definition = def(
+        &format!(
+            "narrow_command = \"echo narrowed {{tests}} >> {l}; echo 1..1; echo ok 1 - picked\"\n\
+             narrow_tests = \"tests/*_test.sh\"\n\
+             narrow_root = \"tests/\"\n\
+             whole_later = \"batch\"\n{extra}",
+            l = log.display()
+        ),
+        "",
+        "",
+    );
+    let s = Scratch::new(
+        "sh checks.sh",
+        json!({"steps": {"develop": [commit(HELLO, "change a file no test names")]}}),
+    );
+    s.push_files(
+        &[
+            (".mason/mason.toml", &definition),
+            (".mason/landing.toml", WHOLE_LATER_LANDING),
+            ("checks.sh", CHECKS),
+            ("tests/a_test.sh", "# a\n"),
+            ("tests/b_test.sh", "# b\n"),
+            ("tests/c_test.sh", "# c\n"),
+        ],
+        "project setup",
+    );
+    let d = start(&s);
+    let pid = d.project_id_by_name("scratch").unwrap();
+    let cfg = mason_daemon::landing::load_config(&d, pid);
+    assert!(cfg.is_ok(), "landing config: {cfg:?}");
+    (s, d)
+}
+
+#[test]
+fn a_suite_that_runs_whole_at_the_batch_is_not_run_by_the_test_step_when_no_test_is_reached() {
+    // #676: an empty pick ran the whole suite in the step and again in the landing batch.
+    let runs = tempfile::tempdir().unwrap();
+    let log = runs.path().join("ran");
+    let (_s, d) = whole_later_world("", &log);
+    let t = file_it(&d, "Whole later");
+    wait_state(&d, t, State::Landed, 120);
+    let ran = std::fs::read_to_string(&log).unwrap_or_default();
+    assert_eq!(ran.trim(), "", "the step ran nothing narrowed: {ran:?}");
+    let (_, note) = closing(&d, t);
+    assert!(note.contains("checks: not selected"), "{note}");
+    let notes = std::fs::read_to_string(d.task_dir(t).join("test-notes.txt")).unwrap_or_default();
+    assert!(
+        notes.contains(
+            "checks: not run: nothing in this change reaches its tests; runs whole at batch"
+        ),
+        "{notes}"
+    );
+    // The batch tier lists the suite, so landing proves the union.
+    let cfg = mason_daemon::landing::load_config(&d, ProjectId(1)).unwrap();
+    assert_eq!(cfg.batch_suites(), Some(&["checks".to_string()][..]));
+}
+
+#[test]
+fn a_suite_that_runs_whole_at_the_batch_runs_only_its_smoke_units_when_no_test_is_reached() {
+    let runs = tempfile::tempdir().unwrap();
+    let log = runs.path().join("ran");
+    let (_s, d) = whole_later_world("narrow_smoke = [\"c_test\"]", &log);
+    let t = file_it(&d, "Whole later, smoke");
+    wait_state(&d, t, State::Landed, 120);
+    let ran = std::fs::read_to_string(&log).unwrap_or_default();
+    assert_eq!(ran.trim(), "narrowed c_test", "{ran:?}");
+}
+
 fn two_tasks_world() -> Scratch {
     world(
         vec![
