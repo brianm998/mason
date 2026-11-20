@@ -2097,29 +2097,49 @@ fn rerun_failing(
     attempt: u32,
     dev: Option<&Dev>,
 ) -> Option<Vec<String>> {
-    let cmd = match &suite.rerun {
-        Some(t) => t.replace(
-            "{tests}",
-            &failures
-                .iter()
-                .map(|f| quote(f))
-                .collect::<Vec<_>>()
-                .join(" "),
-        ),
-        None => suite.command.clone(),
-    };
-    let cmd = crate::jobs::pty_wrap(suite.pty, &lifecycle::with_device(&cmd, dev_id(dev)));
-    if let Some(f) = &suite.results_file {
-        remove_results(cwd, f);
-    }
     let id = if attempt == 0 {
         format!("{}-r-{}", who.id_prefix, suite.name)
     } else {
         format!("{}-r{}-{}", who.id_prefix, now_ms(), suite.name)
     };
+    run_tests_alone(who, suite, cwd, failures, &id, false, dev)
+}
+
+/// The suite's `rerun` template with `{tests}` filled in; one test at a time (`serial`) adds
+/// libtest's `--test-threads=1` after a `--`, so a red that came from load shows as green.
+fn rerun_command(suite: &Suite, tests: &[String], serial: bool) -> String {
+    let Some(t) = &suite.rerun else {
+        return suite.command.clone();
+    };
+    let mut cmd = t.replace(
+        "{tests}",
+        &tests.iter().map(|f| quote(f)).collect::<Vec<_>>().join(" "),
+    );
+    if serial && cmd.contains(" -- ") {
+        cmd.push_str(" --test-threads=1");
+    }
+    cmd
+}
+
+/// Run `tests` of a suite alone with its `rerun` template (the whole suite when it has none)
+/// under log `id`. What still fails, or `None` when the run could not tell.
+fn run_tests_alone(
+    who: &Who,
+    suite: &Suite,
+    cwd: &Path,
+    tests: &[String],
+    id: &str,
+    serial: bool,
+    dev: Option<&Dev>,
+) -> Option<Vec<String>> {
+    let cmd = rerun_command(suite, tests, serial);
+    let cmd = crate::jobs::pty_wrap(suite.pty, &lifecycle::with_device(&cmd, dev_id(dev)));
+    if let Some(f) = &suite.results_file {
+        remove_results(cwd, f);
+    }
     let ran = run_hosted(
         &who.d,
-        &id,
+        id,
         &cmd,
         cwd,
         suite.timeout.unwrap_or(Duration::from_secs(1800)),
@@ -2140,6 +2160,111 @@ fn rerun_failing(
         return None;
     }
     Some(j.results.failed_names())
+}
+
+/// Whether every red suite in `failing` can be run on its failing tests alone: it names some
+/// and the suite defines a `rerun` template.
+pub fn can_run_alone(
+    def: &Definition,
+    failed: &std::collections::BTreeSet<String>,
+    failing: &std::collections::BTreeMap<String, Vec<String>>,
+) -> bool {
+    !failed.is_empty()
+        && failed.iter().all(|n| {
+            failing.get(n).is_some_and(|t| !t.is_empty())
+                && def.testing.suite(n).is_some_and(|s| s.rerun.is_some())
+        })
+}
+
+/// Run only the failing tests of each suite in `wt` (#682), one at a time when `serial`;
+/// with `build`, after the suite's own `build` (a bisect subset is a fresh tree). Green when
+/// none of them still fails. A build that fails, or a run that cannot tell, is red for the
+/// suite, with no names. This proves less than a whole run: nothing lands on it alone.
+#[allow(clippy::too_many_arguments)]
+pub fn run_alone(
+    d: &Arc<Daemon>,
+    p: &crate::config::ProjectCfg,
+    def: &Definition,
+    failing: &std::collections::BTreeMap<String, Vec<String>>,
+    wt: &Path,
+    log_dir: &Path,
+    id_prefix: &str,
+    sink: Option<StepRunId>,
+    build: bool,
+    serial: bool,
+) -> OverRun {
+    let who = Who {
+        d: d.clone(),
+        task: None,
+        step: String::new(),
+        project: p.id.clone(),
+        log_dir: log_dir.to_path_buf(),
+        id_prefix: id_prefix.to_string(),
+        sink,
+        env: vec![],
+        trust_base: true,
+        members: Members::default(),
+    };
+    let _ = std::fs::create_dir_all(log_dir);
+    let project_test = d
+        .project_id_by_name(&p.id)
+        .and_then(|pid| crate::jobs::test_commands(d, def, pid, None))
+        .map(|t| t.test);
+    let mut out = OverRun {
+        green: true,
+        failed: Default::default(),
+        notes: vec![],
+        failing: Default::default(),
+    };
+    for (name, tests) in failing {
+        let red = |out: &mut OverRun, note: String| {
+            out.green = false;
+            out.failed.insert(name.clone());
+            out.notes.push(note);
+        };
+        let Some(suite) = def.testing.suite(name) else {
+            red(&mut out, format!("{name}: not a suite of the definition"));
+            continue;
+        };
+        let suite = match with_project_test(suite, project_test.as_deref()) {
+            Ok(s) => s,
+            Err(why) => {
+                red(&mut out, format!("{name}: {why}"));
+                continue;
+            }
+        };
+        if build {
+            if let Some(b) = suite.build.as_deref() {
+                match run_build(&who, &suite, b, 0, wt) {
+                    Built::Ok => {}
+                    Built::Gone => {
+                        red(&mut out, format!("{name}: stopped"));
+                        continue;
+                    }
+                    Built::Red(why) => {
+                        red(&mut out, format!("{name}: {}", tail(&why, 12)));
+                        continue;
+                    }
+                }
+            }
+        }
+        let id = format!("{id_prefix}-n-{name}");
+        match run_tests_alone(&who, &suite, wt, tests, &id, serial, None) {
+            Some(still) if still.is_empty() => out.notes.push(format!(
+                "{name}: {} failing test(s) green on their own",
+                tests.len()
+            )),
+            Some(still) => {
+                red(
+                    &mut out,
+                    format!("{name}: still red on its own: {}", still.join(", ")),
+                );
+                out.failing.insert(name.clone(), still);
+            }
+            None => red(&mut out, format!("{name}: the rerun could not tell")),
+        }
+    }
+    out
 }
 
 // ---- the step --------------------------------------------------------------
@@ -4053,6 +4178,9 @@ pub struct OverRun {
     pub failed: std::collections::BTreeSet<String>,
     /// One line per suite, and the feedback of a red.
     pub notes: Vec<String>,
+    /// The failing tests of each red suite that named some (a red that read none, a build
+    /// failure or a timeout has no entry): what a rerun or a bisect can run alone (#682).
+    pub failing: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 /// Run the named suites in `wt` (a batch's integration worktree, at the tree
@@ -4103,6 +4231,7 @@ pub fn run_over(
         green: true,
         failed: Default::default(),
         notes: vec![],
+        failing: Default::default(),
     };
     for name in suites {
         let Some(suite) = def.testing.suite(name) else {
@@ -4142,9 +4271,14 @@ pub fn run_over(
                 out.failed.insert(name.clone());
                 out.notes.push(notes.join("; "));
             }
-            SuiteRun::Product { feedback, .. } => {
+            SuiteRun::Product {
+                feedback, failing, ..
+            } => {
                 out.green = false;
                 out.failed.insert(name.clone());
+                if !failing.is_empty() {
+                    out.failing.insert(name.clone(), failing);
+                }
                 out.notes.push(format!("{name}: {}", tail(&feedback, 12)));
             }
             SuiteRun::Gone => {
@@ -4445,5 +4579,69 @@ mod land_now_debt_tests {
         // `ci:` debts are paid by running CI on the base, not by suites.
         let def = Definition::empty();
         assert!(debt_suites(&def, &[], "ci:build").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod alone_tests {
+    use super::*;
+    use mason_testing::ParserKind;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    fn def(rerun: Option<&str>) -> Definition {
+        let mut def = Definition::empty();
+        let mut s = Suite::new("cw", "cargo test", ParserKind::Tap);
+        s.rerun = rerun.map(String::from);
+        def.testing.suites.push(s);
+        def
+    }
+
+    fn red(names: &[&str]) -> (BTreeSet<String>, BTreeMap<String, Vec<String>>) {
+        let failed: BTreeSet<String> = ["cw".to_string()].into();
+        let mut m = BTreeMap::new();
+        if !names.is_empty() {
+            m.insert(
+                "cw".to_string(),
+                names.iter().map(|n| n.to_string()).collect(),
+            );
+        }
+        (failed, m)
+    }
+
+    #[test]
+    fn a_red_runs_alone_only_when_every_red_suite_has_names_and_a_rerun_template() {
+        let (f, n) = red(&["a::b"]);
+        assert!(can_run_alone(&def(Some("t -- {tests}")), &f, &n));
+        // No readable names: the whole suite, as before.
+        let (f, none) = red(&[]);
+        assert!(!can_run_alone(&def(Some("t -- {tests}")), &f, &none));
+        // No rerun template: the whole suite.
+        let (f, n) = red(&["a::b"]);
+        assert!(!can_run_alone(&def(None), &f, &n));
+        // A red the names do not cover (a lint, a floor) is not searched on tests alone.
+        let mut f2 = f.clone();
+        f2.insert("lint".into());
+        assert!(!can_run_alone(&def(Some("t -- {tests}")), &f2, &n));
+    }
+
+    #[test]
+    fn the_rerun_command_names_the_tests_and_runs_them_one_at_a_time_when_asked() {
+        let d = def(Some("cargo test -- --exact {tests}"));
+        let s = d.testing.suite("cw").unwrap();
+        let t = vec!["a::b".to_string(), "c::d".to_string()];
+        assert_eq!(
+            rerun_command(s, &t, false),
+            "cargo test -- --exact 'a::b' 'c::d'"
+        );
+        assert_eq!(
+            rerun_command(s, &t, true),
+            "cargo test -- --exact 'a::b' 'c::d' --test-threads=1"
+        );
+        // Without a `--` there is nowhere to put a libtest flag.
+        let d = def(Some("run {tests}"));
+        assert_eq!(
+            rerun_command(d.testing.suite("cw").unwrap(), &t, true),
+            "run 'a::b' 'c::d'"
+        );
     }
 }

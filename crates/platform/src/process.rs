@@ -333,6 +333,19 @@ pub fn own_group() -> u32 {
     }
 }
 
+/// The pid of this process's parent. It becomes 1 (or a subreaper) when the parent exits.
+/// Windows keeps no such link, so it reads as 0 there and never changes.
+pub fn parent_pid() -> u32 {
+    #[cfg(unix)]
+    {
+        nix::unistd::getppid().as_raw() as u32
+    }
+    #[cfg(windows)]
+    {
+        0
+    }
+}
+
 /// Start a new session, detaching from the controlling terminal (`setsid`).
 /// Fails harmlessly if already a session leader.
 pub fn detach_session() -> io::Result<()> {

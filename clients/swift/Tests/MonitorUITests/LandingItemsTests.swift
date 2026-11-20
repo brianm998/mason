@@ -96,4 +96,61 @@ final class LandingItemsTests: XCTestCase {
         XCTAssertEqual(m.landNowLabel(.batch(9)), "Landing…")
         XCTAssertNil(m.landNowLabel(.batch(5)), "a batch's pending state is not a task's")
     }
+
+    // ---- Land now for all (pure model) ----
+
+    private func trow(_ id: UInt64, _ actions: [String]) -> TaskRow {
+        var r = TaskRow()
+        r.id = id
+        r.allowedActions = actions
+        return r
+    }
+
+    @MainActor
+    private func landingModel(owner: Bool = true) -> (MonitorModel, Sent) {
+        let m = MonitorModel()
+        m.connected = true
+        m.isOwner = owner
+        var l = LandingView()
+        var b = batch(7, running: true, actions: ["land_now"])
+        b.tasks = [1, 2]
+        l.batches = [b]
+        m.landing = l
+        let log = Sent()
+        m.sender = { c in log.commands.append(c) }
+        return (m, log)
+    }
+
+    @MainActor
+    func testLandAllNowSendsOneBatchCommandAndOnePerQueuedTask() {
+        let (m, log) = landingModel()
+        m.landAllNow([trow(1, ["land_now"]), trow(2, ["land_now"]), trow(3, ["land_now"]), trow(4, ["cancel"])])
+        XCTAssertEqual(log.commands.filter { $0.landNowBatch.batch != 0 }.map(\.landNowBatch.batch), [7])
+        XCTAssertEqual(log.commands.filter { $0.landNow.task != 0 }.map(\.landNow.task), [3])
+        XCTAssertEqual(log.commands.count, 2)
+        XCTAssertEqual(m.landNotice, "Land now sent for 3 tasks (1 batch)")
+    }
+
+    @MainActor
+    func testLandAllNowSendsNothingWhenNothingAllowsItOrTheDeviceCannotAct() {
+        let (m, log) = landingModel()
+        m.landAllNow([trow(4, ["cancel"])])
+        XCTAssertTrue(log.commands.isEmpty)
+        XCTAssertEqual(m.landNotice, "Nothing to land: no task here allows it")
+        m.isOwner = false
+        XCTAssertNotNil(m.landDisabledReason)
+        m.landAllNow([trow(3, ["land_now"])])
+        XCTAssertTrue(log.commands.isEmpty)
+        XCTAssertEqual(m.landNotice, m.landDisabledReason)
+    }
+
+    @MainActor
+    func testLandingRowsOfferLandNowOnlyWhenAllowedAndCanAct() {
+        let (m, _) = landingModel()
+        let rows = [trow(1, ["land_now"]), trow(4, ["cancel"])]
+        XCTAssertEqual(m.landableRows(rows).map(\.id), [1])
+        XCTAssertTrue(m.canAct && rows[0].allowedActions.contains("land_now"))
+        m.isOwner = false
+        XCTAssertFalse(m.canAct && rows[0].allowedActions.contains("land_now"))
+    }
 }
