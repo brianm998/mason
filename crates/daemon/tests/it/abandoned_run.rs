@@ -94,10 +94,10 @@ fn a_granted_run_of_an_ended_step_has_its_command_stopped_and_its_units_freed() 
     wait_for("the command to end", 30, || {
         !mason_daemon::hung::read_ps().iter().any(|p| p.ppid == pid)
     });
-    assert!(matches!(
-        d.broker.lease_poll(next),
-        LeaseState::Granted { .. }
-    ));
+    // The grant may wait on the CPU gate or the settle time; wait on the state, not on time.
+    wait_for("the next waiter to be granted", 60, || {
+        matches!(d.broker.lease_poll(next), LeaseState::Granted { .. })
+    });
     d.broker.lease_close(next);
     let _ = client.kill();
     let _ = client.wait();
