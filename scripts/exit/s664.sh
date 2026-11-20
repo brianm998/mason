@@ -5,10 +5,14 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 run10() {
-    local crate=$1 file=$2 name=$3 i
+    local crate=$1 file=$2 name=$3 i build bin
+    build=$(cargo test -q -p "$crate" --test "$file" --no-run 2>&1) \
+        || { echo "$build" >&2; echo "FAILED: build of $file" >&2; exit 1; }
+    bin=$(echo "$build" | grep -oE "target/[^ )]*/deps/${file}-[0-9a-f]+" | tail -1)
+    [ -x "$bin" ] || { echo "$build" >&2; echo "no test binary for $file" >&2; exit 1; }
     for i in 1 2 3 4 5 6 7 8 9 10; do
         echo "== $name ($i of 10)"
-        out=$(cargo test -q -p "$crate" --test "$file" "$name" -- --exact 2>&1) \
+        out=$("$bin" --exact "$name" 2>&1) \
             || { echo "$out" >&2; echo "FAILED: $name on run $i" >&2; exit 1; }
         echo "$out" | grep -E '^test result' | tail -1
     done
