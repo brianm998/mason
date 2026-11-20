@@ -5,6 +5,8 @@
 //! going backwards. The "new code" is the same binaries copied into a runtime of
 //! their own, so what is tested is the machinery, not a code difference.
 
+#![cfg(unix)]
+
 use crate::support;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};

@@ -332,6 +332,8 @@ struct Ran {
     /// After a lost host, the finished executables of the lost run were kept and only the rest
     /// ran again (#621): what was reused, for the step's note. Its time is not the suite's either.
     resumed: Option<String>,
+    /// It ran on GitHub Actions, not here (#697): where, for the step's note.
+    ran_on: Option<String>,
 }
 
 /// Record how long a suite's build or run took, when it finished on its own (s385): the
@@ -400,6 +402,7 @@ type Check = Arc<dyn Fn() -> Stop + Send + Sync>;
 #[allow(clippy::too_many_arguments)]
 fn run_hosted(
     d: &Arc<Daemon>,
+    project: &str,
     id: &str,
     cmd: &str,
     cwd: &Path,
@@ -412,7 +415,7 @@ fn run_hosted(
     env: Vec<(String, String)>,
 ) -> Result<Ran, String> {
     run_hosted_resuming(
-        d, id, cmd, cwd, limit, log_dir, check, run, watch, th, env, None,
+        d, project, id, cmd, cwd, limit, log_dir, check, run, watch, th, env, None,
     )
 }
 
@@ -422,6 +425,7 @@ fn run_hosted(
 #[allow(clippy::too_many_arguments)]
 fn run_hosted_resuming(
     d: &Arc<Daemon>,
+    project: &str,
     id: &str,
     cmd: &str,
     cwd: &Path,
@@ -435,6 +439,17 @@ fn run_hosted_resuming(
     resume: Option<&str>,
 ) -> Result<Ran, String> {
     use crate::hostloss as hl;
+    // Where the run goes (#697). `Local` for every run until #698 decides; a remote run is
+    // returned as the same `Ran`, so it is judged by the code below this call, not by it.
+    if let crate::remote::Executor::GitHub { runs_on } =
+        crate::remote::executor_for(d, project, crate::remote::Kind::Suite)
+    {
+        if let Some(ran) = run_remote(
+            d, project, id, cmd, cwd, limit, log_dir, &check, watch, &env, &runs_on,
+        )? {
+            return Ok(ran);
+        }
+    }
     let hosts = d.cfg.hosts_dir();
     let again_id = hl::rerun_id(id);
     let mut first = None;
@@ -498,6 +513,70 @@ fn run_hosted_resuming(
                 });
             }
         }
+    }
+}
+
+/// A suite command run on GitHub Actions. `Ok(None)`: it could not go remote and the project's
+/// `fallback` is `local`, so the caller runs it here. An outage or a missing runner is an `Err`
+/// that [`crate::remote::environmental`] recognizes.
+#[allow(clippy::too_many_arguments)]
+fn run_remote(
+    d: &Arc<Daemon>,
+    project: &str,
+    id: &str,
+    cmd: &str,
+    cwd: &Path,
+    limit: Duration,
+    log_dir: &Path,
+    check: &Check,
+    watch: Option<&Suite>,
+    env: &[(String, String)],
+    runs_on: &str,
+) -> Result<Option<Ran>, String> {
+    use crate::remote as rm;
+    let Some(site) = rm::site_for(d, project, cwd) else {
+        return Err(rm::env_err("the project has no [remote] section"));
+    };
+    let spec = rm::spec_for(project, id, watch, cmd, limit, env, runs_on, "");
+    let stop = || match check() {
+        Stop::No => None,
+        Stop::Skipped => Some(rm::StopWhy::Skipped),
+        Stop::Gone => Some(rm::StopWhy::Gone),
+    };
+    Ok(match rm::run_or_fallback(&site, &spec, log_dir, &stop)? {
+        None => None,
+        Some(rm::Outcome::Stopped(why)) => Some(Ran {
+            code: -1,
+            signal: 9,
+            output: String::new(),
+            stop: match why {
+                rm::StopWhy::Skipped => Stop::Skipped,
+                rm::StopWhy::Gone => Stop::Gone,
+            },
+            timed_out: false,
+            stalled: None,
+            ran_ms: None,
+            narrowed: false,
+            resumed: None,
+            ran_on: None,
+        }),
+        Some(rm::Outcome::Done(f)) => Some(remote_ran(f)),
+    })
+}
+
+/// A finished remote run as the `Ran` a step host would have given.
+fn remote_ran(f: crate::remote::Finished) -> Ran {
+    Ran {
+        code: f.code,
+        signal: f.signal,
+        output: f.output,
+        stop: Stop::No,
+        timed_out: f.timed_out,
+        stalled: None,
+        ran_ms: f.ran_ms,
+        narrowed: false,
+        resumed: None,
+        ran_on: Some(f.ran_on),
     }
 }
 
@@ -660,6 +739,7 @@ fn run_hosted_once(
         },
         narrowed: false,
         resumed: None,
+        ran_on: None,
     })
 }
 
@@ -1302,6 +1382,82 @@ pub(crate) fn left_out_note(dropped: &[String]) -> String {
     )
 }
 
+/// The paths that differ between two trees.
+fn tree_diff(c_repo: &Path, from: &str, to: &str) -> Option<Vec<String>> {
+    let out = git::run(c_repo, &["diff", "--name-only", from, to]).ok()?;
+    Some(
+        out.lines()
+            .filter(|l| !l.is_empty())
+            .map(String::from)
+            .collect(),
+    )
+}
+
+/// An earlier round's green of `suite` that still stands for `tree`: same task, same
+/// definition hash, and a non-empty diff that the impact map sends nowhere near the suite.
+/// Returns `(executed, passed, step_run, from_tree)` (#677). Only whole-suite greens are ever
+/// stored (a narrowed run proves only the tests it ran), so a narrowed pick is never reused.
+fn reusable_task_green(
+    store: &mason_store::Store,
+    c_repo: &Path,
+    def: &Definition,
+    suite: &Suite,
+    task: u64,
+    tree: &str,
+) -> Option<(usize, usize, u64, String)> {
+    let hash = suite_def_hash(def, suite);
+    for (from, step_run, executed, passed) in store.task_greens(task, &suite.name, &hash).ok()? {
+        if from == tree {
+            continue;
+        }
+        let Some(paths) = tree_diff(c_repo, &from, tree) else {
+            continue;
+        };
+        if !paths.is_empty() && untouched_by(def, suite, &paths) {
+            return Some((executed, passed, step_run, from));
+        }
+    }
+    None
+}
+
+/// Record evidence for `tree` from an earlier round's green, when one stands. Never for a
+/// landing batch or a debt run, which belong to no task. Returns the note to report.
+fn adopt_earlier_green(
+    who: &Who,
+    c_repo: &Path,
+    def: &Definition,
+    suite: &Suite,
+    tree: &Tree,
+) -> Option<String> {
+    let (task, run) = who.task?;
+    let d = &who.d;
+    if matches!(d.store.evidence(&tree.tree, &suite.name), Ok(Some(_))) {
+        return None;
+    }
+    let (executed, passed, from_run, _) =
+        reusable_task_green(&d.store, c_repo, def, suite, task.0, &tree.tree)?;
+    let hash = suite_def_hash(def, suite);
+    let now = now_ms();
+    d.store
+        .put_evidence(&tree.tree, &suite.name, executed, passed, task.0, now)
+        .ok()?;
+    let _ = d.store.put_task_green(
+        task.0,
+        &suite.name,
+        &hash,
+        &tree.tree,
+        from_run,
+        executed,
+        passed,
+        now,
+    );
+    let _ = run;
+    Some(format!(
+        "{}: green, reused from an earlier round (step run #{from_run}; nothing since touches it)",
+        suite.name
+    ))
+}
+
 /// The newest stored baseline of this suite at an ancestor of `base`, with the same
 /// definition hash, when nothing between the two touches the suite (s478).
 fn reusable_baseline(
@@ -1448,6 +1604,7 @@ fn run_on_base(
         }
         let ran = run_hosted(
             &who.d,
+            &who.project,
             &id,
             &crate::jobs::pty_wrap(suite.pty, &lifecycle::with_device(cmd, dev_id(dev))),
             &wt,
@@ -1533,6 +1690,7 @@ fn run_suite(
     // The test step writes the project's `test` command into its suites before it calls here;
     // a debt run, a ledger rerun and a landing batch did not, and ran `{project_test}` as a
     // command (s271). Writing it in again changes nothing for a suite that has it already.
+    let orig_suite = suite;
     let filled;
     let suite = if uses_project_test(suite) {
         let test = d
@@ -1553,6 +1711,9 @@ fn run_suite(
     } else {
         suite
     };
+    // What an earlier round of this task proved, when nothing since touches the suite (#677).
+    let def_hash = suite_def_hash(def, orig_suite);
+    let adopted = adopt_earlier_green(who, c_repo, def, orig_suite, tree);
     // Identical code never tests twice.
     if let Ok(Some((executed, _, task))) = d.store.evidence(&tree.tree, &suite.name) {
         if let Some(run) = who.run() {
@@ -1565,10 +1726,12 @@ fn run_suite(
         return SuiteRun::Done {
             outcome: SuiteOutcome::Reused,
             results: None,
-            notes: vec![format!(
-                "{}: green for this exact tree already ({executed} tests, from task #{task})",
-                suite.name
-            )],
+            notes: vec![adopted.unwrap_or_else(|| {
+                format!(
+                    "{}: green for this exact tree already ({executed} tests, from task #{task})",
+                    suite.name
+                )
+            })],
         };
     }
     let signatures: &[Signature] = &def.testing.signatures;
@@ -1666,6 +1829,7 @@ fn run_suite(
         };
         let ran = match run_hosted_resuming(
             d,
+            &who.project,
             &id,
             &crate::jobs::pty_wrap(
                 suite.pty,
@@ -1685,6 +1849,21 @@ fn run_suite(
             resume.as_deref(),
         ) {
             Ok(r) => r,
+            Err(e) if crate::remote::environmental(&e).is_some() => {
+                // No runner, or GitHub is down: a wait charged to no task, as a missing device is.
+                env_down(who, def, suite, cwd, dev.as_ref());
+                environmental(
+                    crate::remote::environmental(&e)
+                        .unwrap_or_default()
+                        .to_string(),
+                    String::new(),
+                    on_wait,
+                );
+                waiting = true;
+                attempt += 1;
+                std::thread::sleep(d.cfg.env_retry);
+                continue;
+            }
             Err(e) => {
                 env_down(who, def, suite, cwd, dev.as_ref());
                 return SuiteRun::Product {
@@ -1776,6 +1955,18 @@ fn run_suite(
                         who.task.map_or(0, |t| t.0 .0),
                         now_ms(),
                     );
+                    if let Some((t, r)) = who.task {
+                        let _ = d.store.put_task_green(
+                            t.0,
+                            &suite.name,
+                            &def_hash,
+                            &tree.tree,
+                            r.0,
+                            j.results.executed(),
+                            j.results.passed(),
+                            now_ms(),
+                        );
+                    }
                 }
                 SuiteRun::Done {
                     outcome: SuiteOutcome::Proven,
@@ -2030,7 +2221,13 @@ fn run_suite(
             on_wait(None);
         }
         // Say what a lost host's run left reusable (#621).
-        let result = match (result, &ran.resumed) {
+        let said = [ran.resumed.clone(), ran.ran_on.clone()]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("; ");
+        let said = (!said.is_empty()).then_some(said);
+        let result = match (result, &said) {
             (
                 SuiteRun::Done {
                     outcome,
@@ -2173,6 +2370,7 @@ fn run_tests_alone(
     }
     let ran = run_hosted(
         &who.d,
+        &who.project,
         id,
         &cmd,
         cwd,
@@ -2663,6 +2861,7 @@ fn run_build(who: &Who, suite: &Suite, build: &str, n: usize, cwd: &Path) -> Bui
     }
     let ran = match run_hosted(
         &who.d,
+        &who.project,
         &id,
         build,
         cwd,
@@ -3376,6 +3575,7 @@ fn run_new_tests_at_base(
         }
         let ran = run_hosted(
             &c.d,
+            &who.project,
             &format!("{}-n-{}", who.id_prefix, suite.name),
             &crate::jobs::pty_wrap(
                 suite.pty,
@@ -4467,6 +4667,7 @@ mod lossy_tests {
             ran_ms: None,
             narrowed: false,
             resumed: None,
+            ran_on: None,
         };
         (ran, dir)
     }
@@ -4502,6 +4703,95 @@ mod lossy_tests {
             Verdict::Red { why, .. } => assert_eq!(why, "stalled: no output or CPU for 30 min"),
             v => panic!("{v:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod remote_tests {
+    use super::*;
+    use mason_testing::ParserKind;
+
+    /// What a local step host gives for a command that printed `output` and exited `code`.
+    fn local(output: &str, code: i32) -> Ran {
+        Ran {
+            code,
+            signal: 0,
+            output: output.to_string(),
+            stop: Stop::No,
+            timed_out: false,
+            stalled: None,
+            ran_ms: Some(12_000),
+            narrowed: false,
+            resumed: None,
+            ran_on: None,
+        }
+    }
+
+    fn remote(output: &str, code: i32) -> Ran {
+        remote_ran(crate::remote::Finished {
+            code,
+            signal: 0,
+            output: output.to_string(),
+            timed_out: false,
+            stop: None,
+            ran_ms: Some(12_000),
+            ran_on: "ran on GitHub (ubuntu-latest), run u, picked up after 6 s".into(),
+        })
+    }
+
+    fn same(a: &Ran, b: &Ran) -> bool {
+        (
+            a.code,
+            a.signal,
+            &a.output,
+            a.stop,
+            a.timed_out,
+            &a.stalled,
+            a.ran_ms,
+            a.narrowed,
+        ) == (
+            b.code,
+            b.signal,
+            &b.output,
+            b.stop,
+            b.timed_out,
+            &b.stalled,
+            b.ran_ms,
+            b.narrowed,
+        )
+    }
+
+    #[test]
+    fn a_remote_run_is_the_same_ran_and_is_judged_the_same_as_a_local_one() {
+        let suite = Suite::new("t", "x", ParserKind::Tap);
+        let dir = tempfile::tempdir().unwrap();
+        let cases = [
+            ("ok 1 - a\nok 2 - b\n", 0),
+            ("ok 1 - a\nnot ok 2 - b\n", 1),
+            ("nothing ran here\n", 0),
+        ];
+        let mut kinds = vec![];
+        for (out, code) in cases {
+            let (l, r) = (local(out, code), remote(out, code));
+            assert!(same(&l, &r));
+            assert!(r.ran_on.as_deref().is_some_and(|w| w.contains("GitHub")));
+            let (jl, jr) = (
+                judge_ran(&suite, &l, dir.path()),
+                judge_ran(&suite, &r, dir.path()),
+            );
+            assert_eq!(jl.verdict, jr.verdict);
+            assert_eq!(jl.results.failed_names(), jr.results.failed_names());
+            assert_eq!(jl.results.executed(), jr.results.executed());
+            kinds.push(match jr.verdict {
+                Verdict::Green => "green",
+                Verdict::Red { .. } => "red",
+                Verdict::Vacuous { .. } => "vacuous",
+            });
+            if code == 1 {
+                assert_eq!(jr.results.failed_names().len(), 1);
+            }
+        }
+        assert_eq!(kinds, ["green", "red", "vacuous"]);
     }
 }
 
@@ -4692,6 +4982,68 @@ mod reuse_tests {
             .entries
             .push((".mason/**".into(), vec![]));
         assert_eq!(reuse(&def3, &suite, dir.path(), &store, &d), None);
+    }
+
+    fn tree_of(dir: &Path) -> String {
+        git_in(dir, &["rev-parse", "HEAD^{tree}"])
+    }
+
+    fn two_suite_def() -> (Definition, Suite, Suite) {
+        let mut def = Definition::empty();
+        def.testing.impact = ImpactMap {
+            entries: vec![
+                ("a/**".into(), vec!["A".into()]),
+                ("b/**".into(), vec!["B".into()]),
+            ],
+            overrides: Vec::new(),
+        };
+        (
+            def,
+            Suite::new("A", "run a", ParserKind::Tap),
+            Suite::new("B", "run b", ParserKind::Tap),
+        )
+    }
+
+    #[test]
+    fn a_later_round_reuses_a_green_only_for_suites_the_change_does_not_touch() {
+        let dir = tempfile::tempdir().unwrap();
+        git_in(dir.path(), &["init", "-q"]);
+        commit(dir.path(), "a/x");
+        commit(dir.path(), "b/x");
+        let t1 = tree_of(dir.path());
+        let db = tempfile::tempdir().unwrap();
+        let store = mason_store::Store::open(db.path().join("s.db")).unwrap();
+        let (def, a, b) = two_suite_def();
+        for s in [&a, &b] {
+            let h = suite_def_hash(&def, s);
+            store
+                .put_task_green(7, &s.name, &h, &t1, 3, 5, 5, 1)
+                .unwrap();
+        }
+        // Round 2 changes only a/.
+        commit(dir.path(), "a/y");
+        let t2 = tree_of(dir.path());
+        let got = |s: &Suite, d: &Definition, task: u64, tree: &str| {
+            reusable_task_green(&store, dir.path(), d, s, task, tree).map(|r| (r.2, r.3))
+        };
+        assert_eq!(got(&b, &def, 7, &t2), Some((3, t1.clone())));
+        assert_eq!(got(&a, &def, 7, &t2), None);
+        // Another task's green is not this task's.
+        assert_eq!(got(&b, &def, 8, &t2), None);
+        // The same tree is the exact-evidence path, not this one.
+        assert_eq!(got(&b, &def, 7, &t1), None);
+        // A changed definition forces a rerun.
+        let mut changed = b.clone();
+        changed.command = "run b --more".into();
+        assert_eq!(got(&changed, &def, 7, &t2), None);
+        // A narrowed pick hashes differently, so an earlier whole run is not reused for it.
+        let mut narrowed = b.clone();
+        narrowed.narrowed = true;
+        assert_eq!(got(&narrowed, &def, 7, &t2), None);
+        // An unmapped path forces a rerun.
+        commit(dir.path(), "other/z");
+        let t3 = tree_of(dir.path());
+        assert_eq!(got(&b, &def, 7, &t3), None);
     }
 
     #[test]

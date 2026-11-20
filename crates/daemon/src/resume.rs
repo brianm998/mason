@@ -473,4 +473,29 @@ mod tests {
         s.narrowed = true;
         assert_eq!(template(&s), None);
     }
+
+    #[test]
+    fn a_lost_filtered_it_group_reruns_as_the_same_filtered_group() {
+        // A narrowed suite has no unit plan: the whole command, filter included, runs again.
+        let mut s = Suite::new(
+            "c",
+            "cargo test -p mason-daemon --test it -- resume_loss:: host_loss::",
+            ParserKind::Regex,
+        );
+        s.narrowed = true;
+        assert_eq!(template(&s), None);
+        s.narrowed = false;
+        assert_eq!(template(&s), None);
+        // A filtered group in a rerun plan keeps its filter.
+        let plan = Plan {
+            reused: String::new(),
+            rerun: vec!["-p mason-daemon --test it -- a:: b::".into()],
+            done: 1,
+            total: 2,
+        };
+        assert_eq!(
+            command("cargo test {tests_for_change}", &plan),
+            "cargo test -p mason-daemon --test it -- a:: b::"
+        );
+    }
 }
