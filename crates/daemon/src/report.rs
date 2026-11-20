@@ -30,6 +30,8 @@ pub struct Rows {
     pub open_debts: Vec<(String, String)>,
     /// The slowest tests by median time, longest first (s634).
     pub slowest: Vec<mason_store::SlowTest>,
+    /// (phase, note) of each landing batch that began in the window (s702).
+    pub batches: Vec<(String, String)>,
 }
 
 #[derive(Default)]
@@ -249,6 +251,7 @@ impl Collector {
             "host_losses": losses,
             "flaky": {"sightings": rows.flaky.len(), "by_test": flaky},
             "open_debts": debts,
+            "batches": batch_counts(&rows.batches),
         })
     }
 }
@@ -311,6 +314,22 @@ pub fn normalize(reason: &str) -> String {
     t.chars().take(100).collect()
 }
 
+/// Batches by what became of them (s702). A batch whose suite was killed at its limit is a
+/// timeout, counted apart from the reds: its note says `timed out once` or `timed out twice`.
+fn batch_counts(batches: &[(String, String)]) -> Value {
+    let timed = |n: &str| {
+        n.contains(crate::landing::TIMED_OUT_ONCE) || n.contains(crate::landing::TIMED_OUT_TWICE)
+    };
+    let held = |n: &str| n.contains(crate::landing::TIMED_OUT_TWICE);
+    json!({
+        "total": batches.len(),
+        "landed": batches.iter().filter(|(p, _)| p == "landed").count(),
+        "red": batches.iter().filter(|(p, n)| p != "landed" && matches!(p.as_str(), "red" | "parked" | "failed") && !timed(n)).count(),
+        "timed_out": batches.iter().filter(|(_, n)| timed(n)).count(),
+        "timed_out_twice": batches.iter().filter(|(_, n)| held(n)).count(),
+    })
+}
+
 /// The report for the last `days` days, read once.
 pub fn report(d: &Daemon, project: Option<&str>, days: u64) -> Value {
     let to = now_ms();
@@ -362,6 +381,14 @@ pub fn report(d: &Daemon, project: Option<&str>, days: u64) -> Value {
             .store
             .slowest_tests(project, SLOWEST_TESTS)
             .unwrap_or_default(),
+        batches: d
+            .store
+            .batches(project, 2000)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|b| b.at >= from && b.at < to)
+            .map(|b| (b.phase, b.note))
+            .collect(),
     };
     c.finish(&rows, project)
 }
@@ -437,6 +464,25 @@ mod tests {
             "suite `_` is red: N tests failed"
         );
         assert_eq!(suites_in("suite `x` and `y z` and `w`"), vec!["x", "w"]);
+    }
+
+    #[test]
+    fn batch_timeouts_are_counted_apart_from_reds() {
+        let b = |p: &str, n: &str| (p.to_string(), n.to_string());
+        let v = batch_counts(&[
+            b(
+                "landed",
+                "cargo-workspace timed out once and was green on a rerun",
+            ),
+            b("landed", ""),
+            b("failed", "batch #1 timed out twice in cargo-workspace"),
+            b("red", "cargo-workspace"),
+        ]);
+        assert_eq!(v["total"], 4);
+        assert_eq!(v["landed"], 2);
+        assert_eq!(v["red"], 1);
+        assert_eq!(v["timed_out"], 2);
+        assert_eq!(v["timed_out_twice"], 1);
     }
 
     #[test]
@@ -522,6 +568,7 @@ mod tests {
             host_losses: vec![(1, day1 + 6_000), (2, 100)],
             flaky: vec!["s::t".into(), "s::t".into(), "s::u".into()],
             open_debts: vec![("p".into(), "suite:x".into())],
+            batches: vec![],
             slowest: ["a", "b", "c"]
                 .iter()
                 .zip([4_000, 3_000, 1_000])
