@@ -77,6 +77,8 @@ pub struct Wait {
     /// An exclusive request that has waited past `order.exclusive_max_wait_s`: how long it has
     /// waited. It gave up its freeze, so other work runs again until the machine drains (s552).
     pub thawed_ms: Option<u64>,
+    /// `thawed_ms` is for a converted request that froze `compile` only (s681).
+    pub thawed_compile: bool,
 }
 
 pub fn ordinal(n: usize) -> String {
@@ -289,8 +291,13 @@ fn reason(cause: &WaitCause, now_ms: u64) -> Option<String> {
 pub fn explain(w: &Wait, now_ms: u64) -> String {
     let mut text = explain_cause(w, now_ms);
     if let Some(ms) = w.thawed_ms {
+        let (what, scope) = if w.thawed_compile {
+            ("converted exclusive request", "compile")
+        } else {
+            ("exclusive request", "the machine")
+        };
         text.push_str(&format!(
-            "; exclusive request waited {}: work runs again until the machine drains",
+            "; {what} waited {}: work runs again until {scope} drains",
             since(ms, 0)
         ));
     }
@@ -491,6 +498,7 @@ mod tests {
             blocker,
             aged_ms: None,
             thawed_ms: None,
+            thawed_compile: false,
         };
         // (wait, the code, a fragment the sentence must have)
         let cases = [
@@ -657,6 +665,7 @@ mod tests {
             }],
             aged_ms: None,
             thawed_ms: None,
+            thawed_compile: false,
         }
     }
 
@@ -707,6 +716,7 @@ mod tests {
             held_by: vec![],
             aged_ms: None,
             thawed_ms: None,
+            thawed_compile: false,
         };
         let s = explain(&w, 30_000);
         assert_eq!(
