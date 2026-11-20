@@ -3217,6 +3217,7 @@ fn agent_job(c: &Ctx) {
     impl Drop for StopCrediting<'_> {
         fn drop(&mut self) {
             self.0.d.broker.stop_crediting_waits(self.0.task);
+            end_run_leases(&self.0.d, self.0.task);
         }
     }
     let _credit = StopCrediting(c);
@@ -5400,5 +5401,34 @@ mod review_diff_tests {
         assert!(block.contains("big.txt") && block.contains("Read the files listed above"));
         // A base that does not exist is said plainly, not shown as an empty change.
         assert!(review_diff_block(wt, "nope").contains("could not be read"));
+    }
+}
+
+/// The agent step of `task` ended: close the `mason run` requests it left (s688). Why: nobody
+/// is left to read what they would run, and a waiting one holds a place in the queue (a grant
+/// to it would run a command for a step that is over). A waiting request is dropped now; a
+/// granted one has its command sent SIGTERM, then SIGKILL after a grace period, and its units
+/// are released. Only leases linked to this task are looked at: a person's `mason run`, another
+/// pipeline's request and other tasks' are never touched.
+pub fn end_run_leases(d: &Arc<Daemon>, task: TaskId) {
+    for l in d.broker.close_task_leases(task) {
+        if !l.held {
+            tracing::warn!(
+                task = task.0, lease = l.id, label = %l.label, waited_s = l.ms / 1000,
+                "closed a waiting `mason run` request: its task's step has ended"
+            );
+            continue;
+        }
+        tracing::warn!(
+            task = task.0, lease = l.id, label = %l.label, held_s = l.ms / 1000,
+            "stopping a `mason run` command: its task's step has ended"
+        );
+        let d = d.clone();
+        std::thread::spawn(move || {
+            crate::abandon::stop_command(l.pid, crate::abandon::grace(), || {
+                !d.broker.lease_holds(l.id)
+            });
+            d.broker.lease_close(l.id);
+        });
     }
 }
