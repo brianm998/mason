@@ -3188,6 +3188,11 @@ fn main() {
                             println!("Task #{id} will retry from `{to}`");
                         }
                     }
+                    if t["step"].as_str().is_some_and(|s| s.contains("land")) {
+                        println!(
+                            "Task #{id} is in landing: if its batch is running it leaves the batch, and its new commits will not join it"
+                        );
+                    }
                     let mut body = from.as_ref().map_or(json!({}), |f| json!({"to": f}));
                     if let Some(run) = t["last_run"].as_u64() {
                         body["seen"] = json!(run);
