@@ -800,6 +800,20 @@ const STEPS: &[&str] = &[
          at_ms   INTEGER NOT NULL,
          PRIMARY KEY (project, base, tasks, filter)
      );",
+    // What each cargo test executable was last built from when it ran (s707): the input key of
+    // a green or red run. A green with the same key is not run again. Additive.
+    "CREATE TABLE target_runs (
+         project TEXT NOT NULL,
+         suite   TEXT NOT NULL,
+         target  TEXT NOT NULL,
+         key     TEXT NOT NULL,
+         state   TEXT NOT NULL CHECK (state IN ('green', 'red')),
+         tests   INTEGER NOT NULL,
+         tree    TEXT NOT NULL,
+         task    INTEGER NOT NULL,
+         at_ms   INTEGER NOT NULL,
+         PRIMARY KEY (project, suite, target, key)
+     );",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;
