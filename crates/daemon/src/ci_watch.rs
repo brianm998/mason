@@ -223,6 +223,7 @@ pub fn encode(s: &Saved) -> String {
                             "t_run": js.last_timeout.run, "t_job": js.last_timeout.job,
                             "t_sha": js.last_timeout.sha, "t_url": js.last_timeout.url,
                             "t_at_ms": js.last_timeout.at_ms,
+                            "absent": js.absent,
                         }),
                     )
                 })
@@ -294,6 +295,7 @@ pub fn decode(text: &str) -> Saved {
                         .map(u)
                         .collect(),
                     timeout_filed: jv["timeout_filed"].as_bool().unwrap_or(false),
+                    absent: jv["absent"].as_u64().unwrap_or(0) as u32,
                     last_timeout: RunRef {
                         run: u(&jv["t_run"]),
                         job: u(&jv["t_job"]),
@@ -865,6 +867,25 @@ pub(crate) fn emit_task(
 }
 
 /// The watch as the status shows it: what is watched, what waits for agreement, what was filed.
+/// The held-back part of the view. Open tickets are being fixed: a line each. Landed ones
+/// wait for a finished run: one quiet line, no banner. (A newer red run after the landing is
+/// not held back at all.)
+pub fn held_view(state: &rules::State, r: &rules::Rules) -> Value {
+    let lines = rules::held_lines(state, r);
+    let held: Vec<Value> = lines
+        .iter()
+        .filter(|l| !l.landed)
+        .map(|l| json!({"job": l.key, "run": l.run, "task": l.ticket, "text": l.open_text()}))
+        .collect();
+    let unconfirmed: Vec<Value> = lines
+        .iter()
+        .filter(|l| l.landed)
+        .map(|l| json!({"job": l.key, "run": l.run, "task": l.ticket, "text": l.name()}))
+        .collect();
+    json!({"held_back": held, "unconfirmed": unconfirmed,
+           "unconfirmed_text": rules::unconfirmed_text(&lines)})
+}
+
 pub fn view(d: &Daemon, pid: ProjectId) -> Value {
     let Some(p) = d.project(pid) else {
         return Value::Null;
@@ -907,22 +928,16 @@ pub fn view(d: &Daemon, pid: ProjectId) -> Value {
         .into_iter()
         .find(|f| f.project == p.id && f.source == "ci")
         .map(|f| json!({"reason": f.reason, "fix_task": f.fix_task, "since": f.since}));
-    let notes = rules::timeout_notes(&s.state);
-    let held: Vec<Value> = rules::held_back(&s.state, &r)
-        .into_iter()
-        .map(|(k, run, t)| {
-            let (landed, n) = notes.get(&k).copied().unwrap_or((None, 0));
-            let text = rules::held_text_timeouts(&k, run, t, landed, n, now_ms());
-            json!({"job": k, "run": run, "task": t, "text": text})
-        })
-        .collect();
+    let held = held_view(&s.state, &r);
     let timeouts: Vec<Value> = rules::timeouts(&s.state, &r)
         .into_iter()
         .map(|(k, n, filed)| json!({"job": k, "timed_out_runs": n, "agreement": r.agreement, "filed": filed}))
         .collect();
     json!({
         "enabled": true,
-        "held_back": held,
+        "held_back": held["held_back"],
+        "unconfirmed": held["unconfirmed"],
+        "unconfirmed_text": held["unconfirmed_text"],
         "workflows": watched,
         "excluded": r.exclude,
         "gate": r.gate,
