@@ -563,10 +563,22 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s684**: an `[impact]` value may be `{ suites = [...], override = true }`, which replaces less specific entries for the paths it matches, so a narrow `= []` finally takes a path out of a broader glob.
 - **s685**: The `[impact]` table now names `.github`, `packaging`, `scripts`, `.cargo`, `.mason` data files and other paths that used to run every suite whole, `mason definition check` and the daemon's definition load list tracked files no glob matches, and the test notes name the unmapped path.
 - **s686**: The skipped-batch landing test now waits for the first batch's teardown before paying its debt, fixing a flake where the payment raced the worktree prune.
+- **s687**: The flaky skipped-batch fast-tier test now prints both tasks' reasons and the fast tier's output when it fails, so the next red shows whether the test name was never read or the run was cut; no assertion changed.
 - **s689**: A suite can say `whole_later = "batch"` (or `"ci"`) and list `narrow_smoke` units, so the test step runs only the smoke units plus its pick, or nothing, where it used to run the whole suite.
 - **s691**: Landing now runs the lint tier before the batch suites and parks the tasks whose diff touches a file the lint (or a red `ci_gates` fmt test) names, instead of bisecting the whole suite; the test step gains a fast `fmt` suite.
 - **s692**: A red landing batch whose run named its failing tests now reruns just those tests (one at a time) and bisects with a build plus just those tests through the suite's `rerun` template, falling back to whole-suite runs when no names were read, the red was a build, or the suite has no `rerun`; the remainder still gets one whole-suite run before it lands.
 - **s693**: A landing batch merges each task's pinned head instead of its live branch, drops members whose run ended, and refuses to land a task whose head differs from the tested one.
 - **s696**: CI/lint: the SPDX header of scripts/exit/s653.sh is corrected from Apache-2.0 to GPL-3.0-or-later so check-spdx passes on develop.
 - **s697**: The red CI/monitor-compose run 44697853075 names no failing step in the supplied log tail (only post-job Gradle cache cleanup), so no code changed and decision 0690 records how to classify it from the full log.
+- **s703**: A change now selects only the `mod <name>;` modules of a directory test target (such as the daemon's `it`) that reference it, rendered as a filtered group `-p mason-daemon --test it -- a:: b::`, instead of the whole 553-test executable.
+- **s704**: The swift and gradle exit scripts s645 and s662 now skip when their skip variable is set, and the live-token cost test waits for the cost instead of a fixed sleep.
+- **s709**: The github adapter test's fake world now strips the Windows `\\?\` verbatim prefix from its canonical tempdir path, so `git clone` of the local remote no longer fails with "hostname contains invalid characters".
+- **s714**: The red CI/monitor-compose run 44767972773 names no failing step in the supplied log tail (only post-job Gradle cache cleanup), so no code changed and decision 0707 records how to classify it from the full log.
+- **s715**: The row-redraw tests now run a full layout, display and bitmap draw cycle on their never-ordered-in host, so CI/monitor-swift sees rows drawn on the headless runner.
+- **s716**: scripts/run-changed-exit-scripts.sh now runs select-exit-scripts.sh from the helper's own directory and fails with `FAIL select-exit-scripts` when the selector errors, which fixes s249 on ubuntu-latest; s193 and s219 stay open.
+- **s717**: The impact-map test's "unmapped runs everything" probe now uses a path under no glob, so it no longer trips over the `scripts/*.sh` rule and CI is green again.
+- **s718**: s668 clears the inherited MASON_EXIT_* selection variables and pins its own shard, so the exit-scripts job passes on every shard (it failed on shard 5/6).
+- **s719**: The daemon's takeover_drain and update integration tests are unix-only, as the support module they import from already is, so the Windows CI test build compiles again.
+- **s720**: s640 stops re-running s426 (605 s), s664 builds its test binary once and runs it ten times, and the stale s640 weight is dropped.
+- **s721**: The `CI/test` daemon leg is split into three shards per system by test-name checksum, with a script that fails when any daemon test is in no shard or in two.
 <!-- status:end -->

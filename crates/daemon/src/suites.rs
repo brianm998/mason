@@ -1382,6 +1382,82 @@ pub(crate) fn left_out_note(dropped: &[String]) -> String {
     )
 }
 
+/// The paths that differ between two trees.
+fn tree_diff(c_repo: &Path, from: &str, to: &str) -> Option<Vec<String>> {
+    let out = git::run(c_repo, &["diff", "--name-only", from, to]).ok()?;
+    Some(
+        out.lines()
+            .filter(|l| !l.is_empty())
+            .map(String::from)
+            .collect(),
+    )
+}
+
+/// An earlier round's green of `suite` that still stands for `tree`: same task, same
+/// definition hash, and a non-empty diff that the impact map sends nowhere near the suite.
+/// Returns `(executed, passed, step_run, from_tree)` (#677). Only whole-suite greens are ever
+/// stored (a narrowed run proves only the tests it ran), so a narrowed pick is never reused.
+fn reusable_task_green(
+    store: &mason_store::Store,
+    c_repo: &Path,
+    def: &Definition,
+    suite: &Suite,
+    task: u64,
+    tree: &str,
+) -> Option<(usize, usize, u64, String)> {
+    let hash = suite_def_hash(def, suite);
+    for (from, step_run, executed, passed) in store.task_greens(task, &suite.name, &hash).ok()? {
+        if from == tree {
+            continue;
+        }
+        let Some(paths) = tree_diff(c_repo, &from, tree) else {
+            continue;
+        };
+        if !paths.is_empty() && untouched_by(def, suite, &paths) {
+            return Some((executed, passed, step_run, from));
+        }
+    }
+    None
+}
+
+/// Record evidence for `tree` from an earlier round's green, when one stands. Never for a
+/// landing batch or a debt run, which belong to no task. Returns the note to report.
+fn adopt_earlier_green(
+    who: &Who,
+    c_repo: &Path,
+    def: &Definition,
+    suite: &Suite,
+    tree: &Tree,
+) -> Option<String> {
+    let (task, run) = who.task?;
+    let d = &who.d;
+    if matches!(d.store.evidence(&tree.tree, &suite.name), Ok(Some(_))) {
+        return None;
+    }
+    let (executed, passed, from_run, _) =
+        reusable_task_green(&d.store, c_repo, def, suite, task.0, &tree.tree)?;
+    let hash = suite_def_hash(def, suite);
+    let now = now_ms();
+    d.store
+        .put_evidence(&tree.tree, &suite.name, executed, passed, task.0, now)
+        .ok()?;
+    let _ = d.store.put_task_green(
+        task.0,
+        &suite.name,
+        &hash,
+        &tree.tree,
+        from_run,
+        executed,
+        passed,
+        now,
+    );
+    let _ = run;
+    Some(format!(
+        "{}: green, reused from an earlier round (step run #{from_run}; nothing since touches it)",
+        suite.name
+    ))
+}
+
 /// The newest stored baseline of this suite at an ancestor of `base`, with the same
 /// definition hash, when nothing between the two touches the suite (s478).
 fn reusable_baseline(
@@ -1614,6 +1690,7 @@ fn run_suite(
     // The test step writes the project's `test` command into its suites before it calls here;
     // a debt run, a ledger rerun and a landing batch did not, and ran `{project_test}` as a
     // command (s271). Writing it in again changes nothing for a suite that has it already.
+    let orig_suite = suite;
     let filled;
     let suite = if uses_project_test(suite) {
         let test = d
@@ -1634,6 +1711,9 @@ fn run_suite(
     } else {
         suite
     };
+    // What an earlier round of this task proved, when nothing since touches the suite (#677).
+    let def_hash = suite_def_hash(def, orig_suite);
+    let adopted = adopt_earlier_green(who, c_repo, def, orig_suite, tree);
     // Identical code never tests twice.
     if let Ok(Some((executed, _, task))) = d.store.evidence(&tree.tree, &suite.name) {
         if let Some(run) = who.run() {
@@ -1646,10 +1726,12 @@ fn run_suite(
         return SuiteRun::Done {
             outcome: SuiteOutcome::Reused,
             results: None,
-            notes: vec![format!(
-                "{}: green for this exact tree already ({executed} tests, from task #{task})",
-                suite.name
-            )],
+            notes: vec![adopted.unwrap_or_else(|| {
+                format!(
+                    "{}: green for this exact tree already ({executed} tests, from task #{task})",
+                    suite.name
+                )
+            })],
         };
     }
     let signatures: &[Signature] = &def.testing.signatures;
@@ -1873,6 +1955,18 @@ fn run_suite(
                         who.task.map_or(0, |t| t.0 .0),
                         now_ms(),
                     );
+                    if let Some((t, r)) = who.task {
+                        let _ = d.store.put_task_green(
+                            t.0,
+                            &suite.name,
+                            &def_hash,
+                            &tree.tree,
+                            r.0,
+                            j.results.executed(),
+                            j.results.passed(),
+                            now_ms(),
+                        );
+                    }
                 }
                 SuiteRun::Done {
                     outcome: SuiteOutcome::Proven,
@@ -4888,6 +4982,68 @@ mod reuse_tests {
             .entries
             .push((".mason/**".into(), vec![]));
         assert_eq!(reuse(&def3, &suite, dir.path(), &store, &d), None);
+    }
+
+    fn tree_of(dir: &Path) -> String {
+        git_in(dir, &["rev-parse", "HEAD^{tree}"])
+    }
+
+    fn two_suite_def() -> (Definition, Suite, Suite) {
+        let mut def = Definition::empty();
+        def.testing.impact = ImpactMap {
+            entries: vec![
+                ("a/**".into(), vec!["A".into()]),
+                ("b/**".into(), vec!["B".into()]),
+            ],
+            overrides: Vec::new(),
+        };
+        (
+            def,
+            Suite::new("A", "run a", ParserKind::Tap),
+            Suite::new("B", "run b", ParserKind::Tap),
+        )
+    }
+
+    #[test]
+    fn a_later_round_reuses_a_green_only_for_suites_the_change_does_not_touch() {
+        let dir = tempfile::tempdir().unwrap();
+        git_in(dir.path(), &["init", "-q"]);
+        commit(dir.path(), "a/x");
+        commit(dir.path(), "b/x");
+        let t1 = tree_of(dir.path());
+        let db = tempfile::tempdir().unwrap();
+        let store = mason_store::Store::open(db.path().join("s.db")).unwrap();
+        let (def, a, b) = two_suite_def();
+        for s in [&a, &b] {
+            let h = suite_def_hash(&def, s);
+            store
+                .put_task_green(7, &s.name, &h, &t1, 3, 5, 5, 1)
+                .unwrap();
+        }
+        // Round 2 changes only a/.
+        commit(dir.path(), "a/y");
+        let t2 = tree_of(dir.path());
+        let got = |s: &Suite, d: &Definition, task: u64, tree: &str| {
+            reusable_task_green(&store, dir.path(), d, s, task, tree).map(|r| (r.2, r.3))
+        };
+        assert_eq!(got(&b, &def, 7, &t2), Some((3, t1.clone())));
+        assert_eq!(got(&a, &def, 7, &t2), None);
+        // Another task's green is not this task's.
+        assert_eq!(got(&b, &def, 8, &t2), None);
+        // The same tree is the exact-evidence path, not this one.
+        assert_eq!(got(&b, &def, 7, &t1), None);
+        // A changed definition forces a rerun.
+        let mut changed = b.clone();
+        changed.command = "run b --more".into();
+        assert_eq!(got(&changed, &def, 7, &t2), None);
+        // A narrowed pick hashes differently, so an earlier whole run is not reused for it.
+        let mut narrowed = b.clone();
+        narrowed.narrowed = true;
+        assert_eq!(got(&narrowed, &def, 7, &t2), None);
+        // An unmapped path forces a rerun.
+        commit(dir.path(), "other/z");
+        let t3 = tree_of(dir.path());
+        assert_eq!(got(&b, &def, 7, &t3), None);
     }
 
     #[test]

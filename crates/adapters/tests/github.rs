@@ -316,9 +316,24 @@ fn mason_landing_git(cwd: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&o.stdout).trim().to_string()
 }
 
+/// `canonicalize` returns a verbatim `\\?\C:\...` path on Windows. Git reads that as scp-style
+/// `host:path` and fails with "hostname contains invalid characters"; plain `C:\...` is local.
+/// Strip the prefix when a drive letter follows it. Unchanged elsewhere.
+fn plain_canonical(p: &Path) -> PathBuf {
+    let c = std::fs::canonicalize(p).unwrap();
+    let s = c.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        let b = rest.as_bytes();
+        if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
+            return PathBuf::from(rest);
+        }
+    }
+    c
+}
+
 fn fake_world() -> (tempfile::TempDir, PathBuf, PathBuf) {
     let d = tempfile::tempdir().unwrap();
-    let root = std::fs::canonicalize(d.path()).unwrap();
+    let root = plain_canonical(d.path());
     let bare = root.join("host.git");
     std::fs::create_dir_all(&bare).unwrap();
     sh(&bare, &["init", "-q", "--bare", "-b", "develop"]);
