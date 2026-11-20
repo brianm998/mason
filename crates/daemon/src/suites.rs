@@ -350,6 +350,27 @@ fn record_test_times(who: &Who, suite: &str, results: &Results) {
         .record_test_times(&who.project, suite, &times, now_ms());
 }
 
+/// Record each test executable's own time from a finished cargo run's log, whole or narrowed
+/// (s649).
+fn record_target_times(who: &Who, suite: &str, output: &str) {
+    let times = crate::targettimes::parse_log(output);
+    let _ = who
+        .d
+        .store
+        .record_target_times(&who.project, suite, &times, now_ms());
+}
+
+/// The estimate in ms when a narrowed run of `groups` is small enough for the `test-small`
+/// lane: the definition declares it and every selected target has a recorded median whose sum
+/// is under the project's `small_run_s` (s649).
+fn small_run(who: &Who, c: &Ctx, suite: &Suite, groups: &[String]) -> Option<u64> {
+    if !c.def.resources.contains_key(crate::jobs::TEST_SMALL) {
+        return None;
+    }
+    let medians = who.d.store.target_medians(&who.project, &suite.name).ok()?;
+    crate::targettimes::small_estimate_ms(groups, &medians, c.project.small_run_s)
+}
+
 /// What a build or run of `suite` is expected to take at most, from its recorded times (s385).
 fn estimate(who: &Who, suite: &str, phase: &str) -> Option<u64> {
     who.d
@@ -1686,6 +1707,7 @@ fn run_suite(
         }
         let j = judge_ran_with(suite, &ran, cwd, who.plugin_parser(suite).as_deref());
         record_test_times(who, &suite.name, &j.results);
+        record_target_times(who, &suite.name, &j.output);
         let out = |extra: &str| {
             format!(
                 "{extra}Last output of `{}`:\n{}",
@@ -2288,7 +2310,13 @@ enum Leased {
 /// is skipped first: a skip ends the wait, so a skipped suite never takes a slot. On
 /// 2026-11-13 #288's test step was skipped while it waited for a compile slot, and it
 /// waited on until a slot came, built, and only then noticed.
-fn lease_suite(c: &Ctx, needs: Needs, check: &Check, expected_ms: Option<u64>) -> Leased {
+fn lease_suite(
+    c: &Ctx,
+    needs: Needs,
+    check: &Check,
+    expected_ms: Option<u64>,
+    label: Option<&str>,
+) -> Leased {
     match check() {
         Stop::Skipped => return Leased::Skipped,
         Stop::Gone => return Leased::Gone,
@@ -2298,7 +2326,7 @@ fn lease_suite(c: &Ctx, needs: Needs, check: &Check, expected_ms: Option<u64>) -
         return Leased::Got;
     }
     let wanted = || check() == Stop::No;
-    match crate::jobs::acquire_needs_expecting(c, needs, &wanted, false, expected_ms) {
+    match crate::jobs::acquire_needs_labeled(c, needs, &wanted, false, expected_ms, label) {
         Ok(l) => {
             *c.lease.lock().unwrap_or_else(|e| e.into_inner()) = Some(l);
             Leased::Got
@@ -2347,7 +2375,7 @@ fn whole_later_holds(c: &Ctx, suite: &Suite) -> Option<mason_testing::WholeLater
 fn narrow_step(c: &Ctx, suite: &Suite) -> StepNarrow {
     if suite.narrow_packages {
         return match narrow_packages_for_step(c, suite) {
-            Some((s, n)) => StepNarrow::Run(Box::new(s), n),
+            Some((s, n, g)) => StepNarrow::Run(Box::new(s), n, g),
             None => StepNarrow::Whole,
         };
     }
@@ -2430,7 +2458,7 @@ fn narrow_units_for_step(
             w.name()
         ),
     };
-    Some(StepNarrow::Run(Box::new(s), note))
+    Some(StepNarrow::Run(Box::new(s), note, None))
 }
 
 /// Why nothing runs for a suite whose pick is empty and which has no smoke units.
@@ -2453,7 +2481,10 @@ fn whole_later_why(
 /// (and `dev_build`) with `{packages}` for the crates the change touches and their dependents,
 /// as `run_check` does. `None` (runs whole) when the suite has no `dev_command`, or no package
 /// list can be found. Like a test-unit narrowing, it records no evidence.
-fn narrow_packages_for_step(c: &Ctx, suite: &Suite) -> Option<(Suite, String)> {
+fn narrow_packages_for_step(
+    c: &Ctx,
+    suite: &Suite,
+) -> Option<(Suite, String, Option<Vec<String>>)> {
     let dc = suite.dev_command.as_ref()?;
     let all = worktree_paths(&c.wt, &c.project.base_ref())?;
     let (paths, dropped) = split_for_suite(&c.def, suite, &all);
@@ -2500,7 +2531,11 @@ fn narrow_packages_for_step(c: &Ctx, suite: &Suite) -> Option<(Suite, String)> {
             format!(" ({left})")
         }
     );
-    Some((s, note))
+    let groups = match &n {
+        crate::scope::Narrow::Targets(t) => Some(t.clone()),
+        crate::scope::Narrow::Packages(_) => None,
+    };
+    Some((s, note, groups))
 }
 
 /// The new-file line numbers a `git diff -U0` adds or changes (`@@ -a,b +c,d @@`).
@@ -2848,12 +2883,12 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
         };
         // Only the tests this change needs, when the suite says how (s386). The landing batch
         // runs it whole.
-        let suite = match narrow_step(c, &suite) {
-            StepNarrow::Run(narrowed, note) => {
+        let (suite, groups) = match narrow_step(c, &suite) {
+            StepNarrow::Run(narrowed, note, groups) => {
                 // Said in the closing note too: a narrowed green is not the whole suite's.
                 details.push(note.clone());
                 notes.push(note);
-                *narrowed
+                (*narrowed, groups)
             }
             StepNarrow::NotRun(note) => {
                 // It runs whole at landing: the step has nothing to prove, and says so.
@@ -2862,8 +2897,12 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
                 outcomes.push((name, SuiteOutcome::NotSelected));
                 continue;
             }
-            StepNarrow::Whole => suite,
+            StepNarrow::Whole => (suite, None),
         };
+        // A narrowed run of short targets takes the small lane; a whole run never does (s649).
+        let small = groups
+            .as_deref()
+            .and_then(|g| small_run(&who, c, &suite, g));
         let ran_beside = side.remove(&name);
         if per_suite && ran_beside.is_none() {
             c.release_lease();
@@ -2875,7 +2914,13 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
             {
                 let needs = needs_of(&crate::jobs::build_uses(), None);
                 who.env = held_env(c, &needs);
-                match lease_suite(c, needs, &who.check(&name), estimate(&who, &name, "build")) {
+                match lease_suite(
+                    c,
+                    needs,
+                    &who.check(&name),
+                    estimate(&who, &name, "build"),
+                    None,
+                ) {
                     Leased::Gone => return,
                     // Nothing is built; the suite's run below reports the skip.
                     Leased::Skipped => {}
@@ -2920,15 +2965,32 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
                     }
                 }
             }
-            let needs = run_needs(&c.def, &c.step, &suite);
+            let mut needs = run_needs(&c.def, &c.step, &suite);
+            let mut label = None;
+            if let Some(ms) = small {
+                let before = needs.amounts.clone();
+                needs.amounts = crate::jobs::small_lane(&c.def, needs.amounts);
+                if needs.amounts != before {
+                    let l = crate::targettimes::label(ms);
+                    notes.push(format!(
+                        "{name}: {l}: queued for {}",
+                        crate::jobs::TEST_SMALL
+                    ));
+                    label = Some(l);
+                }
+            }
             who.env = held_env(c, &needs);
             // A skipped suite holds nothing: `run_suite` sees the skip before it runs. Nor does
             // one already green for this exact tree, which `run_suite` reuses without running
             // (s380): it must not wait in the queue to learn that.
             if !proven(d, &tree, &name) {
-                if let Leased::Gone =
-                    lease_suite(c, needs, &who.check(&name), estimate(&who, &name, "run"))
-                {
+                if let Leased::Gone = lease_suite(
+                    c,
+                    needs,
+                    &who.check(&name),
+                    estimate(&who, &name, "run"),
+                    label.as_deref(),
+                ) {
                     return;
                 }
             }
