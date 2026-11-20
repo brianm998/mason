@@ -534,12 +534,15 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s644**: `sched::tests::ten_compiles_behind_a_waiting_exclusive_lease_all_name_it` compares task ids on the wait view instead of searching a Debug string that holds epoch-millisecond timestamps.
 - **s651**: The red `ten_compiles_behind_a_waiting_exclusive_lease_all_name_it` at 386e8e4b was the test matching "510" in epoch-ms text, which 159f33a7 already replaced with a task-id check; this stage records that and adds a repeat-run exit script.
 - **s652**: the resume test for a log cut off in the third of five executables now expects `-p a --test two` and `-p a --doc` as separate reruns, matching `affected::render`, since cargo cannot combine `--doc` with a target flag.
+- **s653**: The resume_loss test and the resume unit test now expect doc tests in their own `-p a --doc` rerun group, as decision 0609 made production emit.
 - **s655**: CI/lint red on develop: restore the SPDX header on scripts/exit/s638.sh so check-spdx.sh passes.
 - **s656**: The red CI/monitor-compose run 44570141981 names no failing step in the supplied log tail (only post-job Gradle cache cleanup), so no code changed and decision 0649 records how to classify it from the full log.
 - **s663**: the skipped-batch fast-tier landing test now forms its batch by size, writes the skip debt before admission and waits for the first batch to finish, so it no longer flakes under load.
 - **s664**: The skipped-batch fast-tier test did not reproduce in 20 consecutive runs on this machine, so no daemon code was changed; a 10-run exit script now guards it and the cause stays unconfirmed.
+- **s665**: The test-target picker no longer runs the whole workspace for a data, workflow, support or manifest change: only the root `Cargo.toml`/`Cargo.lock`, the toolchain file, `.cargo/` and paths the suite's own command names still do, and the reply and test-step note now say which path did it.
 - **s670**: The restart-in-the-middle token test now holds its step on a release file that the test writes once the restarted daemon shows (4, 50), instead of a fixed 9 s sleep that a loaded runner could overrun.
 - **s671**: `scripts/exit/s634.sh` now rewrites `(?:` to `(` in the suite's `pass_regex` before `grep -E`, which fixes the red CI/exit-scripts job.
 - **s673**: Double-clicking (or tapping on the phone) the stuck or proposed tile with several tasks now opens a page listing them, because `needs_attention` and `proposed` are section pages in the Swift and Compose clients.
 - **s676**: The landing fast-tier test pays the first task's open `step:test` debt before it files the second task, so the daemon's idle debt pass can no longer overlap it; no assertion removed.
+- **s679**: The red CI/monitor-compose run 44615387131 names no failing step in the supplied log tail (only post-job Gradle cache cleanup), so no code changed and decision 0672 records how to classify it from the full log.
 <!-- status:end -->
