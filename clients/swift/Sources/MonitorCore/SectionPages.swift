@@ -27,6 +27,8 @@ extension MonitorModel {
         case "developing": return "Developing"
         case "testing": return "Testing"
         case "review": return "Review"
+        case "needs_attention": return "Needs you"
+        case "proposed": return "Proposed"
         default: return name
         }
     }
