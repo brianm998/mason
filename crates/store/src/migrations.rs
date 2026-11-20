@@ -762,6 +762,15 @@ const STEPS: &[&str] = &[
          at_ms   INTEGER NOT NULL
      );
      CREATE INDEX test_times_key ON test_times(project, suite, test, at_ms);",
+    // The run time of each test executable of a cargo run (s649), for the test step's lane.
+    "CREATE TABLE target_times (
+         project TEXT NOT NULL,
+         suite   TEXT NOT NULL,
+         target  TEXT NOT NULL,
+         ms      INTEGER NOT NULL,
+         at_ms   INTEGER NOT NULL
+     );
+     CREATE INDEX target_times_key ON target_times(project, suite, target, at_ms);",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;
