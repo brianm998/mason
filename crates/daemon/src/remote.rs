@@ -1009,7 +1009,7 @@ pub fn pool_needs(
     if !needs.exclusive && !MACHINE.iter().any(|m| needs.amounts.contains_key(*m)) {
         return None;
     }
-    let Executor::GitHub { runs_on } = executor_for(d, project, Kind::Suite) else {
+    let Executor::GitHub { runs_on } = executor_for(d, project, Kind::Suite, None) else {
         return None;
     };
     let mut out = mason_scheduler::Needs {
