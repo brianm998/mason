@@ -5,7 +5,7 @@
 # and says how many runs were green out of how many were attempted.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-n=${S99_RUNS:-20}
+n=${MASON_EXIT_REPEAT:-${S99_RUNS:-20}}
 green=0
 out=$(mktemp /tmp/s99.XXXXXX)
 trap 'rm -f "$out"' EXIT
