@@ -771,6 +771,20 @@ const STEPS: &[&str] = &[
          at_ms   INTEGER NOT NULL
      );
      CREATE INDEX target_times_key ON target_times(project, suite, target, at_ms);",
+    // (#677) a task's own greens per suite and definition hash, kept across rounds so a later
+    // round can reuse one when nothing since touches the suite (#677). Evidence is by tree
+    // and loses which task, round and definition it came from.
+    "CREATE TABLE task_greens (
+         task     INTEGER NOT NULL,
+         suite    TEXT NOT NULL,
+         def_hash TEXT NOT NULL,
+         tree     TEXT NOT NULL,
+         step_run INTEGER NOT NULL,
+         executed INTEGER NOT NULL,
+         passed   INTEGER NOT NULL,
+         at       INTEGER NOT NULL,
+         PRIMARY KEY (task, suite, tree)
+     );",
     // What each cargo test executable was last built from when it ran (s707): the input key of
     // a green or red run. A green with the same key is not run again. Additive.
     "CREATE TABLE target_runs (

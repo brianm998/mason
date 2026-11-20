@@ -737,6 +737,7 @@ fn has_mason(dir: &Path, r: &str) -> bool {
     Command::new("git")
         .args(["cat-file", "-e", &format!("{r}:.mason/mason.toml")])
         .current_dir(dir)
+        .stderr(std::process::Stdio::null())
         .status()
         .unwrap()
         .success()

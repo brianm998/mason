@@ -1247,3 +1247,20 @@ fn the_latest_baseline_of_a_suite_is_the_newest_by_time() {
         Some(("new".to_string(), vec![]))
     );
 }
+
+#[test]
+fn task_greens_are_kept_per_task_suite_and_definition_newest_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = Store::open(dir.path().join("s.db")).unwrap();
+    s.put_task_green(1, "a", "h1", "t1", 10, 4, 4, 100).unwrap();
+    s.put_task_green(1, "a", "h1", "t2", 11, 5, 5, 200).unwrap();
+    s.put_task_green(1, "a", "h2", "t3", 12, 6, 6, 300).unwrap();
+    s.put_task_green(2, "a", "h1", "t4", 13, 7, 7, 400).unwrap();
+    let got = s.task_greens(1, "a", "h1").unwrap();
+    assert_eq!(
+        got,
+        vec![("t2".to_string(), 11, 5, 5), ("t1".to_string(), 10, 4, 4)]
+    );
+    assert!(s.task_greens(1, "b", "h1").unwrap().is_empty());
+    assert!(s.task_greens(3, "a", "h1").unwrap().is_empty());
+}
