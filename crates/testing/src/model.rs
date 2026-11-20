@@ -336,6 +336,30 @@ pub enum Selection {
 }
 
 impl ImpactMap {
+    /// The first of `paths` no glob names: the one that makes `select` run everything.
+    pub fn first_unmapped<'a>(&self, paths: &'a [String]) -> Option<&'a str> {
+        if self.entries.is_empty() {
+            return paths.first().map(String::as_str);
+        }
+        paths
+            .iter()
+            .find(|p| !self.entries.iter().any(|(g, _)| glob::matches(g, p)))
+            .map(String::as_str)
+    }
+
+    /// The files of `files` no glob names, grouped by top-level directory
+    /// (`.` for files at the root), in order.
+    pub fn unmapped_by_dir(&self, files: &[String]) -> Vec<(String, Vec<String>)> {
+        let mut out: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+        for f in files {
+            if self.first_unmapped(std::slice::from_ref(f)).is_some() {
+                let top = f.split_once('/').map_or(".", |(d, _)| d).to_string();
+                out.entry(top).or_default().push(f.clone());
+            }
+        }
+        out.into_iter().collect()
+    }
+
     /// The suites a change to `paths` needs, out of `available` (in order).
     /// No changed paths selects nothing; any unmapped path selects all.
     pub fn select(&self, paths: &[String], available: &[String]) -> Selection {

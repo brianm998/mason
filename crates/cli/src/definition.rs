@@ -42,6 +42,49 @@ fn missing_prompts(def: &mason_definition::Definition, dir: &Path) -> Vec<String
         .collect()
 }
 
+/// `git ls-files` in `root`; `None` when it is not a git checkout.
+fn tracked_files(root: &Path) -> Option<Vec<String>> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files"])
+        .output()
+        .ok()?;
+    out.status.success().then(|| {
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(String::from)
+            .collect()
+    })
+}
+
+/// Lines naming the tracked files no `[impact]` glob matches, by top-level directory.
+/// `.mason/mason.toml` stays unmapped on purpose (a definition change tests everything).
+fn unmapped_report(impact: &mason_testing::model::ImpactMap, files: &[String]) -> Vec<String> {
+    if impact.entries.is_empty() {
+        return vec![];
+    }
+    impact
+        .unmapped_by_dir(files)
+        .into_iter()
+        .map(|(dir, fs)| {
+            let fs: Vec<String> = fs
+                .into_iter()
+                .filter(|f| f != ".mason/mason.toml")
+                .collect();
+            (dir, fs)
+        })
+        .filter(|(_, fs)| !fs.is_empty())
+        .map(|(dir, fs)| {
+            format!(
+                "unmapped  {dir}: {} file(s) run every suite whole: {}",
+                fs.len(),
+                fs.join(", ")
+            )
+        })
+        .collect()
+}
+
 /// Validate a definition file: the language, then what this version can run,
 /// then a dry run of the default scenarios. Returns the exit status.
 ///
@@ -78,6 +121,16 @@ pub fn check(path: &Path, plugins: &[PluginType]) -> i32 {
     missing.iter().for_each(|m| println!("error  {m}"));
     if !language.is_empty() || !runnable.is_empty() || !missing.is_empty() {
         return 1;
+    }
+    // Tracked files at the checkout no impact glob names: each one runs every suite whole.
+    let root = path
+        .parent()
+        .and_then(Path::parent)
+        .unwrap_or(Path::new("."));
+    if let Some(files) = tracked_files(root) {
+        for line in unmapped_report(&def.testing.impact, &files) {
+            println!("{line}");
+        }
     }
     println!(
         "ok  {} steps, definition {}",
@@ -143,6 +196,85 @@ pub fn dry(path: &Path, scenarios: Option<&Path>) -> i32 {
 mod tests {
     use super::*;
     use serde_json::json;
+    fn real_definition() -> mason_definition::Definition {
+        let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.mason/mason.toml");
+        parse(&std::fs::read_to_string(p).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn the_paths_that_ran_everything_are_now_mapped() {
+        let def = real_definition();
+        let all: Vec<String> = [
+            "cargo-workspace",
+            "swift-clients",
+            "compose-clients",
+            "exit-scripts",
+        ]
+        .map(String::from)
+        .to_vec();
+        for f in [
+            ".github/workflows/release.yml",
+            "scripts/package/deb.sh",
+            "scripts/bundle-monitor.sh",
+            "scripts/tests/pick.sh",
+            "scripts/install.sh",
+            ".mason/smoke-tests.txt",
+            ".mason/landing.toml",
+            "packaging/homebrew/mason.rb",
+            ".gitignore",
+            "clients/mascot.toml",
+            "scripts/rustdoc-bootstrap.sh",
+            "scripts/run-exit-scripts.sh",
+            ".cargo/config.toml",
+            "scripts/spike/sccache-workspace.sh",
+        ] {
+            let sel = def.testing.impact.select(&[f.to_string()], &all);
+            assert!(
+                matches!(sel, mason_testing::model::Selection::Some(_)),
+                "{f}"
+            );
+        }
+        let sel = def
+            .testing
+            .impact
+            .select(&[".mason/mason.toml".to_string()], &all);
+        assert_eq!(sel, mason_testing::model::Selection::All);
+    }
+
+    #[test]
+    fn no_tracked_file_but_the_definition_is_unmapped() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Some(files) = tracked_files(&root) else {
+            return;
+        };
+        let r = unmapped_report(&real_definition().testing.impact, &files);
+        assert!(r.is_empty(), "{r:?}");
+    }
+
+    #[test]
+    fn unmapped_files_are_listed_by_top_level_directory() {
+        let impact = mason_testing::model::ImpactMap {
+            entries: vec![("src/**".into(), vec!["unit".into()])],
+        };
+        let files: Vec<String> = [
+            "src/a.rs",
+            "tools/x.sh",
+            "tools/y.sh",
+            "LICENSE",
+            ".mason/mason.toml",
+        ]
+        .map(String::from)
+        .to_vec();
+        let r = unmapped_report(&impact, &files);
+        assert_eq!(r.len(), 2, "{r:?}");
+        assert!(r
+            .iter()
+            .any(|l| l.contains("tools: 2") && l.contains("tools/x.sh")));
+        assert!(r
+            .iter()
+            .any(|l| l.contains(".: 1") && l.contains("LICENSE")));
+        assert!(!r.iter().any(|l| l.contains("src/a.rs")));
+    }
     #[test]
     fn a_missing_prompt_file_is_reported() {
         let text = "schema = 1\nstart = \"s\"\n[step.s]\ntype = \"agent\"\ncategory = \"exploring\"\nprompt = \"sec.md\"\nnext = \"l\"\n[step.l]\ntype = \"landing\"\ncategory = \"landing\"\n";

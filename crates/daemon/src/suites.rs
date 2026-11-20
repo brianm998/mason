@@ -43,7 +43,7 @@ use std::time::{Duration, Instant};
 pub struct Sel {
     pub suite: Suite,
     pub selected: bool,
-    pub why: &'static str,
+    pub why: String,
 }
 
 /// Paths the task's branch changes against its base.
@@ -95,6 +95,7 @@ pub fn plan(
 /// `paths` of `None` (unreadable) runs everything that is bound.
 pub fn plan_for(def: &Definition, step: &Step, paths: Option<Vec<String>>, when: When) -> Vec<Sel> {
     let t = &def.testing;
+    let paths_for_why = paths.clone();
     let selection = match paths {
         Some(paths) => t.impact.select(&paths, &step.suites),
         None => Selection::All,
@@ -104,15 +105,26 @@ pub fn plan_for(def: &Definition, step: &Step, paths: Option<Vec<String>>, when:
         When::Development => "its level is not bound to development",
         _ => "its level is not bound to the test step",
     };
+    let unmapped_why: String = match paths_for_why
+        .as_deref()
+        .and_then(|p| t.impact.first_unmapped(p))
+    {
+        Some(f) if matches!(selection, Selection::All) => {
+            format!("an unmapped path runs everything ({f})")
+        }
+        _ => "an unmapped path runs everything".to_string(),
+    };
     step.suites
         .iter()
         .filter_map(|n| t.suite(n))
         .map(|s| {
             let (selected, why) = match &selection {
-                _ if !bound.contains(&s.name) => (false, why_not),
-                Selection::All => (true, "an unmapped path runs everything"),
-                Selection::Some(v) if v.contains(&s.name) => (true, "the impact map selects it"),
-                Selection::Some(_) => (false, "the impact map does not select it"),
+                _ if !bound.contains(&s.name) => (false, why_not.to_string()),
+                Selection::All => (true, unmapped_why.clone()),
+                Selection::Some(v) if v.contains(&s.name) => {
+                    (true, "the impact map selects it".to_string())
+                }
+                Selection::Some(_) => (false, "the impact map does not select it".to_string()),
             };
             Sel {
                 suite: s.clone(),
