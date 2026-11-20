@@ -126,7 +126,42 @@ pub fn warnings(def: &Definition, caps: &Capabilities) -> Vec<Problem> {
         look(format!("step.{}", s.name), &s.model, &s.effort);
     }
     unlisted_suites(def, &mut w);
+    dead_empty_impact_entries(def, &mut w);
     w
+}
+
+/// A plain `= []` impact entry that a broader non-empty entry always covers
+/// changes nothing under the union.
+fn dead_empty_impact_entries(def: &Definition, w: &mut Vec<Problem>) {
+    use mason_testing::model::glob_specificity;
+    let imp = &def.testing.impact;
+    for (g, suites) in imp.entries.iter().filter(|(_, s)| s.is_empty()) {
+        // A path the empty entry names: wildcards become a literal.
+        let sample: Vec<String> = g
+            .trim_start_matches("./")
+            .split('/')
+            .map(|s| {
+                if s == "**" || s.contains(['*', '?']) {
+                    "x".into()
+                } else {
+                    s.to_string()
+                }
+            })
+            .collect();
+        let sample = sample.join("/");
+        let covered = imp.entries.iter().any(|(h, hs)| {
+            !hs.is_empty()
+                && h != g
+                && glob_specificity(h) < glob_specificity(g)
+                && mason_testing::glob::matches(h, &sample)
+        });
+        if covered {
+            w.push(Problem::new(
+                format!("impact.{g}"),
+                "has no effect under the union; did you mean `{ suites = [], override = true }`?",
+            ));
+        }
+    }
 }
 
 /// Suites bound to `test_step` that no test step lists: the step then runs the
@@ -266,7 +301,7 @@ fn validate_testing(def: &Definition, p: &mut Vec<Problem>) {
             ));
         }
     }
-    for (glob, suites) in &t.impact.entries {
+    for (glob, suites) in t.impact.entries.iter().chain(&t.impact.overrides) {
         for s in suites {
             if !suite_names.contains(s.as_str()) {
                 p.push(Problem::new(
