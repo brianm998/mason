@@ -38,7 +38,11 @@ SERIAL_FILE = ".mason/serial-tests.txt"
 
 
 def split_cargo(argv):
-    """(cargo flags, name filters, libtest args) from the words after our own `--`."""
+    """(cargo flags, name filters, libtest args) from the words after our own `--`.
+
+    A caller's `--no-run` (the build line is `{project_test} --no-run`) is dropped: the runner adds
+    its own, and cargo rejects the flag twice.
+    """
     flags, filters, libtest = [], [], []
     if "test" not in argv:
         raise SystemExit("test-parallel: the command must be a `cargo test` command")
@@ -54,7 +58,9 @@ def split_cargo(argv):
             flags += [a, argv[i + 1]]
             i += 2
             continue
-        if a.startswith("-"):
+        if a == "--no-run":
+            pass  # list_executables adds its own
+        elif a.startswith("-"):
             flags.append(a)
         else:
             filters.append(a)
