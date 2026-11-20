@@ -14,6 +14,12 @@
 //! again, and a task already in the base is reported as landed, so a crash at
 //! any phase resumes by doing the same steps over.
 
+/// Words the batch's note carries for a run that was killed at its limit (s702): `mason report`
+/// counts batches by them.
+pub const TIMED_OUT_ONCE: &str = "timed out once";
+/// The second kill of the same batch.
+pub const TIMED_OUT_TWICE: &str = "timed out twice";
+
 use crate::daemon::{now_ms, Daemon};
 use crate::jobs::Ctx;
 use mason_adapter_api::service::{
@@ -1704,7 +1710,18 @@ impl Runner {
                     "red",
                     &landed,
                     &parked,
-                    &vr.failed.iter().cloned().collect::<Vec<_>>().join(", "),
+                    &format!(
+                        "{}{}",
+                        vr.failed.iter().cloned().collect::<Vec<_>>().join(", "),
+                        if vr.failing.is_empty()
+                            && !vr.unfinished.is_empty()
+                            && vr.failed.iter().all(|n| vr.unfinished.contains_key(n))
+                        {
+                            format!(" ({TIMED_OUT_ONCE})")
+                        } else {
+                            String::new()
+                        }
+                    ),
                     &asm.head,
                     false,
                 );
@@ -1824,6 +1841,13 @@ impl Runner {
                         }
                     }
                 }
+                // A run killed at its time limit, with no failing test named, is not a red to
+                // search (s702): load can slow it past any limit and a subset would only finish
+                // sooner. It is rerun once whole, and held when it times out again.
+                let mut timeout_only = !floor
+                    && vr.failing.is_empty()
+                    && !vr.unfinished.is_empty()
+                    && vr.failed.iter().all(|n| vr.unfinished.contains_key(n));
                 // A lint red (or a red only in the fmt/SPDX gate tests) names its files:
                 // the tasks whose diff touches one are sent back, the rest stay (s691).
                 if let Some(files) = self.lint_blame_files(
@@ -1849,6 +1873,138 @@ impl Runner {
                         break;
                     }
                     match rung {
+                        Rung::RerunFailed if timeout_only => {
+                            let again: Vec<String> = vr.failed.iter().cloned().collect();
+                            let first = vr.unfinished.clone();
+                            self.say(&format!(
+                                "batch #{batch_id} timed out in {}: rerunning it whole once",
+                                again.join(", ")
+                            ));
+                            // The rerun takes the `test-suite` slot again, and taking a slot
+                            // waits out the cpu and thermal gates: it starts when the load has
+                            // dropped.
+                            let r2 = self.verify(
+                                &def,
+                                &again,
+                                &int_wt,
+                                &asm.base_tip,
+                                &log_dir,
+                                &format!("b{batch_id}-r{rounds}x"),
+                            );
+                            if let Some(e) = self.take_service_error() {
+                                break 'outer Err(e);
+                            }
+                            if r2.green {
+                                note = format!(
+                                    "{} {TIMED_OUT_ONCE} and was green on a rerun",
+                                    again.join(", ")
+                                );
+                                vr.green = true;
+                                resolved = true;
+                                break;
+                            }
+                            let timed_out_again = r2.failing.is_empty()
+                                && !r2.unfinished.is_empty()
+                                && r2.failed.iter().all(|n| r2.unfinished.contains_key(n));
+                            if !timed_out_again {
+                                // A different red: the ladder goes on with that one.
+                                vr.failed = r2.failed;
+                                vr.failing = r2.failing;
+                                vr.unfinished = r2.unfinished;
+                                vr.notes = r2.notes;
+                                timeout_only = false;
+                                continue;
+                            }
+                            // The tests still running at both kills.
+                            let mut same: std::collections::BTreeMap<String, Vec<String>> =
+                                Default::default();
+                            for (suite, now) in &r2.unfinished {
+                                let both: Vec<String> = first
+                                    .get(suite)
+                                    .into_iter()
+                                    .flatten()
+                                    .filter(|t| now.contains(t))
+                                    .cloned()
+                                    .collect();
+                                if both.is_empty()
+                                    || def.testing.suite(suite).is_none_or(|s| s.rerun.is_none())
+                                {
+                                    same.clear();
+                                    break;
+                                }
+                                same.insert(suite.clone(), both);
+                            }
+                            if same.is_empty() {
+                                let running = r2
+                                    .unfinished
+                                    .iter()
+                                    .map(|(s, t)| {
+                                        if t.is_empty() {
+                                            format!("{s}: none read")
+                                        } else {
+                                            format!("{s}: {}", t.join(", "))
+                                        }
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("; ");
+                                let why = format!(
+                                    "batch #{batch_id} {TIMED_OUT_TWICE} in {}; no test was still running at both kills, so nobody is blamed and the batch is held. Still running at the second kill: {running}",
+                                    again.join(", ")
+                                );
+                                self.d.landing.raise(
+                                    self.pid,
+                                    "timeout",
+                                    "landing",
+                                    &format!("{}: {why}", self.project().id),
+                                );
+                                self.d.poke();
+                                break 'outer Err(why);
+                            }
+                            if active.len() == 1 {
+                                let id = active[0].id;
+                                self.park(&mut parked, &mut active, &[id], batch_id, &vr);
+                                continue 'outer;
+                            }
+                            let n: usize = same.values().map(Vec::len).sum();
+                            self.say(&format!(
+                                "batch #{batch_id} {TIMED_OUT_TWICE} with the same {n} test(s) running: splitting it on those alone"
+                            ));
+                            let (found, runs) = self.pin_red(
+                                &def,
+                                &batch,
+                                &lock,
+                                &active,
+                                &int_wt,
+                                &log_dir,
+                                batch_id,
+                                rounds,
+                                None,
+                                &vr.failed.iter().cloned().collect::<Vec<_>>(),
+                                Some(&same),
+                            );
+                            if let Some(e) = self.take_service_error() {
+                                break 'outer Err(e);
+                            }
+                            match self.settle_pin(
+                                found,
+                                &runs,
+                                &mut parked,
+                                &mut active,
+                                batch_id,
+                                &vr,
+                            ) {
+                                Settled::Parked(n) => {
+                                    split_note = format!("{n} ({TIMED_OUT_TWICE}; bisected on the hanging test(s) alone)");
+                                    note = split_note.clone();
+                                    continue 'outer;
+                                }
+                                Settled::Base(why) => {
+                                    self.raise_base(&why);
+                                    break 'outer Err(why);
+                                }
+                            }
+                        }
+                        Rung::BlameByImpact | Rung::Bisect if timeout_only => {}
                         Rung::RerunFailed => {
                             let again: Vec<String> = vr.failed.iter().cloned().collect();
                             // A red floor is rerun as the floor, a build, not as the whole
@@ -2540,6 +2696,7 @@ impl Runner {
             failed: BTreeSet::new(),
             notes: vec![],
             failing: Default::default(),
+            unfinished: Default::default(),
         };
         // Names that are not suites (CI job names) have nothing to run locally.
         let local: Vec<String> = suites
@@ -2550,8 +2707,12 @@ impl Runner {
             })
             .cloned()
             .collect();
+        let (local, stopped) = self.without_stopped(def, local);
+        let notes = stopped;
         if local.is_empty() {
-            green()
+            let mut g = green();
+            g.notes = notes;
+            g
         } else {
             let _lease = match self.hold(def, suites_needs(def, &local), true) {
                 Ok(l) => l,
@@ -2562,12 +2723,13 @@ impl Runner {
                         failed: BTreeSet::new(),
                         notes: vec![e],
                         failing: Default::default(),
+                        unfinished: Default::default(),
                     };
                 }
             };
             let n = self.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let stop = std::sync::atomic::AtomicBool::new(false);
-            std::thread::scope(|sc| {
+            let mut r = std::thread::scope(|sc| {
                 sc.spawn(|| self.mirror(&stop));
                 let r = crate::suites::run_over(
                     &self.d,
@@ -2584,8 +2746,35 @@ impl Runner {
                 );
                 stop.store(true, std::sync::atomic::Ordering::SeqCst);
                 r
-            })
+            });
+            r.notes.splice(0..0, notes);
+            r
         }
+    }
+
+    /// Split off the suites the owner has already stopped for the whole batch (every member
+    /// skipped them, a member is forced, or Land now): they run nothing, so they must not
+    /// queue for a slot. Returns the rest and a note per stopped suite, as `run_over` writes.
+    fn without_stopped(
+        &self,
+        def: &mason_definition::Definition,
+        names: Vec<String>,
+    ) -> (Vec<String>, Vec<String>) {
+        let members = self.members(def);
+        let mut rest = vec![];
+        let mut notes = vec![];
+        for name in names {
+            match members.stop_running(&self.d, &name) {
+                Some(why) => {
+                    if members.land_now(&self.d).is_some() {
+                        members.note_stopped(&format!("suite:{name}"));
+                    }
+                    notes.push(format!("{name}: {why}"));
+                }
+                None => rest.push(name),
+            }
+        }
+        (rest, notes)
     }
 
     /// Run only the failing tests of each suite (#682): what a rerun and a bisect need when
@@ -2604,6 +2793,14 @@ impl Runner {
         serial: bool,
     ) -> crate::suites::OverRun {
         let names: Vec<String> = failing.keys().cloned().collect();
+        let (names, stopped) = self.without_stopped(def, names);
+        if names.is_empty() {
+            return crate::suites::OverRun {
+                green: true,
+                notes: stopped,
+                ..Default::default()
+            };
+        }
         let _lease = match self.hold(def, suites_needs(def, &names), true) {
             Ok(l) => l,
             Err(e) => {
@@ -2613,6 +2810,7 @@ impl Runner {
                     failed: BTreeSet::new(),
                     notes: vec![e],
                     failing: Default::default(),
+                    unfinished: Default::default(),
                 };
             }
         };
@@ -2693,6 +2891,7 @@ impl Runner {
             failed: BTreeSet::new(),
             notes: vec![],
             failing: Default::default(),
+            unfinished: Default::default(),
         };
         // Force lands past verification, CI included.
         if self.kind == "force" || self.forced() {
@@ -2707,6 +2906,7 @@ impl Runner {
                 failed: l.failed,
                 notes: l.notes,
                 failing: Default::default(),
+                unfinished: Default::default(),
             };
         }
         let mut r = self.run_local(def, suites, wt, base, log_dir, prefix);
@@ -2808,6 +3008,7 @@ impl Runner {
             failed: BTreeSet::new(),
             notes: vec![],
             failing: Default::default(),
+            unfinished: Default::default(),
         };
         let paths: Vec<String> =
             match git::run(wt, &["diff", "--name-only", &format!("{base}..HEAD")]) {
@@ -2964,6 +3165,7 @@ impl Runner {
             failed: BTreeSet::new(),
             notes: vec![],
             failing: Default::default(),
+            unfinished: Default::default(),
         };
         let Some(tier) = self.cfg.tier("lint") else {
             return out;
@@ -3064,6 +3266,7 @@ impl Runner {
             failed: BTreeSet::new(),
             notes: vec![],
             failing: Default::default(),
+            unfinished: Default::default(),
         };
         let paths: Vec<String> =
             match git::run(wt, &["diff", "--name-only", &format!("{base}..HEAD")]) {
@@ -3076,6 +3279,7 @@ impl Runner {
                         failed: BTreeSet::new(),
                         notes: vec![why],
                         failing: Default::default(),
+                        unfinished: Default::default(),
                     };
                 }
             };
@@ -3123,6 +3327,7 @@ impl Runner {
             failed: BTreeSet::new(),
             notes: vec![],
             failing: Default::default(),
+            unfinished: Default::default(),
         };
         let tree = git::run(wt, &["rev-parse", "HEAD^{tree}"])
             .map(|s| s.trim().to_string())

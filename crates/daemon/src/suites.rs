@@ -332,6 +332,8 @@ struct Ran {
     /// After a lost host, the finished executables of the lost run were kept and only the rest
     /// ran again (#621): what was reused, for the step's note. Its time is not the suite's either.
     resumed: Option<String>,
+    /// It ran on GitHub Actions, not here (#697): where, for the step's note.
+    ran_on: Option<String>,
 }
 
 /// Record how long a suite's build or run took, when it finished on its own (s385): the
@@ -400,6 +402,7 @@ type Check = Arc<dyn Fn() -> Stop + Send + Sync>;
 #[allow(clippy::too_many_arguments)]
 fn run_hosted(
     d: &Arc<Daemon>,
+    project: &str,
     id: &str,
     cmd: &str,
     cwd: &Path,
@@ -412,7 +415,7 @@ fn run_hosted(
     env: Vec<(String, String)>,
 ) -> Result<Ran, String> {
     run_hosted_resuming(
-        d, id, cmd, cwd, limit, log_dir, check, run, watch, th, env, None,
+        d, project, id, cmd, cwd, limit, log_dir, check, run, watch, th, env, None,
     )
 }
 
@@ -422,6 +425,7 @@ fn run_hosted(
 #[allow(clippy::too_many_arguments)]
 fn run_hosted_resuming(
     d: &Arc<Daemon>,
+    project: &str,
     id: &str,
     cmd: &str,
     cwd: &Path,
@@ -435,6 +439,17 @@ fn run_hosted_resuming(
     resume: Option<&str>,
 ) -> Result<Ran, String> {
     use crate::hostloss as hl;
+    // Where the run goes (#697). `Local` for every run until #698 decides; a remote run is
+    // returned as the same `Ran`, so it is judged by the code below this call, not by it.
+    if let crate::remote::Executor::GitHub { runs_on } =
+        crate::remote::executor_for(d, project, crate::remote::Kind::Suite)
+    {
+        if let Some(ran) = run_remote(
+            d, project, id, cmd, cwd, limit, log_dir, &check, watch, &env, &runs_on,
+        )? {
+            return Ok(ran);
+        }
+    }
     let hosts = d.cfg.hosts_dir();
     let again_id = hl::rerun_id(id);
     let mut first = None;
@@ -498,6 +513,70 @@ fn run_hosted_resuming(
                 });
             }
         }
+    }
+}
+
+/// A suite command run on GitHub Actions. `Ok(None)`: it could not go remote and the project's
+/// `fallback` is `local`, so the caller runs it here. An outage or a missing runner is an `Err`
+/// that [`crate::remote::environmental`] recognizes.
+#[allow(clippy::too_many_arguments)]
+fn run_remote(
+    d: &Arc<Daemon>,
+    project: &str,
+    id: &str,
+    cmd: &str,
+    cwd: &Path,
+    limit: Duration,
+    log_dir: &Path,
+    check: &Check,
+    watch: Option<&Suite>,
+    env: &[(String, String)],
+    runs_on: &str,
+) -> Result<Option<Ran>, String> {
+    use crate::remote as rm;
+    let Some(site) = rm::site_for(d, project, cwd) else {
+        return Err(rm::env_err("the project has no [remote] section"));
+    };
+    let spec = rm::spec_for(project, id, watch, cmd, limit, env, runs_on, "");
+    let stop = || match check() {
+        Stop::No => None,
+        Stop::Skipped => Some(rm::StopWhy::Skipped),
+        Stop::Gone => Some(rm::StopWhy::Gone),
+    };
+    Ok(match rm::run_or_fallback(&site, &spec, log_dir, &stop)? {
+        None => None,
+        Some(rm::Outcome::Stopped(why)) => Some(Ran {
+            code: -1,
+            signal: 9,
+            output: String::new(),
+            stop: match why {
+                rm::StopWhy::Skipped => Stop::Skipped,
+                rm::StopWhy::Gone => Stop::Gone,
+            },
+            timed_out: false,
+            stalled: None,
+            ran_ms: None,
+            narrowed: false,
+            resumed: None,
+            ran_on: None,
+        }),
+        Some(rm::Outcome::Done(f)) => Some(remote_ran(f)),
+    })
+}
+
+/// A finished remote run as the `Ran` a step host would have given.
+fn remote_ran(f: crate::remote::Finished) -> Ran {
+    Ran {
+        code: f.code,
+        signal: f.signal,
+        output: f.output,
+        stop: Stop::No,
+        timed_out: f.timed_out,
+        stalled: None,
+        ran_ms: f.ran_ms,
+        narrowed: false,
+        resumed: None,
+        ran_on: Some(f.ran_on),
     }
 }
 
@@ -660,6 +739,7 @@ fn run_hosted_once(
         },
         narrowed: false,
         resumed: None,
+        ran_on: None,
     })
 }
 
@@ -773,7 +853,7 @@ fn judge_ran_with(suite: &Suite, ran: &Ran, cwd: &Path, plugin: Option<&PluginPa
             let verdict = if ran.timed_out {
                 Verdict::Red {
                     failures: results.failed_names(),
-                    why: "it ran out of time".into(),
+                    why: RAN_OUT_OF_TIME.into(),
                 }
             } else {
                 judge(&results, suite.min_tests, exit)
@@ -1524,6 +1604,7 @@ fn run_on_base(
         }
         let ran = run_hosted(
             &who.d,
+            &who.project,
             &id,
             &crate::jobs::pty_wrap(suite.pty, &lifecycle::with_device(cmd, dev_id(dev))),
             &wt,
@@ -1748,6 +1829,7 @@ fn run_suite(
         };
         let ran = match run_hosted_resuming(
             d,
+            &who.project,
             &id,
             &crate::jobs::pty_wrap(
                 suite.pty,
@@ -1767,6 +1849,21 @@ fn run_suite(
             resume.as_deref(),
         ) {
             Ok(r) => r,
+            Err(e) if crate::remote::environmental(&e).is_some() => {
+                // No runner, or GitHub is down: a wait charged to no task, as a missing device is.
+                env_down(who, def, suite, cwd, dev.as_ref());
+                environmental(
+                    crate::remote::environmental(&e)
+                        .unwrap_or_default()
+                        .to_string(),
+                    String::new(),
+                    on_wait,
+                );
+                waiting = true;
+                attempt += 1;
+                std::thread::sleep(d.cfg.env_retry);
+                continue;
+            }
             Err(e) => {
                 env_down(who, def, suite, cwd, dev.as_ref());
                 return SuiteRun::Product {
@@ -2082,6 +2179,12 @@ fn run_suite(
                             };
                         }
                         let mut extra = format!("`{}` is red ({why}).", suite.name);
+                        if why == RAN_OUT_OF_TIME && tests.is_empty() {
+                            let still = still_running(&j.output);
+                            if !still.is_empty() {
+                                extra.push_str(&format!("\n{STILL_RUNNING}{}.", still.join(", ")));
+                            }
+                        }
                         if !tests.is_empty() {
                             extra.push_str(&format!(" Failing: {}.", tests.join(", ")));
                         }
@@ -2124,7 +2227,13 @@ fn run_suite(
             on_wait(None);
         }
         // Say what a lost host's run left reusable (#621).
-        let result = match (result, &ran.resumed) {
+        let said = [ran.resumed.clone(), ran.ran_on.clone()]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("; ");
+        let said = (!said.is_empty()).then_some(said);
+        let result = match (result, &said) {
             (
                 SuiteRun::Done {
                     outcome,
@@ -2267,6 +2376,7 @@ fn run_tests_alone(
     }
     let ran = run_hosted(
         &who.d,
+        &who.project,
         id,
         &cmd,
         cwd,
@@ -2281,6 +2391,10 @@ fn run_tests_alone(
     .ok()?;
     if ran.stop != Stop::No {
         return None;
+    }
+    // A test that hangs is still not green (s702): it stays on the list.
+    if ran.timed_out {
+        return Some(tests.to_vec());
     }
     let j = judge_ran_with(suite, &ran, cwd, who.plugin_parser(suite).as_deref());
     if j.results.executed() == 0 {
@@ -2343,6 +2457,7 @@ pub fn run_alone(
         failed: Default::default(),
         notes: vec![],
         failing: Default::default(),
+        unfinished: Default::default(),
     };
     for (name, tests) in failing {
         let red = |out: &mut OverRun, note: String| {
@@ -2757,6 +2872,7 @@ fn run_build(who: &Who, suite: &Suite, build: &str, n: usize, cwd: &Path) -> Bui
     }
     let ran = match run_hosted(
         &who.d,
+        &who.project,
         &id,
         build,
         cwd,
@@ -3470,6 +3586,7 @@ fn run_new_tests_at_base(
         }
         let ran = run_hosted(
             &c.d,
+            &who.project,
             &format!("{}-n-{}", who.id_prefix, suite.name),
             &crate::jobs::pty_wrap(
                 suite.pty,
@@ -4422,7 +4539,56 @@ pub fn ledger_run(d: &Arc<Daemon>, task: TaskId) -> Result<String, String> {
     Ok(report.join("; "))
 }
 
+/// The `why` of a run that was stopped at its time limit (s702).
+pub const RAN_OUT_OF_TIME: &str = "it ran out of time";
+
+/// Starts the line of a timed-out run's feedback that names the tests still running at the kill.
+const STILL_RUNNING: &str = "Still running at the kill: ";
+
+/// The tests libtest reported as "has been running for over N seconds" that never printed a
+/// result: what a run killed at its limit was still doing (s702).
+pub fn still_running(output: &str) -> Vec<String> {
+    let mut slow: Vec<String> = vec![];
+    let mut done: std::collections::BTreeSet<&str> = Default::default();
+    for l in output.lines() {
+        let Some(rest) = l.trim().strip_prefix("test ") else {
+            continue;
+        };
+        if let Some((name, _)) = rest.split_once(" has been running for over ") {
+            if !slow.iter().any(|n| n == name) {
+                slow.push(name.to_string());
+            }
+        } else if let Some((name, _)) = rest.split_once(" ... ") {
+            done.insert(name);
+        }
+    }
+    slow.retain(|n| !done.contains(n.as_str()));
+    slow
+}
+
+/// The names a timed-out run's feedback lists as still running, when the feedback is a timeout's
+/// (`None` otherwise).
+fn timeout_names(feedback: &str) -> Option<Vec<String>> {
+    feedback
+        .lines()
+        .any(|l| l.starts_with('`') && l.contains(&format!("({RAN_OUT_OF_TIME})")))
+        .then(|| {
+            feedback
+                .lines()
+                .find_map(|l| l.strip_prefix(STILL_RUNNING))
+                .map(|r| {
+                    r.trim_end_matches('.')
+                        .split(", ")
+                        .filter(|n| !n.is_empty())
+                        .map(String::from)
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+}
+
 /// What running suites over a batch's integration branch said.
+#[derive(Default)]
 pub struct OverRun {
     pub green: bool,
     /// The suites that were red.
@@ -4432,6 +4598,10 @@ pub struct OverRun {
     /// The failing tests of each red suite that named some (a red that read none, a build
     /// failure or a timeout has no entry): what a rerun or a bisect can run alone (#682).
     pub failing: std::collections::BTreeMap<String, Vec<String>>,
+    /// The suites that were stopped at their time limit with no failing test named, each with
+    /// the tests still running at the kill (possibly none read): a timeout is not a red to
+    /// bisect (s702).
+    pub unfinished: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 /// Run the named suites in `wt` (a batch's integration worktree, at the tree
@@ -4483,6 +4653,7 @@ pub fn run_over(
         failed: Default::default(),
         notes: vec![],
         failing: Default::default(),
+        unfinished: Default::default(),
     };
     for name in suites {
         let Some(suite) = def.testing.suite(name) else {
@@ -4527,6 +4698,11 @@ pub fn run_over(
             } => {
                 out.green = false;
                 out.failed.insert(name.clone());
+                if failing.is_empty() {
+                    if let Some(names) = timeout_names(&feedback) {
+                        out.unfinished.insert(name.clone(), names);
+                    }
+                }
                 if !failing.is_empty() {
                     out.failing.insert(name.clone(), failing);
                 }
@@ -4561,6 +4737,7 @@ mod lossy_tests {
             ran_ms: None,
             narrowed: false,
             resumed: None,
+            ran_on: None,
         };
         (ran, dir)
     }
@@ -4596,6 +4773,95 @@ mod lossy_tests {
             Verdict::Red { why, .. } => assert_eq!(why, "stalled: no output or CPU for 30 min"),
             v => panic!("{v:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod remote_tests {
+    use super::*;
+    use mason_testing::ParserKind;
+
+    /// What a local step host gives for a command that printed `output` and exited `code`.
+    fn local(output: &str, code: i32) -> Ran {
+        Ran {
+            code,
+            signal: 0,
+            output: output.to_string(),
+            stop: Stop::No,
+            timed_out: false,
+            stalled: None,
+            ran_ms: Some(12_000),
+            narrowed: false,
+            resumed: None,
+            ran_on: None,
+        }
+    }
+
+    fn remote(output: &str, code: i32) -> Ran {
+        remote_ran(crate::remote::Finished {
+            code,
+            signal: 0,
+            output: output.to_string(),
+            timed_out: false,
+            stop: None,
+            ran_ms: Some(12_000),
+            ran_on: "ran on GitHub (ubuntu-latest), run u, picked up after 6 s".into(),
+        })
+    }
+
+    fn same(a: &Ran, b: &Ran) -> bool {
+        (
+            a.code,
+            a.signal,
+            &a.output,
+            a.stop,
+            a.timed_out,
+            &a.stalled,
+            a.ran_ms,
+            a.narrowed,
+        ) == (
+            b.code,
+            b.signal,
+            &b.output,
+            b.stop,
+            b.timed_out,
+            &b.stalled,
+            b.ran_ms,
+            b.narrowed,
+        )
+    }
+
+    #[test]
+    fn a_remote_run_is_the_same_ran_and_is_judged_the_same_as_a_local_one() {
+        let suite = Suite::new("t", "x", ParserKind::Tap);
+        let dir = tempfile::tempdir().unwrap();
+        let cases = [
+            ("ok 1 - a\nok 2 - b\n", 0),
+            ("ok 1 - a\nnot ok 2 - b\n", 1),
+            ("nothing ran here\n", 0),
+        ];
+        let mut kinds = vec![];
+        for (out, code) in cases {
+            let (l, r) = (local(out, code), remote(out, code));
+            assert!(same(&l, &r));
+            assert!(r.ran_on.as_deref().is_some_and(|w| w.contains("GitHub")));
+            let (jl, jr) = (
+                judge_ran(&suite, &l, dir.path()),
+                judge_ran(&suite, &r, dir.path()),
+            );
+            assert_eq!(jl.verdict, jr.verdict);
+            assert_eq!(jl.results.failed_names(), jr.results.failed_names());
+            assert_eq!(jl.results.executed(), jr.results.executed());
+            kinds.push(match jr.verdict {
+                Verdict::Green => "green",
+                Verdict::Red { .. } => "red",
+                Verdict::Vacuous { .. } => "vacuous",
+            });
+            if code == 1 {
+                assert_eq!(jr.results.failed_names().len(), 1);
+            }
+        }
+        assert_eq!(kinds, ["green", "red", "vacuous"]);
     }
 }
 
@@ -4958,5 +5224,31 @@ mod alone_tests {
             rerun_command(d.testing.suite("cw").unwrap(), &t, true),
             "run 'a::b' 'c::d'"
         );
+    }
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+
+    #[test]
+    fn the_tests_still_running_at_the_kill_are_the_slow_ones_with_no_result() {
+        let out = "test a ... ok\ntest b has been running for over 60 seconds\ntest c has been running for over 60 seconds\ntest b has been running for over 120 seconds\ntest c ... ok <61.2s>\n";
+        assert_eq!(still_running(out), vec!["b".to_string()]);
+        assert!(still_running("1..1\nok 1 - x\n").is_empty());
+    }
+
+    #[test]
+    fn a_timeout_feedback_gives_its_names_and_another_red_gives_none() {
+        let f = format!(
+            "`s` is red ({RAN_OUT_OF_TIME}).\n{STILL_RUNNING}a::b, c.\nLast output of `s`:\n"
+        );
+        assert_eq!(
+            timeout_names(&f),
+            Some(vec!["a::b".to_string(), "c".to_string()])
+        );
+        let none = format!("`s` is red ({RAN_OUT_OF_TIME}).\nLast output of `s`:\n");
+        assert_eq!(timeout_names(&none), Some(vec![]));
+        assert_eq!(timeout_names("`s` is red (3 tests failed).\n"), None);
     }
 }

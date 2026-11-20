@@ -10,6 +10,7 @@
 # Scripts that need a real service, person or device (`sNN-real.sh`, `sNN-manual.sh`) are skipped,
 # as scripts/run-exit-scripts.sh skips them.
 set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
 cd "$(git rev-parse --show-toplevel)"
 base_ref=${MASON_BASE:-origin/develop}
 if ! base=$(git merge-base "$base_ref" HEAD 2>/dev/null); then
@@ -26,7 +27,9 @@ trap 'rm -f "$cpu" "$log"' EXIT
 fail=0; n=0
 # Scripts the change adds or edits, plus those whose text names a changed path, crate or test target
 # (scripts/select-exit-scripts.sh, s669).
-for s in $(bash scripts/select-exit-scripts.sh "$base"); do
+# The selector is read from this helper'"'"'s own directory, so a helper run inside another repository still finds it (s716).
+selected=$(bash "$here/select-exit-scripts.sh" "$base") || { echo "FAIL select-exit-scripts"; exit 1; }
+for s in $selected; do
   case "$s" in
     *-real.sh|*-manual.sh) continue ;;
   esac

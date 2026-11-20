@@ -139,7 +139,7 @@ mason: command-line client for the MASON pipeline
   mason targets list [--json]         simulators, emulators and phones, and who has each
   mason resources limit <resource> <units>   change a limit while things run (llm:claude, compile, ...)
   mason resources gate <name> <value>   change a compile gate while masond runs, kept across restarts (compile_cpu_max,
-                                      compile_settle_s, compile_jobs, compile_idle_kill_s, syspolicyd_max_pct, thermal_min_pct, stall_ms,
+                                      compile_settle_s, compile_jobs, compile_idle_kill_s, syspolicyd_max_pct, thermal_min_pct, thermal_max_c, stall_ms,
                                       memory.floor_mb, disk.floor_gb)
   mason resources gate <name> --reset   go back to resources.toml, or the default
   mason hook bash [--needs compile]   optional Claude Code PreToolUse hook: builds go through the queue
@@ -3673,6 +3673,13 @@ fn print_report(r: &serde_json::Value) {
         .flatten()
     {
         println!("  {v:>4}  {k}");
+    }
+    let b = &r["batches"];
+    if b["total"].as_u64().is_some_and(|n| n > 0) {
+        println!(
+            "landing batches: {}  landed {}  red {}  timed out {} (twice {})",
+            b["total"], b["landed"], b["red"], b["timed_out"], b["timed_out_twice"]
+        );
     }
     println!(
         "host losses {}  flaky sightings {}  open debts {}",

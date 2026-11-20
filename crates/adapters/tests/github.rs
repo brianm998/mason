@@ -909,3 +909,92 @@ fn jobs_are_counted_by_where_they_are() {
     );
     assert_eq!(c.running_names, vec!["b".to_string()]);
 }
+
+// ---- remote runs (#697) ----------------------------------------------------------------------
+
+fn inline_gh(script: &str) -> Gh {
+    let d = tempfile::tempdir().unwrap();
+    let tok = d.path().join("token");
+    std::fs::write(&tok, "ghp_recorded_test_token\n").unwrap();
+    let http = Arc::new(Recorded::from_json(script).unwrap());
+    let gh = GitHub::new(
+        http.clone(),
+        "https://api.github.com",
+        "o/r",
+        TokenRef::File(tok),
+    );
+    Gh { gh, http, _d: d }
+}
+
+#[test]
+fn a_remote_run_is_found_by_sha_polled_with_its_etag_and_cancelled_only_on_masons_refs() {
+    let g = inline_gh(
+        r#"[
+        {"method": "GET", "url": "/actions/runs?head_sha=abc", "response": {"status": 200,
+          "body": {"workflow_runs": [{"id": 7, "status": "queued", "head_branch": "mason/run/p/x",
+                   "html_url": "https://github.com/o/r/actions/runs/7", "created_at": "2026-11-20T10:00:00Z"}]}}},
+        {"method": "GET", "url": "/actions/runs/7", "response": {"status": 304}},
+        {"method": "POST", "url": "/actions/runs/7/cancel", "response": {"status": 202, "body": {}}}
+    ]"#,
+    );
+    let runs = g.gh.runs_for_sha("abc").unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].id, 7);
+    assert_eq!(runs[0].branch, "mason/run/p/x");
+    // 304: nothing changed.
+    assert!(g.gh.run_changed(7, Some("\"e\"")).unwrap().is_none());
+    let sent = g.http.requests();
+    assert!(sent[1]
+        .headers
+        .iter()
+        .any(|(k, v)| k == "If-None-Match" && v == "\"e\""));
+    // A run on the base branch (or a PR) is never cancelled; MASON's own refs are.
+    let other = mason_adapters::github::ActionRun {
+        id: 9,
+        branch: "main".into(),
+        ..Default::default()
+    };
+    assert_eq!(
+        g.gh.cancel_own_run(&other).unwrap_err().kind,
+        ErrorKind::Invalid
+    );
+    g.gh.cancel_own_run(&runs[0]).unwrap();
+    assert_eq!(
+        g.http.requests().len(),
+        3,
+        "the refused cancel sent nothing"
+    );
+}
+
+#[test]
+fn an_artifact_is_downloaded_through_the_signed_redirect_without_the_token() {
+    let g = inline_gh(
+        r#"[
+        {"method": "GET", "url": "/actions/runs/7/artifacts?name=mason-run", "response": {"status": 200,
+          "body": {"artifacts": [{"name": "mason-run", "expired": false,
+                   "archive_download_url": "https://api.github.com/repos/o/r/actions/artifacts/3/zip"}]}}},
+        {"method": "GET", "url": "/actions/artifacts/3/zip", "response": {"status": 302,
+          "headers": {"Location": "https://signed.example/blob"}}},
+        {"method": "GET", "url": "https://signed.example/blob", "response": {"status": 200, "body": "zipbytes"}}
+    ]"#,
+    );
+    let dest = g._d.path().join("a.zip");
+    assert!(g.gh.download_artifact(7, "mason-run", &dest).unwrap());
+    assert_eq!(std::fs::read_to_string(&dest).unwrap(), "zipbytes");
+    let sent = g.http.requests();
+    let has_auth = |i: usize| sent[i].headers.iter().any(|(k, _)| k == "Authorization");
+    assert!(
+        has_auth(0) && has_auth(1),
+        "GitHub's own addresses get the token"
+    );
+    assert!(!has_auth(2), "the signed address does not");
+    // No artifact of that name: false, not an error.
+    let g = inline_gh(
+        r#"[{"method": "GET", "url": "/artifacts?name=mason-run", "response": {"status": 200,
+            "body": {"artifacts": []}}}]"#,
+    );
+    assert!(!g
+        .gh
+        .download_artifact(7, "mason-run", &g._d.path().join("b.zip"))
+        .unwrap());
+}

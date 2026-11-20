@@ -386,6 +386,38 @@ pub fn cpu_line(cpu: &Value, max: u64) -> String {
     }
 }
 
+/// The thermal reading: speed limit, die temperature and power-limit state, and why work is
+/// held. `None` without a thermal gate or any reading.
+pub fn thermal_line(cpu: &Value) -> Option<String> {
+    let speed = cpu["thermal_speed_pct"].as_u64();
+    let die = cpu["thermal_die_c"].as_f64();
+    let limited = cpu["thermal_power_limited_ms"].as_u64();
+    if speed.is_none() && die.is_none() {
+        return None;
+    }
+    let mut parts = vec![];
+    if let Some(s) = speed {
+        parts.push(format!("speed limit {s}%"));
+    }
+    if let Some(c) = die {
+        let max = cpu["thermal_max_c"].as_u64().filter(|m| *m > 0);
+        parts.push(match max {
+            Some(m) => format!("die {c:.0} °C (holds at {m})"),
+            None => format!("die {c:.0} °C"),
+        });
+    }
+    match limited {
+        Some(0) => parts.push("not power limited".into()),
+        Some(ms) => parts.push(format!("power limited for {} s", ms / 1000)),
+        None => {}
+    }
+    let why = match cpu["thermal_why"].as_str() {
+        Some(w) => format!("; holding new compiles and tests: {w}"),
+        None => String::new(),
+    };
+    Some(format!("thermal {}{why}", parts.join(", ")))
+}
+
 /// One line of `mason cpu`: `#287  23.4%  Scheduler: ...`.
 pub fn share_line(s: &Value) -> String {
     let pm = s["permille"].as_u64().unwrap_or(0);
@@ -448,6 +480,9 @@ pub fn show(d: &Daemon, json_out: bool) -> Result<(), String> {
     }
     if let Some(max) = v["cpu"]["compile_max_pct"].as_u64() {
         println!("  {}", cpu_line(&v["cpu"], max));
+    }
+    if let Some(l) = thermal_line(&v["cpu"]) {
+        println!("  {l}");
     }
     if let Some(f) = v["memory"]["floor_mb"].as_u64() {
         println!("  memory floor {f} MB ({} MB free)", v["memory"]["free_mb"]);
