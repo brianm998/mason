@@ -2,6 +2,10 @@
 
 //! The MCP bridge, spoken to as an agent CLI would: JSON-RPC over stdio.
 
+#![cfg(unix)]
+// Unix-only: the contract and step-host sockets are AF_UNIX. Windows coverage comes with the
+// IPC port.
+
 use mason_adapter_api::conformance::valid_plan;
 use mason_adapter_api::contract::{ContractHandle, NoChecks};
 use mason_adapter_api::StepKind;

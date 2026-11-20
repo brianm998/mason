@@ -8,7 +8,6 @@
 -p mason-landing --test batch
 -p mason-testing --test parsers
 -p mason-pipeline --test init
-# Not `--test it`: since the daemon's tests were merged into that one executable it is 543 tests
-# and about 9 minutes, run by every task. A smoke line cannot name a module of it yet (#617);
-# until it can, this separate landing target (about 15 s) is the daemon's end-to-end smoke test.
--p mason-daemon --test landing_fast_tier
+# The daemon's tests are one 543-test executable (about 9 minutes), so only a module of it:
+# a filter after `--` runs just the tests whose names match (#617).
+-p mason-daemon --test it -- landing_floor::
