@@ -56,3 +56,43 @@ extension MonitorModel {
         }
     }
 }
+
+extension MonitorModel {
+    /// Why Land now for all cannot be used, or nil when it can: the same rule as Skip testing.
+    public var landDisabledReason: String? {
+        if let why = readOnlyReason { return "Read-only: \(why)" }
+        if !isOwner { return "Only the owner can land tasks now" }
+        return nil
+    }
+
+    /// The rows of a landing page that offer Land now.
+    public func landableRows(_ rows: [TaskRow]) -> [TaskRow] {
+        rows.filter { $0.allowedActions.contains("land_now") }
+    }
+
+    /// Land now for every row that allows it. Land now on one member lands its whole running batch,
+    /// so one `land_now_batch` goes out per running batch holding a landable row, and one
+    /// `land_now` for each landable task in none of those batches.
+    public func landAllNow(_ rows: [TaskRow]) {
+        if let why = landDisabledReason { landNotice = why; return }
+        let targets = landableRows(rows)
+        guard !targets.isEmpty else {
+            landNotice = "Nothing to land: no task here allows it"
+            return
+        }
+        let running = (landing?.batches ?? []).filter { $0.running && $0.allowedActions.contains("land_now") }
+        var sentBatches: [UInt64] = []
+        var singles: [UInt64] = []
+        for r in targets {
+            if let b = running.first(where: { $0.tasks.contains(r.id) }) {
+                if !sentBatches.contains(b.id) { sentBatches.append(b.id) }
+            } else {
+                singles.append(r.id)
+            }
+        }
+        for b in sentBatches { landNowBatch(b) }
+        for t in singles { landNow(t) }
+        let n = targets.count
+        landNotice = "Land now sent for \(n) task\(n == 1 ? "" : "s") (\(sentBatches.count) batch\(sentBatches.count == 1 ? "" : "es"))"
+    }
+}

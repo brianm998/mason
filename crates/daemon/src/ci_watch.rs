@@ -29,6 +29,10 @@ pub trait Source {
     fn runs(&self, branch: &str) -> Result<Vec<ActionsRun>, String>;
     fn jobs(&self, run: u64) -> Result<Vec<ActionsJob>, String>;
     fn log_tail(&self, job: u64) -> Option<String>;
+    /// The annotation messages of a job (where GitHub says it hit its time limit).
+    fn annotations(&self, _job: u64) -> Option<String> {
+        None
+    }
     /// A longer end of the job's log, for finding which tests failed.
     fn log_long(&self, job: u64) -> Option<String> {
         self.log_tail(job)
@@ -48,6 +52,38 @@ impl Source for GitHub {
     fn log_long(&self, job: u64) -> Option<String> {
         self.job_log_tail(job, 4000)
     }
+    fn annotations(&self, job: u64) -> Option<String> {
+        self.job_annotations(job)
+    }
+}
+
+/// What GitHub writes on a job it cut off at its `timeout-minutes`.
+pub const TIMEOUT_NOTE: &str = "exceeded the maximum execution time";
+
+/// The conclusion the rules should see for a job (decision 0660). GitHub reports a job that
+/// hit its time limit as `cancelled`, the same as a job of a run a newer push superseded. On
+/// the base branch (`cancel-in-progress` is off) a `cancelled` job inside a run that finished
+/// `failure` or `success` is not superseded; it is a timeout when its annotations say so.
+/// The annotation text is data from GitHub, not a measured duration.
+pub fn job_conclusion(
+    run_conclusion: Option<&str>,
+    job_conclusion: Option<&str>,
+    annotations: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    if job_conclusion == Some("cancelled")
+        && matches!(run_conclusion, Some("failure" | "success"))
+        && annotations().is_some_and(|a| a.contains(TIMEOUT_NOTE))
+    {
+        return Some("timed_out".into());
+    }
+    job_conclusion.map(String::from)
+}
+
+/// The `== scripts/exit/sNN.sh` lines of a log, with whatever timestamp starts each line.
+fn script_lines(log: &str) -> Vec<&str> {
+    log.lines()
+        .filter(|l| l.contains("== scripts/exit/"))
+        .collect()
 }
 
 /// How a red landing batch stands against the base branch's own CI (s174): each failed job
@@ -151,6 +187,10 @@ pub fn encode(s: &Saved) -> String {
                             "freeze": js.freeze,
                             "covered": js.covered, "landed_ms": opt(js.landed_ms),
                             "at_ms": js.last_red.at_ms,
+                            "timeouts": js.timeouts, "timeout_filed": js.timeout_filed,
+                            "t_run": js.last_timeout.run, "t_job": js.last_timeout.job,
+                            "t_sha": js.last_timeout.sha, "t_url": js.last_timeout.url,
+                            "t_at_ms": js.last_timeout.at_ms,
                         }),
                     )
                 })
@@ -209,6 +249,20 @@ pub fn decode(text: &str) -> Saved {
                     freeze: jv["freeze"].as_bool().unwrap_or(false),
                     covered: u(&jv["covered"]),
                     landed_ms: jv["landed_ms"].as_u64(),
+                    timeouts: jv["timeouts"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(u)
+                        .collect(),
+                    timeout_filed: jv["timeout_filed"].as_bool().unwrap_or(false),
+                    last_timeout: RunRef {
+                        run: u(&jv["t_run"]),
+                        job: u(&jv["t_job"]),
+                        sha: jv["t_sha"].as_str().unwrap_or_default().to_string(),
+                        url: jv["t_url"].as_str().unwrap_or_default().to_string(),
+                        at_ms: u(&jv["t_at_ms"]),
+                    },
                 },
             );
         }
@@ -340,12 +394,15 @@ pub fn pass(
     for id in rules::needs_jobs(&saved.state, r, &recs) {
         let jobs = src.jobs(id)?;
         if let Some(rec) = recs.iter_mut().find(|x| x.id == id) {
+            let rc = rec.conclusion.clone();
             rec.jobs = jobs
                 .into_iter()
                 .map(|j| JobRec {
                     id: j.id,
+                    conclusion: job_conclusion(rc.as_deref(), j.conclusion.as_deref(), || {
+                        src.annotations(j.id)
+                    }),
                     name: j.name,
-                    conclusion: j.conclusion,
                 })
                 .collect();
         }
@@ -505,10 +562,14 @@ fn file_task(
     src: &dyn Source,
 ) -> Result<Option<u64>, String> {
     let key = f.key();
+    if f.why == Why::Timeout {
+        return file_timeout(d, pid, base, f, src);
+    }
     let why = match f.why {
         Why::Gate => "the gate job went red".to_string(),
         Why::Agreed => "it was red on more than one run in a row".to_string(),
         Why::LongRed => "it has stayed red past the long-red threshold".to_string(),
+        Why::Timeout => String::new(),
     };
     let tail = src
         .log_tail(f.at.job)
@@ -528,6 +589,51 @@ fn file_task(
         } else {
             Priority::Normal
         },
+        f.proposed,
+    )
+}
+
+/// The task for a job that keeps hitting its time limit: the run, the limit GitHub gave, and
+/// the end of its log, with the exit-script lines (and their timestamps) so the slow ones are
+/// named.
+fn file_timeout(
+    d: &Arc<Daemon>,
+    pid: ProjectId,
+    base: &str,
+    f: &File,
+    src: &dyn Source,
+) -> Result<Option<u64>, String> {
+    let key = f.key();
+    let note = src.annotations(f.at.job).unwrap_or_default();
+    let limit = note
+        .lines()
+        .find(|l| l.contains(TIMEOUT_NOTE))
+        .unwrap_or("(GitHub's annotation could not be read)");
+    let tail = src
+        .log_tail(f.at.job)
+        .unwrap_or_else(|| "(the log could not be read)".into());
+    let scripts = src
+        .log_long(f.at.job)
+        .map(|l| script_lines(&l).join("\n"))
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            format!(
+                "\n\nExit scripts started (with their timestamps), last ones last:\n```\n{s}\n```"
+            )
+        })
+        .unwrap_or_default();
+    let body = format!(
+        "`{key}` was cut off at its time limit on `{base}` in more than one run in a row.\n\n\
+         Limit: {limit}\nRun: {}\nCommit: {}\n\nLast lines before the cut:\n```\n{tail}\n```{scripts}\n\n\
+         Found by the base-branch CI watch.",
+        f.at.url, f.at.sha
+    );
+    emit_task(
+        d,
+        pid,
+        format!("{key} exceeds its time limit on {base}"),
+        body,
+        Priority::Normal,
         f.proposed,
     )
 }
@@ -603,9 +709,18 @@ pub fn view(d: &Daemon, pid: ProjectId) -> Value {
         .into_iter()
         .find(|f| f.project == p.id && f.source == "ci")
         .map(|f| json!({"reason": f.reason, "fix_task": f.fix_task, "since": f.since}));
+    let notes = rules::timeout_notes(&s.state);
     let held: Vec<Value> = rules::held_back(&s.state, &r)
         .into_iter()
-        .map(|(k, run, t)| json!({"job": k, "run": run, "task": t, "text": rules::held_text(&k, run, t)}))
+        .map(|(k, run, t)| {
+            let (landed, n) = notes.get(&k).copied().unwrap_or((None, 0));
+            let text = rules::held_text_timeouts(&k, run, t, landed, n, now_ms());
+            json!({"job": k, "run": run, "task": t, "text": text})
+        })
+        .collect();
+    let timeouts: Vec<Value> = rules::timeouts(&s.state, &r)
+        .into_iter()
+        .map(|(k, n, filed)| json!({"job": k, "timed_out_runs": n, "agreement": r.agreement, "filed": filed}))
         .collect();
     json!({
         "enabled": true,
@@ -615,9 +730,43 @@ pub fn view(d: &Daemon, pid: ProjectId) -> Value {
         "gate": r.gate,
         "freeze_on_gate": r.freeze_on_gate,
         "pending": pending,
+        "timeouts": timeouts,
         "filed": filed,
         "freeze": freeze,
         "error": s.error,
         "checked_at": s.checked_at,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NOTE: &str = "The job has exceeded the maximum execution time of 1h0m0s";
+
+    #[test]
+    fn a_cancelled_job_in_a_finished_run_with_the_timeout_note_is_timed_out() {
+        for run in ["failure", "success"] {
+            let c = job_conclusion(Some(run), Some("cancelled"), || Some(NOTE.into()));
+            assert_eq!(c.as_deref(), Some("timed_out"), "{run}");
+        }
+    }
+
+    #[test]
+    fn other_cancellations_stay_cancelled() {
+        // No timeout note on the job.
+        let c = job_conclusion(Some("failure"), Some("cancelled"), || {
+            Some("canceled".into())
+        });
+        assert_eq!(c.as_deref(), Some("cancelled"));
+        // A run a newer push superseded.
+        let c = job_conclusion(Some("cancelled"), Some("cancelled"), || Some(NOTE.into()));
+        assert_eq!(c.as_deref(), Some("cancelled"));
+        // Annotations that cannot be read.
+        let c = job_conclusion(Some("failure"), Some("cancelled"), || None);
+        assert_eq!(c.as_deref(), Some("cancelled"));
+        // Only a cancelled job is looked at.
+        let c = job_conclusion(Some("failure"), Some("failure"), || panic!("not read"));
+        assert_eq!(c.as_deref(), Some("failure"));
+    }
 }

@@ -11,8 +11,12 @@
 //!   known-red ledger.
 //! - **Passed over.** A run that ended otherwise (cancelled by a newer push, ...) and a job
 //!   `skipped` inside a finished run say nothing about the code.
-//! - **Infrastructure is not a regression.** `cancelled`, `timed_out` and `startup_failure`
-//!   are never filed.
+//! - **Infrastructure is not a regression.** `cancelled` and `startup_failure` are never
+//!   filed. A job that hit its GitHub time limit is not infrastructure on the base branch:
+//!   the daemon reads it as `timed_out` (a `cancelled` job inside a finished run whose
+//!   annotation says it exceeded the maximum execution time; decision 0660), and `agreement`
+//!   distinct runs that timed out with no finished result between file it once, as its own
+//!   condition ("exceeds its time limit"). A success or failure clears the count.
 //! - **The gate acts at once.** A gate job going red after green is filed (urgent) on that
 //!   one run, and holds the freeze until the job is green again.
 //! - **Other jobs need agreement.** The first red after green is pending; `agreement`
@@ -119,6 +123,12 @@ pub struct JobState {
     /// When that ticket landed with a change, once seen: a newer run must be of a commit
     /// at or after it.
     pub landed_ms: Option<u64>,
+    /// Distinct runs it timed out in, since the last success or failure.
+    pub timeouts: Vec<u64>,
+    /// The latest run it timed out in.
+    pub last_timeout: RunRef,
+    /// The timeout was filed (or found named): nothing more until a result clears it.
+    pub timeout_filed: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
@@ -151,6 +161,8 @@ pub enum Why {
     Gate,
     Agreed,
     LongRed,
+    /// The job hit its time limit in `agreement` runs.
+    Timeout,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -254,6 +266,20 @@ pub fn step(state: &mut State, runs: &[RunRec], ctx: &Ctx) -> Vec<File> {
             .get_mut(&f.workflow)
             .and_then(|w| w.jobs.get_mut(&f.job));
         let Some(js) = js else { return };
+        if f.why == Why::Timeout {
+            // Its own condition: it leaves the red job's ticket and coverage alone.
+            js.timeout_filed = true;
+            if ctx.named.contains_key(&k) || !decided.insert(format!("{k}#timeout")) {
+                return;
+            }
+            if open_auto >= rules.max_open_auto {
+                f.proposed = true;
+            } else {
+                open_auto += 1;
+            }
+            out.push(f);
+            return;
+        }
         js.checked = Some(ctx.now_ms);
         if f.urgent && rules.freeze_on_gate {
             js.freeze = true;
@@ -343,8 +369,33 @@ pub fn step(state: &mut State, runs: &[RunRec], ctx: &Ctx) -> Vec<File> {
                         let js = ws.jobs.entry(j.name.clone()).or_default();
                         *js = JobState::default();
                     }
+                    Some("timed_out") => {
+                        let js = ws.jobs.entry(j.name.clone()).or_default();
+                        js.last_timeout = job_run_ref(r, j);
+                        if !js.timeouts.contains(&r.id) {
+                            js.timeouts.push(r.id);
+                        }
+                        let n = js.timeouts.len() as u32;
+                        if !excluded && !js.timeout_filed && n >= rules.agreement.max(1) {
+                            let at = js.last_timeout.clone();
+                            file(
+                                state,
+                                &mut out,
+                                File {
+                                    workflow: w.clone(),
+                                    job: j.name.clone(),
+                                    urgent: false,
+                                    proposed: false,
+                                    why: Why::Timeout,
+                                    at,
+                                },
+                            );
+                        }
+                    }
                     Some("failure") => {
                         let js = ws.jobs.entry(j.name.clone()).or_default();
+                        js.timeouts.clear();
+                        js.timeout_filed = false;
                         let at = job_run_ref(r, j);
                         js.last_red = at.clone();
                         if !js.red {
@@ -393,8 +444,8 @@ pub fn step(state: &mut State, runs: &[RunRec], ctx: &Ctx) -> Vec<File> {
                             );
                         }
                     }
-                    // skipped, neutral, cancelled, timed_out, startup_failure,
-                    // action_required, stale: nothing about the code.
+                    // skipped, neutral, cancelled, startup_failure, action_required,
+                    // stale: nothing about the code.
                     _ => {}
                 }
             }
@@ -481,6 +532,71 @@ pub fn held_text(key: &str, run: u64, ticket: Option<u64>) -> String {
     }
 }
 
+/// Like `held_text`, for a job whose newer runs `timed_out` of them did not finish it:
+/// "CI/x still red on run N; #T landed 3h ago; the 5 runs since timed out before finishing it".
+/// With no such runs it is `held_text`.
+pub fn held_text_timeouts(
+    key: &str,
+    run: u64,
+    ticket: Option<u64>,
+    landed_ms: Option<u64>,
+    timed_out_since: usize,
+    now_ms: u64,
+) -> String {
+    if timed_out_since == 0 {
+        return held_text(key, run, ticket);
+    }
+    let runs = if timed_out_since == 1 {
+        "the 1 run since timed out".to_string()
+    } else {
+        format!("the {timed_out_since} runs since timed out")
+    };
+    let t = match (ticket, landed_ms) {
+        (Some(t), Some(l)) => format!("#{t} landed {}; ", ago(now_ms.saturating_sub(l))),
+        (Some(t), None) => format!("#{t} covered it; "),
+        _ => String::new(),
+    };
+    format!("{key} still red on run {run}; {t}{runs} before finishing it")
+}
+
+fn ago(ms: u64) -> String {
+    let m = ms / 60_000;
+    match m {
+        0..=59 => format!("{m}m ago"),
+        60..=2879 => format!("{}h ago", m / 60),
+        _ => format!("{}d ago", m / 1440),
+    }
+}
+
+/// For a held-back job: when its ticket landed, and how many runs newer than its last red
+/// timed out. `(key, landed_ms, timed_out_since)` for every red job, held or not.
+pub fn timeout_notes(state: &State) -> BTreeMap<String, (Option<u64>, usize)> {
+    let mut m = BTreeMap::new();
+    for (w, ws) in &state.workflows {
+        for (j, js) in &ws.jobs {
+            let n = js.timeouts.iter().filter(|r| **r > js.last_red.run).count();
+            m.insert(key(w, j), (js.landed_ms, n));
+        }
+    }
+    m
+}
+
+/// Jobs that hit their time limit since their last result: `(key, runs, filed)`.
+pub fn timeouts(state: &State, rules: &Rules) -> Vec<(String, usize, bool)> {
+    let mut v = vec![];
+    for (w, ws) in &state.workflows {
+        if rules.excluded(w) {
+            continue;
+        }
+        for (j, js) in &ws.jobs {
+            if !js.timeouts.is_empty() {
+                v.push((key(w, j), js.timeouts.len(), js.timeout_filed));
+            }
+        }
+    }
+    v
+}
+
 /// The jobs whose red holds the freeze: `workflow/job` and the task that fixes it.
 pub fn freezing(state: &State) -> Vec<(String, Option<u64>)> {
     let mut v = vec![];
@@ -516,6 +632,7 @@ pub fn filed(state: &mut State, f: &File, task: Option<u64>, now_ms: u64, url: &
         .workflows
         .get_mut(&f.workflow)
         .and_then(|w| w.jobs.get_mut(&f.job))
+        .filter(|_| f.why != Why::Timeout)
     {
         js.ticket = task;
         js.covered = js.covered.max(f.at.run);
@@ -789,6 +906,125 @@ mod tests {
         assert!(f.is_empty());
     }
 
+    fn red_then_timeouts(s: &mut State, n: u64) -> Vec<File> {
+        go(
+            s,
+            &[run(1, "CI", "success", &[("a", "success")])],
+            0,
+            &none(),
+            0,
+        );
+        go(
+            s,
+            &[run(2, "CI", "failure", &[("a", "failure")])],
+            1000,
+            &none(),
+            0,
+        );
+        let mut all = vec![];
+        for id in 3..3 + n {
+            all.extend(go(
+                s,
+                &[run(id, "CI", "failure", &[("a", "timed_out")])],
+                2000,
+                &none(),
+                0,
+            ));
+        }
+        all
+    }
+
+    #[test]
+    fn timeouts_agree_into_one_ticket_and_no_more() {
+        let mut s = State::default();
+        let f = red_then_timeouts(&mut s, 4);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(f[0].why, Why::Timeout);
+        assert_eq!(f[0].at.run, 4);
+        assert_eq!(timeouts(&s, &rules()), vec![("CI/a".to_string(), 4, true)]);
+        // The red job's own ticket state is untouched.
+        assert!(s.workflows["CI"].jobs["a"].ticket.is_none());
+    }
+
+    #[test]
+    fn one_timeout_is_not_agreement() {
+        let mut s = State::default();
+        assert!(red_then_timeouts(&mut s, 1).is_empty());
+        assert_eq!(timeouts(&s, &rules()), vec![("CI/a".to_string(), 1, false)]);
+    }
+
+    #[test]
+    fn a_superseded_cancelled_run_changes_nothing() {
+        let mut s = State::default();
+        go(
+            &mut s,
+            &[run(1, "CI", "success", &[("a", "success")])],
+            0,
+            &none(),
+            0,
+        );
+        let f = go(
+            &mut s,
+            &[run(2, "CI", "cancelled", &[("a", "cancelled")])],
+            1000,
+            &none(),
+            0,
+        );
+        assert!(f.is_empty());
+        assert!(timeouts(&s, &rules()).is_empty());
+    }
+
+    #[test]
+    fn a_result_clears_the_timeouts() {
+        let mut s = State::default();
+        assert_eq!(red_then_timeouts(&mut s, 2).len(), 1);
+        go(
+            &mut s,
+            &[run(9, "CI", "success", &[("a", "success")])],
+            3000,
+            &none(),
+            0,
+        );
+        assert!(timeouts(&s, &rules()).is_empty());
+        assert!(!s.workflows["CI"].jobs["a"].red);
+        // A failure also ends the count, and a new run of timeouts can file again.
+        let f = red_then_timeouts_from(&mut s, 10);
+        assert_eq!(f.len(), 1);
+    }
+
+    fn red_then_timeouts_from(s: &mut State, from: u64) -> Vec<File> {
+        let mut all = vec![];
+        for id in from..from + 2 {
+            all.extend(go(
+                s,
+                &[run(id, "CI", "failure", &[("a", "timed_out")])],
+                4000,
+                &none(),
+                0,
+            ));
+        }
+        all
+    }
+
+    #[test]
+    fn held_text_names_the_runs_that_timed_out_and_the_landing() {
+        let mut s = State::default();
+        red_then_timeouts(&mut s, 5);
+        let notes = timeout_notes(&s);
+        let (_, n) = notes["CI/a"];
+        assert_eq!(n, 5);
+        let h = 3_600_000;
+        let t = held_text_timeouts("CI/a", 2, Some(7), Some(h), n, 4 * h);
+        assert_eq!(
+            t,
+            "CI/a still red on run 2; #7 landed 3h ago; the 5 runs since timed out before finishing it"
+        );
+        assert_eq!(
+            held_text_timeouts("CI/a", 2, Some(7), None, 0, 0),
+            held_text("CI/a", 2, Some(7))
+        );
+    }
+
     #[test]
     fn infrastructure_conclusions_file_nothing() {
         let mut s = State::default();
@@ -804,10 +1040,7 @@ mod tests {
             &none(),
             0,
         );
-        for (i, c) in ["cancelled", "timed_out", "startup_failure"]
-            .iter()
-            .enumerate()
-        {
+        for (i, c) in ["cancelled", "startup_failure"].iter().enumerate() {
             let id = 2 + i as u64;
             // A failed run whose jobs ended in infrastructure.
             let f = go(
