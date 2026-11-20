@@ -1086,6 +1086,12 @@ pub(crate) fn test_step_name(def: &Definition) -> Option<String> {
 }
 
 impl Who {
+    /// What the executor needs to decide where a run goes: a task's own suite names its task, a
+    /// run no task owns (a landing tier, a bisect half) follows the global switch (#702).
+    fn place<'a>(&self, suite: &'a Suite) -> Option<(Option<TaskId>, &'a Suite)> {
+        Some((self.task.map(|(t, _)| t), suite))
+    }
+
     /// The step run that shows this run's progress, if any.
     fn run(&self) -> Option<StepRunId> {
         self.task.map(|(_, r)| r).or(self.sink)

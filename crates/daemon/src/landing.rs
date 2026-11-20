@@ -4525,7 +4525,8 @@ impl Runner {
                     Prep::Run(j) => Some(execute(j)),
                     Prep::Done(..) => None,
                 };
-                let h = sc.spawn(|| run(&jy));
+                let jy_ref = &jy;
+                let h = sc.spawn(move || run(jy_ref));
                 (run(&jx), h.join().ok().flatten())
             });
             let mut out = [false; 2];
