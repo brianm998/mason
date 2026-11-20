@@ -59,6 +59,8 @@ struct Wait {
     /// The landing step run this task waits in (its progress record).
     run: StepRunId,
     branch: String,
+    /// The branch's head when the task joined the queue: the commit the batch merges.
+    head: String,
     rank: u64,
     ready_at: u64,
     footprint: Footprint,
@@ -322,6 +324,8 @@ pub fn submit_and_wait(c: &Ctx) -> Option<Verdict> {
         task: c.task,
         run: c.run,
         branch: c.branch.clone(),
+        head: mason_landing::git::rev_parse(&c.project.path, &c.branch)
+            .unwrap_or_else(|_| c.branch.clone()),
         rank: rank_of(priority, c.task),
         ready_at: landing_clock(d).saturating_sub(first_submit_age_s(d, c)),
         footprint: Footprint {
@@ -1388,10 +1392,17 @@ impl Runner {
             .map(|(t, b)| BatchTask {
                 id: t.0,
                 branch: b.clone(),
+                head: self
+                    .waits
+                    .iter()
+                    .find(|w| w.task == *t)
+                    .map_or_else(|| b.clone(), |w| w.head.clone()),
                 removes: removals_in(&d.task_dir(*t)),
             })
             .collect();
         let mut parked: Vec<Parked> = vec![];
+        // The head each task had when the union was last sent to verification.
+        let mut tested: HashMap<u64, String>;
         // Tasks that conflict only with batch-mates: they stay in landing and wait for
         // the next batch (decision 0162).
         let mut deferred: Vec<u64> = vec![];
@@ -1419,6 +1430,22 @@ impl Runner {
                 .clear();
             if rounds > limit {
                 break Err(format!("gave up after {rounds} rounds: the base kept moving or the batch kept changing"));
+            }
+            // A member whose run ended (retried, canceled) leaves the batch: neither landed
+            // nor parked. The union then differs from what the last run tested, and the
+            // round verifies it again.
+            let gone: Vec<String> = active
+                .iter()
+                .filter(|t| self.left(t.id))
+                .map(|t| format!("#{}", t.id))
+                .collect();
+            if !gone.is_empty() {
+                active.retain(|t| !self.left(t.id));
+                note = format!("{} left the batch: retried or canceled", gone.join(", "));
+                self.say(&format!("batch #{batch_id}: {note}"));
+                if active.is_empty() {
+                    break Ok(());
+                }
             }
             // -- assemble
             let asm = {
@@ -1551,6 +1578,7 @@ impl Runner {
                 std::sync::atomic::Ordering::SeqCst,
             );
 
+            tested = active.iter().map(|t| (t.id, t.head.clone())).collect();
             // -- verify the union once
             let suites = if force {
                 vec![]
@@ -1876,6 +1904,34 @@ impl Runner {
             self.d.landing.clear(self.pid, "redbase");
 
             // -- promote
+            {
+                let gone: Vec<String> = active
+                    .iter()
+                    .filter(|t| self.left(t.id))
+                    .map(|t| format!("#{}", t.id))
+                    .collect();
+                let moved = mason_landing::batch::moved_after_testing(&active, &tested);
+                if !gone.is_empty() || !moved.is_empty() {
+                    for id in &moved {
+                        if !self.left(*id) {
+                            parked.push(Parked {
+                                task: *id,
+                                reason: "its branch moved after testing".into(),
+                                feedback: "Your branch moved after the batch tested it, so it was not landed. Submit it again.".into(),
+                                conflict: false,
+                            });
+                        }
+                    }
+                    active.retain(|t| !self.left(t.id) && !moved.contains(&t.id));
+                    if !gone.is_empty() {
+                        note = format!("{} left the batch: retried or canceled", gone.join(", "));
+                    }
+                    if active.is_empty() {
+                        break Ok(());
+                    }
+                    continue 'outer;
+                }
+            }
             self.record(
                 batch_id,
                 "promoting",
@@ -3618,6 +3674,17 @@ impl Runner {
         active.retain(|t| !blamed.contains(&t.id));
     }
 
+    /// True when the task's landing run is no longer its open run (retried or canceled).
+    fn left(&self, id: u64) -> bool {
+        let Some(w) = self.waits.iter().find(|w| w.task.0 == id) else {
+            return false;
+        };
+        match self.d.world() {
+            Ok(world) => world.open_run(w.task) != Some(w.run),
+            Err(_) => false,
+        }
+    }
+
     fn raise_base(&self, why: &str) {
         self.d.landing.raise(
             self.pid,
@@ -3652,7 +3719,7 @@ impl Runner {
         let mut red = |subset: &[u64]| -> bool {
             let sub: Vec<BatchTask> = active
                 .iter()
-                .filter(|t| subset.contains(&t.id))
+                .filter(|t| subset.contains(&t.id) && !self.left(t.id))
                 .cloned()
                 .collect();
             let a = {
@@ -3749,7 +3816,7 @@ impl Runner {
                     ),
                 )
             };
-            for t in g {
+            for t in g.iter().filter(|t| !self.left(**t)) {
                 parked.push(Parked {
                     task: *t,
                     reason: reason.clone(),
