@@ -1,0 +1,3 @@
+# 0665: The proposed and stuck tile fill marks the shown task
+
+The red fill on a count tile said only "something is here". For `proposed` and `needs_attention` the fill is now the attention tint only while the page is a task page whose task is a row of that tile's sidebar section; the border and count colour still follow the count, and every other tile (including `failed`) is unchanged. The test lives in the core model (`tileShowsCurrentTask`) so it needs no view. The phone is unchanged because its tiles and task page are never on screen together. `clients/features.toml` (protected, client parity) has only its `count-tiles` description reworded; no status value changes. No gate, guard, budget or verdict logic is changed.

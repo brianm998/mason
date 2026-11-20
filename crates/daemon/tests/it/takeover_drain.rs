@@ -11,18 +11,18 @@ use mason_daemon::update;
 use std::path::Path;
 use std::time::Duration;
 use support::lw::*;
+use support::orphans::blocking_loop;
 use support::*;
 
 const LANDING: &str = "window = \"0s\"\n[[tier]]\nname = \"batch\"\nsuites = [\"integration\"]\n";
 
-/// A world whose integration suite blocks until `release` exists (or the scratch root is gone).
+/// A world whose integration suite blocks until `release` exists (or the scratch root or this test process is gone).
 fn blocked_world() -> (W, std::path::PathBuf) {
     let w = world(LANDING, &[]);
     let release = w.s.root.path().join("release");
     let script = format!(
-        "#!/bin/sh\necho 1..1\nwhile [ -d '{r}' ] && [ ! -e '{f}' ]; do sleep 0.1; done\necho 'ok 1 - integration'\n",
-        r = w.s.root.path().display(),
-        f = release.display()
+        "#!/bin/sh\necho 1..1\n{wait}\necho 'ok 1 - integration'\n",
+        wait = blocking_loop(w.s.root.path(), &release, std::process::id(), "0.1"),
     );
     w.s.push_files(&[("checks.sh", &script)], "blocking suite");
     (w, release)

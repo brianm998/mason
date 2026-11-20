@@ -460,8 +460,9 @@ fn masons_own_impact_map_selects_suites_by_path() {
             "Cargo.lock",
             "rust-toolchain.toml"
         ]),
-        one("cargo-workspace")
+        Selection::Some(["cargo-workspace", "fmt"].map(String::from).to_vec())
     );
+    assert_eq!(pick(&["Cargo.lock"]), one("cargo-workspace"));
     // Shared client inputs run the three build suites; `exit-scripts` (s249) runs only for a
     // change under `scripts/exit/`.
     let three = Selection::Some(
@@ -481,10 +482,10 @@ fn masons_own_impact_map_selects_suites_by_path() {
     );
     assert_eq!(pick(&["scripts/unmapped.sh"]), Selection::All);
     assert_eq!(pick(&["docs/x.md"]), one("cargo-workspace"));
-    // All four are bound to run_check and the test step.
-    assert_eq!(all.len(), 4);
-    assert_eq!(d.testing.bound(When::Development).len(), 4);
-    assert_eq!(d.testing.bound(When::TestStep).len(), 4);
+    // All five (with `fmt`, s691) are bound to run_check and the test step.
+    assert_eq!(all.len(), 5);
+    assert_eq!(d.testing.bound(When::Development).len(), 5);
+    assert_eq!(d.testing.bound(When::TestStep).len(), 5);
 }
 
 #[test]
