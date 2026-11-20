@@ -81,7 +81,13 @@ fn acquire(
         let _ = d.call("POST", &format!("/leases/{id}/release"), Some(&json!({})));
     };
     let mut last = String::new();
+    // Whoever started us: if it goes (we are reparented), nobody will read what we run (s688).
+    let parent = mason_platform::process::parent_pid();
     let granted = loop {
+        if mason_platform::process::parent_pid() != parent {
+            release(d);
+            return Err("the command that asked for this has gone; request dropped".into());
+        }
         let s = d.call("GET", &format!("/leases/{id}"), None).map_err(say)?;
         match s["state"].as_str() {
             Some("waiting") => {
@@ -244,7 +250,7 @@ fn run_watched(
     is_task: bool,
 ) -> std::io::Result<std::process::ExitStatus> {
     use mason_daemon::watch::{tick, Action, State};
-    if th.off() || !is_task {
+    if !is_task {
         return Command::new(prog).args(args).status();
     }
     let mut cmd = Command::new(prog);
@@ -262,7 +268,8 @@ fn run_watched(
             return Ok(s);
         }
         std::thread::sleep(Duration::from_millis(50));
-        if last.elapsed() < tick_every {
+        // With no thresholds the group is only there so the daemon can stop it (s688).
+        if th.off() || last.elapsed() < tick_every {
             continue;
         }
         last = Instant::now();
@@ -473,6 +480,12 @@ pub fn show(d: &Daemon, json_out: bool) -> Result<(), String> {
 pub fn waiter_line(w: &Value) -> String {
     let label = w["label"].as_str().unwrap_or("?");
     let why = w["explain"].as_str().unwrap_or("");
+    let gone = w["abandoned"]
+        .as_str()
+        .map(|a| format!(" [abandoned: {a}]"))
+        .unwrap_or_default();
+    let why = format!("{why}{gone}");
+    let why = why.as_str();
     if w["pipeline"].is_string() {
         format!("{label}: {why}")
     } else {
