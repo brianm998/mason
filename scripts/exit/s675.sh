@@ -14,20 +14,27 @@ cargo test -q -p mason-daemon --test it --no-run >/dev/null 2>&1 || { echo "s675
 
 cargo test -q -p mason-daemon --test it a_takeover_waits_for_running_landing_batches >"$out" 2>&1 &
 cargo_pid=$!
-# Partway: the test binary is cargo's child; its world root is the one whose owner.lock holds
-# its pid (other runs on this machine make roots too), and it has a host under it.
+# Partway: the test binary is the `it` binary (cargo may be wrapped, so not necessarily its
+# child) that holds a new root's owner.lock, with a host under that root. Other runs on this
+# machine make roots too; their lock pids name other binaries or are not `it` runs of ours.
 root=""
 tpid=""
 for _ in $(seq 1 1200); do
-  tpid=$(pgrep -P "$cargo_pid" | head -1)
-  if [ -n "$tpid" ]; then
-    for f in /tmp/ms*/owner.lock; do
-      [ -e "$f" ] || continue
-      [ "$(cat "$f" 2>/dev/null)" = "$tpid" ] || continue
-      r=$(dirname "$f")
-      if /bin/ps -axo command= | grep -F -- "/tmp/$(basename "$r")/" | grep -q -e '--dir' -e '--data-dir'; then root=$r; break 2; fi
+  for r in $(ls -d /tmp/ms* 2>/dev/null | sort | comm -13 "$before" -); do
+    p=$(cat "$r/owner.lock" 2>/dev/null)
+    [ -n "$p" ] || continue
+    /bin/ps -o command= -p "$p" 2>/dev/null | grep -q '/deps/it-' || continue
+    # Ours: a descendant of the cargo job we started.
+    q=$p
+    ours=0
+    for _ in 1 2 3 4 5 6; do
+      q=$(/bin/ps -o ppid= -p "$q" 2>/dev/null | tr -d ' ')
+      [ -n "$q" ] || break
+      [ "$q" = "$cargo_pid" ] && { ours=1; break; }
     done
-  fi
+    [ "$ours" = 1 ] || continue
+    if /bin/ps -axo command= | grep -F -- "/tmp/$(basename "$r")/" | grep -q -e '--dir' -e '--data-dir'; then root=$r; tpid=$p; break 2; fi
+  done
   sleep 0.5
 done
 [ -n "$root" ] || { echo "s675: no blocking world appeared"; kill "$cargo_pid" 2>/dev/null; exit 1; }
