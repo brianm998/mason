@@ -126,7 +126,11 @@ parser = "regex"
 pass_regex = '^$'
 fail_regex = '^error'
 min_tests = 1
-# Not "unit": # The same selector over the merged tree, once per batch (the `exit` tier of .mason/landing.toml, s669).
+# Not "unit": [binding.unit] would also bind it to run_check and the test step. No binding
+# names this level, so only the landing tier runs it.
+level = "landing"
+
+# The same selector over the merged tree, once per batch (the `exit` tier of .mason/landing.toml, s669).
 # MASON_BASE is unset there, so it compares with origin/develop.
 [suite.exit-scripts-landing]
 command = "bash scripts/run-changed-exit-scripts.sh"
@@ -134,10 +138,6 @@ parser = "regex"
 pass_regex = '^PASS (.+)$'
 fail_regex = '^FAIL (.+)$'
 min_tests = 1
-level = "landing"
-
-[binding.unit] would also bind it to run_check and the test step. No binding
-# names this level, so only the landing tier runs it.
 level = "landing"
 
 [binding.unit]
