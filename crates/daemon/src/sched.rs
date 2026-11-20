@@ -83,6 +83,10 @@ pub struct ResourceCfg {
     /// The CPU speed limit, in percent, below which no further machine work starts while some
     /// is running (0: never). macOS lowers it for heat or power.
     pub thermal_min_pct: u32,
+    /// The CPU die temperature, in °C, at or above which no further machine work starts while
+    /// some is running (0: never). Also turns off the SMC power-limit check. Read from the SMC,
+    /// since `pmset`'s speed limit stays at 100 while the package is power-limited.
+    pub thermal_max_c: u32,
     /// Order waiting work by tracker priority before steps remaining. It applies to
     /// every project at once, since one queue serves them all.
     pub priority_first: bool,
@@ -132,11 +136,17 @@ pub const DEFAULT_SYSPOLICYD_MAX_PCT: u32 = 300;
 /// owner's iMac Pro read 51 and 27 under light load.
 pub const DEFAULT_THERMAL_MIN_PCT: u32 = 80;
 
+<<<<<<< HEAD
 /// The default size of the `gha` pool: every GitHub job a remote run uses (#700).
 pub const DEFAULT_GHA: u32 = 16;
 
 /// The default size of the `gha-macos` pool: the macOS jobs among them.
 pub const DEFAULT_GHA_MACOS: u32 = 4;
+=======
+/// The default `thermal_max_c`. On 2026-11-18/19 the owner's iMac Pro sat at 90 °C or more for
+/// 647 minutes, 98 °C or more for 97 and peaked at 99.6 °C, with `pmset` reading 100 throughout.
+pub const DEFAULT_THERMAL_MAX_C: u32 = 97;
+>>>>>>> origin/develop
 
 /// How often an open `mason run` wait is added to its task's deadline while it waits (s417).
 /// Anything longer than this of a wait in progress is lost if the daemon restarts.
@@ -157,6 +167,7 @@ impl Default for ResourceCfg {
             disk_stall_ms: DEFAULT_DISK_STALL_MS,
             syspolicyd_max_pct: DEFAULT_SYSPOLICYD_MAX_PCT,
             thermal_min_pct: DEFAULT_THERMAL_MIN_PCT,
+            thermal_max_c: DEFAULT_THERMAL_MAX_C,
             priority_first: false,
             from_file: Default::default(),
             max_wait_s: DEFAULT_MAX_WAIT_S,
@@ -238,6 +249,14 @@ pub fn parse_resource_cfg(text: &str) -> Result<ResourceCfg, String> {
                     }
                     c.thermal_min_pct = n as u32;
                 }
+                "cpu" if name == "thermal_max_c" => {
+                    if !(0..=150).contains(&n) {
+                        return Err(
+                            "resources.toml: cpu.thermal_max_c must be from 0 to 150".into()
+                        );
+                    }
+                    c.thermal_max_c = n as u32;
+                }
                 "disk" if name == "floor_gb" => c.disk_floor_gb = n as u64,
                 "disk" if name == "stall_ms" => c.disk_stall_ms = n as u64,
                 other => return Err(format!("resources.toml: unknown setting {other}.{name}")),
@@ -257,6 +276,7 @@ pub const GATES: &[&str] = &[
     "compile_idle_kill_s",
     "syspolicyd_max_pct",
     "thermal_min_pct",
+    "thermal_max_c",
     "stall_ms",
     "memory.floor_mb",
     "disk.floor_gb",
@@ -288,6 +308,10 @@ fn check_gate(name: &str, v: i64) -> Result<(), String> {
         if !(0..=100).contains(&v) {
             return Err("thermal_min_pct must be from 0 to 100".into());
         }
+    } else if name == "thermal_max_c" {
+        if !(0..=150).contains(&v) {
+            return Err("thermal_max_c must be from 0 to 150".into());
+        }
     } else if v < 0 {
         return Err(format!("{name} must be a whole number, 0 or more"));
     } else if matches!(
@@ -309,6 +333,7 @@ fn base_gate(c: &ResourceCfg, name: &str) -> Option<i64> {
         "compile_idle_kill_s" => i64::from(c.compile_idle_kill_s),
         "syspolicyd_max_pct" => i64::from(c.syspolicyd_max_pct),
         "thermal_min_pct" => i64::from(c.thermal_min_pct),
+        "thermal_max_c" => i64::from(c.thermal_max_c),
         "stall_ms" => c.disk_stall_ms as i64,
         "memory.floor_mb" => c.memory_floor_mb? as i64,
         _ => c.disk_floor_gb as i64,
@@ -452,8 +477,15 @@ struct State {
     /// The CPU speed limit and the level below which machine work waits. `None`: no gate.
     thermal: Option<Arc<dyn crate::thermal::ThermalSource>>,
     thermal_min: u32,
+    /// The die temperature at which machine work waits (0: off).
+    thermal_max: u32,
     /// The latest reading: (speed %, minimum %), `None` with no gate or no reading.
     thermal_read: Option<(u32, u32)>,
+    /// Why the gate holds, when it does: "die 97 °C", "power limited" or the speed limit.
+    thermal_why: Option<String>,
+    /// The latest die temperature in °C and whether power limiting has lasted long enough.
+    thermal_die: Option<f32>,
+    thermal_limited_ms: Option<u64>,
     /// When the last scheduling pass ran. A waiter skips its own pass while this is
     /// younger than the broker's tick (see `acquire`).
     last_pass: Option<Instant>,
@@ -651,6 +683,7 @@ fn apply_gate(st: &mut State, name: &str) {
         "stall_ms" => st.stall_ms = v.unwrap_or(0) as u64,
         "syspolicyd_max_pct" => st.policy_max = v.unwrap_or(0) as u32,
         "thermal_min_pct" => st.thermal_min = v.unwrap_or(0) as u32,
+        "thermal_max_c" => st.thermal_max = v.unwrap_or(0) as u32,
         "memory.floor_mb" => {
             st.floor_mb = v.map(|n| n as u64);
             st.mem = None;
@@ -789,7 +822,11 @@ impl Broker {
                 policy_since: None,
                 thermal: None,
                 thermal_min: cfg.thermal_min_pct,
+                thermal_max: cfg.thermal_max_c,
                 thermal_read: None,
+                thermal_why: None,
+                thermal_die: None,
+                thermal_limited_ms: None,
                 last_pass: None,
                 pass_running: false,
                 passes: 0,
@@ -1079,6 +1116,9 @@ impl Broker {
             .overrides
             .get("thermal_min_pct")
             .map_or(min_pct, |v| *v as u32);
+        if let Some(v) = st.overrides.get("thermal_max_c") {
+            st.thermal_max = *v as u32;
+        }
         st = self.pass(st);
         drop(st);
         self.cv.notify_all();
@@ -1089,6 +1129,19 @@ impl Broker {
         let mut st = lock(&self.st);
         self.cpu_gate(&mut st);
         st.thermal_read
+    }
+
+    /// What the thermal gate sees: the die temperature in °C and how long the SMC has
+    /// power-limited the package in ms (each `None` without a reading), and why the gate holds
+    /// work, if it does ("die 97 °C", "power limited").
+    pub fn thermal_smc(&self) -> (Option<f32>, Option<u64>, Option<String>) {
+        let mut st = lock(&self.st);
+        self.cpu_gate(&mut st);
+        (
+            st.thermal_die,
+            st.thermal_limited_ms,
+            st.thermal_why.clone(),
+        )
     }
 
     /// Read the CPU and stall sources afresh. Every plan is made right after
@@ -1113,18 +1166,33 @@ impl Broker {
             });
         st.ledger.set_policy(policy);
         st.policy_read = policy.map(|p| (p.busy_pct, p.max_pct));
-        let min_pct = st.thermal_min;
-        let thermal = st
+        let (min_pct, max_c) = (st.thermal_min, st.thermal_max);
+        let readings = st
             .thermal
             .as_ref()
-            .filter(|_| min_pct > 0)
-            .and_then(|source| {
-                source
-                    .speed_pct()
-                    .map(|speed_pct| mason_scheduler::ThermalGate { speed_pct, min_pct })
+            .map(|s| (s.speed_pct(), s.die_c(), s.limited_ms()));
+        st.thermal_die = readings.and_then(|r| r.1);
+        st.thermal_limited_ms = readings.and_then(|r| r.2);
+        // Hot when the speed limit is low, the die is at its maximum, or power limiting has gone
+        // on for 30 s. The scheduler's gate is a speed against a minimum, so a die or power-limit
+        // reading is carried as a minimum just above the speed; `thermal_why` has the real reason.
+        let hot =
+            readings.and_then(|(sp, die, lim)| crate::thermal::hot(sp, die, lim, min_pct, max_c));
+        let thermal = readings
+            .and_then(|(sp, _, _)| sp.or(hot.map(|_| 100)))
+            .filter(|_| min_pct > 0 || max_c > 0)
+            .map(|speed_pct| match hot {
+                Some(crate::thermal::Hot::Die(_) | crate::thermal::Hot::Limited(_)) => {
+                    mason_scheduler::ThermalGate {
+                        speed_pct,
+                        min_pct: speed_pct.saturating_add(1),
+                    }
+                }
+                _ => mason_scheduler::ThermalGate { speed_pct, min_pct },
             });
         st.ledger.set_thermal(thermal);
         st.thermal_read = thermal.map(|t| (t.speed_pct, t.min_pct));
+        st.thermal_why = hot.map(|h| h.why());
         match policy {
             Some(p) if p.busy_pct >= p.max_pct => {
                 if st.policy_since.is_none() {
@@ -2692,7 +2760,7 @@ impl Broker {
             .enumerate()
             .map(|(i, r)| {
                 let (cause, reason) = match waits.waits.get(&r.id) {
-                    Some(w) => compile_reason(w, now, limit),
+                    Some(w) => compile_reason(w, now, limit, st.thermal_why.as_deref()),
                     None => ("", "starting".to_string()),
                 };
                 CompileWaiter {
@@ -2737,6 +2805,12 @@ impl Broker {
                 ", and no further compile or test while macOS holds the CPU below {}% of its speed",
                 st.thermal_min
             ));
+            if st.thermal_max > 0 {
+                rules.push_str(&format!(
+                    ", the CPU die reads {} °C or more, or the SMC has power-limited the package for 30 s",
+                    st.thermal_max
+                ));
+            }
         }
         if st.compile_idle_kill_s > 0 {
             rules.push_str(&format!(
@@ -2881,6 +2955,12 @@ impl Broker {
                 "failed_reads": st.cpu.failed_reads(),
                 "syspolicyd_pct": st.policy_read.map(|(b, _)| b),
                 "syspolicyd_max_pct": st.policy_read.map(|(_, m)| m),
+                "thermal_speed_pct": st.thermal_read.map(|(s, _)| s),
+                "thermal_min_pct": st.thermal_read.map(|(_, m)| m),
+                "thermal_die_c": st.thermal_die,
+                "thermal_max_c": st.thermal.as_ref().map(|_| st.thermal_max),
+                "thermal_power_limited_ms": st.thermal_limited_ms,
+                "thermal_why": st.thermal_why,
             },
             "now_ms": now,
         })
@@ -2935,7 +3015,12 @@ fn abandoned_of(st: &State, snap: &mason_scheduler::Snapshot) -> HashMap<u64, &'
 }
 
 /// Why a compile waits, as a code and a short phrase for the home page.
-fn compile_reason(w: &mason_scheduler::Wait, now: u64, limit: u32) -> (&'static str, String) {
+fn compile_reason(
+    w: &mason_scheduler::Wait,
+    now: u64,
+    limit: u32,
+    thermal_why: Option<&str>,
+) -> (&'static str, String) {
     match &w.cause {
         WaitCause::Full { .. } => ("full", format!("every slot is held ({limit} of {limit})")),
         WaitCause::Behind { .. } => (
@@ -2977,9 +3062,12 @@ fn compile_reason(w: &mason_scheduler::Wait, now: u64, limit: u32) -> (&'static 
         ),
         WaitCause::Thermal { speed_pct, min_pct } => (
             "thermal",
-            format!(
-                "macOS holds the CPU to {speed_pct}% of its speed for heat (work starts at {min_pct}% or more)"
-            ),
+            match thermal_why {
+                Some(why) if !why.starts_with("CPU held") => format!("thermal: {why}"),
+                _ => format!(
+                    "macOS holds the CPU to {speed_pct}% of its speed for heat (work starts at {min_pct}% or more)"
+                ),
+            },
         ),
         WaitCause::Policy { busy_pct, max_pct } => (
             "syspolicyd",
