@@ -414,7 +414,8 @@ fn seen_json(s: &Seen) -> Value {
 
 /// One run of a landing batch (a tier, a rerun, a bisect half): its id, which starts `b<batch>-`,
 /// its suite and where it ran, with the run's link when it ran on GitHub (#702).
-static LANDING_RUNS: Mutex<Vec<(String, String, String, String, u64)>> = Mutex::new(Vec::new());
+type LandingRun = (String, String, String, String, u64);
+static LANDING_RUNS: Mutex<Vec<LandingRun>> = Mutex::new(Vec::new());
 
 /// Remember where a run no task owns ran. Newest 200 kept.
 pub fn note_landing_run(project: &str, id: &str, suite: &str, text: &str) {

@@ -4361,7 +4361,7 @@ impl Runner {
         alone: Option<&std::collections::BTreeMap<String, Vec<String>>>,
     ) -> (plan::Pin, Vec<SplitRun>) {
         let ids: Vec<u64> = active.iter().map(|t| t.id).collect();
-        let mut runs: Vec<SplitRun> = vec![];
+        let runs: Vec<SplitRun> = vec![];
         // The second integration worktree of a split that runs both halves at once (#702).
         let int_wt_b = {
             let mut n = int_wt.as_os_str().to_owned();
