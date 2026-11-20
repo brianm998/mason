@@ -102,7 +102,9 @@ fn shown_tokens(s: &Scratch) -> Option<(u64, u64)> {
 
 #[test]
 fn a_restart_in_the_middle_of_the_step_keeps_the_total_and_does_not_double_it() {
-    let s = Scratch::new("test -f hello.txt", slow_develop());
+    let release = std::env::temp_dir().join(format!("mason-restart-tokens-{}", std::process::id()));
+    let _ = std::fs::remove_file(&release);
+    let s = Scratch::new("test -f hello.txt", gated_develop(&release));
     let mut m = s.masond(&[], &[]);
     s.wait_daemon(&mut m);
     s.mason_ok(&["task", "add", "Restart tokens"]);
@@ -129,12 +131,15 @@ fn a_restart_in_the_middle_of_the_step_keeps_the_total_and_does_not_double_it() 
         if let Some(k) = shown_tokens(&s) {
             assert_eq!(k, (4, 50), "after the restart");
             shown = true;
+            // Only now may the step end.
+            let _ = std::fs::write(&release, b"go");
         }
         let o = s.mason(&["task", "show", "0", "--json"]);
         let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap_or_default();
         v["state"] != "developing" && v["state"] != "exploring"
     });
     assert!(shown, "the restarted daemon never showed the tokens");
+    let _ = std::fs::remove_file(&release);
     drop(m2);
     kill_hosts(&s.data_dir);
 }
