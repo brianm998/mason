@@ -33,6 +33,7 @@ fn spec(
         holds: Default::default(),
         label: String::new(),
         place: None,
+        global: false,
     }
 }
 

@@ -27,7 +27,7 @@
 //!   `jobs-N-2.json` (if present) the jobs of run N and sets its `run_attempt` to 2.
 //!
 //! Remote runs (#697), when `run-artifact.zip` exists in DIR: `GET .../actions/runs?head_sha=SHA`
-//! answers with one completed, successful run (id 9001) whose branch is the `mason/run/**` ref of
+//! answers with one completed, successful run (id 9001, or one per commit when `run-artifact-red.zip` exists: its runs whose commit holds a file `red.marker` get that zip instead) whose branch is the `mason/run/**` ref of
 //! the bare repository named in `origin-path` that points at SHA (none: no run). Its jobs, its
 //! artifact list and the artifact's zip (the file's bytes) are answered, and
 //! `POST .../actions/runs/9001/cancel` is appended to `cancel.log`. While a file `run-hold`
@@ -75,6 +75,44 @@ fn reply_bytes(out: &mut impl Write, bytes: &[u8]) {
     );
     let _ = out.write_all(head.as_bytes());
     let _ = out.write_all(bytes);
+}
+
+/// The id of the run for `sha`. 9001 for every run, unless `run-artifact-red.zip` exists in DIR:
+/// then each pushed commit has a run of its own (so that runs side by side are told apart), and
+/// the sha is written to `run-<id>.sha` for the artifact to be chosen by.
+fn run_id(dir: &Path, sha: &str) -> u64 {
+    if !dir.join("run-artifact-red.zip").exists() {
+        return 9001;
+    }
+    let n = 100_000 + u64::from_str_radix(sha.get(..5).unwrap_or("0"), 16).unwrap_or(0);
+    let _ = std::fs::write(dir.join(format!("run-{n}.sha")), sha);
+    n
+}
+
+/// Is `n` a run of this fake: 9001, or one made by [`run_id`]?
+fn is_run(dir: &Path, n: &str) -> bool {
+    n == "9001" || dir.join(format!("run-{n}.sha")).exists()
+}
+
+/// The artifact of run `n`: `run-artifact-red.zip` for a run whose commit holds a file named
+/// `red.marker`, else `run-artifact.zip`.
+fn artifact_for(dir: &Path, n: &str) -> Option<Vec<u8>> {
+    let red = std::fs::read_to_string(dir.join(format!("run-{n}.sha")))
+        .ok()
+        .zip(std::fs::read_to_string(dir.join("origin-path")).ok())
+        .is_some_and(|(sha, bare)| {
+            std::process::Command::new("git")
+                .args(["cat-file", "-e", &format!("{}:red.marker", sha.trim())])
+                .current_dir(bare.trim())
+                .output()
+                .is_ok_and(|o| o.status.success())
+        });
+    let file = if red {
+        "run-artifact-red.zip"
+    } else {
+        "run-artifact.zip"
+    };
+    std::fs::read(dir.join(file)).ok()
 }
 
 /// The `mason/run/**` branch of the repository in `origin-path` that points at `sha`.
@@ -217,9 +255,10 @@ fn serve(dir: &Path, stream: std::net::TcpStream) {
             };
             let runs: Vec<Value> = run_branch(dir, sha)
                 .map(|branch| {
-                    json!({"id": 9001, "status": status, "conclusion": conclusion,
+                    let id = run_id(dir, sha);
+                    json!({"id": id, "status": status, "conclusion": conclusion,
                            "head_branch": branch, "event": "push",
-                           "html_url": "https://github.com/o/r/actions/runs/9001",
+                           "html_url": format!("https://github.com/o/r/actions/runs/{id}"),
                            "created_at": "2026-11-20T10:00:00Z"})
                 })
                 .into_iter()
@@ -231,21 +270,26 @@ fn serve(dir: &Path, stream: std::net::TcpStream) {
                 &json!({"total_count": runs.len(), "workflow_runs": runs}).to_string(),
             );
         }
-        ("GET", ["repos", _, _, "actions", "runs", "9001", "artifacts"]) => {
-            let url = format!("http://{host}/repos/o/r/actions/artifacts/1/zip");
+        ("GET", ["repos", _, _, "actions", "runs", n, "artifacts"]) if is_run(dir, n) => {
+            let url = format!("http://{host}/repos/o/r/actions/artifacts/{n}/zip");
             reply(
                 &mut out,
                 "200 OK",
                 &[],
-                &json!({"total_count": 1, "artifacts": [{"id": 1, "name": "mason-run",
+                &json!({"total_count": 1, "artifacts": [{"id": n.parse::<u64>().unwrap_or(1), "name": "mason-run",
                     "expired": false, "archive_download_url": url}]})
                 .to_string(),
             );
         }
-        ("GET", ["repos", _, _, "actions", "artifacts", _, "zip"]) => {
-            match std::fs::read(dir.join("run-artifact.zip")) {
-                Ok(b) => reply_bytes(&mut out, &b),
-                Err(_) => reply(
+        ("GET", ["repos", _, _, "actions", "artifacts", n, "zip"]) => {
+            let bytes = if *n == "1" {
+                std::fs::read(dir.join("run-artifact.zip")).ok()
+            } else {
+                artifact_for(dir, n)
+            };
+            match bytes {
+                Some(b) => reply_bytes(&mut out, &b),
+                None => reply(
                     &mut out,
                     "404 Not Found",
                     &[],
@@ -310,7 +354,7 @@ fn serve(dir: &Path, stream: std::net::TcpStream) {
         }
         ("GET", ["repos", _, _, "actions", "runs", n, "jobs"]) => {
             let mut jobs = read_json(&dir.join(format!("jobs-{n}.json")), json!([]));
-            if *n == "9001" && jobs.as_array().is_some_and(Vec::is_empty) {
+            if is_run(dir, n) && jobs.as_array().is_some_and(Vec::is_empty) {
                 jobs = json!([{"name": "run", "status": "completed",
                                "started_at": "2026-11-20T10:00:06Z"}]);
             }

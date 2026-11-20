@@ -1935,6 +1935,7 @@ impl TestChecks {
                 label: format!("#{} check", self.task),
                 stop: None,
                 place: None,
+                global: false,
             }
         };
         let mut lines: Vec<String> = vec![];
@@ -2507,6 +2508,7 @@ impl TestChecks {
                 label: format!("#{} check", self.task),
                 stop: None,
                 place: None,
+                global: false,
             }
         };
         let merges = self.reds.merges();

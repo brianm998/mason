@@ -157,8 +157,25 @@ pub enum Pin {
 /// 2026-11-18 one task failed `cargo fmt` and the other clippy), and calling that the base's
 /// blamed nobody and held both forever.
 pub fn pin(ids: &[u64], red: &mut dyn FnMut(&[u64]) -> bool) -> Pin {
+    pin_with(ids, red, None)
+}
+
+/// [`pin`] where the two halves of each split are asked together: `pair(a, b)` runs both at once
+/// and answers `(red(a), red(b))`. It finds what [`pin`] finds for the same answers (`pair` is
+/// asked the very questions `pin` asks one after the other); only when the answers come differs.
+pub fn pin_paired(
+    ids: &[u64],
+    red: &mut dyn FnMut(&[u64]) -> bool,
+    pair: &mut dyn FnMut(&[u64], &[u64]) -> (bool, bool),
+) -> Pin {
+    pin_with(ids, red, Some(pair))
+}
+
+type PairFn<'a> = &'a mut dyn FnMut(&[u64], &[u64]) -> (bool, bool);
+
+fn pin_with(ids: &[u64], red: &mut dyn FnMut(&[u64]) -> bool, mut pair: Option<PairFn>) -> Pin {
     let mut groups: Vec<Vec<u64>> = vec![];
-    pin_into(ids, red, &mut groups);
+    pin_into(ids, red, &mut pair, &mut groups);
     if ids.len() > 1 && groups.len() == ids.len() && groups.iter().all(|g| g.len() == 1) && red(&[])
     {
         return Pin::Base;
@@ -166,13 +183,21 @@ pub fn pin(ids: &[u64], red: &mut dyn FnMut(&[u64]) -> bool) -> Pin {
     Pin::Groups(groups)
 }
 
-fn pin_into(ids: &[u64], red: &mut dyn FnMut(&[u64]) -> bool, out: &mut Vec<Vec<u64>>) {
+fn pin_into(
+    ids: &[u64],
+    red: &mut dyn FnMut(&[u64]) -> bool,
+    pair: &mut Option<PairFn>,
+    out: &mut Vec<Vec<u64>>,
+) {
     match ids {
         [] => {}
         [one] => out.push(vec![*one]),
         _ => {
             let (a, b) = ids.split_at(ids.len() / 2);
-            let (ra, rb) = (red(a), red(b));
+            let (ra, rb) = match pair {
+                Some(p) => p(a, b),
+                None => (red(a), red(b)),
+            };
             if !ra && !rb {
                 let mut cur = ids.to_vec();
                 for id in ids {
@@ -188,10 +213,10 @@ fn pin_into(ids: &[u64], red: &mut dyn FnMut(&[u64]) -> bool, out: &mut Vec<Vec<
                 return;
             }
             if ra {
-                pin_into(a, red, out);
+                pin_into(a, red, pair, out);
             }
             if rb {
-                pin_into(b, red, out);
+                pin_into(b, red, pair, out);
             }
         }
     }
@@ -301,6 +326,25 @@ mod tests {
             });
             assert_eq!(r, Bisect::Culprit(bad));
             assert!(calls <= 2 * 3 + 1, "{calls} runs for 5 tasks");
+        }
+    }
+
+    #[test]
+    fn pairing_the_halves_finds_what_one_at_a_time_finds() {
+        let ids: Vec<u64> = (1..=6).collect();
+        for bad in [
+            vec![1],
+            vec![4],
+            vec![6],
+            vec![2, 5],
+            vec![1, 6],
+            vec![3, 4],
+            vec![],
+        ] {
+            let is_red = |s: &[u64]| !bad.is_empty() && bad.iter().all(|b| s.contains(b));
+            let one = pin(&ids, &mut |s| is_red(s));
+            let both = pin_paired(&ids, &mut |s| is_red(s), &mut |a, b| (is_red(a), is_red(b)));
+            assert_eq!(one, both, "{bad:?}");
         }
     }
 

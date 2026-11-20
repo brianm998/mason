@@ -51,9 +51,10 @@ pub struct CheckSpec {
     /// Whose run it is, as the resources list shows it: `#567 check`.
     pub label: String,
     /// The task and suite a develop-phase `run_check` runs for, so that the one function that
-    /// decides where runs go (#698) can say. `None` for everything else (a landing re-test is
-    /// #702): it stays on this machine.
+    /// decides where runs go (#698) can say. `None` for everything else.
     pub place: Option<(mason_core::TaskId, Box<mason_testing::Suite>)>,
+    /// A landing check (#702): no task owns it, so it follows the global switch alone.
+    pub global: bool,
 }
 
 /// What a step host's command holds of the machine, as recorded at its start.
@@ -463,8 +464,12 @@ fn remote_check(d: &Arc<Daemon>, spec: &CheckSpec, id: &str) -> Option<Shared> {
     }
     let project = rm::project_of(d, &spec.cwd)?;
     let place = spec.place.as_ref().map(|(t, s)| (*t, &**s));
-    let rm::Executor::GitHub { runs_on } = rm::executor_for(d, &project, rm::Kind::Check, place)
-    else {
+    let exec = match place {
+        Some((t, s)) => rm::executor_for(d, &project, rm::Kind::Check, Some((Some(t), s))),
+        None if spec.global => rm::executor_global(d, &project),
+        None => rm::executor_for(d, &project, rm::Kind::Check, None),
+    };
+    let rm::Executor::GitHub { runs_on } = exec else {
         return None;
     };
     // The suite's build is the first part of what runs there (it was not run here).

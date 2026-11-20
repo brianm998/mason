@@ -57,15 +57,17 @@ pub enum Kind {
     Check,
 }
 
-/// Where this run goes: [`crate::place::decide`] for a task's suite or check (`place` names the
-/// task and the suite); every other run (a landing batch, a base run, a debt) stays here until
-/// #702. A test can force a project remote (`MASON_TEST_FORCE_REMOTE=1` in the daemon's own
+/// Where this run goes: [`crate::place::decide`] for a suite (`place` names the suite and, for a
+/// task's own run, the task). A run no task owns (a landing batch or its bisect halves, a base
+/// run, a debt) has `None` for the task and follows the global switch and the suite's own rules:
+/// a batch spans tasks, so no one task's choice can decide it (#702). Without a suite it stays
+/// here. A test can force a project remote (`MASON_TEST_FORCE_REMOTE=1` in the daemon's own
 /// environment, which a task cannot set, and only for a project that has a `[remote]`).
 pub fn executor_for(
     d: &Daemon,
     project: &str,
     kind: Kind,
-    place: Option<(mason_core::TaskId, &mason_testing::Suite)>,
+    place: Option<(Option<mason_core::TaskId>, &mason_testing::Suite)>,
 ) -> Executor {
     if forced_for_tests() {
         if let Some(r) = remote_cfg(d, project) {
@@ -79,7 +81,21 @@ pub fn executor_for(
         Kind::Suite => "suite",
         Kind::Check => "check",
     };
-    match crate::place::place_of(d, project, Some(task.0), suite, kind) {
+    match crate::place::place_of(d, project, task.map(|t| t.0), suite, kind) {
+        crate::place::Place::GitHub { runs_on, .. } => Executor::GitHub { runs_on },
+        crate::place::Place::Local { .. } => Executor::Local,
+    }
+}
+
+/// Where a check no task owns and no suite describes (a landing lint or re-test) goes: the global
+/// switch alone, for a project with a `[remote]` (#702).
+pub fn executor_global(d: &Daemon, project: &str) -> Executor {
+    if forced_for_tests() {
+        if let Some(r) = remote_cfg(d, project) {
+            return Executor::GitHub { runs_on: r.runs_on };
+        }
+    }
+    match crate::place::global_place(d, project) {
         crate::place::Place::GitHub { runs_on, .. } => Executor::GitHub { runs_on },
         crate::place::Place::Local { .. } => Executor::Local,
     }

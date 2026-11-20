@@ -575,6 +575,23 @@ pub fn removals_view(dir: &Path) -> String {
 /// One run of a split batch's search: the tasks it held and what failed (s394).
 type SplitRun = (Vec<u64>, Vec<String>);
 
+/// A subset of a red batch, assembled in a worktree and ready to run (#702).
+struct SplitJob {
+    subset: Vec<u64>,
+    a: mason_landing::batch::Assembled,
+    run_key: String,
+    run_filter: String,
+    prefix: String,
+    wt: PathBuf,
+}
+
+/// What preparing a subset came to: its answer already (`red`, with the notes of an earlier red
+/// run), or a job to run.
+enum Prep {
+    Done(bool, Option<Vec<String>>),
+    Run(Box<SplitJob>),
+}
+
 /// The lines the base landed that each merge of it into the task's branch lost, less what
 /// the task declares under `removes` (decision 0117).
 fn dropped_in_merges(c: &Ctx, removes: &[Removal]) -> Result<Vec<audit::Dropped>, String> {
@@ -2287,6 +2304,7 @@ impl Runner {
                                 }))
                             },
                             place: None,
+                            global: true,
                         };
                     // The base moved: the union is linted again, tests skipped or not (s521).
                     let lint = self.lint_checks(
@@ -3069,6 +3087,7 @@ impl Runner {
                     Arc::new(move || m.forced(&d))
                 }),
                 place: None,
+                global: true,
             };
             match crate::hostedcheck::run(d, &spec) {
                 Ok(o) if o.stopped.is_some() => out.notes.push(format!(
@@ -3214,6 +3233,7 @@ impl Runner {
                     Arc::new(move || m.forced(&d)) as crate::hostedcheck::StopFn
                 }),
                 place: None,
+                global: true,
             };
             match crate::hostedcheck::run(d, &spec) {
                 Ok(o) if o.stopped.is_some() => out.notes.push(format!(
@@ -3397,6 +3417,7 @@ impl Runner {
                     Arc::new(move || m.stop(&d, &name)) as crate::hostedcheck::StopFn
                 }),
                 place: None,
+                global: true,
             };
             match crate::hostedcheck::run(d, &spec) {
                 Ok(o) if o.stopped.is_some() => out.notes.push(format!(
@@ -4336,8 +4357,20 @@ impl Runner {
     ) -> (plan::Pin, Vec<SplitRun>) {
         let ids: Vec<u64> = active.iter().map(|t| t.id).collect();
         let mut runs: Vec<SplitRun> = vec![];
-        let mut tried = 0usize;
-        let mut red = |subset: &[u64]| -> bool {
+        // The second integration worktree of a split that runs both halves at once (#702).
+        let int_wt_b = {
+            let mut n = int_wt.as_os_str().to_owned();
+            n.push("-half");
+            PathBuf::from(n)
+        };
+        let int_branch_b = format!("{}-half", batch.int_branch);
+        let batch_b = Batch {
+            int_wt: &int_wt_b,
+            int_branch: &int_branch_b,
+            ..batch.clone()
+        };
+        // Assemble a subset into a worktree and see whether it must run at all.
+        let prepare = |subset: &[u64], b: &Batch, wt: &Path, tried: &mut usize| -> Prep {
             let sub: Vec<BatchTask> = active
                 .iter()
                 .filter(|t| subset.contains(&t.id) && !self.left(t.id))
@@ -4345,13 +4378,15 @@ impl Runner {
                 .collect();
             let a = {
                 let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
-                batch.assemble(&sub, &|_| {})
+                b.assemble(&sub, &|_| {})
             };
             // A base that cannot be checked out keeps the old answer (the base's), not a blame.
-            let Ok(a) = a else { return subset.is_empty() };
+            let Ok(a) = a else {
+                return Prep::Done(subset.is_empty(), None);
+            };
             if self.yield_now() {
                 // The search stops here; the caller sees it and leaves the batch.
-                return false;
+                return Prep::Done(false, None);
             }
             let run_key = mason_store::batch_run_key(
                 &sub.iter()
@@ -4369,14 +4404,9 @@ impl Runner {
                     "batch #{batch_id} is red: reusing an earlier run of {} task(s)",
                     subset.len()
                 ));
-                if !r.green {
-                    let mut k = subset.to_vec();
-                    k.sort_unstable();
-                    runs.push((k, r.notes.clone()));
-                }
-                return !r.green;
+                return Prep::Done(!r.green, (!r.green).then(|| r.notes.clone()));
             }
-            tried += 1;
+            *tried += 1;
             let which = if subset.is_empty() {
                 "the base alone".to_string()
             } else {
@@ -4393,39 +4423,133 @@ impl Runner {
                 )
             });
             self.say(&format!(
-                "batch #{batch_id} is red: {how}splitting it to find the task (run {tried}: {which})"
+                "batch #{batch_id} is red: {how}splitting it to find the task (run {tried}: {which})",
+                tried = *tried
             ));
-            let prefix = format!("b{batch_id}-r{rounds}-bis{tried}");
+            Prep::Run(Box::new(SplitJob {
+                subset: subset.to_vec(),
+                a,
+                run_key,
+                run_filter,
+                prefix: format!("b{batch_id}-r{rounds}-bis{}", *tried),
+                wt: wt.to_path_buf(),
+            }))
+        };
+        // Run an assembled subset to its verdict and keep it. Reads only: two of these can run
+        // at once, each in its own worktree.
+        let execute = |j: &SplitJob| -> crate::suites::OverRun {
             // Build the subset and run only the failing tests. A build that fails or a run
             // that cannot tell names no test: that is no proof of the same red, so the
             // whole suites run, as before.
             let small =
-                alone.map(|a| self.run_alone(def, a, int_wt, log_dir, &prefix, true, false));
+                alone.map(|a| self.run_alone(def, a, &j.wt, log_dir, &j.prefix, true, false));
             let r = match small {
                 Some(r) if r.green || !r.failing.is_empty() => r,
                 _ => match mapped {
-                    Some(m) => self.run_local(def, m, int_wt, &a.base_tip, log_dir, &prefix),
+                    Some(m) => self.run_local(def, m, &j.wt, &j.a.base_tip, log_dir, &j.prefix),
                     // The base alone (`plan::pin` asks when every task was red alone): a base
                     // has no diff to select suites by, so it runs the ones that were red.
-                    None if subset.is_empty() => {
-                        self.verify(def, failed, int_wt, &a.base_tip, log_dir, &prefix)
+                    None if j.subset.is_empty() => {
+                        self.verify(def, failed, &j.wt, &j.a.base_tip, log_dir, &j.prefix)
                     }
                     None => {
-                        let s = self.suites_for(def, batch, &a);
-                        self.verify(def, &s, int_wt, &a.base_tip, log_dir, &prefix)
+                        let s = self.suites_for(def, batch, &j.a);
+                        self.verify(def, &s, &j.wt, &j.a.base_tip, log_dir, &j.prefix)
                     }
                 },
             };
-            self.keep_run(&a.base_tip, &run_key, &run_filter, &r);
-            if !r.green {
-                let mut k = subset.to_vec();
-                k.sort_unstable();
-                runs.push((k, r.notes.clone()));
-            }
-            !r.green
+            self.keep_run(&j.a.base_tip, &j.run_key, &j.run_filter, &r);
+            r
         };
-        let found = plan::pin(&ids, &mut red);
-        (found, runs)
+        let note_red = |runs: &mut Vec<SplitRun>, subset: &[u64], notes: Vec<String>| {
+            let mut k = subset.to_vec();
+            k.sort_unstable();
+            runs.push((k, notes));
+        };
+        // Both halves of a split at once, when every suite it can run goes to GitHub (#702).
+        // The verdicts are the ones the one-at-a-time search gets; only the wall time differs.
+        let side_by_side = {
+            let mut names: std::collections::BTreeSet<&String> = failed.iter().collect();
+            names.extend(mapped.into_iter().flatten());
+            names.extend(alone.into_iter().flat_map(|a| a.keys()));
+            !names.is_empty()
+                && names.into_iter().all(|n| {
+                    def.testing.suite(n).is_some_and(|s| {
+                        matches!(
+                            crate::remote::executor_for(
+                                &self.d,
+                                &self.project().id,
+                                crate::remote::Kind::Suite,
+                                Some((None, s))
+                            ),
+                            crate::remote::Executor::GitHub { .. }
+                        )
+                    })
+                })
+        };
+        let runs = std::cell::RefCell::new(runs);
+        let tried = std::cell::Cell::new(0usize);
+        let mut red = |subset: &[u64]| -> bool {
+            let mut t = tried.get();
+            let p = prepare(subset, batch, int_wt, &mut t);
+            tried.set(t);
+            match p {
+                Prep::Done(red, notes) => {
+                    if let Some(n) = notes {
+                        note_red(&mut runs.borrow_mut(), subset, n);
+                    }
+                    red
+                }
+                Prep::Run(j) => {
+                    let r = execute(&j);
+                    if !r.green {
+                        note_red(&mut runs.borrow_mut(), subset, r.notes.clone());
+                    }
+                    !r.green
+                }
+            }
+        };
+        let mut red_pair = |x: &[u64], y: &[u64]| -> (bool, bool) {
+            let mut t = tried.get();
+            let px = prepare(x, batch, int_wt, &mut t);
+            let py = prepare(y, &batch_b, &int_wt_b, &mut t);
+            tried.set(t);
+            let (jx, jy) = (px, py);
+            let (rx, ry) = std::thread::scope(|sc| {
+                let run = |p: &Prep| match p {
+                    Prep::Run(j) => Some(execute(j)),
+                    Prep::Done(..) => None,
+                };
+                let h = sc.spawn(|| run(&jy));
+                (run(&jx), h.join().ok().flatten())
+            });
+            let mut out = [false; 2];
+            for (i, (p, r, sub)) in [(&jx, rx, x), (&jy, ry, y)].into_iter().enumerate() {
+                match (p, r) {
+                    (Prep::Done(red, notes), _) => {
+                        if let Some(n) = notes {
+                            note_red(&mut runs.borrow_mut(), sub, n.clone());
+                        }
+                        out[i] = *red;
+                    }
+                    (Prep::Run(_), Some(r)) => {
+                        if !r.green {
+                            note_red(&mut runs.borrow_mut(), sub, r.notes.clone());
+                        }
+                        out[i] = !r.green;
+                    }
+                    // A run that panicked proves nothing: not red.
+                    (Prep::Run(_), None) => {}
+                }
+            }
+            (out[0], out[1])
+        };
+        let found = if side_by_side {
+            plan::pin_paired(&ids, &mut red, &mut red_pair)
+        } else {
+            plan::pin(&ids, &mut red)
+        };
+        (found, runs.into_inner())
     }
 
     /// Act on what splitting found: send back the task or tasks that reproduce the red
