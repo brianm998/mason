@@ -1163,7 +1163,7 @@ impl GitHub {
     }
 
     /// The latest attempt's jobs of a run.
-    pub fn run_jobs(&self, id: u64) -> Result<Vec<ActionJob>, ApiError> {
+    pub fn remote_run_jobs(&self, id: u64) -> Result<Vec<ActionJob>, ApiError> {
         let v = self.json(Request::get(&self.url(&format!(
             "/actions/runs/{id}/jobs?filter=latest&per_page=100"
         ))))?;
