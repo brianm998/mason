@@ -321,7 +321,7 @@ pub fn run_with(d: &Arc<Daemon>, spec: &CheckSpec, progress: Option<&CheckProgre
             match read_kv(&rec) {
                 Err(_) => {
                     // A free number: this run is new.
-                    for ext in ["log", "exit"] {
+                    for ext in ["log", "exit", "remote"] {
                         let _ = std::fs::remove_file(spec.log_dir.join(format!("{id}.{ext}")));
                     }
                     let _ = write_kv(&rec, &[("key", key.clone()), ("delivered", "0".into())]);
@@ -448,12 +448,63 @@ pub fn stop_unwanted(d: &Arc<Daemon>) -> usize {
     n
 }
 
+/// The check on GitHub Actions, when the one function that decides where runs go says so
+/// (#697); `None` for the local path, which is every run until #698. The result is the same
+/// `CheckOutcome`: `passed` is what the command's exit says. A remote run that is lost is run
+/// again, not resumed. No live counts come from it.
+fn remote_check(d: &Arc<Daemon>, spec: &CheckSpec, id: &str) -> Option<Shared> {
+    use crate::remote as rm;
+    if !rm::any_remote(d) {
+        return None;
+    }
+    let project = rm::project_of(d, &spec.cwd)?;
+    let rm::Executor::GitHub { runs_on } = rm::executor_for(d, &project, rm::Kind::Check) else {
+        return None;
+    };
+    let site = rm::site_for(d, &project, &spec.cwd)?;
+    let rs = rm::spec_for(
+        &project, id, None, &spec.cmd, spec.limit, &spec.env, &runs_on, &spec.tree,
+    );
+    let note: Mutex<Option<String>> = Mutex::new(None);
+    let stop = || {
+        let n = spec.stop.as_ref().and_then(|f| f())?;
+        *note.lock().unwrap_or_else(|e| e.into_inner()) = Some(n);
+        Some(rm::StopWhy::Skipped)
+    };
+    Some(
+        match rm::run_or_fallback(&site, &rs, &spec.log_dir, &stop) {
+            Ok(None) => return None,
+            Ok(Some(rm::Outcome::Stopped(_))) => Ok(CheckOutcome {
+                passed: false,
+                timed_out: false,
+                output: String::new(),
+                id: id.to_string(),
+                stopped: note.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            }),
+            Ok(Some(rm::Outcome::Done(f))) => Ok(CheckOutcome {
+                passed: f.code == 0 && f.signal == 0 && !f.timed_out,
+                timed_out: f.timed_out,
+                output: format!("({})\n{}", f.ran_on, crate::jobs::tail(&f.output, 40)),
+                id: id.to_string(),
+                stopped: None,
+            }),
+            Err(e) => Err(match rm::environmental(&e) {
+                Some(why) => format!("the check could not run on GitHub: {why}; run it again"),
+                None => e,
+            }),
+        },
+    )
+}
+
 fn collect(
     d: &Arc<Daemon>,
     spec: &CheckSpec,
     id: &str,
     progress: Option<&CheckProgress>,
 ) -> Shared {
+    if let Some(r) = remote_check(d, spec, id) {
+        return r;
+    }
     let hosts = d.cfg.hosts_dir();
     let dir = hosts.join(id);
     if !dir.join("host.kv").exists() {
@@ -519,7 +570,7 @@ fn collect(
     let rec = match rec {
         Ok(r) => r,
         Err(ClientError::HostLost { .. }) => {
-            return Err("the check was lost (its host died); run it again".into())
+            return Err("the check was lost (its host died); run it again".into());
         }
         Err(e) => return Err(format!("cannot collect the check's result: {e}")),
     };

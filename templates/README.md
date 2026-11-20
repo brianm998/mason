@@ -16,3 +16,9 @@ project. They are only a starting point: change anything, any time, in the monit
 Each directory has `mason.toml` (the pipeline) and `landing.toml` (how work lands).
 `mason init` fills in the `# suites:` marker line of the test step from the suites it
 proposed, and takes the landing mode and base branch from your answers.
+
+## `github/mason-run.yml`
+
+Not a workflow pipeline: the GitHub Actions workflow MASON uses to run a suite or a check on a
+GitHub-hosted runner (the `[remote]` section of a project file). Put it at
+`.github/workflows/mason-run.yml` on the base branch and fill in its setup step.
