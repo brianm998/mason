@@ -271,6 +271,7 @@ struct Blocked {
 }
 
 impl Blocked {
+    #[allow(clippy::too_many_arguments)]
     fn add(
         &mut self,
         capacity: &BTreeMap<String, Capacity>,
