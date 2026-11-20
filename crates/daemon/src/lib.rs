@@ -7,6 +7,7 @@
 //! events. Nothing blocks the async event loop.
 
 pub mod abandon;
+pub mod agentshim;
 pub mod affected;
 pub mod attention;
 pub mod autoquarantine;
