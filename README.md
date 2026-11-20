@@ -593,4 +593,5 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s725**: The CI watch's home banners now show only red jobs whose ticket is still open (one line per ticket, shards grouped), put jobs whose fix landed and await a finished run on one quiet `ci_watch_quiet` line, and forget jobs absent from `agreement + 2` finished runs.
 - **s726**: Debt payments take a per-daemon lock and a lease wait that both end when the daemon shuts down or the debt is closed, and the landing fast-tier test is turned back on.
 - **s727**: A task can choose where its compiles and tests run with `mason task add --run-on github|local` or later `mason task run-on <id> github|local|default`, stored as the task override `run_on`, read before the global switch, shown as "runs on: GitHub (task choice)" in `mason task show` and the task detail, and refused in tracker and agent filings.
+- **s728**: A daily idle job maps each module of the daemon's `it` executable to the source files it ran under `-C instrument-coverage`, and test selection picks modules from that map, falling back to the name scan for unmapped files, stale or missing maps.
 <!-- status:end -->
