@@ -4928,20 +4928,17 @@ pub fn run_over(
         let mut left_out: Option<Suite> = None;
         let full = reuse && p.reuse_green && full_run_due(&p.id, p.reuse_full_hours);
         if reuse && p.reuse_green {
-            match batch_reuse(&who, p, def, suite, wt, full) {
-                Some((s, plan)) => {
-                    if let Some(note) = plan.note() {
-                        out.notes.push(note);
-                    }
-                    if plan.all_reused() {
-                        continue;
-                    }
-                    if !plan.reused.is_empty() {
-                        left_out = Some(s);
-                    }
-                    who.reuse = Some(Arc::new(plan));
+            if let Some((s, plan)) = batch_reuse(&who, p, def, suite, wt, full) {
+                if let Some(note) = plan.note() {
+                    out.notes.push(note);
                 }
-                None => {}
+                if plan.all_reused() {
+                    continue;
+                }
+                if !plan.reused.is_empty() {
+                    left_out = Some(s);
+                }
+                who.reuse = Some(Arc::new(plan));
             }
         }
         let suite = left_out.as_ref().unwrap_or(suite);
