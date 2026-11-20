@@ -57,6 +57,37 @@ impl Source for GitHub {
     }
 }
 
+/// Reads each job's long log once per pass; the short tail is its last lines. The signatures
+/// and the filed body come from the same fetch.
+struct OnceLog<'a> {
+    inner: &'a dyn Source,
+    logs: std::cell::RefCell<std::collections::HashMap<u64, Option<String>>>,
+}
+
+impl Source for OnceLog<'_> {
+    fn runs(&self, branch: &str) -> Result<Vec<ActionsRun>, String> {
+        self.inner.runs(branch)
+    }
+    fn jobs(&self, run: u64) -> Result<Vec<ActionsJob>, String> {
+        self.inner.jobs(run)
+    }
+    fn annotations(&self, job: u64) -> Option<String> {
+        self.inner.annotations(job)
+    }
+    fn log_long(&self, job: u64) -> Option<String> {
+        self.logs
+            .borrow_mut()
+            .entry(job)
+            .or_insert_with(|| self.inner.log_long(job))
+            .clone()
+    }
+    fn log_tail(&self, job: u64) -> Option<String> {
+        let long = self.log_long(job)?;
+        let lines: Vec<&str> = long.lines().collect();
+        Some(lines[lines.len().saturating_sub(LOG_LINES)..].join("\n"))
+    }
+}
+
 /// What GitHub writes on a job it cut off at its `timeout-minutes`.
 pub const TIMEOUT_NOTE: &str = "exceeded the maximum execution time";
 
@@ -188,6 +219,7 @@ pub fn encode(s: &Saved) -> String {
                             "covered": js.covered, "landed_ms": opt(js.landed_ms),
                             "at_ms": js.last_red.at_ms,
                             "timeouts": js.timeouts, "timeout_filed": js.timeout_filed,
+                            "signatures": js.signatures,
                             "t_run": js.last_timeout.run, "t_job": js.last_timeout.job,
                             "t_sha": js.last_timeout.sha, "t_url": js.last_timeout.url,
                             "t_at_ms": js.last_timeout.at_ms,
@@ -244,6 +276,12 @@ pub fn decode(text: &str) -> Saved {
                         url: jv["url"].as_str().unwrap_or_default().to_string(),
                         at_ms: u(&jv["at_ms"]),
                     },
+                    signatures: jv["signatures"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect(),
                     ticket: jv["ticket"].as_u64(),
                     checked: jv["checked"].as_u64(),
                     freeze: jv["freeze"].as_bool().unwrap_or(false),
@@ -376,6 +414,11 @@ pub fn pass(
     src: &dyn Source,
     now: u64,
 ) -> Result<(), String> {
+    let once = OnceLog {
+        inner: src,
+        logs: Default::default(),
+    };
+    let src: &dyn Source = &once;
     let p = d.project(pid).ok_or("no such project")?;
     let mut saved = load(d, &p.id);
     let runs = src.runs(&p.base)?;
@@ -402,6 +445,14 @@ pub fn pass(
                     conclusion: job_conclusion(rc.as_deref(), j.conclusion.as_deref(), || {
                         src.annotations(j.id)
                     }),
+                    // What failed, for the title and for finding the same failure again.
+                    signatures: if j.conclusion.as_deref() == Some("failure") {
+                        src.log_long(j.id)
+                            .map(|l| rules::signatures(&l))
+                            .unwrap_or_default()
+                    } else {
+                        vec![]
+                    },
                     name: j.name,
                 })
                 .collect();
@@ -409,6 +460,7 @@ pub fn pass(
     }
     let (named, open_auto) = who_names(d, pid, &saved, &recs);
     let (recent, landed) = recent_tasks(d, pid, now);
+    let named_sigs = who_names_signatures(d, pid, &saved, &recs);
     let files = rules::step(
         &mut saved.state,
         &recs,
@@ -419,6 +471,7 @@ pub fn pass(
             open_auto,
             recent: &recent,
             landed: &landed,
+            named_sigs: &named_sigs,
         },
     );
     for f in &files {
@@ -494,10 +547,16 @@ fn who_names(
 ) -> (BTreeMap<String, Option<u64>>, u32) {
     let mut keys: Vec<String> = vec![];
     for (w, ws) in &saved.state.workflows {
-        keys.extend(ws.jobs.keys().map(|j| rules::key(w, j)));
+        for j in ws.jobs.keys() {
+            keys.push(rules::key(w, j));
+            keys.push(rules::group_key(w, j));
+        }
     }
     for r in recs {
-        keys.extend(r.jobs.iter().map(|j| rules::key(&r.workflow, &j.name)));
+        for j in &r.jobs {
+            keys.push(rules::key(&r.workflow, &j.name));
+            keys.push(rules::group_key(&r.workflow, &j.name));
+        }
     }
     keys.sort();
     keys.dedup();
@@ -514,6 +573,65 @@ fn who_names(
             .count() as u32;
     }
     (named, open_auto)
+}
+
+/// The open tasks and issues that name a failing script or test of a red job. An open task
+/// counts when its title names it, or when the watch filed it (its body is then the log of a
+/// red); an open issue by its title or body. A task about something else that happens to
+/// quote a script name in its body is not taken for a ticket.
+fn who_names_signatures(
+    d: &Daemon,
+    pid: ProjectId,
+    saved: &Saved,
+    recs: &[RunRec],
+) -> BTreeMap<String, Option<u64>> {
+    let mut sigs: Vec<String> = vec![];
+    for ws in saved.state.workflows.values() {
+        for js in ws.jobs.values().filter(|j| j.red) {
+            sigs.extend(js.signatures.iter().cloned());
+        }
+    }
+    for r in recs {
+        for j in &r.jobs {
+            sigs.extend(j.signatures.iter().cloned());
+        }
+    }
+    sigs.sort();
+    sigs.dedup();
+    let mut named = BTreeMap::new();
+    if sigs.is_empty() {
+        return named;
+    }
+    let mine: std::collections::BTreeSet<u64> =
+        saved.state.filed.iter().filter_map(|f| f.task).collect();
+    if let Ok(w) = d.world() {
+        for t in w
+            .tasks
+            .values()
+            .filter(|t| t.project == pid && !t.state.is_terminal())
+        {
+            for s in &sigs {
+                if rules::mentions(&t.title, s)
+                    || (mine.contains(&t.id.0) && rules::mentions(&t.body, s))
+                {
+                    named.entry(s.clone()).or_insert(Some(t.id.0));
+                }
+            }
+        }
+    }
+    if let Some(p) = d.project(pid) {
+        for it in d.store.tracker_items(&p.id).unwrap_or_default() {
+            if !it.open {
+                continue;
+            }
+            for s in &sigs {
+                if rules::mentions(&it.title, s) || rules::mentions(&it.body, s) {
+                    named.entry(s.clone()).or_insert(None);
+                }
+            }
+        }
+    }
+    named
 }
 
 /// Which of `keys` an open task (by its title) or an open tracker issue (by title or body)
@@ -561,10 +679,11 @@ fn file_task(
     f: &File,
     src: &dyn Source,
 ) -> Result<Option<u64>, String> {
-    let key = f.key();
     if f.why == Why::Timeout {
         return file_timeout(d, pid, base, f, src);
     }
+    // Shards of one matrix job go by their group key, so one ticket names them all.
+    let key = f.group();
     let why = match f.why {
         Why::Gate => "the gate job went red".to_string(),
         Why::Agreed => "it was red on more than one run in a row".to_string(),
@@ -574,15 +693,85 @@ fn file_task(
     let tail = src
         .log_tail(f.at.job)
         .unwrap_or_else(|| "(the log could not be read)".into());
+    let shorts: Vec<&str> = f.signatures.iter().map(|s| rules::short(s)).collect();
+    let failing = if shorts.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\nFailing: {}",
+            f.signatures
+                .iter()
+                .map(|s| format!("`{s}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    let shards = if f.also.is_empty() {
+        String::new()
+    } else {
+        format!("\nAlso red in the same run: {}", f.also.join(", "))
+    };
+    let repeats = if f.repeats.is_empty() {
+        String::new()
+    } else {
+        let list: Vec<String> = f
+            .repeats
+            .iter()
+            .map(|r| {
+                format!(
+                    "#{} (landed {}): {}",
+                    r.task,
+                    ago_text(now_ms().saturating_sub(r.landed_ms)),
+                    r.title
+                )
+            })
+            .collect();
+        let ids: Vec<String> = f
+            .repeats
+            .iter()
+            .map(|r| {
+                format!(
+                    "#{} (landed {})",
+                    r.task,
+                    ago_text(now_ms().saturating_sub(r.landed_ms))
+                )
+            })
+            .collect();
+        let named: Vec<&str> = f
+            .repeats
+            .iter()
+            .flat_map(|r| r.signatures.iter().map(|s| rules::short(s)))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        format!(
+            "\n\nRepeat failure: {} changed {} and it still fails on `{base}`; find why \
+             their fix did not hold.\n{}",
+            ids.join(" and "),
+            named.join(", "),
+            list.join("\n")
+        )
+    };
     let body = format!(
-        "`{key}` is red on `{base}`: {why}.\n\nRun: {}\nCommit: {}\n\n\
+        "`{key}` is red on `{base}`: {why}.{failing}{shards}{repeats}\n\nRun: {}\nCommit: {}\n\n\
          Failed log tail:\n```\n{tail}\n```\n\nFound by the base-branch CI watch.",
         f.at.url, f.at.sha
     );
+    let what = if shorts.is_empty() {
+        String::new()
+    } else if shorts.len() > 6 {
+        format!(
+            ": {}, and {} more",
+            shorts[..6].join(", "),
+            shorts.len() - 6
+        )
+    } else {
+        format!(": {}", shorts.join(", "))
+    };
     emit_task(
         d,
         pid,
-        format!("{key} red on {base}"),
+        format!("{key} red on {base}{what}"),
         body,
         if f.urgent {
             Priority::Urgent
@@ -591,6 +780,15 @@ fn file_task(
         },
         f.proposed,
     )
+}
+
+fn ago_text(ms: u64) -> String {
+    let m = ms / 60_000;
+    match m {
+        0..=59 => format!("{m}m ago"),
+        60..=2879 => format!("{}h ago", m / 60),
+        _ => format!("{}d ago", m / 1440),
+    }
 }
 
 /// The task for a job that keeps hitting its time limit: the run, the limit GitHub gave, and
