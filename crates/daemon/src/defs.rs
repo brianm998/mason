@@ -144,6 +144,14 @@ impl Daemon {
         for w in mason_definition::validate::warnings(&def, &caps) {
             tracing::warn!(project = %p.id, "{what}: {w}");
         }
+        if let (Some(sha), false) = (&sha, def.testing.impact.entries.is_empty()) {
+            if let Ok(list) = git::run(&p.path, &["ls-tree", "-r", "--name-only", sha]) {
+                let files: Vec<String> = list.lines().map(String::from).collect();
+                for (dir, fs) in def.testing.impact.unmapped_by_dir(&files) {
+                    tracing::warn!(project = %p.id, "{what}: [impact] names no suite for {} file(s) in {dir} (e.g. {}); a change to one runs every suite whole", fs.len(), fs[0]);
+                }
+            }
+        }
         self.store
             .put_definition(&def.hash, &text, now_ms())
             .map_err(|e| vec![e.to_string()])?;

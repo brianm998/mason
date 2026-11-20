@@ -48,7 +48,7 @@ count = 2
 type = "test"
 category = "testing"
 uses = { compile = 1, test-suite = 1 }
-suites = ["cargo-workspace", "swift-clients", "compose-clients", "exit-scripts"]
+suites = ["cargo-workspace", "swift-clients", "compose-clients", "exit-scripts", "fmt"]
 max_rounds = 3
 on_red = "develop"
 next = "land"
@@ -117,17 +117,40 @@ min_tests = 1
 level = "unit"
 uses = { test-suite = 1 }
 
+# A fast formatting gate for the test step (s691): no build, no slot, a few seconds. An unformatted
+# change goes back from its own test step, and `run_check` shows the develop agent the `Diff in`
+# lines. Its own suite, so a skip of `cargo-workspace` does not skip it. The landing `lint` tier
+# runs the same check again over the union.
+[suite.fmt]
+command = '''if cargo fmt --all -- --check; then echo "test fmt_clean ... ok"; else echo "test fmt_clean ... FAILED"; exit 1; fi'''
+parser = "regex"
+pass_regex = '^test (.+) \.\.\. ok$'
+fail_regex = '^test (.+) \.\.\. FAILED$'
+min_tests = 1
+level = "unit"
+uses = {}
+
 # Run by the landing `lint` tier (.mason/landing.toml) over every batch, not by the test step: six
 # lint errors and five unformatted files landed in two days because neither the batch's tests nor
 # the rebuild of a skipped batch ran them (s521).
 [suite.lint]
-command = "cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings"
+command = "bash scripts/check-spdx.sh && bash scripts/check-exit-guards.sh && bash scripts/check-exit-portability.sh && cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings"
 parser = "regex"
 pass_regex = '^$'
 fail_regex = '^error'
 min_tests = 1
 # Not "unit": [binding.unit] would also bind it to run_check and the test step. No binding
 # names this level, so only the landing tier runs it.
+level = "landing"
+
+# The same selector over the merged tree, once per batch (the `exit` tier of .mason/landing.toml, s669).
+# MASON_BASE is unset there, so it compares with origin/develop.
+[suite.exit-scripts-landing]
+command = "bash scripts/run-changed-exit-scripts.sh"
+parser = "regex"
+pass_regex = '^PASS (.+)$'
+fail_regex = '^FAIL (.+)$'
+min_tests = 1
 level = "landing"
 
 [binding.unit]
@@ -137,7 +160,7 @@ when = ["development", "test_step"]
 # select the cargo suite, which then runs only the smoke set per task (decisions 0173, 0539); the
 # landing batch runs it whole.
 [impact]
-"crates/**" = ["cargo-workspace"]
+"crates/**" = ["cargo-workspace", "fmt"]
 "Cargo.*" = ["cargo-workspace"]
 "rust-toolchain.toml" = ["cargo-workspace"]
 "scripts/exit/**" = ["cargo-workspace", "exit-scripts"]
@@ -148,6 +171,37 @@ when = ["development", "test_step"]
 "schemas/**" = ["cargo-workspace", "swift-clients", "compose-clients"]
 "docs/**" = ["cargo-workspace"]
 "**/*.md" = ["cargo-workspace"]
+# Paths that used to run every suite whole (s685, decision 0678). Each choice follows what reads the
+# file; `.mason/mason.toml` is left unmapped on purpose, so a definition change tests everything.
+# CI runs the workflows itself and the CI watch checks them; only ci.yml is read by a cargo test.
+".github/**" = []
+".github/workflows/ci.yml" = ["cargo-workspace"]
+".cargo/**" = ["cargo-workspace"]
+".gitignore" = []
+".claude/**" = []
+"LICENSE*" = []
+"deny.toml" = []
+"packaging/**" = []
+"site/**" = []
+"spikes/**" = []
+"prompts/**" = []
+# `mason init` embeds the templates and the cli tests parse them.
+"templates/**" = ["cargo-workspace"]
+".mason/landing.toml" = []
+".mason/smoke-tests.txt" = ["cargo-workspace"]
+".mason/serial-tests.txt" = ["cargo-workspace"]
+# The conformance crate reads the mascot art list.
+"clients/mascot.toml" = ["cargo-workspace", "swift-clients", "compose-clients"]
+"scripts/*.sh" = ["exit-scripts"]
+"scripts/lib/**" = ["exit-scripts"]
+"scripts/tests/**" = ["exit-scripts"]
+"scripts/package/**" = ["swift-clients"]
+"scripts/bundle-monitor.sh" = ["swift-clients"]
+"scripts/gen-app-icon-macos.swift" = ["swift-clients"]
+"scripts/install.sh" = []
+"scripts/rustdoc-bootstrap.sh" = ["cargo-workspace"]
+"scripts/test-parallel.py" = ["cargo-workspace"]
+"scripts/spike/**" = []
 
 [step.land]
 type = "landing"

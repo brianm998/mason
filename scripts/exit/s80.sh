@@ -5,7 +5,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-for i in 1 2 3; do
+for i in $(seq 1 "${MASON_EXIT_REPEAT:-3}"); do
     echo "== holds run $i"
     out=$(cargo test -q -p mason-daemon --test holds 2>&1) || { echo "$out" >&2; echo "FAILED: run $i" >&2; exit 1; }
     echo "$out" | grep -E '^test result' | tail -1
