@@ -101,3 +101,19 @@ fn push_triggered_matrices_have_no_macos_for_exit_scripts_or_compose() {
         assert!(!os.contains("macos"), "{name} lists macOS: {os}");
     }
 }
+
+#[test]
+fn the_test_step_has_a_fast_fmt_suite_that_holds_no_slot() {
+    // s691: an unformatted change goes back from its own test step, even when the owner
+    // skipped `cargo-workspace`, because `fmt` is a suite of its own.
+    let text = std::fs::read_to_string(root().join(".mason/mason.toml")).unwrap();
+    let step = text.split("[step.test]").nth(1).unwrap();
+    let step = step.split("\n[suite.").next().unwrap();
+    assert!(step.contains("\"fmt\""), "step.test lists the fmt suite");
+    let suite = text.split("[suite.fmt]").nth(1).expect("a fmt suite");
+    let suite = suite.split("\n[").next().unwrap();
+    assert!(suite.contains("cargo fmt --all -- --check"));
+    assert!(suite.contains("level = \"unit\"") && suite.contains("uses = {}"));
+    assert!(!suite.contains("build ="), "no build step");
+    assert!(text.contains("\"crates/**\" = [\"cargo-workspace\", \"fmt\"]"));
+}
