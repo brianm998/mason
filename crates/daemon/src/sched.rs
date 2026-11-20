@@ -15,7 +15,7 @@ use mason_core::TaskId;
 use mason_resources::{Held, Locks, Take, TakeError};
 use mason_scheduler::{
     explain, since, CpuGate, DiskGate, Kind, Ledger, Needs, PolicyGate, Rank, StallGate, WaitCause,
-    COMPILE,
+    COMPILE, GHA, GHA_MACOS,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -135,6 +135,12 @@ pub const DEFAULT_SYSPOLICYD_MAX_PCT: u32 = 300;
 /// The default `thermal_min_pct`. A cool machine reads 100; before the 2026-11-18 resets the
 /// owner's iMac Pro read 51 and 27 under light load.
 pub const DEFAULT_THERMAL_MIN_PCT: u32 = 80;
+
+/// The default size of the `gha` pool: every GitHub job a remote run uses (#700).
+pub const DEFAULT_GHA: u32 = 16;
+
+/// The default size of the `gha-macos` pool: the macOS jobs among them.
+pub const DEFAULT_GHA_MACOS: u32 = 4;
 
 /// The default `thermal_max_c`. On 2026-11-18/19 the owner's iMac Pro sat at 90 °C or more for
 /// 647 minutes, 98 °C or more for 97 and peaked at 99.6 °C, with `pmset` reading 100 throughout.
@@ -402,6 +408,13 @@ enum Meta {
     /// with the kernel: there is no lock to find.
     Host {
         dir: PathBuf,
+    },
+    /// The GitHub runner units of a remote run that outlived the daemon that started it (#700).
+    /// Counted as held until the run's record says it has ended (`record`), or the run's own
+    /// step asks again for the same `key` and takes them over.
+    Remote {
+        key: String,
+        record: PathBuf,
     },
 }
 
@@ -735,6 +748,14 @@ impl Broker {
             ledger.set_capacity(p, *n, Kind::Pool);
             fixed.insert(p.clone());
             pools.insert(p.clone());
+        }
+        // The GitHub runner pools (#700): MASON keeps to 16 of GitHub's 20 jobs at once and 4 of
+        // its 5 macOS ones. An owner's `[pools]` entry above, or a live limit below, wins.
+        for (p, n) in [(GHA, DEFAULT_GHA), (GHA_MACOS, DEFAULT_GHA_MACOS)] {
+            if !cfg.pools.contains_key(p) {
+                ledger.set_capacity(p, n, Kind::Pool);
+                pools.insert(p.to_string());
+            }
         }
         // Reading the machine replaces a count set per project, but CPU use alone
         // lets too many in: a test run is mostly disk and process launches, and
@@ -1251,7 +1272,7 @@ impl Broker {
             .filter(|id| {
                 !matches!(
                     st.meta.get(id),
-                    Some(Meta::Outside { .. } | Meta::Host { .. })
+                    Some(Meta::Outside { .. } | Meta::Host { .. } | Meta::Remote { .. })
                 )
             })
             .collect();
@@ -1380,6 +1401,7 @@ impl Broker {
         }
         if probes.is_some() {
             changed |= Self::release_ended_hosts(st);
+            changed |= Self::release_ended_remote(st);
         }
         if let Some(probes) = probes {
             changed |= self.count_outside_holders(st, now, probes);
@@ -1526,6 +1548,7 @@ impl Broker {
                 Meta::Host { .. } => {
                     Some((*id, "held by a step host from before the restart".into()))
                 }
+                Meta::Remote { .. } => Some((*id, "a GitHub run from before the restart".into())),
                 Meta::Task => None,
             })
             .collect();
@@ -1679,6 +1702,75 @@ impl Broker {
             );
             st.meta.insert(id, Meta::Host { dir: h.dir.clone() });
         }
+    }
+
+    /// Count, as held, the runner units of every remote run whose record says it is still in
+    /// progress (#700). Called with [`Broker::adopt_hosts`], before the first grant.
+    pub fn adopt_remote(&self, holds: &[crate::remote::RemoteHold]) {
+        let mut st = lock(&self.st);
+        let now = crate::daemon::now_ms();
+        for h in holds {
+            let amounts: BTreeMap<String, u32> = h
+                .units
+                .iter()
+                .filter(|(k, n)| **n > 0 && st.pools.contains(*k))
+                .map(|(k, n)| (k.clone(), *n))
+                .collect();
+            if amounts.is_empty() {
+                continue;
+            }
+            let id = st.ledger.adopt(
+                Needs {
+                    exclusive: false,
+                    amounts,
+                },
+                &format!("{} (from before the restart)", h.label),
+                now,
+            );
+            st.meta.insert(
+                id,
+                Meta::Remote {
+                    key: h.key.clone(),
+                    record: h.record.clone(),
+                },
+            );
+        }
+    }
+
+    /// The run `key` asks for its units again after a restart: give back those adopted for it,
+    /// so it is not counted twice. Returns whether there were any.
+    pub fn take_over_remote(&self, key: &str) -> bool {
+        let mut st = lock(&self.st);
+        let ids: Vec<u64> = st
+            .meta
+            .iter()
+            .filter_map(|(id, m)| match m {
+                Meta::Remote { key: k, .. } if k == key => Some(*id),
+                _ => None,
+            })
+            .collect();
+        for id in &ids {
+            st.ledger.release(*id);
+            st.meta.remove(id);
+        }
+        !ids.is_empty()
+    }
+
+    /// Give back the units of an adopted remote run that has ended.
+    fn release_ended_remote(st: &mut State) -> bool {
+        let ended: Vec<u64> = st
+            .meta
+            .iter()
+            .filter_map(|(id, m)| match m {
+                Meta::Remote { record, .. } => crate::remote::record_ended(record).then_some(*id),
+                _ => None,
+            })
+            .collect();
+        for id in &ended {
+            st.ledger.release(*id);
+            st.meta.remove(id);
+        }
+        !ended.is_empty()
     }
 
     /// Give back the slots of a host whose command ended (or whose host is gone).
@@ -4090,5 +4182,154 @@ mod tests {
         for w in v.tasks.values() {
             assert_eq!(w.cause, "cpu");
         }
+    }
+
+    fn runner_broker(dir: &Path, gha: u32, macos: u32, cpu_pct: u32) -> Arc<Broker> {
+        let cfg = ResourceCfg {
+            machine: BTreeMap::from([("compile".to_string(), 3)]),
+            pools: BTreeMap::from([("gha".to_string(), gha), ("gha-macos".to_string(), macos)]),
+            ..Default::default()
+        };
+        Broker::new(
+            dir.join("locks"),
+            dir.join("limits.kv"),
+            &cfg,
+            2,
+            crate::cpu::FakeCpu::new(cpu_pct),
+            &[],
+        )
+        .unwrap()
+    }
+
+    fn held(b: &Broker, id: u64) -> bool {
+        lock(&b.st).ledger.holds(id)
+    }
+
+    fn macos_run() -> BTreeMap<String, u32> {
+        BTreeMap::from([("gha".to_string(), 1), ("gha-macos".to_string(), 1)])
+    }
+
+    #[test]
+    fn the_runner_pools_exist_by_default_and_resources_toml_changes_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = Broker::new(
+            dir.path().join("locks"),
+            dir.path().join("limits.kv"),
+            &ResourceCfg::default(),
+            2,
+            crate::cpu::FakeCpu::new(0),
+            &[],
+        )
+        .unwrap();
+        assert_eq!((b.limit("gha"), b.limit("gha-macos")), (Some(16), Some(4)));
+        b.set_limit("gha-macos", 2).unwrap();
+        assert_eq!(b.limit("gha-macos"), Some(2));
+        let other = tempfile::tempdir().unwrap();
+        let b = runner_broker(other.path(), 8, 1, 0);
+        assert_eq!((b.limit("gha"), b.limit("gha-macos")), (Some(8), Some(1)));
+    }
+
+    #[test]
+    fn the_third_macos_run_waits_and_says_why_then_starts_when_one_ends() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = runner_broker(dir.path(), 16, 2, 0);
+        let a = queue_task(&b, 701, &macos_run());
+        let c = queue_task(&b, 705, &macos_run());
+        let third = queue_task(&b, 690, &macos_run());
+        assert!(held(&b, a) && held(&b, c) && !held(&b, third));
+        let text = lock(&b.st)
+            .ledger
+            .waits_gated(0, None, None, None)
+            .waits
+            .get(&third)
+            .map(|w| explain(w, 0))
+            .expect("the third run waits");
+        assert!(
+            text.starts_with("waiting for a GitHub macOS runner: 2 of 2 in use (#701, #705)"),
+            "{text}"
+        );
+        // The fake GitHub completes one of the first two.
+        lock(&b.st).ledger.release(a);
+        drop(b.pass(lock(&b.st)));
+        assert!(held(&b, third));
+    }
+
+    #[test]
+    fn a_remote_run_starts_while_the_cpu_and_the_heat_hold_a_local_compile() {
+        let dir = tempfile::tempdir().unwrap();
+        // CPU at 95% (limit 50) and a CPU held to 40% for heat.
+        let b = runner_broker(dir.path(), 16, 4, 95);
+        b.set_thermal(crate::thermal::FakeThermal::new(40), 80);
+        let one = BTreeMap::from([("compile".to_string(), 1)]);
+        let first = queue_task(&b, 1, &one);
+        let second = queue_task(&b, 2, &one);
+        let remote = queue_task(&b, 3, &macos_run());
+        assert!(held(&b, first));
+        assert!(
+            !held(&b, second),
+            "the local compile waits for the CPU and the heat"
+        );
+        assert!(held(&b, remote), "the remote run uses none of this machine");
+    }
+
+    #[test]
+    fn a_run_sharded_three_ways_holds_three_units_and_gives_them_all_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = runner_broker(dir.path(), 16, 4, 0);
+        let three = BTreeMap::from([("gha".to_string(), 3)]);
+        let id = queue_task(&b, 9, &three);
+        assert!(held(&b, id));
+        let used = |b: &Broker| -> u32 {
+            let snap = lock(&b.st).ledger.snapshot();
+            snap.holders
+                .iter()
+                .filter_map(|h| h.needs.amounts.get("gha"))
+                .sum()
+        };
+        assert_eq!(used(&b), 3);
+        lock(&b.st).ledger.release(id);
+        assert_eq!(used(&b), 0);
+    }
+
+    #[test]
+    fn after_a_restart_the_units_of_a_run_still_out_count_as_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = runner_broker(dir.path(), 16, 1, 0);
+        let record = dir.path().join("t1.remote");
+        mason_step_host::registry::write_kv(
+            &record,
+            &[("sha", "abc".to_string()), ("collected", "0".to_string())],
+        )
+        .unwrap();
+        b.adopt_remote(&[crate::remote::RemoteHold {
+            key: "task 5".into(),
+            label: "#5".into(),
+            units: BTreeMap::from([("gha".to_string(), 1), ("gha-macos".to_string(), 1)]),
+            record: record.clone(),
+        }]);
+        // The only macOS unit is held, so the next macOS run waits.
+        let next = queue_task(&b, 6, &macos_run());
+        assert!(!held(&b, next));
+        // Its own step asking again takes the adopted units over, so it is not counted twice.
+        let other = queue_task(&b, 7, &macos_run());
+        assert!(!held(&b, other));
+        assert!(b.take_over_remote("task 5"));
+        drop(b.pass(lock(&b.st)));
+        assert!(held(&b, next));
+        // A run whose record says it ended gives its units back at the next probe.
+        let b2 = runner_broker(dir.path(), 16, 1, 0);
+        b2.adopt_remote(&[crate::remote::RemoteHold {
+            key: "task 8".into(),
+            label: "#8".into(),
+            units: macos_run(),
+            record: record.clone(),
+        }]);
+        assert!(!held(&b2, queue_task(&b2, 9, &macos_run())));
+        mason_step_host::registry::write_kv(
+            &record,
+            &[("sha", "abc".to_string()), ("collected", "1".to_string())],
+        )
+        .unwrap();
+        assert!(crate::remote::record_ended(&record));
     }
 }
