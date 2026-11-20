@@ -14,18 +14,26 @@ cargo test -q -p mason-daemon --test it --no-run >/dev/null 2>&1 || { echo "s675
 
 cargo test -q -p mason-daemon --test it a_takeover_waits_for_running_landing_batches >"$out" 2>&1 &
 cargo_pid=$!
-# Partway: wait for a world root (new since `before`) with a step host under it.
+# Partway: the test binary is cargo's child; its world root is the one whose owner.lock holds
+# its pid (other runs on this machine make roots too), and it has a host under it.
 root=""
+tpid=""
 for _ in $(seq 1 1200); do
-  for r in $(ls -d /tmp/ms* 2>/dev/null | sort | comm -13 "$before" -); do
-    if /bin/ps -axo command= | grep -F -- "/tmp/$(basename "$r")/" | grep -q -e '--dir' -e '--data-dir'; then root=$r; break 2; fi
-  done
+  tpid=$(pgrep -P "$cargo_pid" | head -1)
+  if [ -n "$tpid" ]; then
+    for f in /tmp/ms*/owner.lock; do
+      [ -e "$f" ] || continue
+      [ "$(cat "$f" 2>/dev/null)" = "$tpid" ] || continue
+      r=$(dirname "$f")
+      if /bin/ps -axo command= | grep -F -- "/tmp/$(basename "$r")/" | grep -q -e '--dir' -e '--data-dir'; then root=$r; break 2; fi
+    done
+  fi
   sleep 0.5
 done
 [ -n "$root" ] || { echo "s675: no blocking world appeared"; kill "$cargo_pid" 2>/dev/null; exit 1; }
 echo "killing the run whose root is $root"
 # SIGKILL the test binary (and cargo), not its hosts.
-pkill -KILL -P "$cargo_pid" 2>/dev/null
+kill -KILL "$tpid" 2>/dev/null
 kill -KILL "$cargo_pid" 2>/dev/null
 wait "$cargo_pid" 2>/dev/null
 

@@ -110,12 +110,16 @@ fn blocking_loop_ends_when_its_test_is_gone() {
         .args(["-c", "sleep 600; :"])
         .spawn()
         .unwrap();
-    let script = blocking_loop(&dir, &dir.join("release"), owner.id(), "0.05");
+    let script = format!(
+        "touch '{}/started'; {}",
+        dir.display(),
+        blocking_loop(&dir, &dir.join("release"), owner.id(), "0.05")
+    );
     let mut looper = Command::new("/bin/sh")
         .args(["-c", &script])
         .spawn()
         .unwrap();
-    std::thread::sleep(Duration::from_millis(300));
+    wait_until("the loop to start", || dir.join("started").exists());
     assert!(looper.try_wait().unwrap().is_none(), "the loop ended early");
     owner.kill().unwrap();
     owner.wait().unwrap();
