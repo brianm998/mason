@@ -167,6 +167,9 @@ pub fn render(steps: &str) -> String {
     TEMPLATE.replacen(MARK, steps.trim_end_matches('\n'), 1)
 }
 
+/// Every `mason remote` subcommand, for the unknown-subcommand errors.
+pub const COMMANDS: &str = "the remote commands are `setup`, `on`, `off` and `status`";
+
 fn fail(msg: &str) -> i32 {
     eprintln!("error: {msg}");
     1
@@ -174,7 +177,9 @@ fn fail(msg: &str) -> i32 {
 
 pub fn run(mut args: Vec<String>, config_dir: &Path) -> i32 {
     if args.first().map(String::as_str) != Some("setup") {
-        return fail("the only remote command is `mason remote setup --project P [--runs-on L]`");
+        return fail(&format!(
+            "{COMMANDS}: `mason remote setup --project P [--runs-on L]`, `mason remote on|off|status [--json]`"
+        ));
     }
     args.remove(0);
     let mut take = |name: &str| -> Result<Option<String>, String> {

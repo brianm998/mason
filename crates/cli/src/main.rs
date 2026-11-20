@@ -525,7 +525,7 @@ fn main() {
             &config_dir,
         ));
     }
-    if cmd == "remote" {
+    if cmd == "remote" && a.rest.first().map(String::as_str) == Some("setup") {
         exit(remote::run(std::mem::take(&mut a.rest), &config_dir));
     }
     if cmd == "remove" {
@@ -676,7 +676,10 @@ fn main() {
             "on" => Some("github"),
             "off" => Some("local"),
             "status" => None,
-            other => die(&format!("unknown remote command {other:?}\n\n{HELP}")),
+            other => die(&format!(
+                "unknown remote command {other:?}: {}\n\n{HELP}",
+                remote::COMMANDS
+            )),
         };
         finish(&a);
         if let Some(to) = to {
