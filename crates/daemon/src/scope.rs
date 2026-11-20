@@ -188,9 +188,21 @@ pub fn narrow_for(
     smoke: bool,
     named: &str,
 ) -> Result<Narrow, String> {
+    narrow_noted(wt, paths, tests, smoke, named).map(|(n, _)| n)
+}
+
+/// [`narrow_for`] with the notes on how each narrowed directory target's modules were picked
+/// ("it: 7 of 82 modules, by the coverage map of 1a2b3c4").
+pub fn narrow_noted(
+    wt: &Path,
+    paths: &[String],
+    tests: bool,
+    smoke: bool,
+    named: &str,
+) -> Result<(Narrow, Vec<String>), String> {
     if !tests {
         return changed_packages(wt, paths)
-            .map(Narrow::Packages)
+            .map(|p| (Narrow::Packages(p), vec![]))
             .ok_or_else(|| "no packages found for your changes".to_string());
     }
     // No path left for this suite (docs and client files only) runs the smoke set alone.
@@ -221,7 +233,12 @@ pub fn narrow_for(
     };
     let files: Vec<String> = listed.lines().map(String::from).collect();
     let read = |p: &str| std::fs::read_to_string(wt.join(p)).ok();
-    let mut groups = match crate::affected::select(&pkgs, paths, &files, &read, named) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let cov = crate::covmap::load_fresh(now);
+    let picked = crate::affected::select_with(&pkgs, paths, &files, &read, named, cov.as_ref());
+    let mut groups = match picked {
         crate::affected::Pick::Some(g) => g,
         crate::affected::Pick::All { because } => return Err(because),
     };
@@ -231,12 +248,13 @@ pub fn narrow_for(
             raw = crate::affected::add_smoke(&mut groups, &text);
         }
     }
+    let notes: Vec<String> = groups.values().flat_map(|g| g.notes.clone()).collect();
     let mut runs = crate::affected::render(&groups);
     runs.extend(raw);
     if runs.is_empty() {
         return Err("no test target reads what changed".to_string());
     }
-    Ok(Narrow::Targets(runs))
+    Ok((Narrow::Targets(runs), notes))
 }
 
 /// The owner-edited list of fast end-to-end targets every task's test step also runs.
