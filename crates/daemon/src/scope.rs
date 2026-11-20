@@ -147,7 +147,10 @@ pub fn expand(template: &str, n: &Narrow, build: bool) -> String {
     // the filter would otherwise reach the test binary.
     let group = |g: &str| {
         if build {
-            let g = match g.find(" -- ").or_else(|| g.strip_suffix(" --").map(|h| h.len())) {
+            let g = match g
+                .find(" -- ")
+                .or_else(|| g.strip_suffix(" --").map(|h| h.len()))
+            {
                 Some(i) => &g[..i],
                 None => g,
             };
