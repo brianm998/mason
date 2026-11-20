@@ -42,13 +42,28 @@ fn a_skipped_batch_whose_merge_breaks_a_unit_test_is_parked_naming_that_test() {
 
 #[test]
 fn a_skipped_batch_whose_unit_tests_pass_lands_and_a_batch_with_testing_does_not_run_the_tier() {
-    let w = world_built_fast("window = \"2s\"\nmax_size = 5\n", &[], true);
-    let t = w.task("fine", &[("x/ok.txt", "1")]);
-    skip_testing(&w, t);
+    // The batch forms when the task is admitted (max_size), never on the timer.
+    let w = world_built_fast("window = \"20m\"\nmax_size = 1\n", &[], true);
+    let t = w.task_with("fine", &[("x/ok.txt", "1")], skip_testing);
     wait_for("it to land", 120, || w.landed(t));
     // The push is read back through the origin: look until it shows, not once.
     wait_for("its file on main", 120, || w.on_main("x/ok.txt"));
     assert!(w.on_main("x/ok.txt"));
+    // The daemon's idle debt pass pays this task's `step:test` debt about a minute after start,
+    // in this repo, while the next task is made. Order it: pay it here, now, then check it is closed.
+    for d in w.d.store.debts(Some(t.0), true).unwrap() {
+        if d.scope == "step:test" {
+            // "already paid" (the daemon got there first) is fine; the check below decides.
+            let _ = mason_daemon::suites::pay(&w.d, d.id);
+        }
+    }
+    let open = w.d.store.debts(Some(t.0), true).unwrap();
+    assert!(open.iter().all(|d| d.scope != "step:test"), "{open:?}");
+    // Let the first batch finish tearing down before the next task's worktree is made.
+    let pid = w.d.project_id_by_name("scratch").unwrap();
+    wait_for("the first batch to finish", 120, || {
+        w.d.landing().running_batches(pid) == 0
+    });
     // Not skipped: only the floor runs, so the tier's red does not stop it.
     let u = w.task("tested", &[("x/red.fast", "1")]);
     wait_for("the tested task to land", 120, || w.landed(u));

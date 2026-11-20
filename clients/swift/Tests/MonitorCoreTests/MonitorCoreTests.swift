@@ -320,6 +320,29 @@ final class MonitorCoreTests: XCTestCase {
         XCTAssertEqual(m.page, .landing)
     }
 
+    func testDoubleClickOnStuckOrProposedWithSeveralTasksOpensTheirPage() {
+        for state in ["needs_attention", "proposed"] {
+            let m = model()
+            m.sidebar!.sections.append(section(state, collapsed: true, rows: [row(40, state: state), row(41, state: state)]))
+            m.tileClicked(state: state, clickCount: 2)
+            let sec = m.sidebar!.sections.first { $0.state == state }!
+            XCTAssertTrue(m.isExpanded(sec), state)
+            XCTAssertEqual(m.scrollTarget, state)
+            XCTAssertEqual(m.page, .section(state))
+            XCTAssertEqual(m.sectionRows(state).map(\.id), [40, 41])
+            let one = model()
+            one.sidebar!.sections.append(section(state, rows: [row(42, state: state)]))
+            one.tileClicked(state: state, clickCount: 2)
+            XCTAssertEqual(one.page, .task(42))
+            let off = model(connected: false)
+            off.sidebar!.sections.append(section(state, rows: [row(40, state: state), row(41, state: state)]))
+            off.tileClicked(state: state, clickCount: 2)
+            XCTAssertEqual(off.page, .home, "disconnected does nothing")
+        }
+        XCTAssertEqual(MonitorModel.sectionTitle("needs_attention"), "Needs you")
+        XCTAssertEqual(MonitorModel.sectionTitle("proposed"), "Proposed")
+    }
+
     func testSectionUrlsRoundTripToTheirPages() {
         for name in Page.sectionNames {
             let page = Page.sectionPage(name)
@@ -699,6 +722,14 @@ final class MonitorCoreTests: XCTestCase {
         var m = Mason_V1_ServerMessage()
         m.result = r
         return m
+    }
+
+    /// A monitor started by `make run` has the old commit in MASON_MONITOR_VERSION. The rebuilt
+    /// binary must not inherit it, or it reports the old commit and offers the update forever.
+    func testARelaunchedMonitorDoesNotInheritTheOldVersion() {
+        let env = Relaunch.environment(from: ["MASON_MONITOR_VERSION": "0f45f127", "HOME": "/h", "MASON_SOURCE_DIR": "/s"])
+        XCTAssertNil(env["MASON_MONITOR_VERSION"])
+        XCTAssertEqual(env, ["HOME": "/h", "MASON_SOURCE_DIR": "/s"])
     }
 
     func testAMonitorOffersToUpdateOnlyWhenItsOwnSourceMoved() {

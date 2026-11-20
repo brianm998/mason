@@ -96,11 +96,13 @@ final class Session: ObservableObject {
         }
     }
 
-    /// Start the binary at `path` again, with this one's arguments, and close this one.
+    /// Start the binary at `path` again, with this one's arguments, and close this one. The new
+    /// binary reports the commit stamped into it, not this process's `MASON_MONITOR_VERSION`.
     func relaunchInPlace(_ path: String) {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: path)
         p.arguments = Array(CommandLine.arguments.dropFirst())
+        p.environment = Relaunch.environment(from: ProcessInfo.processInfo.environment)
         do {
             try p.run()
             NSApp.terminate(nil)
