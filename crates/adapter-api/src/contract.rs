@@ -1619,7 +1619,10 @@ mod tests {
             &json!({"name": "tests", "full": true, "why": "changed build.rs"}),
         );
         assert!(r.ok, "{}", r.text);
-        assert!(c.call("run_check", &json!({"name": "tests", "full": true})).ok);
+        assert!(
+            c.call("run_check", &json!({"name": "tests", "full": true}))
+                .ok
+        );
         let seen = seen.lock().unwrap();
         assert!(seen[0].full);
         assert_eq!(seen[0].why.as_deref(), Some("changed build.rs"));
