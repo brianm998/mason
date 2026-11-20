@@ -65,6 +65,10 @@ pub struct Request {
     /// How long it is expected to hold what it asks for, at most (s385): known for a suite's
     /// build or run from its recorded times. `None`: unknown.
     pub expected_ms: Option<u64>,
+    /// A converted request (s681): an agent's `--exclusive` turned into all `compile` units. It
+    /// freezes `compile` like an exclusive request freezes the machine, with the same bound
+    /// (`exclusive_max_wait`) and backfill, scoped to `compile`.
+    pub drains_compile: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -259,9 +263,15 @@ struct Blocked {
     /// A holder that has run past its expected end counts as ending one more expected run from
     /// now, so the end never falls into the past and stops all backfill (s552).
     drain_end: Option<u64>,
+    /// A converted all-`compile` request waits (s681): compile work may pass it only when done
+    /// in time, as for `machine_all`, and it reserves no `compile` units for the passing rule.
+    compile_drain: bool,
+    /// As `drain_end`, from the `compile` holders only.
+    compile_drain_end: Option<u64>,
 }
 
 impl Blocked {
+    #[allow(clippy::too_many_arguments)]
     fn add(
         &mut self,
         capacity: &BTreeMap<String, Capacity>,
@@ -270,6 +280,7 @@ impl Blocked {
         holders: &[Holder],
         now: u64,
         thawed: Option<u64>,
+        drains_compile: bool,
     ) {
         let short: Vec<&String> = n
             .amounts
@@ -286,13 +297,21 @@ impl Blocked {
             .iter()
             .all(|r| self.reserved.get(*r).copied().unwrap_or(0) == 0);
         for (r, a) in &n.amounts {
+            // A converted request holds compile by the drain rule, not by reserving it (s681).
+            if drains_compile && r == COMPILE {
+                continue;
+            }
             if short.is_empty() || first || short.contains(&r) {
                 *self.reserved.entry(r.clone()).or_insert(0) += a;
             }
         }
         if n.exclusive && !self.machine_all {
             self.machine_all = true;
-            self.drain_end = drain_end(capacity, holders, now, thawed);
+            self.drain_end = drain_end(capacity, holders, now, thawed, false);
+        }
+        if drains_compile && !self.compile_drain {
+            self.compile_drain = true;
+            self.compile_drain_end = drain_end(capacity, holders, now, thawed, true);
         }
         if uses_machine(capacity, n) {
             self.machine_any = true;
@@ -307,12 +326,34 @@ impl Blocked {
         n: &Needs,
         now: u64,
         expected_ms: Option<u64>,
+        drains_compile: bool,
     ) -> bool {
         let done_in_time = matches!(
             (self.drain_end, expected_ms),
             (Some(end), Some(e)) if !n.exclusive && now.saturating_add(e) <= end
         );
-        self.machine_all && !n.exclusive && uses_machine(capacity, n) && !done_in_time
+        (self.machine_all && !n.exclusive && uses_machine(capacity, n) && !done_in_time)
+            || self.held_by_compile_drain(n, now, expected_ms, drains_compile)
+    }
+
+    /// A waiting converted request holds `n` back: it needs `compile` and cannot be done
+    /// before the `compile` holders have drained (s681).
+    fn held_by_compile_drain(
+        &self,
+        n: &Needs,
+        now: u64,
+        expected_ms: Option<u64>,
+        drains_compile: bool,
+    ) -> bool {
+        let done_in_time = matches!(
+            (self.compile_drain_end, expected_ms),
+            (Some(end), Some(e)) if now.saturating_add(e) <= end
+        );
+        self.compile_drain
+            && !drains_compile
+            && !n.exclusive
+            && n.amounts.contains_key(COMPILE)
+            && !done_in_time
     }
 
     /// The first resource of `n` that does not fit once earlier waiters' reservations are set
@@ -324,6 +365,7 @@ impl Blocked {
         n: &Needs,
         now: u64,
         expected_ms: Option<u64>,
+        drains_compile: bool,
     ) -> Option<Touch> {
         let short = n.amounts.iter().find(|(r, a)| {
             let reserved = self.reserved.get(*r).copied().unwrap_or(0);
@@ -348,6 +390,9 @@ impl Blocked {
         {
             return Some(Touch::Machine);
         }
+        if self.held_by_compile_drain(n, now, expected_ms, drains_compile) {
+            return Some(Touch::Name(COMPILE.to_string()));
+        }
         None
     }
 }
@@ -365,9 +410,17 @@ fn drain_end(
     holders: &[Holder],
     now: u64,
     unknown_ms: Option<u64>,
+    compile_only: bool,
 ) -> Option<u64> {
     let mut end = 0u64;
-    for h in holders.iter().filter(|h| uses_machine(capacity, &h.needs)) {
+    let counts = |h: &Holder| {
+        if compile_only {
+            h.needs.amounts.contains_key(COMPILE)
+        } else {
+            uses_machine(capacity, &h.needs)
+        }
+    };
+    for h in holders.iter().filter(|h| counts(h)) {
         let e = match h.expected_ms {
             Some(e) => {
                 let due = h.since.saturating_add(e);
@@ -455,7 +508,14 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
 
     for r in order {
         let compiles = r.needs.amounts.contains_key(COMPILE);
-        let touch = blocked.touches(capacity, &usage, &r.needs, world.now, r.expected_ms);
+        let touch = blocked.touches(
+            capacity,
+            &usage,
+            &r.needs,
+            world.now,
+            r.expected_ms,
+            r.drains_compile,
+        );
         let fitted = fit(capacity, &usage, &r.needs);
         let low_memory = match (world.free_memory_mb, world.memory_floor_mb) {
             (Some(free), Some(floor)) if usage.any && free < floor => Some((free, floor)),
@@ -587,7 +647,13 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
                     && touch.is_some()
                     && matches!(cause, WaitCause::Behind { .. } | WaitCause::Exclusive);
                 let by_exclusive = touched
-                    && blocked.held_by_exclusive(capacity, &r.needs, world.now, r.expected_ms);
+                    && blocked.held_by_exclusive(
+                        capacity,
+                        &r.needs,
+                        world.now,
+                        r.expected_ms,
+                        r.drains_compile,
+                    );
                 let mut wait = build_wait(
                     capacity,
                     &holders,
@@ -601,19 +667,36 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
                 }
                 // An exclusive request past its bound gives up the freeze and says so.
                 let thaw = match world.exclusive_max_wait {
-                    Some(m) if r.needs.exclusive && !matches!(fitted, Fit::Never(_)) => {
+                    Some(m)
+                        if (r.needs.exclusive || r.drains_compile)
+                            && !matches!(fitted, Fit::Never(_)) =>
+                    {
                         let waited = world.now.saturating_sub(r.since);
                         (waited >= m).then_some(m)
                     }
                     _ => None,
                 };
-                if thaw.is_some() && !blocked.machine_all {
+                let first_of_kind = if r.needs.exclusive {
+                    !blocked.machine_all
+                } else {
+                    !blocked.compile_drain
+                };
+                if thaw.is_some() && first_of_kind {
                     wait.thawed_ms = Some(world.now.saturating_sub(r.since));
+                    wait.thawed_compile = !r.needs.exclusive;
                 }
                 out.waits.insert(r.id, wait);
                 // A request that can never fit must not hold up the others.
                 if !matches!(fitted, Fit::Never(_)) {
-                    blocked.add(capacity, &usage, &r.needs, &holders, world.now, thaw);
+                    blocked.add(
+                        capacity,
+                        &usage,
+                        &r.needs,
+                        &holders,
+                        world.now,
+                        thaw,
+                        r.drains_compile,
+                    );
                     ahead.push((r, cause));
                 }
             }
@@ -683,6 +766,7 @@ fn build_wait(
         ahead
             .iter()
             .find(|o| o.0.needs.exclusive)
+            .or_else(|| ahead.iter().find(|o| o.0.drains_compile))
             .map(&to_ahead_ref)
     } else if touched {
         ahead_of_me.first().copied().map(&to_ahead_ref)
@@ -704,5 +788,6 @@ fn build_wait(
         held_by,
         aged_ms: None,
         thawed_ms: None,
+        thawed_compile: false,
     }
 }
