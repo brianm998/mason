@@ -57,6 +57,37 @@ impl Source for GitHub {
     }
 }
 
+/// Reads each job's long log once per pass; the short tail is its last lines. The signatures
+/// and the filed body come from the same fetch.
+struct OnceLog<'a> {
+    inner: &'a dyn Source,
+    logs: std::cell::RefCell<std::collections::HashMap<u64, Option<String>>>,
+}
+
+impl Source for OnceLog<'_> {
+    fn runs(&self, branch: &str) -> Result<Vec<ActionsRun>, String> {
+        self.inner.runs(branch)
+    }
+    fn jobs(&self, run: u64) -> Result<Vec<ActionsJob>, String> {
+        self.inner.jobs(run)
+    }
+    fn annotations(&self, job: u64) -> Option<String> {
+        self.inner.annotations(job)
+    }
+    fn log_long(&self, job: u64) -> Option<String> {
+        self.logs
+            .borrow_mut()
+            .entry(job)
+            .or_insert_with(|| self.inner.log_long(job))
+            .clone()
+    }
+    fn log_tail(&self, job: u64) -> Option<String> {
+        let long = self.log_long(job)?;
+        let lines: Vec<&str> = long.lines().collect();
+        Some(lines[lines.len().saturating_sub(LOG_LINES)..].join("\n"))
+    }
+}
+
 /// What GitHub writes on a job it cut off at its `timeout-minutes`.
 pub const TIMEOUT_NOTE: &str = "exceeded the maximum execution time";
 
@@ -383,6 +414,11 @@ pub fn pass(
     src: &dyn Source,
     now: u64,
 ) -> Result<(), String> {
+    let once = OnceLog {
+        inner: src,
+        logs: Default::default(),
+    };
+    let src: &dyn Source = &once;
     let p = d.project(pid).ok_or("no such project")?;
     let mut saved = load(d, &p.id);
     let runs = src.runs(&p.base)?;

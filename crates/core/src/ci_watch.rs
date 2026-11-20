@@ -1383,7 +1383,7 @@ mod tests {
         let recent = [RecentTask {
             id: 9,
             title: "something else".into(),
-            body: "Run: https://x/runs/2".into(),
+            body: "`CI/a` Run: https://x/runs/2".into(),
         }];
         assert!(go_r(&mut s, &[], 4 * H, &recent, &BTreeMap::new()).is_empty());
         let js = &s.workflows["CI"].jobs["a"];
