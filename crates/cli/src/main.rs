@@ -2734,6 +2734,9 @@ fn main() {
                     counts.join(", ")
                 }
             );
+            if let Some(l) = s["update_wait"].as_str() {
+                println!("update: {l}");
+            }
             for p in s["places"].as_array().into_iter().flatten() {
                 println!(
                     "where: #{} {} {}: {}",
