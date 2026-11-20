@@ -215,6 +215,9 @@ pub struct JobState {
     pub last_timeout: RunRef,
     /// The timeout was filed (or found named): nothing more until a result clears it.
     pub timeout_filed: bool,
+    /// Finished runs of its workflow, in a row, that had no job of this name. At
+    /// `agreement + 2` the job is forgotten (removed or renamed).
+    pub absent: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
@@ -722,6 +725,20 @@ pub fn step(state: &mut State, runs: &[RunRec], ctx: &Ctx) -> Vec<File> {
                     _ => {}
                 }
             }
+            // A job that a finished run does not have is absent; one that has it is not.
+            // After `agreement + 2` runs in a row without it, it was removed or renamed:
+            // its state, banner and freeze go.
+            if let Some(ws) = state.workflows.get_mut(&w) {
+                let limit = rules.agreement + 2;
+                for (name, js) in ws.jobs.iter_mut() {
+                    if r.jobs.iter().any(|j| &j.name == name) {
+                        js.absent = 0;
+                    } else {
+                        js.absent += 1;
+                    }
+                }
+                ws.jobs.retain(|_, js| js.absent < limit);
+            }
         }
     }
 
@@ -799,6 +816,100 @@ pub fn held_back(state: &State, rules: &Rules) -> Vec<(String, u64, Option<u64>)
         }
     }
     v
+}
+
+/// The shard number of a job name `name (os, N)`.
+fn shard_of(job: &str) -> Option<&str> {
+    let inner = job.strip_suffix(')')?;
+    let (_, n) = inner.rsplit_once(", ")?;
+    (!n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())).then_some(n)
+}
+
+/// One line of the held-back view: the shards of a job (or the job) under one ticket.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HeldLine {
+    /// The group key (`CI/exit-scripts (ubuntu-latest, *)` for shards).
+    pub key: String,
+    pub run: u64,
+    pub ticket: u64,
+    pub shards: Vec<String>,
+    /// The ticket landed a change.
+    pub landed: bool,
+}
+
+impl HeldLine {
+    /// `CI/exit-scripts (ubuntu-latest): shards 1, 4` or the plain job key.
+    pub fn name(&self) -> String {
+        match (self.key.strip_suffix(", *)"), self.shards.is_empty()) {
+            (Some(head), false) => format!(
+                "{head}): shard{} {}",
+                if self.shards.len() == 1 { "" } else { "s" },
+                self.shards.join(", ")
+            ),
+            _ => self.key.clone(),
+        }
+    }
+    /// The banner for a job whose open ticket is fixing it.
+    pub fn open_text(&self) -> String {
+        format!("{} red; #{} is fixing it", self.name(), self.ticket)
+    }
+}
+
+/// Held-back red jobs, by shard group and ticket. Jobs with a ticket that has no landing
+/// recorded are `open` (being fixed); with one, landed and not yet confirmed by a finished run.
+pub fn held_lines(state: &State, rules: &Rules) -> Vec<HeldLine> {
+    let mut v: Vec<HeldLine> = vec![];
+    for (w, ws) in &state.workflows {
+        if rules.excluded(w) {
+            continue;
+        }
+        for (j, js) in &ws.jobs {
+            let (true, Some(t), true) = (js.red, js.ticket, held(js)) else {
+                continue;
+            };
+            let key = group_key(w, j);
+            let landed = js.landed_ms.is_some();
+            let i = match v
+                .iter()
+                .position(|l| l.key == key && l.ticket == t && l.landed == landed)
+            {
+                Some(i) => i,
+                None => {
+                    v.push(HeldLine {
+                        key,
+                        run: 0,
+                        ticket: t,
+                        shards: vec![],
+                        landed,
+                    });
+                    v.len() - 1
+                }
+            };
+            v[i].run = v[i].run.max(js.last_red.run);
+            if let Some(n) = shard_of(j) {
+                v[i].shards.push(n.to_string());
+            }
+        }
+    }
+    v
+}
+
+/// The quiet line for jobs whose fix landed and that no finished run has confirmed yet.
+pub fn unconfirmed_text(lines: &[HeldLine]) -> Option<String> {
+    let l: Vec<&HeldLine> = lines.iter().filter(|l| l.landed).collect();
+    if l.is_empty() {
+        return None;
+    }
+    let items: Vec<String> = l
+        .iter()
+        .map(|l| format!("{} (#{})", l.name(), l.ticket))
+        .collect();
+    let n = items.len();
+    Some(format!(
+        "{n} CI job{}: fix landed, not yet confirmed by a finished run: {}",
+        if n == 1 { "" } else { "s" },
+        items.join("; ")
+    ))
 }
 
 /// The text the status shows for a held-back job.

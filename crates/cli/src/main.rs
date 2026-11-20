@@ -4150,6 +4150,9 @@ fn print_ci_watch(project: &str, w: &Value) {
     for h in w["held_back"].as_array().into_iter().flatten() {
         println!("  {}", h["text"].as_str().unwrap_or("?"));
     }
+    if let Some(t) = w["unconfirmed_text"].as_str() {
+        println!("  {t}");
+    }
     for t in w["timeouts"].as_array().into_iter().flatten() {
         println!(
             "  hit its time limit: {} ({} of {} runs{})",
