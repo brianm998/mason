@@ -672,39 +672,7 @@ impl<'a> Ctx<'a> {
             if v["enabled"] != true {
                 continue;
             }
-            let pending: Vec<String> = v["pending"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|x| x["job"].as_str().map(String::from))
-                .collect();
-            if !pending.is_empty() {
-                banners.push(Banner {
-                    kind: "ci_watch".into(),
-                    text: format!(
-                        "{}: red on the base branch, waiting for a second red run: {}",
-                        p.id,
-                        pending.join(", ")
-                    ),
-                    ..Default::default()
-                });
-            }
-            for h in v["held_back"].as_array().into_iter().flatten() {
-                if let Some(t) = h["text"].as_str() {
-                    banners.push(Banner {
-                        kind: "ci_watch".into(),
-                        text: format!("{}: {t}", p.id),
-                        ..Default::default()
-                    });
-                }
-            }
-            if let Some(e) = v["error"].as_str() {
-                banners.push(Banner {
-                    kind: "ci_watch".into(),
-                    text: format!("{}: the base-branch CI watch cannot look: {e}", p.id),
-                    ..Default::default()
-                });
-            }
+            banners.extend(ci_watch_banners(&p.id, &v));
         }
         for f in self.d.store.freezes().unwrap_or_default() {
             if project.is_empty() || f.project == project {
@@ -1593,6 +1561,48 @@ impl<'a> Ctx<'a> {
 /// The last 40 log lines of a task, kept with the logs' signature (each
 /// journal's size and modified time) so an event that changed nothing in the
 /// logs does not read every journal again.
+/// The banners of one project's base-branch CI watch (`ci_watch::view`): what is red and
+/// waiting for agreement, jobs an open ticket is fixing, why the watch cannot look, and, as
+/// a quiet line of its own kind, fixes that landed and are not yet confirmed by a run.
+fn ci_watch_banners(project: &str, v: &serde_json::Value) -> Vec<Banner> {
+    let banner = |kind: &str, text: String| Banner {
+        kind: kind.into(),
+        text,
+        ..Default::default()
+    };
+    let mut banners = vec![];
+    let pending: Vec<String> = v["pending"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|x| x["job"].as_str().map(String::from))
+        .collect();
+    if !pending.is_empty() {
+        banners.push(banner(
+            "ci_watch",
+            format!(
+                "{project}: red on the base branch, waiting for a second red run: {}",
+                pending.join(", ")
+            ),
+        ));
+    }
+    for h in v["held_back"].as_array().into_iter().flatten() {
+        if let Some(t) = h["text"].as_str() {
+            banners.push(banner("ci_watch", format!("{project}: {t}")));
+        }
+    }
+    if let Some(t) = v["unconfirmed_text"].as_str() {
+        banners.push(banner("ci_watch_quiet", format!("{project}: {t}")));
+    }
+    if let Some(e) = v["error"].as_str() {
+        banners.push(banner(
+            "ci_watch",
+            format!("{project}: the base-branch CI watch cannot look: {e}"),
+        ));
+    }
+    banners
+}
+
 fn log_tail(d: &Daemon, id: u64) -> String {
     static CACHE: std::sync::Mutex<Option<LogCache>> = std::sync::Mutex::new(None);
     let stamp = crate::http::log_signature(d, id);
