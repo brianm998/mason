@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Runs the exit scripts that this change adds or edits relative to its merge base with the base
+# Runs the exit scripts that this change adds or edits, or can break (s669), relative to its merge base with the base
 # branch (s249), for the `exit-scripts` suite. The base comes from MASON_BASE (a test step's
 # environment) and falls back to origin/develop (a run_check, which does not have it).
 #
@@ -24,7 +24,9 @@ export MASON_EXIT_REPEAT=${MASON_EXIT_REPEAT:-1}
 log=$(mktemp)
 trap 'rm -f "$cpu" "$log"' EXIT
 fail=0; n=0
-for s in $(git diff --name-only --diff-filter=AM "$base" HEAD -- 'scripts/exit/*.sh' | sort); do
+# Scripts the change adds or edits, plus those whose text names a changed path, crate or test target
+# (scripts/select-exit-scripts.sh, s669).
+for s in $(bash scripts/select-exit-scripts.sh "$base"); do
   case "$s" in
     *-real.sh|*-manual.sh) continue ;;
   esac
