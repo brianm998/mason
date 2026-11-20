@@ -273,6 +273,7 @@ fn uses_project_test(s: &Suite) -> bool {
         || s.build.as_deref().is_some_and(uses)
         || s.rerun.as_deref().is_some_and(uses)
         || s.skip.as_deref().is_some_and(uses)
+        || s.shard_command.as_deref().is_some_and(uses)
         || s.dev_command.as_deref().is_some_and(uses)
         || s.dev_build.as_deref().is_some_and(uses)
 }
@@ -296,6 +297,7 @@ pub(crate) fn with_project_test(suite: &Suite, test: Option<&str>) -> Result<Sui
     s.build = s.build.map(|b| b.replace(KEY, t));
     s.rerun = s.rerun.map(|b| b.replace(KEY, t));
     s.skip = s.skip.map(|b| b.replace(KEY, t));
+    s.shard_command = s.shard_command.map(|b| b.replace(KEY, t));
     // A development command lists packages itself (`-p a -p b`); `--workspace` would override
     // that list, so the project's test command goes in without it (its prefix, such as the
     // owner's CARGO_TARGET_DIR, stays).
@@ -445,17 +447,12 @@ fn run_hosted_resuming(
     // batch, a base run and a debt stay here until #702. A remote run is returned as the same
     // `Ran`, so it is judged by the code below this call, not by it. A suite whose build runs
     // as its own step here has none when it goes remote: the build comes first in the command.
-    let joined;
-    let mut cmd = cmd;
     if let crate::remote::Executor::GitHub { runs_on } =
         crate::remote::executor_for(d, project, crate::remote::Kind::Suite, place)
     {
-        if let Some(b) = place.and_then(|(_, s)| s.build.as_deref()) {
-            joined = format!("{b} && {cmd}");
-            cmd = &joined;
-        }
+        let build = place.and_then(|(_, s)| s.build.as_deref());
         if let Some(ran) = run_remote(
-            d, project, id, cmd, cwd, limit, log_dir, &check, run, watch, &env, &runs_on,
+            d, project, id, build, cmd, cwd, limit, log_dir, &check, run, watch, &env, &runs_on,
         )? {
             return Ok(ran);
         }
@@ -534,6 +531,7 @@ fn run_remote(
     d: &Arc<Daemon>,
     project: &str,
     id: &str,
+    build: Option<&str>,
     cmd: &str,
     cwd: &Path,
     limit: Duration,
@@ -548,7 +546,33 @@ fn run_remote(
     let Some(site) = rm::site_for(d, project, cwd) else {
         return Err(rm::env_err("the project has no [remote] section"));
     };
-    let spec = rm::spec_for(project, id, watch, cmd, limit, env, runs_on, "");
+    // A suite whose build runs as its own step here has none when it goes remote: the build
+    // comes first in the command.
+    let with_build = |c: &str| match build {
+        Some(b) => format!("{b} && {c}"),
+        None => c.to_string(),
+    };
+    let mut spec = rm::spec_for(
+        project,
+        id,
+        watch,
+        &with_build(cmd),
+        limit,
+        env,
+        runs_on,
+        "",
+    );
+    // The whole command of a suite that has shards is split across runners (#701); a narrowed
+    // run, a run without the known-red tests and the like are not the whole suite and run on one.
+    let sharded = watch.and_then(|s| {
+        let sc = s.shard_command.as_deref()?;
+        (s.shards > 1 && !s.narrowed && cmd == s.command).then_some((s, sc))
+    });
+    if let Some((s, sc)) = sharded {
+        spec.shards = s.shards;
+        spec.shard_command = Some(with_build(sc));
+        spec.shard_lists = shard_lists(d, project, s);
+    }
     let stop = || match check() {
         Stop::No => None,
         Stop::Skipped => Some(rm::StopWhy::Skipped),
@@ -560,7 +584,14 @@ fn run_remote(
         Some(t) => (format!("task {}", t.0), format!("#{}", t.0)),
         None => (id.to_string(), id.to_string()),
     };
-    let _hold = rm::HoldGuard::new(&d.cfg.hosts_dir(), &spec, &key, &label, 1, log_dir);
+    let _hold = rm::HoldGuard::new(
+        &d.cfg.hosts_dir(),
+        &spec,
+        &key,
+        &label,
+        spec.shards.max(1),
+        log_dir,
+    );
     Ok(match rm::run_or_fallback(&site, &spec, log_dir, &stop)? {
         None => None,
         Some(rm::Outcome::Stopped(why)) => Some(Ran {
@@ -578,12 +609,36 @@ fn run_remote(
             resumed: None,
             ran_on: None,
         }),
-        Some(rm::Outcome::Done(f)) => Some(remote_ran(f)),
+        Some(rm::Outcome::Done(f)) => Some(remote_ran(f, watch)),
     })
 }
 
+/// Which tests go to which shard, from the times and names this daemon has recorded for the
+/// suite (#701). Nothing recorded gives empty lists: every test then runs on its hash shard.
+fn shard_lists(d: &Arc<Daemon>, project: &str, suite: &Suite) -> Vec<Vec<String>> {
+    let weights = d
+        .store
+        .test_medians(project, &suite.name)
+        .unwrap_or_default();
+    let mut names: std::collections::BTreeSet<String> = weights.keys().cloned().collect();
+    names.extend(d.store.passing_names(&suite.name).unwrap_or_default());
+    crate::shards::assign(&names, &weights, suite.shards)
+}
+
 /// A finished remote run as the `Ran` a step host would have given.
-fn remote_ran(f: crate::remote::Finished) -> Ran {
+fn remote_ran(mut f: crate::remote::Finished, suite: Option<&Suite>) -> Ran {
+    // The shards' outputs are one output, judged by the suite's own parser; a shard that ran none
+    // of its tests is red even when the merged count passes `min_tests`.
+    if !f.parts.is_empty() {
+        let count = |t: &str| match suite {
+            Some(s) if s.plugin_parser.is_none() => {
+                parse(s.parser, t, s).map_or(0, |r| r.executed())
+            }
+            // A parser this cannot call cannot say how many ran.
+            _ => 1,
+        };
+        (f.code, f.signal, f.output) = crate::shards::merge_judged(&f.parts, &count);
+    }
     Ran {
         code: f.code,
         signal: f.signal,
@@ -5099,8 +5154,8 @@ mod remote_tests {
         }
     }
 
-    fn remote(output: &str, code: i32) -> Ran {
-        remote_ran(crate::remote::Finished {
+    fn finished(output: &str, code: i32) -> crate::remote::Finished {
+        crate::remote::Finished {
             code,
             signal: 0,
             output: output.to_string(),
@@ -5108,7 +5163,101 @@ mod remote_tests {
             stop: None,
             ran_ms: Some(12_000),
             ran_on: "ran on GitHub (ubuntu-latest), run u, picked up after 6 s".into(),
-        })
+            parts: vec![],
+            missing: vec![],
+        }
+    }
+
+    fn remote(output: &str, code: i32) -> Ran {
+        remote_ran(finished(output, code), None)
+    }
+
+    fn part(shard: u32, listed: u32, code: i32, output: &str) -> crate::shards::Part {
+        crate::shards::Part {
+            shard,
+            listed,
+            code,
+            signal: 0,
+            output: output.to_string(),
+            run_s: 1,
+            build_s: 1,
+        }
+    }
+
+    /// A suite with cargo's lines and a minimum, as `cargo-workspace` has.
+    fn cargo_suite(min_tests: u32) -> Suite {
+        let mut s = Suite::new("cargo", "x", ParserKind::Regex);
+        s.pass_regex = Some(r"^test (.+) \.\.\. ok$".into());
+        s.fail_regex = Some(r"^test (.+) \.\.\. FAILED$".into());
+        s.min_tests = min_tests;
+        s
+    }
+
+    fn sharded(parts: Vec<crate::shards::Part>, suite: &Suite) -> Ran {
+        let mut f = finished("", 0);
+        f.parts = parts;
+        remote_ran(f, Some(suite))
+    }
+
+    #[test]
+    fn three_shards_are_judged_as_the_one_combined_output() {
+        let suite = cargo_suite(4);
+        let dir = tempfile::tempdir().unwrap();
+        let outs = [
+            "test a ... ok\ntest b ... ok\n",
+            "test c ... ok\n",
+            "test d ... ok\n",
+        ];
+        let merged = sharded(
+            outs.iter()
+                .enumerate()
+                .map(|(i, o)| part(i as u32 + 1, if i == 0 { 2 } else { 1 }, 0, o))
+                .collect(),
+            &suite,
+        );
+        let whole = remote(&outs.concat(), 0);
+        assert!(same(&merged, &whole));
+        let (jm, jw) = (
+            judge_ran(&suite, &merged, dir.path()),
+            judge_ran(&suite, &whole, dir.path()),
+        );
+        assert_eq!(jm.verdict, jw.verdict);
+        assert_eq!(jm.verdict, Verdict::Green);
+        assert_eq!(jm.results.executed(), 4);
+        // `min_tests` applies to the merge: three tests of four are too few.
+        let few = judge_ran(&cargo_suite(5), &merged, dir.path());
+        assert!(matches!(
+            few.verdict,
+            Verdict::Vacuous { .. } | Verdict::Red { .. }
+        ));
+    }
+
+    #[test]
+    fn a_red_shard_names_its_failing_tests_and_an_empty_shard_is_red_whatever_the_count() {
+        let suite = cargo_suite(2);
+        let dir = tempfile::tempdir().unwrap();
+        let red = sharded(
+            vec![
+                part(1, 1, 0, "test a ... ok\n"),
+                part(2, 2, 101, "test b ... FAILED\ntest c ... ok\n"),
+            ],
+            &suite,
+        );
+        let j = judge_ran(&suite, &red, dir.path());
+        assert!(matches!(j.verdict, Verdict::Red { .. }));
+        assert_eq!(j.results.failed_names(), vec!["b".to_string()]);
+        // Shard 3 ran none of its 140 tests, yet the other two pass `min_tests`.
+        let empty = sharded(
+            vec![
+                part(1, 1, 0, "test a ... ok\ntest b ... ok\n"),
+                part(2, 1, 0, "test c ... ok\n"),
+                part(3, 140, 0, "error: no runner\n"),
+            ],
+            &suite,
+        );
+        let j = judge_ran(&suite, &empty, dir.path());
+        assert!(matches!(j.verdict, Verdict::Red { .. }), "{:?}", j.verdict);
+        assert!(j.output.contains("shard 3 ran 0 of 140 tests"));
     }
 
     fn same(a: &Ran, b: &Ran) -> bool {

@@ -785,6 +785,21 @@ const STEPS: &[&str] = &[
          at       INTEGER NOT NULL,
          PRIMARY KEY (task, suite, tree)
      );",
+    // 57: what a landing batch's verification run found (s705, decision 0698), keyed by the
+    // project, the base tip, the batch's tasks with their branch heads and the suite or test
+    // filter the run used. A batch formed again over the same base and heads (after an update
+    // took over) reuses it instead of running again. `detail` is the daemon's own encoding of
+    // the failing suites, tests and notes. Additive.
+    "CREATE TABLE batch_runs (
+         project TEXT NOT NULL,
+         base    TEXT NOT NULL,
+         tasks   TEXT NOT NULL,
+         filter  TEXT NOT NULL,
+         green   INTEGER NOT NULL,
+         detail  TEXT NOT NULL,
+         at_ms   INTEGER NOT NULL,
+         PRIMARY KEY (project, base, tasks, filter)
+     );",
     // What each cargo test executable was last built from when it ran (s707): the input key of
     // a green or red run. A green with the same key is not run again. Additive.
     "CREATE TABLE target_runs (

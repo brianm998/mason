@@ -129,6 +129,13 @@ pub struct Suite {
     /// `runs_on = "macos-15"`: the runner kind when the suite runs on GitHub Actions; without
     /// it the project's `[remote] runs_on`.
     pub runs_on: Option<String>,
+    /// `shards = 8`: when the suite runs on GitHub Actions, split its whole `command` run across
+    /// this many runners, balanced by recorded per-test times (#701). A local run ignores it.
+    /// 0 and 1 mean one runner.
+    pub shards: u32,
+    /// What each shard's runner runs instead of `command`: it reads `.mason/run.json` and the
+    /// `MASON_SHARD` variable, as `scripts/test-shard.py` does. Needed by `shards`.
+    pub shard_command: Option<String>,
 }
 
 /// The `narrow_*` keys of a suite (s386): where its tests live, how one is named, and the
@@ -212,6 +219,8 @@ impl Suite {
             resume_after_loss: false,
             remote: true,
             runs_on: None,
+            shards: 0,
+            shard_command: None,
         }
     }
 }

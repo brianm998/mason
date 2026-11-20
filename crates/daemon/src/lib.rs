@@ -83,6 +83,7 @@ pub mod selfguard;
 pub mod selftest;
 pub mod services;
 pub mod settings;
+pub mod shards;
 pub mod ssh_keys;
 pub mod stall;
 pub mod stopsig;

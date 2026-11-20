@@ -1553,6 +1553,41 @@ impl Store {
         })
     }
 
+    /// The median run time of each recorded test of a suite (#701): the weights a suite split
+    /// across runners is balanced by.
+    pub fn test_medians(
+        &self,
+        project: &str,
+        suite: &str,
+    ) -> Result<std::collections::BTreeMap<String, u64>, StoreError> {
+        let (p, s) = (project.to_string(), suite.to_string());
+        self.read(move |c| {
+            let mut st = c.prepare(
+                "SELECT test, ms FROM test_times WHERE project = ?1 AND suite = ?2 \
+                 ORDER BY test, at_ms DESC",
+            )?;
+            let rows = st.query_map(params![p, s], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?.max(0) as u64))
+            })?;
+            let mut by: std::collections::BTreeMap<String, Vec<u64>> = Default::default();
+            for (t, ms) in rows.filter_map(Result::ok) {
+                by.entry(t).or_default().push(ms);
+            }
+            Ok(by.into_iter().map(|(t, v)| (t, test_median(&v))).collect())
+        })
+    }
+
+    /// The names of the tests of `suite` that have been seen to pass in a green run (#701).
+    pub fn passing_names(&self, suite: &str) -> Result<Vec<String>, StoreError> {
+        let s = suite.to_string();
+        self.read(move |c| {
+            let mut st =
+                c.prepare("SELECT test FROM seen_passing WHERE suite = ?1 ORDER BY test")?;
+            let rows = st.query_map(params![s], |r| r.get::<_, String>(0))?;
+            rows.collect()
+        })
+    }
+
     /// The tests with the longest median time over their recorded runs (s634), longest first,
     /// at most `limit`. `project` narrows to one project. Each is
     /// `(project, suite, test, median_ms, runs, suite_total_ms)`, the last being the sum of the
@@ -2497,6 +2532,83 @@ impl Store {
                 params![task as i64, run as i64],
                 |r| r.get::<_, i64>(0).map(|t| t as u64),
             )
+        })
+    }
+
+    /// Keep what a batch verification run found, for the exact base tip, task heads and
+    /// filter (s705). `tasks` is the sorted `id@head` list made by [`batch_run_key`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn put_batch_run(
+        &self,
+        project: &str,
+        base: &str,
+        tasks: &str,
+        filter: &str,
+        green: bool,
+        detail: &str,
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        let (p, b, t, f, d) = (
+            project.to_string(),
+            base.to_string(),
+            tasks.to_string(),
+            filter.to_string(),
+            detail.to_string(),
+        );
+        self.write(move |c| {
+            c.execute(
+                "INSERT OR REPLACE INTO batch_runs(project, base, tasks, filter, green, detail, at_ms) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                params![p, b, t, f, green as i64, d, now_ms as i64],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// `(green, detail)` of a recorded run of exactly this base, tasks and filter.
+    pub fn batch_run(
+        &self,
+        project: &str,
+        base: &str,
+        tasks: &str,
+        filter: &str,
+    ) -> Result<Option<(bool, String)>, StoreError> {
+        let (p, b, t, f) = (
+            project.to_string(),
+            base.to_string(),
+            tasks.to_string(),
+            filter.to_string(),
+        );
+        self.read(move |c| {
+            c.query_row(
+                "SELECT green, detail FROM batch_runs WHERE project = ?1 AND base = ?2 AND tasks = ?3 AND filter = ?4",
+                params![p, b, t, f],
+                |r| Ok((r.get::<_, i64>(0)? != 0, r.get::<_, String>(1)?)),
+            )
+            .optional()
+        })
+    }
+
+    /// Runs older than `before_ms` are forgotten.
+    pub fn prune_batch_runs(&self, before_ms: u64) -> Result<usize, StoreError> {
+        self.write(move |c| {
+            c.execute(
+                "DELETE FROM batch_runs WHERE at_ms < ?1",
+                params![before_ms as i64],
+            )
+        })
+    }
+
+    /// Say `message` on the stored progress of these tasks' step runs (a batch that stopped).
+    pub fn set_progress_message(&self, tasks: &[u64], message: &str) -> Result<(), StoreError> {
+        let (t, m) = (tasks.to_vec(), message.to_string());
+        self.write(move |c| {
+            for task in t {
+                c.execute(
+                    "UPDATE step_progress SET message = ?2 WHERE task = ?1",
+                    params![task as i64, m],
+                )?;
+            }
+            Ok(())
         })
     }
 
@@ -4331,4 +4443,14 @@ pub fn rank_slowest(
     all.sort_by_key(|b| std::cmp::Reverse(b.median_ms));
     all.truncate(limit);
     all
+}
+
+/// The key of a batch's tasks in `batch_runs`: `id@head`, sorted by id, comma separated.
+pub fn batch_run_key(tasks: &[(u64, String)]) -> String {
+    let mut v: Vec<&(u64, String)> = tasks.iter().collect();
+    v.sort();
+    v.iter()
+        .map(|(i, h)| format!("{i}@{h}"))
+        .collect::<Vec<_>>()
+        .join(",")
 }

@@ -1264,3 +1264,43 @@ fn task_greens_are_kept_per_task_suite_and_definition_newest_first() {
     assert!(s.task_greens(1, "b", "h1").unwrap().is_empty());
     assert!(s.task_greens(3, "a", "h1").unwrap().is_empty());
 }
+
+#[test]
+fn a_batch_run_is_found_again_only_for_the_same_base_and_task_heads() {
+    let (_d, p) = db();
+    let s = Store::open(&p).unwrap();
+    let key = mason_store::batch_run_key(&[(7, "h7".into()), (3, "h3".into())]);
+    assert_eq!(key, "3@h3,7@h7", "sorted by task id");
+    s.put_batch_run("p", "base1", &key, "full|integration", false, "{}", 10)
+        .unwrap();
+    assert_eq!(
+        s.batch_run("p", "base1", &key, "full|integration").unwrap(),
+        Some((false, "{}".to_string()))
+    );
+    // A moved base, a new head on one task, another filter or another project: all miss.
+    let moved = mason_store::batch_run_key(&[(7, "h7b".into()), (3, "h3".into())]);
+    assert_eq!(
+        s.batch_run("p", "base2", &key, "full|integration").unwrap(),
+        None
+    );
+    assert_eq!(
+        s.batch_run("p", "base1", &moved, "full|integration")
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        s.batch_run("p", "base1", &key, "rerun|integration")
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        s.batch_run("q", "base1", &key, "full|integration").unwrap(),
+        None
+    );
+    // Old results are forgotten.
+    assert_eq!(s.prune_batch_runs(11).unwrap(), 1);
+    assert_eq!(
+        s.batch_run("p", "base1", &key, "full|integration").unwrap(),
+        None
+    );
+}
