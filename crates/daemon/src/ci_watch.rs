@@ -571,12 +571,10 @@ fn file_task(
         Why::LongRed => "it has stayed red past the long-red threshold".to_string(),
         Why::Timeout => String::new(),
     };
-    let tail = src
-        .log_tail(f.at.job)
-        .unwrap_or_else(|| "(the log could not be read)".into());
+    let (heading, tail) = failure_text(src, f.at.job);
     let body = format!(
         "`{key}` is red on `{base}`: {why}.\n\nRun: {}\nCommit: {}\n\n\
-         Failed log tail:\n```\n{tail}\n```\n\nFound by the base-branch CI watch.",
+         {heading}:\n```\n{tail}\n```\n\nFound by the base-branch CI watch.",
         f.at.url, f.at.sha
     );
     emit_task(
@@ -590,6 +588,22 @@ fn file_task(
             Priority::Normal
         },
         f.proposed,
+    )
+}
+
+/// What a red job's task quotes: the error lines of the whole log, or, if only the end of the
+/// log can be read, that tail.
+fn failure_text(src: &dyn Source, job: u64) -> (&'static str, String) {
+    if let Some(log) = src.log_long(job) {
+        let e = rules::error_excerpt(&log, LOG_LINES);
+        if !e.trim().is_empty() {
+            return ("Error lines from the failed step", e);
+        }
+    }
+    (
+        "Failed log tail",
+        src.log_tail(job)
+            .unwrap_or_else(|| "(the log could not be read)".into()),
     )
 }
 
@@ -741,6 +755,33 @@ pub fn view(d: &Daemon, pid: ProjectId) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct Fake(&'static str);
+    impl Source for Fake {
+        fn runs(&self, _: &str) -> Result<Vec<ActionsRun>, String> {
+            Ok(vec![])
+        }
+        fn jobs(&self, _: u64) -> Result<Vec<ActionsJob>, String> {
+            Ok(vec![])
+        }
+        fn log_tail(&self, _: u64) -> Option<String> {
+            Some("tail noise".into())
+        }
+        fn log_long(&self, _: u64) -> Option<String> {
+            Some(self.0.into())
+        }
+    }
+
+    #[test]
+    fn the_filed_text_has_the_error_line_not_the_tail() {
+        let log = include_str!("../../core/tests/fixtures/ci_logs/lint_spdx.log");
+        let (h, t) = failure_text(&Fake(log), 1);
+        assert_eq!(h, "Error lines from the failed step");
+        assert!(
+            t.contains("missing SPDX-License-Identifier: GPL-3.0-or-later in scripts/exit/s653.sh")
+        );
+        assert!(!t.contains("tail noise"));
+    }
 
     const NOTE: &str = "The job has exceeded the maximum execution time of 1h0m0s";
 

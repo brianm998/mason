@@ -1,0 +1,18 @@
+2026-11-20T01:02:00.1234567Z ##[group]Run ./gradlew conformance
+2026-11-20T01:02:01.1234567Z env:
+2026-11-20T01:02:02.1234567Z   JAVA_HOME: /opt/java
+2026-11-20T01:02:03.1234567Z ##[endgroup]
+2026-11-20T01:02:04.1234567Z > Task :app:conformance
+2026-11-20T01:02:05.1234567Z checkpoint-3.json: unexpected: field "gap"
+2026-11-20T01:02:06.1234567Z checkpoint-7.json: unexpected: field "gap"
+2026-11-20T01:02:07.1234567Z conformance failed: 21 difference(s)
+2026-11-20T01:02:08.1234567Z > Task :app:conformance FAILED
+2026-11-20T01:02:09.1234567Z 
+2026-11-20T01:02:10.1234567Z FAILURE: Build failed with an exception.
+2026-11-20T01:02:11.1234567Z ##[error]Process completed with exit code 1.
+2026-11-20T01:02:12.1234567Z ##[group]Post job cleanup.
+2026-11-20T01:02:13.1234567Z Post job cleanup.
+2026-11-20T01:02:14.1234567Z Cache cleanup: removing /home/runner/.gradle/caches/modules-2/files-2.1/a
+2026-11-20T01:02:15.1234567Z Cache cleanup: removing /home/runner/.gradle/caches/modules-2/files-2.1/b
+2026-11-20T01:02:16.1234567Z Cache cleanup: removed 2 entries
+2026-11-20T01:02:17.1234567Z ##[endgroup]

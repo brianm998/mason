@@ -9,8 +9,8 @@
 //! - **Seeding.** The first time a workflow is seen, its newest run that ended `success`
 //!   or `failure` sets each job's baseline. Nothing is filed; a job already red is the
 //!   known-red ledger.
-//! - **Passed over.** A run that ended otherwise (cancelled by a newer push, ...) and a job
-//!   `skipped` inside a finished run say nothing about the code.
+//! - **Passed over.** A run that ended otherwise (cancelled by a newer push, ...) says
+//!   nothing about the code. A job that is now `skipped` or `neutral` is no longer red.
 //! - **Infrastructure is not a regression.** `cancelled` and `startup_failure` are never
 //!   filed. A job that hit its GitHub time limit is not infrastructure on the base branch:
 //!   the daemon reads it as `timed_out` (a `cancelled` job inside a finished run whose
@@ -253,6 +253,115 @@ fn job_run_ref(r: &RunRec, j: &JobRec) -> RunRef {
 /// Take in the runs seen on the base branch. Returns what to file, in order. The state
 /// is updated in place; the caller stores it only after acting. Runs whose jobs were not
 /// read (empty `jobs`) are not counted as seen, so they are tried again.
+/// Drop ANSI colour codes and a leading `2026-11-20T01:02:03.1234567Z ` timestamp.
+fn clean_line(l: &str) -> String {
+    let mut out = String::with_capacity(l.len());
+    let mut it = l.chars().peekable();
+    while let Some(c) = it.next() {
+        if c == '\u{1b}' && it.peek() == Some(&'[') {
+            it.next();
+            for d in it.by_ref() {
+                if d.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    let b = out.as_bytes();
+    let stamped = b.len() > 21
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && b[10] == b'T'
+        && b[..20]
+            .iter()
+            .all(|c| c.is_ascii_digit() || b"-T:.".contains(c))
+        && b[20..].iter().take(12).any(|&c| c == b'Z');
+    if stamped {
+        if let Some(i) = out.find('Z') {
+            return out[i + 1..].trim_start().to_string();
+        }
+    }
+    out
+}
+
+fn is_failure_line(l: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "error[",
+        "error:",
+        "panicked at",
+        "FAILED",
+        "failures:",
+        "Diff in",
+        "FAIL",
+        "failed",
+        "missing ",
+        "FAILURE:",
+        "e: ",
+        "conformance failed",
+        "XCTAssert",
+        "failed (",
+        "unexpected:",
+    ];
+    if l.contains("test result: ok") || l.contains(" 0 failed") {
+        return false;
+    }
+    MARKERS.iter().any(|m| l.contains(m))
+}
+
+/// The lines of a job's full log that say what broke, for a ticket body: the log is cut at
+/// the first `##[error]` line (or where the post-job steps start), the lines with failure
+/// markers and two lines of context around each are kept (the last `max_lines` of them), and
+/// with no marker the last `max_lines` lines before the cut. Timestamps and colour codes are
+/// removed, and the step's `Run <cmd>` header is named first when the log has one.
+pub fn error_excerpt(log: &str, max_lines: usize) -> String {
+    let lines: Vec<String> = log.lines().map(clean_line).collect();
+    let is_post = |l: &str| {
+        let t = l.trim_start_matches("##[group]");
+        t.starts_with("Post job cleanup.") || t.starts_with("Post Run ")
+    };
+    let end = if let Some(i) = lines.iter().position(|l| l.contains("##[error]")) {
+        i + 1
+    } else {
+        lines.iter().position(|l| is_post(l)).unwrap_or(lines.len())
+    };
+    let region = &lines[..end];
+    let step = region
+        .iter()
+        .rev()
+        .find_map(|l| l.strip_prefix("##[group]Run "))
+        .map(|c| format!("Step: Run {}", c.trim()));
+    let mut keep = vec![false; region.len()];
+    let mut any = false;
+    for (i, l) in region.iter().enumerate() {
+        if is_failure_line(l) {
+            any = true;
+            for k in i.saturating_sub(2)..(i + 3).min(region.len()) {
+                keep[k] = true;
+            }
+        }
+    }
+    let mut picked: Vec<&str> = if any {
+        region
+            .iter()
+            .zip(&keep)
+            .filter(|(l, k)| **k && !l.starts_with("##[group]") && !l.starts_with("##[endgroup]"))
+            .map(|(l, _)| l.as_str())
+            .collect()
+    } else {
+        region.iter().map(String::as_str).collect()
+    };
+    picked.drain(..picked.len().saturating_sub(max_lines));
+    let mut out = String::new();
+    if let Some(s) = step {
+        out.push_str(&s);
+        out.push('\n');
+    }
+    out.push_str(&picked.join("\n"));
+    out
+}
+
 pub fn step(state: &mut State, runs: &[RunRec], ctx: &Ctx) -> Vec<File> {
     let rules = ctx.rules;
     let mut out: Vec<File> = vec![];
@@ -365,7 +474,8 @@ pub fn step(state: &mut State, runs: &[RunRec], ctx: &Ctx) -> Vec<File> {
                 let gate = rules.is_gate(&w, &j.name);
                 let ws = state.workflows.entry(w.clone()).or_default();
                 match j.conclusion.as_deref() {
-                    Some("success") => {
+                    // A job that now skips (a workflow change, an `if:`) is no longer red.
+                    Some("success" | "skipped" | "neutral") => {
                         let js = ws.jobs.entry(j.name.clone()).or_default();
                         *js = JobState::default();
                     }
@@ -444,8 +554,8 @@ pub fn step(state: &mut State, runs: &[RunRec], ctx: &Ctx) -> Vec<File> {
                             );
                         }
                     }
-                    // skipped, neutral, cancelled, startup_failure, action_required,
-                    // stale: nothing about the code.
+                    // cancelled, startup_failure, action_required, stale: nothing about
+                    // the code.
                     _ => {}
                 }
             }
@@ -1062,6 +1172,103 @@ mod tests {
             0,
         );
         assert!(!s.workflows["CI"].jobs["pr-gate"].red);
+    }
+
+    fn fixture(n: &str) -> String {
+        std::fs::read_to_string(format!(
+            "{}/tests/fixtures/ci_logs/{n}",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn excerpt_of_the_lint_log_has_the_spdx_line_and_no_post_job_noise() {
+        let e = error_excerpt(&fixture("lint_spdx.log"), 60);
+        assert!(
+            e.contains("missing SPDX-License-Identifier: GPL-3.0-or-later in scripts/exit/s653.sh")
+        );
+        assert!(e.contains("Step: Run bash scripts/check-spdx.sh"), "{e}");
+        assert!(!e.contains("Post job cleanup"), "{e}");
+        assert!(!e.contains('\u{1b}') && !e.contains("2026-11-20T"), "{e}");
+    }
+
+    #[test]
+    fn excerpt_of_monitor_compose_has_the_conformance_lines() {
+        let e = error_excerpt(&fixture("monitor_compose.log"), 60);
+        assert!(e.contains("conformance failed: 21 difference(s)"), "{e}");
+        assert!(e.contains("checkpoint-"), "{e}");
+        assert!(!e.contains("Cache cleanup"), "{e}");
+    }
+
+    #[test]
+    fn excerpt_of_a_cargo_failure_names_the_test() {
+        let e = error_excerpt(&fixture("cargo_test.log"), 60);
+        assert!(e.contains("panicked at"), "{e}");
+        assert!(e.contains("ci_watch::tests::red_is_filed"), "{e}");
+    }
+
+    #[test]
+    fn excerpt_of_a_rustfmt_failure_has_the_diff() {
+        let e = error_excerpt(&fixture("rustfmt_diff.log"), 60);
+        assert!(
+            e.contains("Diff in /home/runner/work/mason/crates/core/src/lib.rs:12:"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn excerpt_with_no_marker_is_the_lines_before_the_post_job_section() {
+        let e = error_excerpt(&fixture("no_marker.log"), 3);
+        assert!(
+            e.ends_with("step three done\nthe thing stopped talking"),
+            "{e}"
+        );
+        assert!(!e.contains("Post job cleanup"), "{e}");
+        assert!(!e.contains("step one done"), "{e}");
+    }
+
+    #[test]
+    fn a_red_job_whose_next_run_skips_or_is_neutral_is_no_longer_red() {
+        for c in ["skipped", "neutral"] {
+            let mut s = State::default();
+            go(
+                &mut s,
+                &[run(1, "CI", "failure", &[("a", "failure")])],
+                5000,
+                &none(),
+                0,
+            );
+            assert!(s.workflows["CI"].jobs["a"].red);
+            go(
+                &mut s,
+                &[run(2, "CI", "success", &[("a", c)])],
+                6000,
+                &none(),
+                0,
+            );
+            assert!(!s.workflows["CI"].jobs["a"].red, "{c}");
+        }
+    }
+
+    #[test]
+    fn a_cancelled_job_leaves_a_red_job_red() {
+        let mut s = State::default();
+        go(
+            &mut s,
+            &[run(1, "CI", "failure", &[("a", "failure")])],
+            5000,
+            &none(),
+            0,
+        );
+        go(
+            &mut s,
+            &[run(2, "CI", "failure", &[("a", "cancelled")])],
+            6000,
+            &none(),
+            0,
+        );
+        assert!(s.workflows["CI"].jobs["a"].red);
     }
 
     #[test]
