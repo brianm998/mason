@@ -255,12 +255,12 @@ impl GitHub {
     }
 }
 
-/// May MASON cancel this run? Only one on a `mason/ci/**` ref that is not a pull request's:
-/// a run on the base branch or a PR is never cancelled.
+/// May MASON cancel this run? Only one on a `mason/ci/**` or `mason/run/**` ref that is not a
+/// pull request's: a run on the base branch or a PR is never cancelled.
 fn may_cancel(run: &Value) -> bool {
     run["head_branch"]
         .as_str()
-        .is_some_and(|b| b.starts_with("mason/ci/"))
+        .is_some_and(|b| b.starts_with("mason/ci/") || b.starts_with("mason/run/"))
         && run["event"].as_str() != Some("pull_request")
 }
 
@@ -1085,4 +1085,159 @@ pub fn workflow_problems_at(repo: &Path, git_ref: &str) -> Vec<Problem> {
         .filter_map(|n| git(&["show", &format!("{git_ref}:{n}")]))
         .collect();
     scan_workflows(&texts)
+}
+
+// ---- remote runs (a suite or check run by a workflow on a `mason/run/**` ref) ---------------
+
+/// One workflow run, as a remote run reads it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ActionRun {
+    pub id: u64,
+    /// `queued`, `in_progress` or `completed`.
+    pub status: String,
+    /// `success`, `failure`, `cancelled`, `startup_failure`, ... once completed.
+    pub conclusion: Option<String>,
+    pub url: String,
+    pub branch: String,
+    /// `created_at`, as GitHub writes it (`2026-11-20T10:00:00Z`).
+    pub created_at: String,
+}
+
+fn action_run(v: &Value) -> Option<ActionRun> {
+    Some(ActionRun {
+        id: v["id"].as_u64()?,
+        status: v["status"].as_str().unwrap_or_default().to_string(),
+        conclusion: v["conclusion"].as_str().map(String::from),
+        url: v["html_url"].as_str().unwrap_or_default().to_string(),
+        branch: v["head_branch"].as_str().unwrap_or_default().to_string(),
+        created_at: v["created_at"].as_str().unwrap_or_default().to_string(),
+    })
+}
+
+/// A job of a run: whether a runner has taken it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ActionJob {
+    pub name: String,
+    pub status: String,
+    pub started_at: Option<String>,
+}
+
+impl GitHub {
+    /// The runs of a commit (`GET /actions/runs?head_sha=`), newest first.
+    pub fn runs_for_sha(&self, sha: &str) -> Result<Vec<ActionRun>, ApiError> {
+        let v = self.json(Request::get(
+            &self.url(&format!("/actions/runs?head_sha={sha}&per_page=20")),
+        ))?;
+        Ok(v["workflow_runs"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(action_run)
+            .collect())
+    }
+
+    /// One run, with the ETag of the last look: `None` when GitHub answered 304 (nothing
+    /// changed, which does not count against the rate limit). Otherwise the run and the new ETag.
+    pub fn run_changed(
+        &self,
+        id: u64,
+        etag: Option<&str>,
+    ) -> Result<Option<(ActionRun, Option<String>)>, ApiError> {
+        let mut r = Request::get(&self.url(&format!("/actions/runs/{id}")));
+        if let Some(e) = etag {
+            r = r.with("If-None-Match", e);
+        }
+        let resp = self.send(r)?;
+        if resp.status == 304 {
+            return Ok(None);
+        }
+        let v: Value = serde_json::from_str(&resp.body).map_err(|e| {
+            ApiError::new(
+                ErrorKind::Unavailable,
+                format!("the answer is not JSON: {e}"),
+            )
+        })?;
+        let run = action_run(&v)
+            .ok_or_else(|| ApiError::new(ErrorKind::Unavailable, "no run id in the answer"))?;
+        Ok(Some((run, resp.header("etag").map(String::from))))
+    }
+
+    /// The latest attempt's jobs of a run.
+    pub fn run_jobs(&self, id: u64) -> Result<Vec<ActionJob>, ApiError> {
+        let v = self.json(Request::get(&self.url(&format!(
+            "/actions/runs/{id}/jobs?filter=latest&per_page=100"
+        ))))?;
+        Ok(v["jobs"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|j| ActionJob {
+                name: j["name"].as_str().unwrap_or_default().to_string(),
+                status: j["status"].as_str().unwrap_or_default().to_string(),
+                started_at: j["started_at"].as_str().map(String::from),
+            })
+            .collect())
+    }
+
+    /// Cancel a run MASON started on a `mason/run/**` or `mason/ci/**` ref; any other is
+    /// refused (`Invalid`).
+    pub fn cancel_own_run(&self, run: &ActionRun) -> Result<(), ApiError> {
+        if !(run.branch.starts_with("mason/run/") || run.branch.starts_with("mason/ci/")) {
+            return Err(ApiError::new(
+                ErrorKind::Invalid,
+                format!(
+                    "run {} is on {:?}: MASON cancels only its own",
+                    run.id, run.branch
+                ),
+            ));
+        }
+        self.cancel_run(run.id)
+    }
+
+    /// Download the artifact `name` of a run to `dest` (a zip). `false`: the run has no such
+    /// artifact. GitHub answers the download with a redirect to a signed address, which is
+    /// fetched without the token.
+    pub fn download_artifact(&self, run: u64, name: &str, dest: &Path) -> Result<bool, ApiError> {
+        let v = self.json(Request::get(
+            &self.url(&format!("/actions/runs/{run}/artifacts?name={name}")),
+        ))?;
+        let Some(url) = v["artifacts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|a| a["name"].as_str() == Some(name) && a["expired"].as_bool() != Some(true))
+            .find_map(|a| a["archive_download_url"].as_str().map(String::from))
+        else {
+            return Ok(false);
+        };
+        let first = self.download_raw(&url, dest, true)?;
+        let resp = match first.status {
+            301 | 302 | 303 | 307 | 308 => {
+                let to = first.header("location").map(String::from).ok_or_else(|| {
+                    ApiError::new(ErrorKind::Unavailable, "a redirect with no location")
+                })?;
+                self.download_raw(&to, dest, false)?
+            }
+            _ => first,
+        };
+        match classify(resp.status, &resp.headers, &resp.body) {
+            None => Ok(true),
+            Some(e) => Err(e),
+        }
+    }
+
+    fn download_raw(&self, url: &str, dest: &Path, with_token: bool) -> Result<Response, ApiError> {
+        let mut r = Request::get(url);
+        if with_token {
+            let token = self.token.read()?;
+            r = r
+                .with("Authorization", &format!("Bearer {token}"))
+                .with("Accept", "application/vnd.github+json")
+                .with("X-GitHub-Api-Version", "2022-11-28")
+                .with("User-Agent", "mason");
+        }
+        self.http
+            .download(&r, dest)
+            .map_err(|e| ApiError::new(ErrorKind::Unavailable, e.to_string()))
+    }
 }

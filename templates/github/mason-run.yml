@@ -1,0 +1,105 @@
+# SPDX-License-Identifier: MIT
+#
+# MASON's remote run workflow: put this file at .github/workflows/mason-run.yml on the base
+# branch. MASON pushes a snapshot of a worktree to `mason/run/<project>/<id>`; this workflow
+# runs the suite or check named in `.mason/run.json` and uploads what MASON needs to judge it:
+# the combined output, the exit code, the times and the results file.
+#
+# MASON replaces this file in every snapshot with the base branch's copy and removes every
+# other workflow from it, so a task cannot change how it is judged. `.mason/run.json` is
+# written by MASON from the project's pinned definition; nothing here reads how to judge a run
+# from the task's own files.
+#
+# Fill in the "setup" step for the project: toolchains and caches. For a Rust project use
+#
+#     - uses: dtolnay/rust-toolchain@stable
+#     - uses: Swatinem/rust-cache@v2
+#       with:
+#         cache-on-failure: true
+#
+# `cache-on-failure: true` matters: by default rust-cache saves its cache only after a green
+# job, so a red or cut-off suite would never warm it and every run would build from scratch.
+name: mason-run
+
+on:
+  push:
+    branches: ["mason/run/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      runs_on: ${{ steps.p.outputs.runs_on }}
+      timeout_min: ${{ steps.p.outputs.timeout_min }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - id: p
+        run: |
+          echo "runs_on=$(jq -c .runs_on .mason/run.json)" >> "$GITHUB_OUTPUT"
+          echo "timeout_min=$(jq -c .timeout_min .mason/run.json)" >> "$GITHUB_OUTPUT"
+
+  run:
+    needs: plan
+    runs-on: ${{ fromJSON(needs.plan.outputs.runs_on) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # setup: the project's toolchains and caches go here (see above).
+
+      - name: run
+        shell: bash
+        timeout-minutes: ${{ fromJSON(needs.plan.outputs.timeout_min) }}
+        run: |
+          set +e
+          out="$RUNNER_TEMP/mason-out"
+          mkdir -p "$out/results"
+          : > "$out/output.log"
+          # The environment MASON sets for the command.
+          eval "$(jq -r '.env | to_entries[] | "export \(.key)=\(.value | @sh)"' .mason/run.json)"
+          build="$(jq -r '.build // empty' .mason/run.json)"
+          command="$(jq -r '.command' .mason/run.json)"
+          results="$(jq -r '.results_file // empty' .mason/run.json)"
+          code=0; build_s=0; run_s=0
+          if [ -n "$build" ]; then
+            t0=$(date +%s)
+            sh -c "$build" 2>&1 | tee -a "$out/output.log"
+            code=${PIPESTATUS[0]}
+            build_s=$(( $(date +%s) - t0 ))
+          fi
+          if [ "$code" -eq 0 ]; then
+            t0=$(date +%s)
+            sh -c "$command" 2>&1 | tee -a "$out/output.log"
+            code=${PIPESTATUS[0]}
+            run_s=$(( $(date +%s) - t0 ))
+          fi
+          # The results file(s) the suite reads, with their paths.
+          if [ -n "$results" ]; then
+            # shellcheck disable=SC2086
+            tar cf - $results 2>/dev/null | tar xf - -C "$out/results"
+          fi
+          signal=0
+          if [ "$code" -gt 128 ]; then signal=$(( code - 128 )); fi
+          jq -n --argjson code "$code" --argjson signal "$signal" \
+             --argjson build_s "$build_s" --argjson run_s "$run_s" \
+             '{code: $code, signal: $signal, build_s: $build_s, run_s: $run_s}' > "$out/result.json"
+
+      - name: upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mason-run
+          path: ${{ runner.temp }}/mason-out
+          if-no-files-found: error
+
+      # The job is red when the command was, so the run reads the same in the Actions UI.
+      - name: exit
+        if: always()
+        shell: bash
+        run: exit "$(jq -r '.code // 1' "$RUNNER_TEMP/mason-out/result.json" 2>/dev/null || echo 1)"
