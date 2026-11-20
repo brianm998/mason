@@ -2558,6 +2558,7 @@ impl Runner {
                 green: false,
                 failed: l.failed,
                 notes: l.notes,
+                failing: Default::default(),
             };
         }
         let mut r = self.run_local(def, suites, wt, base, log_dir, prefix);
