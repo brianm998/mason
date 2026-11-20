@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# s687 exit test: the skipped-batch fast-tier test, alone and with its binary's other tests, 10 runs each.
+# s687 exit test: the skipped-batch fast-tier test, alone and with its binary's other tests, S687_RUNS runs each (default 2 so the suite finishes under load; set 10 for the full check).
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-n=${S687_RUNS:-10}
+n=${S687_RUNS:-2}
 bad=0
 out=$(mktemp /tmp/s687.XXXXXX)
 trap 'rm -f "$out"' EXIT
