@@ -295,6 +295,20 @@ pub fn task_choice(d: &Daemon, task: Option<u64>) -> Option<Choice> {
     }
 }
 
+/// Do the checks of `task` in `project` go to GitHub (#704)? The task's choice, else the global
+/// switch, and only for a project with a `[remote]` section. Whether a suite then stays here
+/// for its own reasons does not matter: the agent is told to use `run_check` either way.
+pub fn task_checks_on_github(d: &Daemon, project: &str, task: u64) -> bool {
+    let wants = match task_choice(d, Some(task)) {
+        Some(c) => c == Choice::GitHub,
+        None => read_global(d).0 == Global::GitHub,
+    };
+    wants
+        && d.project_id_by_name(project)
+            .and_then(|p| d.project(p))
+            .is_some_and(|p| p.services.remote.is_some())
+}
+
 /// "runs on: GitHub (task choice)" / "runs on: this Mac (global switch)": the place a task's
 /// runs go before the suite's own rules, and where that came from. For `mason task show` and
 /// the task detail the monitors read.
