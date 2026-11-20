@@ -1821,4 +1821,33 @@ final class MonitorCoreTests: XCTestCase {
         one.succeeded = 1
         XCTAssertEqual(Format.jobsText(name: "CI", jobs: one), "CI: 1 job · 1 passed")
     }
+
+    // MARK: tile tint follows the shown task
+
+    func testTileShowsCurrentTaskForProposedAndStuck() {
+        for state in ["proposed", "needs_attention"] {
+            let m = model()
+            var c = StateCount()
+            c.state = state
+            c.count = 2
+            c.wantsYou = true
+            var sb = SidebarView()
+            sb.sections = [section(state, rows: [row(1, state: state), row(2, state: state)]), section("queued", rows: [row(3, state: "queued")])]
+            m.sidebar = sb
+            XCTAssertFalse(m.tileShowsCurrentTask(c), "\(state) on Home")
+            m.go(.task(3))
+            XCTAssertFalse(m.tileShowsCurrentTask(c), "\(state): a task in another state")
+            m.go(.task(1))
+            XCTAssertTrue(m.tileShowsCurrentTask(c), "\(state): first task")
+            m.go(.task(2))
+            XCTAssertTrue(m.tileShowsCurrentTask(c), "\(state): second task")
+            m.goHome()
+            XCTAssertFalse(m.tileShowsCurrentTask(c), "\(state) back on Home")
+            m.go(.task(2))
+            var after = SidebarView()
+            after.sections = [section(state, rows: [row(1, state: state)]), section("queued", rows: [row(2, state: "queued"), row(3, state: "queued")])]
+            m.sidebar = after
+            XCTAssertFalse(m.tileShowsCurrentTask(c), "\(state): the shown task left the state")
+        }
+    }
 }
