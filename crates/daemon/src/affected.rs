@@ -6,8 +6,12 @@
 //! runs itself; a changed `src` file runs its crate's unit tests, plus the integration
 //! targets of that crate and of its dependents whose source mentions the changed module or a
 //! public item of it. The scan is static (words in source files), never timing. A reference
-//! it cannot decide includes the target. A path nobody can place (`Cargo.*`, `build.rs`, a
-//! test's `support/` directory, the toolchain file) selects everything, as before.
+//! it cannot decide includes the target. Only a path that can reach every target (the root
+//! `Cargo.toml` and `Cargo.lock`, the toolchain file, `.cargo/`, a path the suite's own command
+//! names) selects everything, and says which (#652). A package's `Cargo.toml` or `build.rs`
+//! runs that package whole plus its dependents' targets; a file under `tests/` that is not a
+//! target selects the package's targets that name it; any other path selects the targets, in
+//! any package, whose text names the path or its file name, and nothing if none does.
 //!
 //! The landing batch runs the whole workspace, so what this leaves out is still run before
 //! anything reaches `develop`.
@@ -50,8 +54,8 @@ pub struct Group {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Pick {
-    /// Something nobody can place changed: run everything.
-    All,
+    /// Something that can affect every target changed: run everything. `because` names the path.
+    All { because: String },
     /// Per package name.
     Some(BTreeMap<String, Group>),
 }
@@ -278,22 +282,61 @@ fn references(p: &Pkg, same_package: bool, changed_rel: &str, content: &str, tex
         || public_items(content).iter().any(|i| contains_word(text, i))
 }
 
+/// The packages that depend on `name` through any chain of path dependencies, and `name`.
+fn family<'a>(pkgs: &'a [Pkg], name: &'a str) -> BTreeSet<&'a str> {
+    let mut family: BTreeSet<&str> = BTreeSet::from([name]);
+    loop {
+        let more: Vec<&str> = pkgs
+            .iter()
+            .filter(|q| !family.contains(q.name.as_str()))
+            .filter(|q| q.deps.iter().any(|d| family.contains(d.as_str())))
+            .map(|q| q.name.as_str())
+            .collect();
+        if more.is_empty() {
+            return family;
+        }
+        family.extend(more);
+    }
+}
+
+/// Can this path reach every target? `named` is the suite's command text.
+fn reaches_all(path: &str, named: &str) -> bool {
+    let file = path.rsplit('/').next().unwrap_or(path);
+    path == "Cargo.toml"
+        || path == "Cargo.lock"
+        || file.starts_with("rust-toolchain") && !path.contains('/')
+        || path.starts_with(".cargo/")
+        || (!path.is_empty() && named.contains(path))
+}
+
 /// The affected test targets for `changed` paths. `files` is every tracked path, `read` gives a
-/// file's text by its workspace-relative path.
+/// file's text by its workspace-relative path. `named` is the text of the suite's commands: a
+/// changed path it names runs everything.
 pub fn select(
     pkgs: &[Pkg],
     changed: &[String],
     files: &[String],
     read: &dyn Fn(&str) -> Option<String>,
+    named: &str,
 ) -> Pick {
     let mut out: BTreeMap<String, Group> = BTreeMap::new();
     let mut src_changes: Vec<(&Pkg, String)> = vec![];
+    // Packages run whole, with the targets of their dependents.
+    let mut whole: BTreeSet<&str> = BTreeSet::new();
+    // Paths read by whichever targets name them: (path, packages to look in, None for all).
+    let mut readers: Vec<(String, Option<&Pkg>)> = vec![];
     for path in changed {
         if ignorable(path) {
             continue;
         }
+        if reaches_all(path, named) {
+            return Pick::All {
+                because: format!("`{path}` changed"),
+            };
+        }
         let Some(p) = owner(pkgs, path) else {
-            return Pick::All;
+            readers.push((path.clone(), None));
+            continue;
         };
         let rel = path[p.dir.len() + 1..].to_string();
         if let Some(t) = p.tests.iter().find(|t| target_owns(t, path)) {
@@ -303,34 +346,87 @@ pub fn select(
                 .insert(t.name.clone());
         } else if rel.starts_with("src/") {
             src_changes.push((p, rel));
+        } else if rel == "Cargo.toml" || rel == "build.rs" {
+            whole.insert(p.name.as_str());
+        } else if rel.starts_with("tests/") {
+            readers.push((path.clone(), Some(p)));
         } else {
-            // `Cargo.toml`, `build.rs`, a test's `support/` directory, fixtures: no one can
-            // say which targets read them.
-            return Pick::All;
+            readers.push((path.clone(), None));
         }
     }
     let mut texts: BTreeMap<String, String> = BTreeMap::new();
+    // A path nothing names selects nothing; a package's build script that names it runs whole.
+    for (path, _) in readers.iter().filter(|(_, only)| only.is_none()) {
+        let file = path.rsplit('/').next().unwrap_or(path);
+        for q in pkgs {
+            let build = read(&format!("{}/build.rs", q.dir)).unwrap_or_default();
+            if build.contains(path.as_str()) || build.contains(file) {
+                whole.insert(q.name.as_str());
+            }
+        }
+    }
+    for (path, only) in &readers {
+        let file = path.rsplit('/').next().unwrap_or(path);
+        let tokens: Vec<String> = match only {
+            Some(p) => {
+                let rel = path[p.dir.len() + 1..].trim_start_matches("tests/");
+                let (dir, _) = rel.split_once('/').unwrap_or(("", rel));
+                let stem = file.trim_end_matches(".rs");
+                let mut t = vec![];
+                if file.ends_with(".rs") {
+                    if !dir.is_empty() {
+                        t.push(dir.to_string());
+                    }
+                    if stem != "mod" {
+                        t.push(stem.to_string());
+                    }
+                }
+                t
+            }
+            None => vec![],
+        };
+        for q in pkgs
+            .iter()
+            .filter(|q| only.is_none_or(|o| o.name == q.name))
+        {
+            for t in &q.tests {
+                let text = texts
+                    .entry(t.src.clone())
+                    .or_insert_with(|| target_text(t, files, read));
+                let hit = if only.is_some() && !tokens.is_empty() {
+                    tokens.iter().any(|w| contains_word(text, w))
+                } else {
+                    text.contains(path.as_str()) || text.contains(file)
+                };
+                if hit {
+                    out.entry(q.name.clone())
+                        .or_default()
+                        .tests
+                        .insert(t.name.clone());
+                }
+            }
+        }
+    }
+    for name in &whole {
+        out.entry(name.to_string()).or_default().whole = true;
+        for q in pkgs
+            .iter()
+            .filter(|q| family(pkgs, name).contains(q.name.as_str()))
+        {
+            if q.name != *name {
+                let g = out.entry(q.name.clone()).or_default();
+                g.tests.extend(q.tests.iter().map(|t| t.name.clone()));
+            }
+        }
+    }
     for (p, rel) in &src_changes {
         let content = read(&format!("{}/{rel}", p.dir)).unwrap_or_default();
         let g = out.entry(p.name.clone()).or_default();
         g.lib |= p.lib.is_some();
         g.bins |= !p.bins.is_empty();
         g.doc |= p.lib.is_some() && content.contains("```");
-        // The crate and everything that depends on it, through any chain of path dependencies.
-        let mut family: BTreeSet<&str> = BTreeSet::from([p.name.as_str()]);
-        loop {
-            let more: Vec<&str> = pkgs
-                .iter()
-                .filter(|q| !family.contains(q.name.as_str()))
-                .filter(|q| q.deps.iter().any(|d| family.contains(d.as_str())))
-                .map(|q| q.name.as_str())
-                .collect();
-            if more.is_empty() {
-                break;
-            }
-            family.extend(more);
-        }
-        for q in pkgs.iter().filter(|q| family.contains(q.name.as_str())) {
+        let fam = family(pkgs, &p.name);
+        for q in pkgs.iter().filter(|q| fam.contains(q.name.as_str())) {
             for t in &q.tests {
                 let text = texts
                     .entry(t.src.clone())
@@ -478,17 +574,25 @@ mod tests {
         }
 
         fn pick(&self, changed: &[&str]) -> Pick {
+            self.pick_named(changed, "cargo test")
+        }
+
+        fn pick_named(&self, changed: &[&str], named: &str) -> Pick {
             let changed: Vec<String> = changed.iter().map(|s| s.to_string()).collect();
             let files: Vec<String> = self.files.keys().cloned().collect();
-            select(&self.pkgs, &changed, &files, &|p| {
-                self.files.get(p).cloned()
-            })
+            select(
+                &self.pkgs,
+                &changed,
+                &files,
+                &|p| self.files.get(p).cloned(),
+                named,
+            )
         }
 
         fn rendered(&self, changed: &[&str]) -> Vec<String> {
             match self.pick(changed) {
                 Pick::Some(g) => render(&g),
-                Pick::All => vec!["ALL".into()],
+                Pick::All { because } => vec![format!("ALL {because}")],
             }
         }
     }
@@ -526,34 +630,99 @@ mod tests {
         assert!(!g["top"].tests.contains("plain"));
     }
 
+    fn all(p: &Pick) -> &str {
+        match p {
+            Pick::All { because } => because,
+            Pick::Some(g) => panic!("expected All, got {g:?}"),
+        }
+    }
+
+    // #652: this test used to say support, Cargo and build files select everything. That is
+    // the intended behaviour change, not a weakened test: only the root files still do.
     #[test]
-    fn support_cargo_and_build_files_select_everything() {
-        let mut fx = Fx::new();
-        fx.files
-            .insert("crates/top/tests/support/mod.rs".into(), String::new());
+    fn only_root_cargo_files_the_toolchain_and_named_scripts_select_everything() {
+        let fx = Fx::new();
         for p in [
-            "crates/top/tests/support/mod.rs",
-            "crates/top/Cargo.toml",
-            "crates/top/build.rs",
             "Cargo.toml",
             "Cargo.lock",
             "rust-toolchain.toml",
-            "scripts/check-spdx.sh",
+            ".cargo/config.toml",
         ] {
-            assert_eq!(fx.pick(&[p]), Pick::All, "{p}");
+            assert!(all(&fx.pick(&[p])).contains(p), "{p}");
+        }
+        let named = fx.pick_named(&["scripts/boot.sh"], "sh scripts/boot.sh && cargo test");
+        assert!(all(&named).contains("scripts/boot.sh"));
+        assert_eq!(fx.pick(&["scripts/boot.sh"]), Pick::Some(BTreeMap::new()));
+    }
+
+    #[test]
+    fn a_data_file_selects_the_targets_that_name_it() {
+        let mut fx = Fx::new();
+        fx.files.insert(
+            "crates/top/tests/names.rs".into(),
+            "include_str!(\"../../../clients/features.toml\");".into(),
+        );
+        assert_eq!(
+            fx.rendered(&["clients/features.toml"]),
+            vec!["-p top --test names"]
+        );
+        // Nothing names it: nothing of its own, and not everything.
+        assert_eq!(
+            fx.pick(&[".github/workflows/ci.yml"]),
+            Pick::Some(BTreeMap::new())
+        );
+    }
+
+    #[test]
+    fn a_file_a_build_script_names_runs_that_package_and_its_dependents() {
+        let mut fx = Fx::new();
+        fx.files.insert(
+            "crates/leaf/build.rs".into(),
+            "compile(\"../../schemas/x.proto\")".into(),
+        );
+        assert_eq!(
+            fx.rendered(&["schemas/x.proto"]),
+            vec!["-p leaf", "-p top --test names --test plain --test uses"]
+        );
+    }
+
+    #[test]
+    fn a_support_file_selects_the_targets_of_its_package_that_declare_it() {
+        let mut fx = Fx::new();
+        fx.files
+            .insert("crates/leaf/tests/support/mod.rs".into(), String::new());
+        fx.files
+            .insert("crates/leaf/tests/own.rs".into(), "mod support;\n".into());
+        fx.files
+            .insert("crates/top/tests/uses.rs".into(), "mod support;\n".into());
+        assert_eq!(
+            fx.rendered(&["crates/leaf/tests/support/mod.rs"]),
+            vec!["-p leaf --test own"]
+        );
+    }
+
+    #[test]
+    fn a_package_manifest_or_build_script_runs_it_whole_with_its_dependents() {
+        let fx = Fx::new();
+        for p in ["crates/leaf/Cargo.toml", "crates/leaf/build.rs"] {
+            assert_eq!(
+                fx.rendered(&[p]),
+                vec!["-p leaf", "-p top --test names --test plain --test uses"],
+                "{p}"
+            );
         }
     }
 
     #[test]
-    fn the_smoke_file_alone_selects_nothing_of_its_own_and_makefile_runs_whole() {
+    fn the_smoke_file_alone_selects_nothing_of_its_own_and_an_unnamed_makefile_selects_nothing() {
         let fx = Fx::new();
         assert_eq!(
             fx.pick(&[".mason/smoke-tests.txt"]),
             Pick::Some(BTreeMap::new())
         );
         assert!(reads_none(&[".mason/smoke-tests.txt".to_string()]));
-        assert_eq!(fx.pick(&["Makefile"]), Pick::All);
-        assert_eq!(fx.pick(&["Cargo.toml"]), Pick::All);
+        assert_eq!(fx.pick(&["Makefile"]), Pick::Some(BTreeMap::new()));
+        assert!(all(&fx.pick(&["Cargo.toml"])).contains("Cargo.toml"));
     }
 
     #[test]
