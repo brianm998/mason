@@ -973,6 +973,191 @@ fn poll(
     }
 }
 
+// ---- runner pools (#700) ----------------------------------------------------------------------
+
+/// Is this a macOS runner? (`macos-14`, `macos-latest`, a `macos-*-xlarge`.) GitHub counts macOS
+/// jobs separately: at most 5 at once on the free plan.
+pub fn is_macos(runs_on: &str) -> bool {
+    runs_on
+        .trim()
+        .trim_matches(['[', ']', '"'])
+        .starts_with("macos")
+}
+
+/// What a remote run holds while it is out: one `gha` unit per job, and with a macOS runner one
+/// `gha-macos` unit as well (which is how GitHub counts). A run sharded `shards` ways (#701)
+/// has that many jobs. It holds nothing of this machine.
+pub fn units_for(runs_on: &str, shards: u32) -> std::collections::BTreeMap<String, u32> {
+    let n = shards.max(1);
+    let mut u = std::collections::BTreeMap::from([(mason_scheduler::GHA.to_string(), n)]);
+    if is_macos(runs_on) {
+        u.insert(mason_scheduler::GHA_MACOS.to_string(), n);
+    }
+    u
+}
+
+/// A lease request for `needs` of a project whose suites run on GitHub: the machine's
+/// `compile`, `test-suite` and `test-small` (and the whole machine) are replaced by the runner
+/// pool units, so the run waits for no machine gate and holds none of the machine. `None`: the
+/// project's runs are local, or `needs` holds none of those.
+pub fn pool_needs(
+    d: &Daemon,
+    project: &str,
+    needs: &mason_scheduler::Needs,
+) -> Option<mason_scheduler::Needs> {
+    const MACHINE: [&str; 3] = ["compile", "test-suite", "test-small"];
+    if !needs.exclusive && !MACHINE.iter().any(|m| needs.amounts.contains_key(*m)) {
+        return None;
+    }
+    let Executor::GitHub { runs_on } = executor_for(d, project, Kind::Suite) else {
+        return None;
+    };
+    let mut out = mason_scheduler::Needs {
+        exclusive: false,
+        amounts: needs
+            .amounts
+            .iter()
+            .filter(|(k, _)| !MACHINE.contains(&k.as_str()))
+            .map(|(k, v)| (k.clone(), *v))
+            .collect(),
+    };
+    for (k, v) in units_for(&runs_on, 1) {
+        out.amounts.insert(k, v);
+    }
+    Some(out)
+}
+
+/// What a remote run holds, written when it starts and removed when it ends, so a daemon that
+/// restarts counts the units of runs still out.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoteHold {
+    /// `task N` when a task's step holds them (its lease takes them over when it asks again),
+    /// else the run's id.
+    pub key: String,
+    pub label: String,
+    pub units: std::collections::BTreeMap<String, u32>,
+    /// The run's record (`<id>.remote`): the run has ended when it is gone or collected.
+    pub record: PathBuf,
+}
+
+/// Where the holds are kept, beside the step hosts' directory.
+pub fn holds_dir(hosts: &Path) -> PathBuf {
+    hosts.with_file_name("remote-holds")
+}
+
+fn hold_file(dir: &Path, id: &str) -> PathBuf {
+    let clean: String = id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    dir.join(format!("{clean}.kv"))
+}
+
+/// Record `hold` for run `id`.
+pub fn write_hold(dir: &Path, id: &str, h: &RemoteHold) {
+    let _ = std::fs::create_dir_all(dir);
+    let units: Vec<String> = h.units.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    let _ = write_kv(
+        &hold_file(dir, id),
+        &[
+            ("key", h.key.clone()),
+            ("label", h.label.clone()),
+            ("units", units.join(",")),
+            ("record", h.record.display().to_string()),
+        ],
+    );
+}
+
+/// Forget the hold of run `id`: it has ended.
+pub fn remove_hold(dir: &Path, id: &str) {
+    let _ = std::fs::remove_file(hold_file(dir, id));
+}
+
+/// Has the run behind this record ended? A missing record is a run that was abandoned or
+/// never began; a collected one is done.
+pub fn record_ended(record: &Path) -> bool {
+    State::load(record).is_none_or(|s| s.collected)
+}
+
+/// The holds of runs whose record says they are still out.
+pub fn running_holds(dir: &Path) -> Vec<RemoteHold> {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return vec![];
+    };
+    let mut out: Vec<RemoteHold> = rd
+        .flatten()
+        .filter_map(|e| {
+            let kv = read_kv(&e.path()).ok()?;
+            let record = PathBuf::from(kv.get("record")?);
+            if record_ended(&record) {
+                let _ = std::fs::remove_file(e.path());
+                return None;
+            }
+            let units = kv
+                .get("units")?
+                .split(',')
+                .filter_map(|p| {
+                    let (k, v) = p.split_once('=')?;
+                    Some((k.to_string(), v.parse().ok()?))
+                })
+                .collect();
+            Some(RemoteHold {
+                key: kv.get("key")?.clone(),
+                label: kv.get("label").cloned().unwrap_or_default(),
+                units,
+                record,
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| a.record.cmp(&b.record));
+    out
+}
+
+/// A hold that is written while a remote run is out and removed when this is dropped.
+pub struct HoldGuard {
+    dir: PathBuf,
+    id: String,
+}
+
+impl HoldGuard {
+    pub fn new(
+        hosts: &Path,
+        spec: &RunSpec,
+        key: &str,
+        label: &str,
+        shards: u32,
+        dir: &Path,
+    ) -> Self {
+        let holds = holds_dir(hosts);
+        write_hold(
+            &holds,
+            &spec.id,
+            &RemoteHold {
+                key: key.to_string(),
+                label: label.to_string(),
+                units: units_for(&spec.runs_on, shards),
+                record: record_path(dir, &spec.id),
+            },
+        );
+        HoldGuard {
+            dir: holds,
+            id: spec.id.clone(),
+        }
+    }
+}
+
+impl Drop for HoldGuard {
+    fn drop(&mut self) {
+        remove_hold(&self.dir, &self.id);
+    }
+}
+
 // ---- the seams --------------------------------------------------------------------------------
 
 /// The spec of a suite or check run, from its pinned definition.
@@ -1702,6 +1887,43 @@ mod tests {
         let again = execute(&s2, &spec("x11"), logs.path(), &|| None).unwrap();
         assert!(matches!(again, Outcome::Done(g) if g.output == GREEN));
         assert_eq!(gh.runs_seen.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_macos_run_holds_a_unit_of_each_pool_and_a_sharded_one_holds_one_per_job() {
+        let u = units_for("macos-14", 1);
+        assert_eq!((u["gha"], u["gha-macos"]), (1, 1));
+        let u = units_for("ubuntu-latest", 3);
+        assert_eq!(u["gha"], 3);
+        assert!(!u.contains_key("gha-macos"));
+        assert_eq!(units_for("macos-latest", 3)["gha-macos"], 3);
+        assert!(is_macos("[\"macos-14\"]") && !is_macos("ubuntu-latest"));
+    }
+
+    #[test]
+    fn a_hold_is_kept_until_the_run_ends_and_is_dropped_once_its_record_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let holds = dir.path().join("remote-holds");
+        let rec = dir.path().join("a.remote");
+        let st = State {
+            sha: "abc".into(),
+            ..Default::default()
+        };
+        st.save(&rec);
+        let h = RemoteHold {
+            key: "task 4".into(),
+            label: "#4".into(),
+            units: units_for("macos-14", 1),
+            record: rec.clone(),
+        };
+        write_hold(&holds, "a", &h);
+        assert_eq!(running_holds(&holds), vec![h]);
+        State {
+            collected: true,
+            ..st
+        }
+        .save(&rec);
+        assert!(running_holds(&holds).is_empty());
     }
 
     #[test]

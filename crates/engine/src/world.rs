@@ -122,6 +122,14 @@ impl World {
         self.open_runs.get(&task).copied()
     }
 
+    /// The task whose step run `run` is the open one.
+    pub fn task_of_open_run(&self, run: StepRunId) -> Option<TaskId> {
+        self.open_runs
+            .iter()
+            .find(|(_, r)| **r == run)
+            .map(|(t, _)| *t)
+    }
+
     pub(crate) fn leave(&mut self, task: TaskId, outcome: StepOutcome) -> bool {
         match self.open_runs.remove(&task) {
             Some(id) => {
