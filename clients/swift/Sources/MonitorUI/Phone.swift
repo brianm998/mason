@@ -231,20 +231,34 @@ struct PhoneNavRow: View {
 /// waits beneath, and the state icon at the end.
 struct PhoneTaskRow: View {
     let row: TaskRow
+    /// When set, the wait line's task numbers are links (the row then is not a Button: a link
+    /// inside a button's label cannot be clicked on its own).
+    var model: MonitorModel? = nil
 
     var body: some View {
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 2) {
                 Text("\(row.key) \(row.title)").fixedSize(horizontal: false, vertical: true)
                 if !row.activity.isEmpty {
-                    Text(row.activity).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    if let model {
+                        LinkedText(model: model, text: row.activity, font: .caption, color: .secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else {
+                        Text(row.activity).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
                 }
                 if row.hasWait {
                     Text(QueueWait.badge(row.wait.cause)).font(.caption.weight(.semibold)).foregroundStyle(.orange)
                         .accessibilityIdentifier("wait:badge")
                 }
                 if !row.whyWaiting.isEmpty {
-                    Text(row.whyWaiting).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    if let model {
+                        LinkedText(model: model, text: row.whyWaiting, font: .caption, color: .secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else {
+                        // A bare row (no model): previews and layout tests.
+                        Text(row.whyWaiting).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
             Spacer(minLength: 0)
@@ -275,7 +289,10 @@ struct PhoneSidebarScreen: View {
                 ForEach(model.sidebar?.sections ?? [], id: \.state) { sec in
                     Section {
                         ForEach(model.filteredRows(sec), id: \.id) { r in
-                            Button { choose(.task(r.id)) } label: { PhoneTaskRow(row: r) }
+                            PhoneTaskRow(row: r, model: model)
+                                .contentShape(Rectangle())
+                                .onTapGesture { choose(.task(r.id)) }
+                                .accessibilityAddTraits(.isButton)
                                 .accessibilityIdentifier("row:\(r.id)")
                         }
                     } header: {
