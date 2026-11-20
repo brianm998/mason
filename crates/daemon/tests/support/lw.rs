@@ -299,6 +299,30 @@ impl W {
             })
     }
 
+    /// The tail of every log under the data dir whose name has `-fast-` in it (the fast tier's
+    /// output for a batch), so a red test can say what the tier printed.
+    pub fn fast_tier_logs(&self) -> String {
+        fn walk(dir: &std::path::Path, out: &mut String) {
+            let Ok(rd) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if p.to_string_lossy().contains("-fast-") {
+                    let text = std::fs::read_to_string(&p).unwrap_or_default();
+                    let tail: Vec<&str> = text.lines().rev().take(60).collect();
+                    let tail: Vec<&str> = tail.into_iter().rev().collect();
+                    out.push_str(&format!("--- {}\n{}\n", p.display(), tail.join("\n")));
+                }
+            }
+        }
+        let mut out = String::new();
+        walk(&self.s.data_dir, &mut out);
+        out
+    }
+
     pub fn on_main(&self, path: &str) -> bool {
         git::ok(&self.s.origin, &["cat-file", "-e", &format!("main:{path}")])
     }
