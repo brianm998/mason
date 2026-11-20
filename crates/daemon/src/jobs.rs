@@ -3263,6 +3263,16 @@ fn agent_job(c: &Ctx) {
         prompt
     };
 
+    // With the task's checks on GitHub, the agent's own shell refuses test runs (#704).
+    let remote_shims = std::env::var("MASON_REMOTE_SHIM").as_deref() != Ok("off")
+        && matches!(kind, StepKind::Develop | StepKind::Review)
+        && crate::place::task_checks_on_github(&c.d, &c.project.id, c.task.0);
+    let prompt = if remote_shims && kind == StepKind::Develop {
+        format!("{prompt}\n\n{}", crate::agentshim::PROMPT_LINE)
+    } else {
+        prompt
+    };
+
     // `run_check` runs the project's tests: the command of its test step, layered exactly
     // as the test step itself resolves it (runtime and task overrides included).
     let tests_cmd = test_commands(&c.d, &c.def, c.project_id, Some(c.task));
@@ -3396,6 +3406,9 @@ fn agent_job(c: &Ctx) {
         spec.on_live = Some(Arc::new(move || crate::holds::probe_ok(&d, &acct, task)));
     }
     spec.env = c.project.agent_env.clone();
+    if remote_shims {
+        crate::agentshim::apply(&mut spec.env, &c.d.cfg.data_dir);
+    }
     // Whoever the agent runs `mason run` for: it ranks the request as this
     // task's pipeline work. Set last so a project's agent_env cannot name
     // another task.
