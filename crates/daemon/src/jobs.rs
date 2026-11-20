@@ -2225,23 +2225,32 @@ impl TestChecks {
         if auto_narrowed {
             let n = red.as_ref().map_or(0, |r| r.len());
             lines.push(format!(
-                "Your last full run was red, so this re-ran the {n} tests that failed and the \
-                 crates you changed; the full run comes before you submit. Call run_check again \
-                 (or with full: true) for it; it is the test step's check."
+                "Your last run was red, so this re-ran the {n} tests that failed and the \
+                 crates you changed. Run one unscoped run_check before you submit; it runs \
+                 what your change affects, as the test step does."
             ));
         }
         if !narrowed.is_empty() && by_default {
             lines.push(format!(
-                "Ran what your change affects ({}). The test step runs the whole workspace; \
-                 pass full: true only if you need all of it now.",
+                "Ran what your change affects ({}). The test step narrows the same way; the \
+                 landing batch runs the whole workspace. Use full: true only if you changed \
+                 something this narrowing cannot see.",
                 narrowed.join("; ")
             ));
         } else if !narrowed.is_empty() {
             lines.push(format!(
-                "Scoped ({}): this green is not the test step's. The test step runs the whole \
-                 workspace; run one unscoped run_check before you submit.",
+                "Scoped ({}): this green covers only those tests. The test step runs what your \
+                 change affects; run one unscoped run_check before you submit.",
                 narrowed.join("; ")
             ));
+        }
+        if scope.full {
+            lines.push(match &scope.why {
+                Some(w) => format!("Full run (why: {w})."),
+                None => "Full run. Next time give a reason with `why`; the test step runs what \
+                         your change affects, so everything is rarely needed."
+                    .to_string(),
+            });
         }
         CheckRun::Done {
             passed: !failed,
@@ -2259,7 +2268,10 @@ fn scope_text(s: &CheckScope) -> String {
     } else if s.changed {
         "changed packages".to_string()
     } else {
-        "full".to_string()
+        match &s.why {
+            Some(w) if s.full => format!("full (why: {w})"),
+            _ => "full".to_string(),
+        }
     }
 }
 

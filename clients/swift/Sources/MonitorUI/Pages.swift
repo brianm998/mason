@@ -171,19 +171,24 @@ struct HomePage: View {
                 ForEach(model.home?.stages ?? [], id: \.state) { st in
                     section(st.title, theme: theme, state: st.state, open: Page.sectionPage(st.state).map { p in { model.go(p) } }) {
                         ForEach(st.rows, id: \.id) { r in
-                            Button { model.go(.task(r.id)) } label: {
-                                let line = compact
-                                    ? AnyLayout(VStackLayout(alignment: .leading, spacing: theme.spacingSmall))
-                                    : AnyLayout(HStackLayout(spacing: theme.spacing))
-                                line {
-                                    ProgressCells(clock: model.live, cells: r.progress, slow: r.slow)
-                                    Text("\(r.project) \(r.key)").font(theme.body(.semibold))
-                                    Text(r.title).font(theme.body()).multilineTextAlignment(.leading)
-                                    if r.hasWait { WaitBadge(cause: r.wait.cause) }
-                                    Text(r.whyWaiting.isEmpty ? Format.duration(ms: r.inState(now: model.daemonNow())) : "\(r.whyWaiting), \(Format.duration(ms: r.inState(now: model.daemonNow())))")
-                                        .font(theme.small()).foregroundStyle(r.slow ? theme.slow : theme.muted)
-                                }
-                            }.buttonStyle(.plain)
+                            // Not a Button: a link inside a button's label cannot be clicked on its own.
+                            // The row opens its task on a tap; the wait line's task numbers are links.
+                            let line = compact
+                                ? AnyLayout(VStackLayout(alignment: .leading, spacing: theme.spacingSmall))
+                                : AnyLayout(HStackLayout(spacing: theme.spacing))
+                            line {
+                                ProgressCells(clock: model.live, cells: r.progress, slow: r.slow)
+                                Text("\(r.project) \(r.key)").font(theme.body(.semibold)).linkStyle()
+                                Text(r.title).font(theme.body()).multilineTextAlignment(.leading)
+                                if r.hasWait { WaitBadge(cause: r.wait.cause) }
+                                LinkedText(model: model,
+                                           text: r.whyWaiting.isEmpty ? Format.duration(ms: r.inState(now: model.daemonNow())) : "\(r.whyWaiting), \(Format.duration(ms: r.inState(now: model.daemonNow())))",
+                                           font: theme.small(), color: r.slow ? theme.slow : theme.muted)
+                            }
+                            .contentShape(Rectangle())
+                            .onTapGesture { model.go(.task(r.id)) }
+                            .accessibilityElement(children: .contain)
+                            .accessibilityAddTraits(.isButton)
                         }
                     }
                 }
@@ -355,8 +360,8 @@ struct CompilationSection: View {
             ForEach(Array(c.leases.enumerated()), id: \.offset) { i, l in
                 HStack(alignment: .firstTextBaseline, spacing: theme.spacing) {
                     who(l.label, task: 0, command: l.command)
-                    Text(QueueWait.leaseDetail(l, now: model.daemonNow()))
-                        .foregroundStyle(theme.muted)
+                    LinkedText(model: model, text: QueueWait.leaseDetail(l, now: model.daemonNow()),
+                               font: theme.body(), color: theme.muted)
                 }
                 .font(theme.body())
                 .accessibilityIdentifier("compile:lease:\(i)")
@@ -656,7 +661,7 @@ struct LandingPage: View {
                         if l.batches.isEmpty { Text("No batch has formed yet.").font(theme.body()).foregroundStyle(theme.muted) }
                         ForEach(l.batches, id: \.id) { b in
                             HStack(spacing: theme.spacing) {
-                                Text(batchText(b)).font(theme.body())
+                                LinkedText(model: model, text: batchText(b))
                                 LandNowButton(model: model, target: .batch(b.id), shown: model.canLandNow(batch: b))
                             }
                             if b.hasCi {
@@ -868,7 +873,8 @@ struct HealthPage: View {
                         }
                         ForEach(i.findings, id: \.id) { f in
                             VStack(alignment: .leading) {
-                                Text("#\(f.id) [\(f.verdict)] \(f.title) (proposal #\(f.task), metric \(f.metric))").font(theme.body())
+                                // `#id` is the finding's own number, not a task.
+                                LinkedText(model: model, text: "#\(f.id) [\(f.verdict)] \(f.title) (proposal #\(f.task), metric \(f.metric))")
                                 if !f.text.isEmpty { Text(f.text).font(theme.body()).foregroundStyle(theme.muted) }
                             }
                         }
@@ -941,7 +947,7 @@ struct LandingItems: View {
                 Text("Landing now").font(theme.body()).foregroundStyle(theme.muted)
                 ForEach(landNowBatches(batches), id: \.id) { b in
                     HStack(spacing: theme.spacing) {
-                        Text("Batch #\(b.id) \(b.phase): \(b.tasks.map { "#\($0)" }.joined(separator: " "))").font(theme.body())
+                        LinkedText(model: model, text: "Batch #\(b.id) \(b.phase): \(b.tasks.map { "#\($0)" }.joined(separator: " "))")
                         LandNowButton(model: model, target: .batch(b.id), shown: model.canLandNow(batch: b))
                     }
                 }
@@ -1101,7 +1107,7 @@ struct StageRows: View {
             }
             Button { model.go(.task(r.id)) } label: {
                 Text("\(r.project) \(r.key)  \(r.title)").font(theme.body()).lineLimit(3)
-                    .multilineTextAlignment(.leading)
+                    .multilineTextAlignment(.leading).linkStyle()
             }.buttonStyle(.plain)
             if !compact { Spacer(minLength: 0) }
             detail(r)
@@ -1120,19 +1126,23 @@ struct StageRows: View {
         .accessibilityIdentifier("stage-row:\(name):\(r.id)")
     }
 
+    /// The detail line's text: the step, suite progress, why it waits, time in state and model.
+    func detailText(_ r: TaskRow) -> String {
+        [r.step.isEmpty ? "" : r.step,
+         MonitorModel.suiteProgress(r),
+         r.whyWaiting,
+         Format.duration(ms: r.inState(now: model.daemonNow())),
+         r.display.isEmpty ? r.model : r.display]
+            .filter { !$0.isEmpty }.joined(separator: " · ")
+    }
+
     /// Approve on a row of the proposed page: the sidebar row's rule.
     static func showsApprove(page: String, canAct: Bool, row: TaskRow) -> Bool {
         page == "proposed" && canAct && row.allowedActions.contains("approve")
     }
 
     @ViewBuilder func detail(_ r: TaskRow) -> some View {
-        let parts = [r.step.isEmpty ? "" : r.step,
-                     MonitorModel.suiteProgress(r),
-                     r.whyWaiting,
-                     Format.duration(ms: r.inState(now: model.daemonNow())),
-                     r.display.isEmpty ? r.model : r.display]
-            .filter { !$0.isEmpty }
-        Text(parts.joined(separator: " · ")).font(theme.small())
-            .foregroundStyle(r.slow ? theme.slow : theme.muted).lineLimit(2)
+        LinkedText(model: model, text: detailText(r), font: theme.small(),
+                   color: r.slow ? theme.slow : theme.muted).lineLimit(2)
     }
 }

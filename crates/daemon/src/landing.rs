@@ -1874,6 +1874,7 @@ impl Runner {
             self.point("batch_verified");
             // A union that builds shows the base builds: an alert about it is over.
             self.d.landing.clear(self.pid, "redbase");
+            let _ = self.d.store.clear_freeze(&self.project().id);
 
             // -- promote
             self.record(
@@ -3625,7 +3626,45 @@ impl Runner {
             "landing",
             &format!("{}: {why}", self.project().id),
         );
+        self.freeze_base(why);
         self.d.poke();
+    }
+
+    /// A red base freezes landing (only a fix passes) and files one urgent fix task, so the
+    /// next batches do not each re-verify the same red and fail their tasks' land step with
+    /// the same reason. A freeze already in force (CI's or post-land's) is left alone. A green
+    /// union later lifts it.
+    fn freeze_base(&self, why: &str) {
+        let d = &self.d;
+        let p = self.project();
+        let held = d
+            .store
+            .freezes()
+            .ok()
+            .is_some_and(|v| v.iter().any(|f| f.project == p.id));
+        if held {
+            return;
+        }
+        let fix = d
+            .emit(EventKind::TaskFiled {
+                project: self.pid,
+                title: "Fix the base: it is red on its own".to_string(),
+                body: format!("{why}."),
+                priority: Priority::Urgent,
+                trust: TrustSource::Owner,
+                explored: false,
+                proposed: false,
+                blockers: vec![],
+                not_before: None,
+            })
+            .ok()
+            .and_then(|a| {
+                a.effects.iter().find_map(|e| match e {
+                    Effect::TaskCreated { task } => Some(task.0),
+                    _ => None,
+                })
+            });
+        let _ = d.store.set_freeze(&p.id, why, fix, now_ms());
     }
 
     /// Split a red batch (decision 0387): run the suites over subsets of it (the integration
