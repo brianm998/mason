@@ -4050,6 +4050,15 @@ fn print_ci_watch(project: &str, w: &Value) {
     for h in w["held_back"].as_array().into_iter().flatten() {
         println!("  {}", h["text"].as_str().unwrap_or("?"));
     }
+    for t in w["timeouts"].as_array().into_iter().flatten() {
+        println!(
+            "  hit its time limit: {} ({} of {} runs{})",
+            t["job"].as_str().unwrap_or("?"),
+            t["timed_out_runs"],
+            t["agreement"],
+            if t["filed"] == true { ", filed" } else { "" }
+        );
+    }
     for f in w["filed"].as_array().into_iter().flatten().take(5) {
         println!(
             "  filed: {} as {}{}{}",
