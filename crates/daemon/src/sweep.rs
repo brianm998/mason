@@ -172,6 +172,10 @@ pub fn sweep_once(d: &Arc<Daemon>) -> Vec<String> {
     // detector reports them, so delete them. Housekeeping: files nothing, retried next pass.
     let _ = d.store.expire_overrides(crate::daemon::now_ms());
 
+    // 4e. Run refs left on a remote by a crash or a killed run: older than 24 h with no live run
+    // record. Housekeeping: logs each deletion, files nothing, tried again later.
+    crate::remote::sweep_stale_refs(d);
+
     // 5. Projections that no longer match the log (every tenth pass; it replays everything).
     if st.passes.is_multiple_of(10) {
         if let Err(e) = d.store.verify() {

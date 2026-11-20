@@ -14,4 +14,5 @@ pub mod hosted;
 pub mod jenkins;
 pub mod plain;
 pub mod runner;
+pub mod runref;
 pub mod sandbox;

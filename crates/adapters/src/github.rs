@@ -1087,6 +1087,28 @@ pub fn workflow_problems_at(repo: &Path, git_ref: &str) -> Vec<Problem> {
     scan_workflows(&texts)
 }
 
+/// The workflow files of `git_ref` as `(file name, text)`, for the remote-run checks.
+pub fn workflow_files_at(repo: &Path, git_ref: &str) -> Vec<(String, String)> {
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+    };
+    let names = git(&["ls-tree", "--name-only", git_ref, ".github/workflows/"]).unwrap_or_default();
+    names
+        .lines()
+        .filter(|n| n.ends_with(".yml") || n.ends_with(".yaml"))
+        .filter_map(|n| {
+            let text = git(&["show", &format!("{git_ref}:{n}")])?;
+            Some((n.rsplit('/').next().unwrap_or(n).to_string(), text))
+        })
+        .collect()
+}
+
 // ---- remote runs (a suite or check run by a workflow on a `mason/run/**` ref) ---------------
 
 /// One workflow run, as a remote run reads it.
@@ -1123,6 +1145,26 @@ pub struct ActionJob {
 }
 
 impl GitHub {
+    /// The repository (`GET /repos/{repo}`): what the token may do and its security settings.
+    pub fn repository(&self) -> Result<Value, ApiError> {
+        self.json(Request::get(&self.url("")))
+    }
+
+    /// Can the token read Actions (`GET /actions/permissions`)? Nothing is written.
+    pub fn actions_readable(&self) -> Result<(), ApiError> {
+        self.send(Request::get(&self.url("/actions/permissions")))
+            .map(|_| ())
+    }
+
+    /// The commit time of `sha` in seconds since the epoch (`GET /commits/{sha}`).
+    pub fn commit_time(&self, sha: &str) -> Option<u64> {
+        let v = self
+            .json(Request::get(&self.url(&format!("/commits/{sha}"))))
+            .ok()?;
+        let t = v["commit"]["committer"]["date"].as_str()?;
+        Some(iso_ms(t) / 1000).filter(|s| *s > 0)
+    }
+
     /// The runs of a commit (`GET /actions/runs?head_sha=`), newest first.
     pub fn runs_for_sha(&self, sha: &str) -> Result<Vec<ActionRun>, ApiError> {
         let v = self.json(Request::get(
