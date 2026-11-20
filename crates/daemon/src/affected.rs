@@ -16,6 +16,7 @@
 //! The landing batch runs the whole workspace, so what this leaves out is still run before
 //! anything reaches `develop`.
 
+use crate::covmap::{hash_text, CoverageMap};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -54,6 +55,8 @@ pub struct Group {
     /// libtest filters (`resume_loss::`). A target also in `tests` (or a `whole` group) runs
     /// whole and its filters are dropped.
     pub modules: BTreeMap<String, BTreeSet<String>>,
+    /// One line per narrowed directory target, how its modules were picked (#656).
+    pub notes: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -389,6 +392,21 @@ pub fn select(
     read: &dyn Fn(&str) -> Option<String>,
     named: &str,
 ) -> Pick {
+    select_with(pkgs, changed, files, read, named, None)
+}
+
+/// [`select`] with a run-time coverage map (#656, decision 0721). For a directory target the
+/// map covers, a changed `src` file picks the modules whose covered set holds it; a file no
+/// module's set names, and a module the map does not list, are picked by the name scan as
+/// before. A map made before the target's `main.rs` last changed is not used for it.
+pub fn select_with(
+    pkgs: &[Pkg],
+    changed: &[String],
+    files: &[String],
+    read: &dyn Fn(&str) -> Option<String>,
+    named: &str,
+    cov: Option<&CoverageMap>,
+) -> Pick {
     let mut out: BTreeMap<String, Group> = BTreeMap::new();
     // Directory targets by root file, and the modules selected in them: (package, target) to
     // module names. Modules are a heuristic (decision 0696); the landing batch runs `it` whole.
@@ -402,6 +420,14 @@ pub fn select(
     };
     let mut picked: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
     let mut src_changes: Vec<(&Pkg, String)> = vec![];
+    // The map, for each directory target it fits; targets where a changed file fell back to the
+    // name scan.
+    let fitting = |t: &TestTarget| {
+        cov.filter(|m| {
+            m.target == t.src && m.main_hash == hash_text(&read(&t.src).unwrap_or_default())
+        })
+    };
+    let mut fell_back: BTreeSet<(String, String)> = BTreeSet::new();
     // Packages run whole, with the targets of their dependents.
     let mut whole: BTreeSet<&str> = BTreeSet::new();
     // Paths read by whichever targets name them: (path, packages to look in, None for all).
@@ -524,8 +550,22 @@ pub fn select(
                 if let Some(d) = dirs.get(&t.src) {
                     // Each module on its own: neither the shared harness `main.rs` includes
                     // nor `main.rs` itself makes every module reference the change.
+                    let map = fitting(t);
+                    let full = format!("{}/{rel}", p.dir);
                     for (m, text) in &d.mods {
-                        if references(p, q.name == p.name, rel, &content, text) {
+                        let (covered, scan) = match map {
+                            Some(c) => {
+                                let listed = c.modules.get(m);
+                                let unknown = listed.is_none() || !c.knows(&full);
+                                (listed.is_some_and(|f| f.contains(&full)), unknown)
+                            }
+                            None => (false, true),
+                        };
+                        if map.is_some() && scan {
+                            fell_back.insert((q.name.clone(), t.name.clone()));
+                        }
+                        if covered || (scan && references(p, q.name == p.name, rel, &content, text))
+                        {
                             picked
                                 .entry((q.name.clone(), t.name.clone()))
                                 .or_default()
@@ -555,10 +595,33 @@ pub fn select(
             .find(|t| t.name == target)
             .and_then(|t| dirs.get(&t.src))
             .map_or(0, |d| d.mods.len());
+        let how = pkgs
+            .iter()
+            .filter(|q| q.name == pkg)
+            .flat_map(|q| &q.tests)
+            .find(|t| t.name == target)
+            .and_then(&fitting)
+            .map(|m| {
+                let back = fell_back.contains(&(pkg.clone(), target.clone()));
+                format!(
+                    "by the coverage map of {}{}",
+                    m.commit.chars().take(7).collect::<String>(),
+                    if back {
+                        " (name scan for files it lacks)"
+                    } else {
+                        ""
+                    }
+                )
+            })
+            .unwrap_or_else(|| "by name scan (no coverage map)".to_string());
         let g = out.entry(pkg).or_default();
         if mods.len() * 2 > total {
             g.tests.insert(target);
         } else {
+            g.notes.push(format!(
+                "{target}: {} of {total} modules, {how}",
+                mods.len()
+            ));
             g.modules
                 .entry(target)
                 .or_default()
@@ -1159,5 +1222,156 @@ mod tests {
         let raw = add_smoke(&mut g, "-p leaf --test it\n");
         assert!(raw.is_empty());
         assert_eq!(render(&g), vec!["-p leaf --test it"]);
+    }
+
+    fn map_for(fx: &Fx, rows: &[(&str, &[&str])]) -> CoverageMap {
+        CoverageMap {
+            commit: "1234567890".into(),
+            made_at: 1,
+            target: "crates/leaf/tests/it/main.rs".into(),
+            main_hash: hash_text(&fx.files["crates/leaf/tests/it/main.rs"]),
+            modules: rows
+                .iter()
+                .map(|(m, f)| (m.to_string(), f.iter().map(|s| s.to_string()).collect()))
+                .collect(),
+        }
+    }
+
+    fn rendered_with(fx: &Fx, changed: &[&str], cov: Option<&CoverageMap>) -> Vec<String> {
+        let changed: Vec<String> = changed.iter().map(|s| s.to_string()).collect();
+        let files: Vec<String> = fx.files.keys().cloned().collect();
+        match select_with(
+            &fx.pkgs,
+            &changed,
+            &files,
+            &|p| fx.files.get(p).cloned(),
+            "cargo test",
+            cov,
+        ) {
+            Pick::Some(g) => render(&g),
+            Pick::All { because } => vec![format!("ALL {because}")],
+        }
+    }
+
+    /// The lines of a rendered pick that run the directory target `it`.
+    fn it_lines(v: Vec<String>) -> Vec<String> {
+        v.into_iter().filter(|l| l.contains("--test it")).collect()
+    }
+
+    #[test]
+    fn a_coverage_map_picks_the_modules_that_ran_the_file() {
+        let fx = with_dir_target();
+        let m = map_for(
+            &fx,
+            &[
+                ("mod_a", &["crates/leaf/src/other_mod.rs"]),
+                ("mod_b", &["crates/leaf/src/shapes.rs"]),
+                ("mod_c", &[]),
+            ],
+        );
+        // The name scan would pick mod_a (it names `shapes`); the map says mod_b ran it.
+        assert_eq!(
+            it_lines(rendered_with(&fx, &["crates/leaf/src/shapes.rs"], Some(&m))),
+            vec!["-p leaf --test it -- mod_b::"]
+        );
+        assert_eq!(
+            it_lines(rendered_with(&fx, &["crates/leaf/src/shapes.rs"], None)),
+            vec!["-p leaf --test it -- mod_a::"]
+        );
+    }
+
+    #[test]
+    fn support_changes_still_select_the_target_whole_with_a_map() {
+        let fx = with_dir_target();
+        let m = map_for(&fx, &[("mod_a", &[]), ("mod_b", &[]), ("mod_c", &[])]);
+        let c = ["crates/leaf/tests/support/mod.rs"];
+        assert_eq!(
+            rendered_with(&fx, &c, Some(&m)),
+            rendered_with(&fx, &c, None)
+        );
+        assert!(
+            it_lines(rendered_with(&fx, &c, Some(&m))).contains(&"-p leaf --test it".to_string())
+        );
+    }
+
+    #[test]
+    fn an_unmapped_file_a_stale_map_or_no_map_gives_the_name_scan_pick() {
+        let mut fx = with_dir_target();
+        fx.files
+            .insert("crates/leaf/src/new.rs".into(), "pub fn nn() {}\n".into());
+        let m = map_for(&fx, &[("mod_a", &[]), ("mod_b", &[]), ("mod_c", &[])]);
+        let shapes = ["crates/leaf/src/shapes.rs"];
+        let scan = rendered_with(&fx, &shapes, None);
+        assert_eq!(it_lines(scan.clone()), vec!["-p leaf --test it -- mod_a::"]);
+        // shapes.rs is in no module's set: the name scan decides.
+        assert_eq!(rendered_with(&fx, &shapes, Some(&m)), scan);
+        let new = ["crates/leaf/src/new.rs"];
+        assert_eq!(
+            rendered_with(&fx, &new, Some(&m)),
+            rendered_with(&fx, &new, None)
+        );
+        // A map made before main.rs changed is not used.
+        let mut stale = map_for(&fx, &[("mod_b", &["crates/leaf/src/shapes.rs"])]);
+        stale.main_hash ^= 1;
+        assert_eq!(rendered_with(&fx, &shapes, Some(&stale)), scan);
+    }
+
+    #[test]
+    fn the_note_says_how_the_modules_were_picked() {
+        let fx = with_dir_target();
+        let m = map_for(
+            &fx,
+            &[
+                ("mod_a", &[]),
+                ("mod_b", &["crates/leaf/src/shapes.rs"]),
+                ("mod_c", &[]),
+            ],
+        );
+        let notes = |cov: Option<&CoverageMap>| {
+            let changed = vec!["crates/leaf/src/shapes.rs".to_string()];
+            let files: Vec<String> = fx.files.keys().cloned().collect();
+            match select_with(
+                &fx.pkgs,
+                &changed,
+                &files,
+                &|p| fx.files.get(p).cloned(),
+                "x",
+                cov,
+            ) {
+                Pick::Some(g) => g.values().flat_map(|g| g.notes.clone()).collect::<Vec<_>>(),
+                Pick::All { .. } => vec![],
+            }
+        };
+        assert_eq!(
+            notes(Some(&m)),
+            vec!["it: 1 of 3 modules, by the coverage map of 1234567"]
+        );
+        assert_eq!(
+            notes(None),
+            vec!["it: 1 of 3 modules, by name scan (no coverage map)"]
+        );
+    }
+
+    #[test]
+    fn the_rendered_pick_is_one_test_command_with_filters_after_the_dashes() {
+        let fx = with_dir_target();
+        let m = map_for(
+            &fx,
+            &[
+                ("mod_a", &["crates/leaf/src/shapes.rs"]),
+                ("mod_b", &[]),
+                ("mod_c", &[]),
+            ],
+        );
+        let r = rendered_with(&fx, &["crates/leaf/src/shapes.rs"], Some(&m));
+        let it = it_lines(r.clone());
+        assert_eq!(it, vec!["-p leaf --test it -- mod_a::"]);
+        // The build form has no filters.
+        let b = crate::scope::expand(
+            "cargo test --no-run {tests_for_change}",
+            &crate::scope::Narrow::Targets(r),
+            true,
+        );
+        assert!(b.contains("--test it") && !b.contains("mod_a"), "{b}");
     }
 }
