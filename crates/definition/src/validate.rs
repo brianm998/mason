@@ -135,7 +135,7 @@ pub fn warnings(def: &Definition, caps: &Capabilities) -> Vec<Problem> {
 fn dead_empty_impact_entries(def: &Definition, w: &mut Vec<Problem>) {
     use mason_testing::model::glob_specificity;
     let imp = &def.testing.impact;
-    for (g, suites) in imp.entries.iter().filter(|(_, s)| s.is_empty()) {
+    for (g, _) in imp.entries.iter().filter(|(_, s)| s.is_empty()) {
         // A path the empty entry names: wildcards become a literal.
         let sample: Vec<String> = g
             .trim_start_matches("./")
