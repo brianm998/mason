@@ -150,7 +150,15 @@ pub struct Finished {
     pub ran_ms: Option<u64>,
     /// "ran on GitHub (ubuntu-latest), run <url>, picked up after 6 s".
     pub ran_on: String,
+    /// A sharded run's shards (#701), in shard order; `output` and `code` are their merge.
+    /// Empty for a run that was not sharded.
+    pub parts: Vec<Part>,
+    /// Shards that got no result (no runner, or cancelled before they ran): the caller of
+    /// [`execute`] runs only these again. Empty in what [`execute_sharded`] returns.
+    pub missing: Vec<u32>,
 }
+
+pub use crate::shards::Part;
 
 /// Why a run did not give a result.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -192,6 +200,41 @@ pub struct RunSpec {
     /// The key the evidence is filed under (`hostedcheck::tree_key`), recorded beside the
     /// snapshot's SHA. Empty for a suite run, which is keyed by the tree it was given.
     pub tree_key: String,
+    /// Split across this many runners (#701); 0 and 1 are one runner.
+    pub shards: u32,
+    /// The shards (1-based) this run makes; empty means all of them. A rerun of the shards that
+    /// got no result names only those.
+    pub only: Vec<u32>,
+    /// Each shard's tests, indexed from 0, for the runner to take its own from `.mason/run.json`.
+    pub shard_lists: Vec<Vec<String>>,
+    /// What a shard's runner runs instead of `command`.
+    pub shard_command: Option<String>,
+}
+
+impl RunSpec {
+    fn sharded(&self) -> bool {
+        self.shards > 1
+    }
+
+    /// The shards this run makes, 1-based.
+    fn active(&self) -> Vec<u32> {
+        if !self.sharded() {
+            vec![1]
+        } else if self.only.is_empty() {
+            (1..=self.shards).collect()
+        } else {
+            self.only.clone()
+        }
+    }
+}
+
+/// The artifact of shard `k`: [`ARTIFACT`] when the run is not sharded.
+pub fn artifact_name(sharded: bool, k: u32) -> String {
+    if sharded {
+        format!("{ARTIFACT}-{k}")
+    } else {
+        ARTIFACT.to_string()
+    }
 }
 
 pub trait Clock: Send + Sync {
@@ -288,6 +331,10 @@ pub fn run_json(spec: &RunSpec) -> String {
         "timeout_min": timeout_min,
         "runs_on": spec.runs_on,
         "env": env,
+        "shards": spec.shards.max(1),
+        "matrix": spec.active(),
+        "shard_lists": spec.shard_lists,
+        "shard_command": spec.shard_command,
     })
     .to_string()
 }
@@ -411,6 +458,11 @@ struct State {
     signal: i32,
     timed_out: bool,
     ran_ms: Option<u64>,
+    /// The shards of the run, 1-based; empty for a run that is not sharded.
+    shards: Vec<u32>,
+    /// What each collected shard sent besides its output (`<id>.shard-<k>.log`), so a daemon
+    /// that restarts after the run was collected still has its parts: `k:listed:code:signal`.
+    parts: Vec<(u32, u32, i32, i32, u64, u64)>,
 }
 
 impl State {
@@ -435,6 +487,22 @@ impl State {
                 ("signal", self.signal.to_string()),
                 ("timed_out", (self.timed_out as u8).to_string()),
                 ("ran_ms", opt(self.ran_ms)),
+                (
+                    "parts",
+                    self.parts
+                        .iter()
+                        .map(|p| format!("{}:{}:{}:{}:{}:{}", p.0, p.1, p.2, p.3, p.4, p.5))
+                        .collect::<Vec<_>>()
+                        .join(","),
+                ),
+                (
+                    "shards",
+                    self.shards
+                        .iter()
+                        .map(u32::to_string)
+                        .collect::<Vec<_>>()
+                        .join(","),
+                ),
             ],
         );
     }
@@ -465,6 +533,25 @@ impl State {
             signal: s("signal").parse().unwrap_or(0),
             timed_out: flag("timed_out"),
             ran_ms: n("ran_ms"),
+            shards: s("shards")
+                .split(',')
+                .filter_map(|v| v.parse().ok())
+                .collect(),
+            parts: s("parts")
+                .split(',')
+                .filter_map(|p| {
+                    let f: Vec<&str> = p.split(':').collect();
+                    let n = |i: usize| f.get(i).and_then(|v| v.parse::<i64>().ok());
+                    Some((
+                        n(0)? as u32,
+                        n(1)? as u32,
+                        n(2)? as i32,
+                        n(3)? as i32,
+                        n(4)? as u64,
+                        n(5)? as u64,
+                    ))
+                })
+                .collect(),
         })
     }
 
@@ -708,6 +795,8 @@ fn unzip_program() -> &'static str {
 
 /// What the artifact holds.
 struct Artifact {
+    /// 1-based; 1 for a run that is not sharded.
+    shard: u32,
     output: Vec<u8>,
     code: i32,
     signal: i32,
@@ -775,6 +864,7 @@ fn read_artifact(zip: &Path, into: &Path) -> Result<Artifact, String> {
     let v: serde_json::Value =
         serde_json::from_slice(&meta).map_err(|e| format!("result.json: {e}"))?;
     Ok(Artifact {
+        shard: 1,
         output,
         code: v["code"].as_i64().ok_or("result.json has no code")? as i32,
         signal: v["signal"].as_i64().unwrap_or(0) as i32,
@@ -785,6 +875,19 @@ fn read_artifact(zip: &Path, into: &Path) -> Result<Artifact, String> {
 }
 
 fn finished_from(st: &State, log: &Path) -> Finished {
+    let parts = st
+        .parts
+        .iter()
+        .map(|p| Part {
+            shard: p.0,
+            listed: p.1,
+            code: p.2,
+            signal: p.3,
+            run_s: p.4,
+            build_s: p.5,
+            output: crate::jobs::read_lossy(&part_log(log, p.0)).unwrap_or_default(),
+        })
+        .collect();
     Finished {
         code: st.code,
         signal: st.signal,
@@ -793,7 +896,14 @@ fn finished_from(st: &State, log: &Path) -> Finished {
         stop: None,
         ran_ms: st.ran_ms,
         ran_on: st.where_text(),
+        parts,
+        missing: vec![],
     }
+}
+
+/// The file a collected shard's output is kept in, beside the run's log.
+fn part_log(log: &Path, shard: u32) -> PathBuf {
+    log.with_extension(format!("shard-{shard}.log"))
 }
 
 /// Run `spec` on GitHub, or collect the run a record in `dir` says is already made. `stop` is
@@ -833,6 +943,11 @@ pub fn execute(
                 tree_key: spec.tree_key.clone(),
                 pushed_ms: site.clock.now_ms(),
                 runs_on: spec.runs_on.clone(),
+                shards: if spec.sharded() {
+                    spec.active()
+                } else {
+                    vec![]
+                },
                 ..Default::default()
             };
             // The record first: a daemon that dies between here and the push finds the run.
@@ -917,6 +1032,73 @@ pub fn execute(
                 let _ = std::fs::remove_dir_all(&scratch);
                 return Err(Fail::Environmental(why));
             }
+            Ok(Step::Parts(got, missing)) => {
+                let _ = std::fs::remove_dir_all(&scratch);
+                let parts: Vec<Part> = got
+                    .iter()
+                    .map(|a| Part {
+                        shard: a.shard,
+                        listed: spec
+                            .shard_lists
+                            .get(a.shard as usize - 1)
+                            .map_or(0, |l| l.len() as u32),
+                        code: a.code,
+                        signal: a.signal,
+                        output: String::from_utf8_lossy(&a.output).into_owned(),
+                        run_s: a.run_s,
+                        build_s: a.build_s,
+                    })
+                    .collect();
+                let (code, signal, output) = crate::shards::merge(&parts);
+                // Shards run side by side: the run took as long as the slowest.
+                let ran_ms = got.iter().map(|a| (a.build_s + a.run_s) * 1000).max();
+                if spec.results_file.is_some() {
+                    for a in &got {
+                        for (rel, bytes) in &a.results {
+                            let p = site.cwd.join(rel);
+                            if let Some(parent) = p.parent() {
+                                let _ = std::fs::create_dir_all(parent);
+                            }
+                            let _ = std::fs::write(p, bytes);
+                        }
+                    }
+                }
+                if !missing.is_empty() {
+                    // Not collected: the caller runs the missing shards again and keeps these.
+                    let ran_on = st.where_text();
+                    abandon(&mut st);
+                    return Ok(Outcome::Done(Finished {
+                        code,
+                        signal,
+                        output,
+                        timed_out: false,
+                        stop: None,
+                        ran_ms,
+                        ran_on,
+                        parts,
+                        missing,
+                    }));
+                }
+                let _ = std::fs::write(&log, &output);
+                for p in &parts {
+                    let _ = std::fs::write(part_log(&log, p.shard), &p.output);
+                }
+                st.parts = parts
+                    .iter()
+                    .map(|p| (p.shard, p.listed, p.code, p.signal, p.run_s, p.build_s))
+                    .collect();
+                st.code = code;
+                st.signal = signal;
+                st.ran_ms = ran_ms;
+                st.collected = true;
+                st.save(&rec);
+                delete_ref(site, &mut st, &rec);
+                let _ = std::fs::write(
+                    dir.join(format!("{}.where", spec.id)),
+                    format!("{}\n", st.where_text()),
+                );
+                return Ok(Outcome::Done(finished_from(&st, &log)));
+            }
             Ok(Step::Got(a)) => {
                 let _ = std::fs::remove_dir_all(&scratch);
                 let _ = std::fs::write(&log, &a.output);
@@ -984,6 +1166,8 @@ fn push(site: &Site, st: &State) -> Result<(), String> {
 enum Step {
     Wait,
     Got(Artifact),
+    /// A sharded run's artifacts, and the shards that sent none.
+    Parts(Vec<Artifact>, Vec<u32>),
     Fail(String),
 }
 
@@ -1051,10 +1235,9 @@ fn poll(
     // Has a runner taken the job? A 304 on the run says nothing about its jobs.
     if st.picked_ms.is_none() && run.status != "completed" {
         let jobs = site.gh.remote_run_jobs(run.id)?;
-        if let Some(j) = jobs
-            .iter()
-            .find(|j| j.name == RUN_JOB && matches!(j.status.as_str(), "in_progress" | "completed"))
-        {
+        if let Some(j) = jobs.iter().find(|j| {
+            is_run_job(&j.name) && matches!(j.status.as_str(), "in_progress" | "completed")
+        }) {
             st.picked_ms = Some(now);
             let from_github = match (
                 j.started_at.as_deref().and_then(parse_iso),
@@ -1069,6 +1252,17 @@ fn poll(
         }
     }
     if run.status != "completed" {
+        // A shard that never got a runner while the others are done would hold the run until its
+        // limit: end the run, and its missing artifact has that shard alone run again (#701).
+        if let (false, Some(p)) = (st.shards.is_empty(), st.picked_ms) {
+            if now >= p.saturating_add(site.pickup_timeout.as_millis() as u64) {
+                let jobs = site.gh.remote_run_jobs(run.id)?;
+                let of = |s: &str| jobs.iter().any(|j| is_run_job(&j.name) && j.status == s);
+                if of("queued") && !of("in_progress") {
+                    cancel(site, st);
+                }
+            }
+        }
         return Ok(Step::Wait);
     }
     if st.picked_ms.is_none() {
@@ -1085,6 +1279,42 @@ fn poll(
     std::fs::create_dir_all(scratch).map_err(|e| {
         mason_adapter_api::service::ApiError::new(ErrorKind::Unavailable, e.to_string())
     })?;
+    if !st.shards.is_empty() {
+        let (mut got, mut absent) = (vec![], vec![]);
+        for k in st.shards.clone() {
+            let zip = scratch.join(format!("artifact-{k}.zip"));
+            if !site
+                .gh
+                .download_artifact(run.id, &artifact_name(true, k), &zip)?
+            {
+                absent.push(k);
+                continue;
+            }
+            let into = scratch.join(format!("files-{k}"));
+            std::fs::create_dir_all(&into).map_err(|e| {
+                mason_adapter_api::service::ApiError::new(ErrorKind::Unavailable, e.to_string())
+            })?;
+            match read_artifact(&zip, &into) {
+                Ok(mut a) => {
+                    a.shard = k;
+                    got.push(a);
+                }
+                Err(e) => return Ok(Step::Fail(format!("run {}: shard {k}: {e}", run.url))),
+            }
+        }
+        if !absent.is_empty() && *misses < 2 {
+            *misses += 1;
+            poller.observe(secs, Observed::Changed { etag: None });
+            return Ok(Step::Wait);
+        }
+        if got.is_empty() {
+            return Ok(Step::Fail(format!(
+                "run {} ended ({conclusion}) without a result artifact",
+                run.url
+            )));
+        }
+        return Ok(Step::Parts(got, absent));
+    }
     let zip = scratch.join("artifact.zip");
     if !site.gh.download_artifact(run.id, ARTIFACT, &zip)? {
         *misses += 1;
@@ -1107,6 +1337,66 @@ fn poll(
         Err(e) => Ok(Step::Fail(format!("run {}: {e}", run.url))),
     }
 }
+
+/// Is this job one that runs the command: `run`, or `run (3)` of a sharded run?
+fn is_run_job(name: &str) -> bool {
+    name == RUN_JOB || name.strip_prefix("run (").is_some_and(|r| r.ends_with(')'))
+}
+
+/// [`execute`] for a run split into shards (#701). The shards that got a result are kept; a
+/// shard that never got a runner or was cancelled before it ran is made again by itself, up to
+/// twice, and the merged result is returned. A run that is not sharded is just [`execute`].
+pub fn execute_sharded(
+    site: &Site,
+    spec: &RunSpec,
+    dir: &Path,
+    stop: &dyn Fn() -> Option<StopWhy>,
+) -> Result<Outcome, Fail> {
+    if !spec.sharded() {
+        return execute(site, spec, dir, stop);
+    }
+    let mut kept: Vec<Part> = vec![];
+    let mut attempt_spec = spec.clone();
+    for attempt in 0..=SHARD_RERUNS {
+        if attempt > 0 {
+            attempt_spec.id = format!("{}-s{attempt}", spec.id);
+        }
+        let f = match execute(site, &attempt_spec, dir, stop)? {
+            Outcome::Done(f) => f,
+            stopped => return Ok(stopped),
+        };
+        let missing = f.missing.clone();
+        if attempt == 0 && missing.is_empty() {
+            // The common case: the record of a run that was collected is the whole answer.
+            return Ok(Outcome::Done(f));
+        }
+        if f.timed_out {
+            return Ok(Outcome::Done(f));
+        }
+        kept.retain(|k| !f.parts.iter().any(|p| p.shard == k.shard));
+        kept.extend(f.parts.iter().cloned());
+        if missing.is_empty() {
+            let (code, signal, output) = crate::shards::merge(&kept);
+            return Ok(Outcome::Done(Finished {
+                code,
+                signal,
+                output,
+                parts: kept,
+                missing: vec![],
+                ..f
+            }));
+        }
+        tracing::warn!(run = %spec.id, ?missing, "shards without a result: running only those again");
+        attempt_spec.only = missing;
+    }
+    Err(Fail::Environmental(format!(
+        "shards {:?} of {} got no result after {SHARD_RERUNS} reruns",
+        attempt_spec.only, spec.id
+    )))
+}
+
+/// How many times the shards that got no result are made again.
+const SHARD_RERUNS: u32 = 2;
 
 // ---- runner pools (#700) ----------------------------------------------------------------------
 
@@ -1319,6 +1609,10 @@ pub fn spec_for(
         env: env.to_vec(),
         runs_on: runs_on.to_string(),
         tree_key: tree_key.to_string(),
+        shards: 0,
+        only: vec![],
+        shard_lists: vec![],
+        shard_command: None,
     }
 }
 
@@ -1331,7 +1625,7 @@ pub fn run_or_fallback(
     dir: &Path,
     stop: &dyn Fn() -> Option<StopWhy>,
 ) -> Result<Option<Outcome>, String> {
-    match execute(site, spec, dir, stop) {
+    match execute_sharded(site, spec, dir, stop) {
         Ok(o) => Ok(Some(o)),
         Err(Fail::Environmental(why)) if site.fallback_local => {
             tracing::warn!(run = %spec.id, "{why}; running it here instead (fallback = local)");
@@ -2138,5 +2432,195 @@ mod tests {
     fn nothing_goes_remote_unless_a_test_forces_it() {
         assert_eq!(environmental(&env_err("x")), Some("x"));
         assert_eq!(environmental("plain"), None);
+    }
+
+    // ---- sharded runs (#701) ----
+
+    /// A fake GitHub for a run split three ways: every shard has an artifact, except the shards
+    /// in `lost` on the first run (its branch has no `-s` rerun suffix).
+    struct ShardGh {
+        bare: PathBuf,
+        zips: std::collections::BTreeMap<u32, PathBuf>,
+        lost: Vec<u32>,
+        shas: Mutex<Vec<String>>,
+    }
+
+    impl ShardGh {
+        fn branch(&self) -> String {
+            git_ok(
+                &self.bare,
+                &[
+                    "for-each-ref",
+                    "--format=%(refname:short)",
+                    "refs/heads/mason/run",
+                ],
+            )
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_string()
+        }
+    }
+
+    impl Http for ShardGh {
+        fn send(&self, r: &Request) -> Result<Response, Transport> {
+            let u = r.url.as_str();
+            let run = |branch: &str| {
+                serde_json::json!({"id": 77, "status": "completed", "conclusion": "success",
+                    "head_branch": branch, "event": "push",
+                    "html_url": "https://github.com/o/r/actions/runs/77",
+                    "created_at": "2026-11-20T10:00:00Z"})
+            };
+            if u.contains("/actions/runs?head_sha=") {
+                let sha = u
+                    .split("head_sha=")
+                    .nth(1)
+                    .unwrap()
+                    .split('&')
+                    .next()
+                    .unwrap();
+                let mut shas = self.shas.lock().unwrap();
+                if !shas.iter().any(|s| s == sha) {
+                    shas.push(sha.to_string());
+                }
+                return ok(serde_json::json!({"workflow_runs": [run(&self.branch())]}));
+            }
+            if u.ends_with("/actions/runs/77") {
+                return ok(run(&self.branch()));
+            }
+            if u.contains("/actions/runs/77/artifacts") {
+                let rerun = self.branch().contains("-s1");
+                let name = u.split("name=").nth(1).unwrap_or("");
+                let k: u32 = name.rsplit('-').next().unwrap().parse().unwrap();
+                if !rerun && self.lost.contains(&k) {
+                    return ok(serde_json::json!({"artifacts": []}));
+                }
+                return ok(
+                    serde_json::json!({"artifacts": [{"name": name, "expired": false,
+                    "archive_download_url": format!("https://api.github.com/artifact/zip/{k}")}]}),
+                );
+            }
+            Err(Transport(format!("fake GitHub: no answer for {u}")))
+        }
+
+        fn download(&self, r: &Request, dest: &Path) -> Result<Response, Transport> {
+            let k: u32 = r.url.rsplit('/').next().unwrap().parse().unwrap();
+            std::fs::copy(&self.zips[&k], dest).map_err(|e| Transport(e.to_string()))?;
+            Ok(Response {
+                status: 200,
+                headers: vec![],
+                body: String::new(),
+            })
+        }
+    }
+
+    fn sharded_spec(id: &str, lists: &[&[&str]]) -> RunSpec {
+        RunSpec {
+            shards: lists.len() as u32,
+            shard_lists: lists
+                .iter()
+                .map(|l| l.iter().map(|t| t.to_string()).collect())
+                .collect(),
+            shard_command: Some("python3 -I scripts/test-shard.py -- cargo test".into()),
+            ..spec(id)
+        }
+    }
+
+    /// Run a 3-way spec against `lost`; returns the result and the fake.
+    fn run_three(outputs: [(&str, i32); 3], lost: Vec<u32>) -> (Finished, Arc<ShardGh>, Repo) {
+        let r = repo();
+        token();
+        let mut zips = std::collections::BTreeMap::new();
+        for (i, (out, code)) in outputs.iter().enumerate() {
+            let d = r._t.path().join(format!("shard{}", i + 1));
+            std::fs::create_dir_all(&d).unwrap();
+            zips.insert(i as u32 + 1, artifact(&d, out, *code, None));
+        }
+        let gh = Arc::new(ShardGh {
+            bare: r.bare.clone(),
+            zips,
+            lost,
+            shas: Mutex::new(vec![]),
+        });
+        let site = Site {
+            cwd: r.wt.clone(),
+            remote: "origin".into(),
+            base_ref: "origin/main".into(),
+            workflow: "mason-run.yml".into(),
+            pickup_timeout: Duration::from_secs(1200),
+            fallback_local: false,
+            gh: GitHub::new(
+                gh.clone(),
+                "https://api.github.com",
+                "o/r",
+                TokenRef::Env("MASON_TEST_REMOTE_TOKEN".into()),
+            ),
+            clock: clock(),
+            poll_s: 10,
+        };
+        let dir = r._t.path().join("runs");
+        let spec = sharded_spec("sh1", &[&["a", "b"], &["c"], &["d"]]);
+        let Ok(Outcome::Done(f)) = execute_sharded(&site, &spec, &dir, &|| None) else {
+            panic!("the sharded run did not finish");
+        };
+        (f, gh, r)
+    }
+
+    const A: &str = "test a ... ok\ntest b ... ok\n";
+    const C: &str = "test c ... ok\n";
+    const D: &str = "test d ... ok\n";
+
+    #[test]
+    fn three_shards_are_one_result_in_shard_order() {
+        let (f, gh, r) = run_three([(A, 0), (C, 0), (D, 0)], vec![]);
+        assert_eq!(f.output, format!("{A}{C}{D}"));
+        assert_eq!((f.code, f.missing.len(), f.parts.len()), (0, 0, 3));
+        assert_eq!(
+            f.parts.iter().map(|p| p.listed).collect::<Vec<_>>(),
+            [2, 1, 1]
+        );
+        // One run, one snapshot: the runners are told the matrix and their lists.
+        let shas = gh.shas.lock().unwrap().clone();
+        assert_eq!(shas.len(), 1);
+        let json: serde_json::Value = serde_json::from_str(&git_ok(
+            &r.wt,
+            &["show", &format!("{}:.mason/run.json", shas[0])],
+        ))
+        .unwrap();
+        assert_eq!(json["matrix"], serde_json::json!([1, 2, 3]));
+        assert_eq!(json["shard_lists"][0], serde_json::json!(["a", "b"]));
+        assert!(json["shard_command"]
+            .as_str()
+            .unwrap()
+            .contains("test-shard.py"));
+    }
+
+    #[test]
+    fn one_red_shard_makes_the_merge_red_and_keeps_the_others_output() {
+        let (f, _, _) = run_three([(A, 0), ("test c ... FAILED\n", 101), (D, 0)], vec![]);
+        assert_eq!(f.code, 101);
+        assert!(f.output.contains("test c ... FAILED") && f.output.contains("test d ... ok"));
+    }
+
+    #[test]
+    fn a_shard_that_never_ran_is_made_again_alone_and_the_others_are_kept() {
+        let (f, gh, r) = run_three([(A, 0), (C, 0), (D, 0)], vec![2]);
+        assert_eq!(f.output, format!("{A}{C}{D}"));
+        assert_eq!(f.code, 0);
+        let shas = gh.shas.lock().unwrap().clone();
+        assert_eq!(shas.len(), 2, "a second run for the missing shard");
+        let second: serde_json::Value = serde_json::from_str(&git_ok(
+            &r.wt,
+            &["show", &format!("{}:.mason/run.json", shas[1])],
+        ))
+        .unwrap();
+        assert_eq!(second["matrix"], serde_json::json!([2]));
+        assert_eq!(second["shards"], 3);
+    }
+
+    #[test]
+    fn job_names_of_a_sharded_run_are_run_jobs() {
+        assert!(is_run_job("run") && is_run_job("run (3)"));
+        assert!(!is_run_job("plan") && !is_run_job("running"));
     }
 }

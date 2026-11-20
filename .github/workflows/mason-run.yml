@@ -34,6 +34,8 @@ jobs:
     outputs:
       runs_on: ${{ steps.p.outputs.runs_on }}
       timeout_min: ${{ steps.p.outputs.timeout_min }}
+      matrix: ${{ steps.p.outputs.matrix }}
+      sharded: ${{ steps.p.outputs.sharded }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -42,10 +44,21 @@ jobs:
         run: |
           echo "runs_on=$(jq -c .runs_on .mason/run.json)" >> "$GITHUB_OUTPUT"
           echo "timeout_min=$(jq -c .timeout_min .mason/run.json)" >> "$GITHUB_OUTPUT"
+          # A suite split across runners (#701) has one job per shard, numbered from 1; a run
+          # that is not sharded has the one job `run`.
+          echo "matrix=$(jq -c '.matrix // [1]' .mason/run.json)" >> "$GITHUB_OUTPUT"
+          echo "sharded=$(jq -r '(.shards // 1) > 1' .mason/run.json)" >> "$GITHUB_OUTPUT"
 
   run:
     needs: plan
+    # MASON finds the job by this name: `run`, or `run (3)` for shard 3.
+    name: ${{ needs.plan.outputs.sharded == 'true' && format('run ({0})', matrix.shard) || 'run' }}
     runs-on: ${{ fromJSON(needs.plan.outputs.runs_on) }}
+    strategy:
+      # A red shard must not cancel the others: every test still runs.
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -86,6 +99,12 @@ jobs:
           eval "$(jq -r '.env | to_entries[] | "export \(.key)=\(.value | @sh)"' .mason/run.json)"
           build="$(jq -r '.build // empty' .mason/run.json)"
           command="$(jq -r '.command' .mason/run.json)"
+          if [ "$(jq -r '(.shards // 1) > 1' .mason/run.json)" = true ]; then
+            # This job's share (#701): the command reads .mason/run.json and MASON_SHARD.
+            export MASON_SHARD="${{ matrix.shard }}"
+            export MASON_SHARDS="$(jq -r '.shards' .mason/run.json)"
+            command="$(jq -r '.shard_command // .command' .mason/run.json)"
+          fi
           results="$(jq -r '.results_file // empty' .mason/run.json)"
           code=0; build_s=0; run_s=0
           if [ -n "$build" ]; then
@@ -115,7 +134,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: mason-run
+          name: ${{ needs.plan.outputs.sharded == 'true' && format('mason-run-{0}', matrix.shard) || 'mason-run' }}
           path: ${{ runner.temp }}/mason-out
           if-no-files-found: error
 

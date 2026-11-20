@@ -1,0 +1,13 @@
+# 0722: a whole suite is split across GitHub runners by recorded per-test time
+
+Context: one runner cannot finish MASON's workspace suite inside the 40-minute job limit (run 44730322603 was about 90% through the `it` binary when it was cut off), but Linux runners start in seconds and 16 run at once.
+
+Decision:
+- A suite key `shards = N` (1 to 64) splits the suite's whole `command` across N runners, only when the run goes to GitHub. A local run ignores it. It needs `shard_command`, what each runner runs instead of `command`. A narrowed run, a run without the known-red tests and any command other than the suite's own `command` run on one runner.
+- The daemon assigns tests with `shards::assign`: greedy, longest first, onto the shard with the least expected time. Weights are the recorded per-test medians; a test with a name but no time takes the median. Ties go to the lowest shard and the name that sorts first, so equal inputs give equal lists. Lists and `MASON_SHARD` are numbered from 1 in text; `shard_lists` is indexed from 0.
+- `.mason/run.json` carries `shards`, `matrix` (the shards this run makes), `shard_lists` and `shard_command`. The workflow runs one job per matrix entry (`run (K)`), each uploads `mason-run-K`. `fail-fast` is off so a red shard does not cancel the others.
+- A test in no list runs on shard `fnv1a64(name) % N + 1`, in the daemon and in `scripts/test-shard.py`, so every test runs once. The script lists each test binary (`--list`), keeps its shard's, runs them with `--exact` and prints libtest's lines under cargo's own `Running` line. A binary that cannot list runs whole on the shard its name hashes to. Doc tests are listed and split the same way.
+- The shards' outputs are joined in shard order and the exit status is the worst (a signal beats a failure, the first of equals wins). The suite's own parser and `min_tests` judge the merged output. A shard whose list was not empty and that ran none of it makes the merge red with `shard K ran 0 of L tests`, even when the merged count passes `min_tests`.
+- A shard with no artifact (no runner, or cancelled before it ran) is made again by itself in a new run whose matrix names only it, twice at most; the other shards' results are kept for that call. When the others are done and a shard is still queued after `pickup_timeout`, the run is cancelled so that shard's absence shows.
+
+Consequences: `cargo-workspace` gets `shards = 8` and a `shard_command` in `.mason/mason.toml` (a trust file). A new test shows up on its hash shard until its time is recorded. Kept shard results are held in memory for one call, so a daemon that restarts in the middle of a rerun makes the whole run again. A run that reaches its limit is one timed-out result, not per shard.

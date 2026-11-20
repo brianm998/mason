@@ -1439,6 +1439,41 @@ impl Store {
         })
     }
 
+    /// The median run time of each recorded test of a suite (#701): the weights a suite split
+    /// across runners is balanced by.
+    pub fn test_medians(
+        &self,
+        project: &str,
+        suite: &str,
+    ) -> Result<std::collections::BTreeMap<String, u64>, StoreError> {
+        let (p, s) = (project.to_string(), suite.to_string());
+        self.read(move |c| {
+            let mut st = c.prepare(
+                "SELECT test, ms FROM test_times WHERE project = ?1 AND suite = ?2 \
+                 ORDER BY test, at_ms DESC",
+            )?;
+            let rows = st.query_map(params![p, s], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?.max(0) as u64))
+            })?;
+            let mut by: std::collections::BTreeMap<String, Vec<u64>> = Default::default();
+            for (t, ms) in rows.filter_map(Result::ok) {
+                by.entry(t).or_default().push(ms);
+            }
+            Ok(by.into_iter().map(|(t, v)| (t, test_median(&v))).collect())
+        })
+    }
+
+    /// The names of the tests of `suite` that have been seen to pass in a green run (#701).
+    pub fn passing_names(&self, suite: &str) -> Result<Vec<String>, StoreError> {
+        let s = suite.to_string();
+        self.read(move |c| {
+            let mut st =
+                c.prepare("SELECT test FROM seen_passing WHERE suite = ?1 ORDER BY test")?;
+            let rows = st.query_map(params![s], |r| r.get::<_, String>(0))?;
+            rows.collect()
+        })
+    }
+
     /// The tests with the longest median time over their recorded runs (s634), longest first,
     /// at most `limit`. `project` narrows to one project. Each is
     /// `(project, suite, test, median_ms, runs, suite_total_ms)`, the last being the sum of the
