@@ -57,17 +57,32 @@ pub enum Kind {
     Check,
 }
 
-/// Where this run goes. Every run answers `Local`: #698 replaces this body with the real
-/// decision and #700 adds the runner pools. Until then nothing runs remotely unless a test
-/// forces it (`MASON_TEST_FORCE_REMOTE=1` in the daemon's own environment, which a task cannot
-/// set, and only for a project that has a `[remote]` section).
-pub fn executor_for(d: &Daemon, project: &str, _kind: Kind) -> Executor {
+/// Where this run goes: [`crate::place::decide`] for a task's suite or check (`place` names the
+/// task and the suite); every other run (a landing batch, a base run, a debt) stays here until
+/// #702. A test can force a project remote (`MASON_TEST_FORCE_REMOTE=1` in the daemon's own
+/// environment, which a task cannot set, and only for a project that has a `[remote]`).
+pub fn executor_for(
+    d: &Daemon,
+    project: &str,
+    kind: Kind,
+    place: Option<(mason_core::TaskId, &mason_testing::Suite)>,
+) -> Executor {
     if forced_for_tests() {
         if let Some(r) = remote_cfg(d, project) {
             return Executor::GitHub { runs_on: r.runs_on };
         }
     }
-    Executor::Local
+    let Some((task, suite)) = place else {
+        return Executor::Local;
+    };
+    let kind = match kind {
+        Kind::Suite => "suite",
+        Kind::Check => "check",
+    };
+    match crate::place::place_of(d, project, Some(task.0), suite, kind) {
+        crate::place::Place::GitHub { runs_on, .. } => Executor::GitHub { runs_on },
+        crate::place::Place::Local { .. } => Executor::Local,
+    }
 }
 
 fn forced_for_tests() -> bool {

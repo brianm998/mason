@@ -413,9 +413,10 @@ fn run_hosted(
     watch: Option<&Suite>,
     th: Thresholds,
     env: Vec<(String, String)>,
+    place: Option<(TaskId, &Suite)>,
 ) -> Result<Ran, String> {
     run_hosted_resuming(
-        d, project, id, cmd, cwd, limit, log_dir, check, run, watch, th, env, None,
+        d, project, id, cmd, cwd, limit, log_dir, check, run, watch, th, env, None, place,
     )
 }
 
@@ -437,13 +438,22 @@ fn run_hosted_resuming(
     th: Thresholds,
     env: Vec<(String, String)>,
     resume: Option<&str>,
+    place: Option<(TaskId, &Suite)>,
 ) -> Result<Ran, String> {
     use crate::hostloss as hl;
-    // Where the run goes (#697). `Local` for every run until #698 decides; a remote run is
-    // returned as the same `Ran`, so it is judged by the code below this call, not by it.
+    // Where the run goes (#697, #698). Only a task's test step asks (`place`); a landing
+    // batch, a base run and a debt stay here until #702. A remote run is returned as the same
+    // `Ran`, so it is judged by the code below this call, not by it. A suite whose build runs
+    // as its own step here has none when it goes remote: the build comes first in the command.
+    let joined;
+    let mut cmd = cmd;
     if let crate::remote::Executor::GitHub { runs_on } =
-        crate::remote::executor_for(d, project, crate::remote::Kind::Suite)
+        crate::remote::executor_for(d, project, crate::remote::Kind::Suite, place)
     {
+        if let Some(b) = place.and_then(|(_, s)| s.build.as_deref()) {
+            joined = format!("{b} && {cmd}");
+            cmd = &joined;
+        }
         if let Some(ran) = run_remote(
             d, project, id, cmd, cwd, limit, log_dir, &check, watch, &env, &runs_on,
         )? {
@@ -1615,6 +1625,7 @@ fn run_on_base(
             None,
             who.thresholds(),
             who.env.clone(),
+            None,
         )
         .ok()?;
         if ran.stop != Stop::No {
@@ -1847,6 +1858,7 @@ fn run_suite(
             who.thresholds(),
             who.env.clone(),
             resume.as_deref(),
+            who.task.map(|(t, _)| (t, suite)),
         ) {
             Ok(r) => r,
             Err(e) if crate::remote::environmental(&e).is_some() => {
@@ -2381,6 +2393,7 @@ fn run_tests_alone(
         None,
         who.thresholds(),
         who.env.clone(),
+        who.task.map(|(t, _)| (t, suite)),
     )
     .ok()?;
     if ran.stop != Stop::No {
@@ -2872,6 +2885,7 @@ fn run_build(who: &Who, suite: &Suite, build: &str, n: usize, cwd: &Path) -> Bui
         None,
         who.thresholds(),
         who.env.clone(),
+        None,
     ) {
         Ok(r) => r,
         Err(e) => return Built::Red(format!("Building `{}` could not run: {e}", suite.name)),
@@ -3122,6 +3136,11 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
                 .build
                 .as_ref()
                 .filter(|b| !reused && !built.contains(b))
+                // On GitHub the build is the first part of the suite's own command.
+                .filter(|_| {
+                    !crate::place::place_of(d, &c.project.id, Some(c.task.0), &suite, "suite")
+                        .is_github()
+                })
             {
                 let needs = needs_of(&crate::jobs::build_uses(), None);
                 who.env = held_env(c, &needs);
@@ -3589,6 +3608,7 @@ fn run_new_tests_at_base(
             None,
             who.thresholds(),
             who.env.clone(),
+            None,
         )
         .ok()?;
         Some(judge_ran_with(suite, &ran, &wt, who.plugin_parser(suite).as_deref()).results)

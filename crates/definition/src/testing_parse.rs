@@ -42,6 +42,8 @@ pub const SUITE_KEYS: &[&str] = &[
     "narrow_smoke",
     "whole_later",
     "resume_after_loss",
+    "remote",
+    "runs_on",
 ];
 const ENV_KEYS: &[&str] = &[
     "type",
@@ -276,6 +278,22 @@ pub fn parse(doc: &DocumentMut, out: &mut Vec<Problem>) -> Testing {
                     Some(b) => s.narrow_packages = b,
                     None => out.push(Problem::new(&path, "must be true or false")),
                 },
+                "remote" => match v.as_bool() {
+                    Some(b) => s.remote = b,
+                    None => out.push(Problem::new(&path, "must be true or false")),
+                },
+                "runs_on" => {
+                    if let Some(r) = string(v, &path, out) {
+                        if r.trim().is_empty() {
+                            out.push(Problem::new(
+                                &path,
+                                "must name a runner, like \"macos-15\"; leave it out to use the project's [remote] runs_on",
+                            ));
+                        } else {
+                            s.runs_on = Some(r);
+                        }
+                    }
+                }
                 "resume_after_loss" => match v.as_bool() {
                     Some(b) => s.resume_after_loss = b,
                     None => out.push(Problem::new(&path, "must be true or false")),

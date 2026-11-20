@@ -67,6 +67,7 @@ pub mod proposals;
 pub mod protect;
 pub mod providers;
 pub mod release;
+pub mod place;
 pub mod remote;
 pub mod report;
 pub mod rerun;
