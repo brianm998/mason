@@ -452,3 +452,45 @@ fn a_runtime_gate_survives_a_restart_wins_over_the_file_and_reset_returns_to_it(
     b3.set_gate("compile_settle_s", None).unwrap();
     assert!(!dir.join("gates.kv").exists(), "nothing left to keep");
 }
+
+#[test]
+fn a_hot_die_holds_further_machine_work_but_never_what_runs() {
+    let dir = scratch("thermal-die");
+    let cfg = mason_daemon::sched::parse_resource_cfg("[cpu]\ncompile_settle_s = 0\n").unwrap();
+    assert_eq!(cfg.thermal_max_c, 97, "the default die limit");
+    let b = broker(&dir, &cfg, &FakeCpu::replacing_compile_count(0));
+    // pmset reads 100 throughout: only the SMC readings change.
+    let t = mason_daemon::thermal::FakeThermal::new(100);
+    t.set_die(70.0);
+    b.set_thermal(t.clone(), cfg.thermal_min_pct);
+    let first = b.lease_open("cc1", &compile());
+    assert!(matches!(b.lease_poll(first), LeaseState::Granted { .. }));
+    let second = b.lease_open("cc2", &compile());
+    assert!(matches!(b.lease_poll(second), LeaseState::Granted { .. }));
+    // 98 °C: the next start waits and says why; the two running are not revoked.
+    t.set_die(98.0);
+    let third = b.lease_open("cc3", &compile());
+    assert!(matches!(b.lease_poll(third), LeaseState::Waiting { .. }));
+    assert!(matches!(b.lease_poll(first), LeaseState::Granted { .. }));
+    let (die, _, why) = b.thermal_smc();
+    assert_eq!(die, Some(98.0));
+    assert_eq!(why.as_deref(), Some("die 98 °C"));
+    assert_eq!(b.compilation().pending[0].reason, "thermal: die 98 °C");
+    assert_eq!(b.snapshot()["cpu"]["thermal_die_c"], 98.0);
+    // Cooler: it starts.
+    t.set_die(80.0);
+    assert!(matches!(b.lease_poll(third), LeaseState::Granted { .. }));
+    // Power limiting for 30 s holds the same way, with the die cool.
+    t.set_limited_ms(30_000);
+    let fourth = b.lease_open("cc4", &compile());
+    assert!(matches!(b.lease_poll(fourth), LeaseState::Waiting { .. }));
+    assert_eq!(b.thermal_smc().2.as_deref(), Some("power limited"));
+    t.set_limited_ms(0);
+    assert!(matches!(b.lease_poll(fourth), LeaseState::Granted { .. }));
+    // The owner can turn the die check off while masond runs.
+    t.set_die(99.0);
+    b.set_gate("thermal_max_c", Some(0)).unwrap();
+    let fifth = b.lease_open("cc5", &compile());
+    assert!(matches!(b.lease_poll(fifth), LeaseState::Granted { .. }));
+    assert!(b.set_gate("thermal_max_c", Some(151)).is_err());
+}
