@@ -356,7 +356,9 @@ impl ImpactMap {
         }
         paths
             .iter()
-            .find(|p| !self.entries.iter().any(|(g, _)| glob::matches(g, p)))
+            .find(|p| {
+                !(self.entries.iter().chain(&self.overrides)).any(|(g, _)| glob::matches(g, p))
+            })
             .map(String::as_str)
     }
 
