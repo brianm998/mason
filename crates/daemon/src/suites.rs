@@ -2355,7 +2355,7 @@ fn lease(c: &Ctx, needs: Needs) -> bool {
 /// What the test step does with one suite once narrowing is applied.
 enum StepNarrow {
     Whole,
-    Run(Box<Suite>, String),
+    Run(Box<Suite>, String, Option<Vec<String>>),
     /// The suite is not run; the note says why (it runs whole later).
     NotRun(String),
 }
