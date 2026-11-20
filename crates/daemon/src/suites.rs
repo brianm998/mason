@@ -43,7 +43,7 @@ use std::time::{Duration, Instant};
 pub struct Sel {
     pub suite: Suite,
     pub selected: bool,
-    pub why: &'static str,
+    pub why: String,
 }
 
 /// Paths the task's branch changes against its base.
@@ -95,6 +95,7 @@ pub fn plan(
 /// `paths` of `None` (unreadable) runs everything that is bound.
 pub fn plan_for(def: &Definition, step: &Step, paths: Option<Vec<String>>, when: When) -> Vec<Sel> {
     let t = &def.testing;
+    let paths_for_why = paths.clone();
     let selection = match paths {
         Some(paths) => t.impact.select(&paths, &step.suites),
         None => Selection::All,
@@ -104,15 +105,26 @@ pub fn plan_for(def: &Definition, step: &Step, paths: Option<Vec<String>>, when:
         When::Development => "its level is not bound to development",
         _ => "its level is not bound to the test step",
     };
+    let unmapped_why: String = match paths_for_why
+        .as_deref()
+        .and_then(|p| t.impact.first_unmapped(p))
+    {
+        Some(f) if matches!(selection, Selection::All) => {
+            format!("an unmapped path runs everything ({f})")
+        }
+        _ => "an unmapped path runs everything".to_string(),
+    };
     step.suites
         .iter()
         .filter_map(|n| t.suite(n))
         .map(|s| {
             let (selected, why) = match &selection {
-                _ if !bound.contains(&s.name) => (false, why_not),
-                Selection::All => (true, "an unmapped path runs everything"),
-                Selection::Some(v) if v.contains(&s.name) => (true, "the impact map selects it"),
-                Selection::Some(_) => (false, "the impact map does not select it"),
+                _ if !bound.contains(&s.name) => (false, why_not.to_string()),
+                Selection::All => (true, unmapped_why.clone()),
+                Selection::Some(v) if v.contains(&s.name) => {
+                    (true, "the impact map selects it".to_string())
+                }
+                Selection::Some(_) => (false, "the impact map does not select it".to_string()),
             };
             Sel {
                 suite: s.clone(),
@@ -2352,13 +2364,46 @@ fn lease(c: &Ctx, needs: Needs) -> bool {
 
 /// The step's `MASON_*` variables, with `MASON_HELD` naming what is leased for the
 /// command about to run (not just the step's own `uses`).
+/// What the test step does with one suite once narrowing is applied.
+enum StepNarrow {
+    Whole,
+    Run(Box<Suite>, String, Option<Vec<String>>),
+    /// The suite is not run; the note says why (it runs whole later).
+    NotRun(String),
+}
+
+/// The suite's `whole_later` claim, when it holds for this project now: `batch` needs a landing
+/// tier that lists the suite, `ci` a `[ci]` section. A claim that does not hold changes nothing.
+fn whole_later_holds(c: &Ctx, suite: &Suite) -> Option<mason_testing::WholeLater> {
+    let w = suite.whole_later?;
+    let claim = [(suite.name.clone(), w.name().to_string())];
+    let cfg = crate::landing::load_config(&c.d, c.project_id).ok()?;
+    let ci = c.project.services.ci.is_some();
+    mason_landing::config::whole_later_problems(&cfg, &claim, ci)
+        .is_empty()
+        .then_some(w)
+}
+
+fn narrow_step(c: &Ctx, suite: &Suite) -> StepNarrow {
+    if suite.narrow_packages {
+        return match narrow_packages_for_step(c, suite) {
+            Some((s, n, g)) => StepNarrow::Run(Box::new(s), n, g),
+            None => StepNarrow::Whole,
+        };
+    }
+    let later = whole_later_holds(c, suite);
+    narrow_units_for_step(c, suite, later).unwrap_or(StepNarrow::Whole)
+}
+
 /// The narrowed copy of `suite` for this task's test step (s386), with a note naming what it
 /// runs, or `None` to run it whole: no `narrow_*` keys, the change unreadable, or
-/// [`mason_testing::narrow::select`] picks nothing or most of it.
-fn narrow_for_step(c: &Ctx, suite: &Suite) -> Option<(Suite, String, Option<Vec<String>>)> {
-    if suite.narrow_packages {
-        return narrow_packages_for_step(c, suite);
-    }
+/// [`mason_testing::narrow::select`] picks nothing or most of it. With `whole_later`, see
+/// [`mason_testing::narrow::select_later`].
+fn narrow_units_for_step(
+    c: &Ctx,
+    suite: &Suite,
+    later: Option<mason_testing::WholeLater>,
+) -> Option<StepNarrow> {
     let n = suite.narrow.as_ref()?;
     let base = git::run(&c.wt, &["merge-base", &c.project.base_ref(), "HEAD"]).ok()?;
     let base = base.trim();
@@ -2378,19 +2423,30 @@ fn narrow_for_step(c: &Ctx, suite: &Suite) -> Option<(Suite, String, Option<Vec<
         paths: &paths,
         added: &added,
     };
-    let picked = mason_testing::narrow::select(n, &files, &change)?;
     let total = mason_testing::narrow::units(n, &files).len();
+    let (picked, case) = match later {
+        None => (mason_testing::narrow::select(n, &files, &change)?, None),
+        Some(w) => match mason_testing::narrow::select_later(n, &files, &change) {
+            mason_testing::narrow::Later::Whole => return None,
+            mason_testing::narrow::Later::Run(u, case) => (u, Some((w, case))),
+            mason_testing::narrow::Later::NotRun => {
+                let why = whole_later_why(n, &change);
+                return Some(StepNarrow::NotRun(format!(
+                    "{}: not run: {why}; runs whole at {}",
+                    suite.name,
+                    w.name()
+                )));
+            }
+        },
+    };
     let mut s = suite.clone();
     s.command = mason_testing::narrow::command(n, &picked);
     s.min_tests = 1;
     s.narrowed = true;
     let names: Vec<&str> = picked.iter().take(8).map(|u| u.name.as_str()).collect();
     let more = picked.len().saturating_sub(names.len());
-    let note = format!(
-        "{}: narrowed to {} of {} test units ({}{}); the landing batch runs it whole",
-        suite.name,
-        picked.len(),
-        total,
+    let list = format!(
+        "{}{}",
         names.join(", "),
         if more > 0 {
             format!(" and {more} more")
@@ -2398,7 +2454,39 @@ fn narrow_for_step(c: &Ctx, suite: &Suite) -> Option<(Suite, String, Option<Vec<
             String::new()
         }
     );
-    Some((s, note, None))
+    let note = match case {
+        None => format!(
+            "{}: narrowed to {} of {} test units ({list}); the landing batch runs it whole",
+            suite.name,
+            picked.len(),
+            total
+        ),
+        Some((w, case)) => format!(
+            "{}: narrowed to {} of {} test units ({list}){}; runs whole at {}",
+            suite.name,
+            picked.len(),
+            total,
+            case.map_or(String::new(), |c| format!(" because {}", c.describe())),
+            w.name()
+        ),
+    };
+    Some(StepNarrow::Run(Box::new(s), note, None))
+}
+
+/// Why nothing runs for a suite whose pick is empty and which has no smoke units.
+fn whole_later_why(
+    n: &mason_testing::Narrow,
+    change: &mason_testing::narrow::Change,
+) -> &'static str {
+    let never = change
+        .paths
+        .iter()
+        .any(|p| n.never.iter().any(|g| mason_testing::glob::matches(g, p)));
+    if never {
+        "a changed path matches narrow_never, but none of the suite's tests is picked and narrow_smoke is empty"
+    } else {
+        "nothing in this change reaches its tests"
+    }
 }
 
 /// The package-mode narrowing of `suite` for a task's test step (s396): its `dev_command`
@@ -2807,14 +2895,21 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
         };
         // Only the tests this change needs, when the suite says how (s386). The landing batch
         // runs it whole.
-        let (suite, groups) = match narrow_for_step(c, &suite) {
-            Some((narrowed, note, groups)) => {
+        let (suite, groups) = match narrow_step(c, &suite) {
+            StepNarrow::Run(narrowed, note, groups) => {
                 // Said in the closing note too: a narrowed green is not the whole suite's.
                 details.push(note.clone());
                 notes.push(note);
-                (narrowed, groups)
+                (*narrowed, groups)
             }
-            None => (suite, None),
+            StepNarrow::NotRun(note) => {
+                // It runs whole at landing: the step has nothing to prove, and says so.
+                details.push(note.clone());
+                notes.push(note);
+                outcomes.push((name, SuiteOutcome::NotSelected));
+                continue;
+            }
+            StepNarrow::Whole => (suite, None),
         };
         // A narrowed run of short targets takes the small lane; a whole run never does (s649).
         let small = groups
