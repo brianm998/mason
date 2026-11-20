@@ -373,7 +373,7 @@ impl ImpactMap {
                 }
             }
             for (g, suites) in &self.entries {
-                if glob::matches(g, p) && best.map_or(true, |b| glob_specificity(g) >= b) {
+                if glob::matches(g, p) && best.is_none_or(|b| glob_specificity(g) >= b) {
                     mapped = true;
                     wanted.extend(suites.iter().map(String::as_str));
                 }
