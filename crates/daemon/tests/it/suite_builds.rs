@@ -294,7 +294,10 @@ fn a_scoped_run_check_runs_the_narrowed_command_and_the_test_step_still_runs_it_
     let logs = render_logs(&d, t.0);
     assert!(logs.contains("RAN-RERUN foo"), "{logs}");
     assert!(logs.contains("RAN-DEV -p pk-one"), "{logs}");
-    assert!(logs.contains("this green is not the test step's"), "{logs}");
+    assert!(
+        logs.contains("this green covers only those tests"),
+        "{logs}"
+    );
     // Neither scoped green stood in for the test step: it ran the whole suite.
     assert!(logs.contains("RAN-FULL"), "{logs}");
 }
@@ -329,7 +332,7 @@ fn after_a_red_full_run_an_unscoped_check_reruns_only_the_failures_and_the_chang
         run,
         // Green last time: what the change affects.
         run,
-        {"call": {"tool": "run_check", "args": {"name": "tests", "full": true}}},
+        {"call": {"tool": "run_check", "args": {"name": "tests", "full": true, "why": "touched build.rs"}}},
         {"call": {"tool": "submit_change", "args": {"summary": "change", "head": "$HEAD"}}}
     ]);
     let s = Scratch::new("false", json!({"steps": {"develop": vec![turns]}}));
@@ -363,6 +366,11 @@ fn after_a_red_full_run_an_unscoped_check_reruns_only_the_failures_and_the_chang
     );
     assert!(logs.contains("RAN-RERUN a::b"), "{logs}");
     assert!(logs.contains("RAN-DEV -p pk"), "{logs}");
+    assert!(
+        !logs.contains("the full run comes before you submit"),
+        "{logs}"
+    );
+    assert!(logs.contains("Full run (why: touched build.rs)"), "{logs}");
 }
 
 /// An unscoped `run_check` runs what the change affects, not the whole suite (2026-11-18: 87 of
@@ -402,6 +410,11 @@ fn an_unscoped_run_check_runs_what_the_change_affects_and_the_test_step_runs_it_
     let logs = render_logs(&d, t.0);
     assert!(logs.contains("RAN-DEV -p pk"), "{logs}");
     assert!(logs.contains("Ran what your change affects"), "{logs}");
+    assert!(
+        !logs.contains("The test step runs the whole workspace"),
+        "{logs}"
+    );
+    assert!(!logs.contains("pass full: true only if"), "{logs}");
     // The test step ran the whole suite.
     assert!(logs.contains("RAN-FULL"), "{logs}");
 }

@@ -70,7 +70,8 @@ pub fn develop_prompt(
          again while one is going, and do not sleep or poll for it: it takes a slot other tasks \
          are waiting for. By default run_check runs only the tests your change affects; narrow it \
          further with `tests` (name filters) or `packages`. A green here is only for you; the test \
-         step still runs the whole workspace, so `full: true` (everything) is rarely worth its wait.",
+         step also runs what your change affects and the landing batch runs the whole workspace, \
+         so `full: true` (everything, with a `why`) is rarely worth its wait.",
         progress = PROGRESS_LINE,
         proj = p.id,
         task_text = fenced(&format!("TASK #{task}: {title}"), trust, body),
