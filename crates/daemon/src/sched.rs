@@ -136,17 +136,15 @@ pub const DEFAULT_SYSPOLICYD_MAX_PCT: u32 = 300;
 /// owner's iMac Pro read 51 and 27 under light load.
 pub const DEFAULT_THERMAL_MIN_PCT: u32 = 80;
 
-<<<<<<< HEAD
 /// The default size of the `gha` pool: every GitHub job a remote run uses (#700).
 pub const DEFAULT_GHA: u32 = 16;
 
 /// The default size of the `gha-macos` pool: the macOS jobs among them.
 pub const DEFAULT_GHA_MACOS: u32 = 4;
-=======
+
 /// The default `thermal_max_c`. On 2026-11-18/19 the owner's iMac Pro sat at 90 °C or more for
 /// 647 minutes, 98 °C or more for 97 and peaked at 99.6 °C, with `pmset` reading 100 throughout.
 pub const DEFAULT_THERMAL_MAX_C: u32 = 97;
->>>>>>> origin/develop
 
 /// How often an open `mason run` wait is added to its task's deadline while it waits (s417).
 /// Anything longer than this of a wait in progress is lost if the daemon restarts.
