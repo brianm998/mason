@@ -163,11 +163,7 @@ pub fn pin(ids: &[u64], red: &mut dyn FnMut(&[u64]) -> bool) -> Pin {
 /// [`pin`] where the two halves of each split are asked together: `pair(a, b)` runs both at once
 /// and answers `(red(a), red(b))`. It finds what [`pin`] finds for the same answers (`pair` is
 /// asked the very questions `pin` asks one after the other); only when the answers come differs.
-pub fn pin_paired(
-    ids: &[u64],
-    red: &mut dyn FnMut(&[u64]) -> bool,
-    pair: PairFn,
-) -> Pin {
+pub fn pin_paired(ids: &[u64], red: &mut dyn FnMut(&[u64]) -> bool, pair: PairFn) -> Pin {
     pin_with(ids, red, Some(pair))
 }
 
