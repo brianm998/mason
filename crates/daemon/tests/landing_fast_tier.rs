@@ -66,7 +66,10 @@ fn a_skipped_batch_whose_unit_tests_pass_lands_and_a_batch_with_testing_does_not
         }
     }
     let open = w.d.store.debts(Some(t.0), true).unwrap();
-    assert!(open.iter().all(|d| d.scope != "step:test"), "{open:?} paid: {paid:?}");
+    assert!(
+        open.iter().all(|d| d.scope != "step:test"),
+        "{open:?} paid: {paid:?}"
+    );
     // Not skipped: only the floor runs, so the tier's red does not stop it.
     let u = w.task("tested", &[("x/red.fast", "1")]);
     wait_for("the tested task to land", 120, || w.landed(u));
