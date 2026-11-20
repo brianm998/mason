@@ -717,11 +717,7 @@ fn coordinate(weak: &Weak<Daemon>, pid: ProjectId, first: &mut bool, last: &mut 
             }
             // The abandoned batches' results are thrown away: stop their step hosts, which
             // would otherwise run on for ever holding test worlds.
-            for id in d
-                .store
-                .abandon_batches(&p.id, now_ms())
-                .unwrap_or_default()
-            {
+            for id in d.store.abandon_batches(&p.id, now_ms()).unwrap_or_default() {
                 d.stop_hosts(&format!("b{id}-"));
             }
             let _ = d
