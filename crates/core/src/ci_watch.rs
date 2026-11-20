@@ -758,11 +758,19 @@ pub fn held_lines(state: &State, rules: &Rules) -> Vec<HeldLine> {
             };
             let key = group_key(w, j);
             let landed = js.landed_ms.is_some();
-            let i = match v.iter().position(|l| l.key == key && l.ticket == t && l.landed == landed)
+            let i = match v
+                .iter()
+                .position(|l| l.key == key && l.ticket == t && l.landed == landed)
             {
                 Some(i) => i,
                 None => {
-                    v.push(HeldLine { key, run: 0, ticket: t, shards: vec![], landed });
+                    v.push(HeldLine {
+                        key,
+                        run: 0,
+                        ticket: t,
+                        shards: vec![],
+                        landed,
+                    });
                     v.len() - 1
                 }
             };
@@ -781,7 +789,10 @@ pub fn unconfirmed_text(lines: &[HeldLine]) -> Option<String> {
     if l.is_empty() {
         return None;
     }
-    let items: Vec<String> = l.iter().map(|l| format!("{} (#{})", l.name(), l.ticket)).collect();
+    let items: Vec<String> = l
+        .iter()
+        .map(|l| format!("{} (#{})", l.name(), l.ticket))
+        .collect();
     let n = items.len();
     Some(format!(
         "{n} CI job{}: fix landed, not yet confirmed by a finished run: {}",
