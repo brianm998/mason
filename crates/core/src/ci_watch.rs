@@ -983,6 +983,7 @@ mod tests {
                     open_auto: 0,
                     recent: &[],
                     landed: &BTreeMap::new(),
+                    named_sigs: &BTreeMap::new(),
                 },
             )
         };
