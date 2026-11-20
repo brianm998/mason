@@ -169,38 +169,52 @@ pub fn expand(template: &str, n: &Narrow, build: bool) -> String {
 }
 
 /// The narrowing for a change. With `tests`, the affected test targets (plus the smoke set when
-/// `smoke`, from `.mason/smoke-tests.txt`); otherwise the touched packages. `None` runs
-/// everything: no cargo, a path nobody can place, or nothing to run.
-pub fn narrow_for(wt: &Path, paths: &[String], tests: bool, smoke: bool) -> Option<Narrow> {
+/// `smoke`, from `.mason/smoke-tests.txt`); otherwise the touched packages. `named` is the text
+/// of the suite's commands: a changed path it names can affect every target. `Err` carries why
+/// everything runs: no cargo, a path that reaches every target (#652), or nothing to run.
+pub fn narrow_for(
+    wt: &Path,
+    paths: &[String],
+    tests: bool,
+    smoke: bool,
+    named: &str,
+) -> Result<Narrow, String> {
     if !tests {
-        return changed_packages(wt, paths).map(Narrow::Packages);
+        return changed_packages(wt, paths)
+            .map(Narrow::Packages)
+            .ok_or_else(|| "no packages found for your changes".to_string());
     }
     // No path left for this suite (docs and client files only) runs the smoke set alone.
     if paths.is_empty() && !smoke {
-        return None;
+        return Err("nothing changed that it reads".to_string());
     }
-    let out = std::process::Command::new("cargo")
-        .args([
-            "metadata",
-            "--no-deps",
-            "--format-version",
-            "1",
-            "--offline",
-        ])
-        .current_dir(wt)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())?;
-    let meta: Value = serde_json::from_slice(&out.stdout).ok()?;
-    let root = std::fs::canonicalize(wt).ok()?;
-    let pkgs = crate::affected::packages(&meta, &root)?;
-    let listed = mason_landing::git::run(wt, &["ls-files"]).ok()?;
+    let cargo = || -> Option<_> {
+        let out = std::process::Command::new("cargo")
+            .args([
+                "metadata",
+                "--no-deps",
+                "--format-version",
+                "1",
+                "--offline",
+            ])
+            .current_dir(wt)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())?;
+        let meta: Value = serde_json::from_slice(&out.stdout).ok()?;
+        let root = std::fs::canonicalize(wt).ok()?;
+        let pkgs = crate::affected::packages(&meta, &root)?;
+        let listed = mason_landing::git::run(wt, &["ls-files"]).ok()?;
+        Some((pkgs, listed))
+    };
+    let Some((pkgs, listed)) = cargo() else {
+        return Err("cargo metadata gave no package list".to_string());
+    };
     let files: Vec<String> = listed.lines().map(String::from).collect();
     let read = |p: &str| std::fs::read_to_string(wt.join(p)).ok();
-    let crate::affected::Pick::Some(mut groups) =
-        crate::affected::select(&pkgs, paths, &files, &read)
-    else {
-        return None;
+    let mut groups = match crate::affected::select(&pkgs, paths, &files, &read, named) {
+        crate::affected::Pick::Some(g) => g,
+        crate::affected::Pick::All { because } => return Err(because),
     };
     let mut raw = vec![];
     if smoke {
@@ -210,7 +224,10 @@ pub fn narrow_for(wt: &Path, paths: &[String], tests: bool, smoke: bool) -> Opti
     }
     let mut runs = crate::affected::render(&groups);
     runs.extend(raw);
-    (!runs.is_empty()).then_some(Narrow::Targets(runs))
+    if runs.is_empty() {
+        return Err("no test target reads what changed".to_string());
+    }
+    Ok(Narrow::Targets(runs))
 }
 
 /// The owner-edited list of fast end-to-end targets every task's test step also runs.
@@ -314,14 +331,42 @@ mod tests {
             assert!(ok);
         }
         let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        let smoke = Some(Narrow::Targets(vec!["-p mason-core --lib".to_string()]));
+        let smoke = Ok(Narrow::Targets(vec!["-p mason-core --lib".to_string()]));
         // Client files are dropped before this, so docs and exit scripts are all that is left.
         let docs = v(&["docs/stages/s1.md", "scripts/exit/s1.sh"]);
-        assert_eq!(narrow_for(d.path(), &docs, true, true), smoke);
-        assert_eq!(narrow_for(d.path(), &v(&[SMOKE_FILE]), true, true), smoke);
-        assert_eq!(narrow_for(d.path(), &[], true, true), smoke);
-        assert_eq!(narrow_for(d.path(), &[], true, false), None);
-        assert_eq!(narrow_for(d.path(), &v(&["Makefile"]), true, true), None);
+        assert_eq!(narrow_for(d.path(), &docs, true, true, "cargo test"), smoke);
+        assert_eq!(
+            narrow_for(d.path(), &v(&[SMOKE_FILE]), true, true, "cargo test"),
+            smoke
+        );
+        assert_eq!(narrow_for(d.path(), &[], true, true, "cargo test"), smoke);
+        assert!(narrow_for(d.path(), &[], true, false, "cargo test").is_err());
+        let why = narrow_for(d.path(), &v(&["Cargo.lock"]), true, true, "cargo test");
+        assert_eq!(why, Err("`Cargo.lock` changed".to_string()));
+        // A file nothing reads selects nothing of its own: the smoke set alone runs.
+        assert_eq!(
+            narrow_for(d.path(), &v(&["Makefile"]), true, true, "cargo test"),
+            smoke
+        );
+    }
+
+    /// The entry point `scripts/exit/s665.sh` drives: with `MASON_NARROW_PROBE_ROOT` set it
+    /// narrows `MASON_NARROW_PROBE_PATHS` (space separated) in that workspace as the test step
+    /// does and prints one `NARROW: ...` line. Without it, nothing happens.
+    #[test]
+    fn narrow_probe() {
+        let (Ok(root), Ok(paths)) = (
+            std::env::var("MASON_NARROW_PROBE_ROOT"),
+            std::env::var("MASON_NARROW_PROBE_PATHS"),
+        ) else {
+            return;
+        };
+        let paths: Vec<String> = paths.split_whitespace().map(String::from).collect();
+        let named = std::env::var("MASON_NARROW_PROBE_NAMED").unwrap_or_default();
+        match narrow_for(Path::new(&root), &paths, true, false, &named) {
+            Ok(n) => println!("NARROW: {}", n.describe()),
+            Err(why) => println!("NARROW: runs whole because {why}"),
+        }
     }
 
     #[test]
