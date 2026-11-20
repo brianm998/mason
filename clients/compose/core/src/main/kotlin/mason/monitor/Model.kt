@@ -267,6 +267,8 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     var lastResult by mutableStateOf<String?>(null)
     /** What the last Skip testing click did; kept apart from [lastResult] so the next ok result does not wipe it. */
     var skipNotice by mutableStateOf<String?>(null)
+    /** What the last Land now for all click did, apart from [lastResult]. */
+    var landNotice by mutableStateOf<String?>(null)
     /** Commands sent and not yet settled, by id (task #522). */
     var pending by mutableStateOf<Map<String, PendingCommand>>(emptyMap())
         internal set
