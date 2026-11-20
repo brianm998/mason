@@ -173,7 +173,7 @@ fn lingering_develop() -> serde_json::Value {
     json!({"steps": {"explore": [explore_turn()], "develop": [turn]}})
 }
 
-fn cost_seen(account: &str, providers: &str) -> Option<bool> {
+fn cost_seen(account: &str, providers: &str, expect_cost: bool) -> Option<bool> {
     let s = Scratch::new("test -f hello.txt", lingering_develop());
     if !providers.is_empty() {
         std::fs::write(s.config_dir.join("providers.toml"), providers).unwrap();
@@ -205,7 +205,19 @@ fn cost_seen(account: &str, providers: &str) -> Option<bool> {
                 >= 2
         })
     });
-    std::thread::sleep(std::time::Duration::from_millis(1500));
+    if expect_cost {
+        // An api account's cost is there once the daemon has read the result: wait for it.
+        wait_for("the cost in the progress record", 60, || {
+            d.progress_of_task(t)
+                .iter()
+                .find(|p| p.step == "develop")
+                .and_then(|p| p.token_total())
+                .is_some_and(|k| k.cost_nano_usd.is_some())
+        });
+    } else {
+        // A subscription has no cost to wait for; give the daemon a moment to read the result.
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+    }
     let out = d
         .progress_of_task(t)
         .iter()
@@ -219,14 +231,15 @@ fn cost_seen(account: &str, providers: &str) -> Option<bool> {
 #[test]
 fn cost_is_in_the_cell_for_an_api_account_and_not_for_a_subscription() {
     assert_eq!(
-        cost_seen("claude", ""),
+        cost_seen("claude", "", false),
         Some(false),
         "a subscription account has no cost"
     );
     assert_eq!(
         cost_seen(
             "apiacct",
-            "[provider.apiacct]\nadapter = \"claude\"\nbilling = \"api\"\n"
+            "[provider.apiacct]\nadapter = \"claude\"\nbilling = \"api\"\n",
+            true
         ),
         Some(true),
         "an api account has it"
