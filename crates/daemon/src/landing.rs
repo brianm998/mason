@@ -3612,6 +3612,7 @@ impl Runner {
                 .flatten()
                 .map(|(k, x)| (k.clone(), strs(x)))
                 .collect(),
+            unfinished: Default::default(),
         };
         self.floor_red.store(
             v["floor"].as_bool().unwrap_or(false),
