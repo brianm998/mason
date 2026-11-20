@@ -336,6 +336,19 @@ pub fn needs_of(uses: &BTreeMap<String, u32>, account: Option<&str>) -> Needs {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Cancelled;
 
+/// A task's `mason run` lease found when its step ended (s688).
+#[derive(Clone, Debug)]
+pub struct TaskLease {
+    pub id: u64,
+    pub label: String,
+    /// The `mason run` client's pid; 0 when it gave none.
+    pub pid: u32,
+    /// Granted and still holding units (otherwise it was waiting, and is already closed).
+    pub held: bool,
+    /// How long it waited (waiting) or held (granted).
+    pub ms: u64,
+}
+
 enum Meta {
     Task,
     External {
@@ -2134,17 +2147,24 @@ impl Broker {
             Some(c) => format!("{label} [{c}]"),
             None => label.to_string(),
         };
-        let id = self.open_lease(&shown, &uses, None, expected_ms, |st, now| {
-            if person {
-                return Rank::new(true, 0, 0, now, st.rank_seq, false);
-            }
-            let (steps, priority, span) =
-                standing.map_or((0, 0, 1), |s| (s.steps_remaining, s.priority, s.span));
-            order(
-                st,
-                Rank::new(false, steps, priority, now, st.rank_seq, false).with_span(span),
-            )
-        });
+        let id = self.open_lease(
+            &shown,
+            &uses,
+            None,
+            expected_ms,
+            converted.is_some(),
+            |st, now| {
+                if person {
+                    return Rank::new(true, 0, 0, now, st.rank_seq, false);
+                }
+                let (steps, priority, span) =
+                    standing.map_or((0, 0, 1), |s| (s.steps_remaining, s.priority, s.span));
+                order(
+                    st,
+                    Rank::new(false, steps, priority, now, st.rank_seq, false).with_span(span),
+                )
+            },
+        );
         Opened {
             id,
             rank: if person { "person" } else { "pipeline" },
@@ -2194,12 +2214,19 @@ impl Broker {
             None => label.to_string(),
         };
         let shown = crate::outside::display_label(&o.pipeline, &label);
-        self.open_lease(&shown, uses, Some(o.pipeline.clone()), None, |st, now| {
-            order(
-                st,
-                Rank::new(false, o.steps, o.priority, now, st.rank_seq, false),
-            )
-        })
+        self.open_lease(
+            &shown,
+            uses,
+            Some(o.pipeline.clone()),
+            None,
+            converted.is_some(),
+            |st, now| {
+                order(
+                    st,
+                    Rank::new(false, o.steps, o.priority, now, st.rank_seq, false),
+                )
+            },
+        )
     }
 
     fn open_lease(
@@ -2208,6 +2235,7 @@ impl Broker {
         uses: &BTreeMap<String, u32>,
         pipeline: Option<String>,
         expected_ms: Option<u64>,
+        drains_compile: bool,
         rank_of: impl FnOnce(&State, u64) -> Rank,
     ) -> u64 {
         let mut st = lock(&self.st);
@@ -2225,6 +2253,7 @@ impl Broker {
         }
         let id = st.ledger.submit(rank, needs, label, now);
         st.ledger.set_expected(id, expected_ms);
+        st.ledger.set_drains_compile(id, drains_compile);
         st.meta.insert(
             id,
             Meta::External {
@@ -2380,10 +2409,82 @@ impl Broker {
         let mut st = lock(&self.st);
         let had = st.ledger.release(id);
         st.meta.remove(&id);
+        st.lease_tasks.remove(&id);
         st = self.pass(st);
         drop(st);
         self.cv.notify_all();
         had
+    }
+
+    /// The agent step of `task` has ended (it submitted, or its process exited): close what its
+    /// `mason run` commands asked for (s688). A waiting request is closed at once, so the next
+    /// waiter moves up. A granted one is only reported (`held`): its command is still running,
+    /// and the caller stops it and then calls [`Broker::lease_close`]. Only leases linked to
+    /// `task` are looked at, so a person's `mason run` (no task) and another pipeline's request
+    /// are never touched, and neither is another task's.
+    pub fn close_task_leases(&self, task: TaskId) -> Vec<TaskLease> {
+        let mut st = lock(&self.st);
+        let ids: Vec<u64> = st
+            .lease_tasks
+            .iter()
+            .filter(|(_, t)| **t == task)
+            .map(|(id, _)| *id)
+            .collect();
+        let snap = st.ledger.snapshot();
+        let mut out = vec![];
+        for id in ids {
+            let Some(Meta::External {
+                pipeline: None,
+                opened,
+                granted_at,
+                pid,
+                ..
+            }) = st.meta.get(&id)
+            else {
+                continue;
+            };
+            let held = st.ledger.holds(id);
+            let label = snap
+                .waiting
+                .iter()
+                .map(|r| (r.id, &r.label))
+                .chain(snap.holders.iter().map(|h| (h.id, &h.label)))
+                .find(|(i, _)| *i == id)
+                .map(|(_, l)| l.clone())
+                .unwrap_or_default();
+            let since = if held {
+                granted_at.unwrap_or(*opened)
+            } else {
+                *opened
+            };
+            out.push(TaskLease {
+                id,
+                label,
+                pid: *pid,
+                held,
+                ms: since.elapsed().as_millis() as u64,
+            });
+        }
+        let mut closed = false;
+        for l in out.iter().filter(|l| !l.held) {
+            st.ledger.release(l.id);
+            st.meta.remove(&l.id);
+            st.lease_tasks.remove(&l.id);
+            closed = true;
+        }
+        if closed {
+            st = self.pass(st);
+        }
+        drop(st);
+        if closed {
+            self.cv.notify_all();
+        }
+        out
+    }
+
+    /// Does lease `id` still hold what it was granted?
+    pub fn lease_holds(&self, id: u64) -> bool {
+        lock(&self.st).ledger.holds(id)
     }
 
     /// Everything holding `compile` now, for the idle check: the lease, the task it
@@ -2598,6 +2699,7 @@ impl Broker {
             .map(|(t, id)| (*id, t.0))
             .chain(st.lease_tasks.iter().map(|(id, t)| (*id, t.0)))
             .collect();
+        let abandoned = abandoned_of(&st, &snap);
         let kind = |k: Kind| match k {
             Kind::Llm => "llm",
             Kind::Machine => "machine",
@@ -2669,6 +2771,7 @@ impl Broker {
                     "uses": r.needs.amounts,
                     "exclusive": r.needs.exclusive,
                     "explain": explain,
+                    "abandoned": abandoned.get(&r.id),
                 })
             })
             .collect();
@@ -2690,6 +2793,53 @@ impl Broker {
             "now_ms": now,
         })
     }
+}
+
+/// The waiting requests nobody is reading any more (s688), with why: the process that asked has
+/// lost its parent (it is now a child of pid 1), or the task's agent step has ended.
+fn abandoned_of(st: &State, snap: &mason_scheduler::Snapshot) -> HashMap<u64, &'static str> {
+    let mut out = HashMap::new();
+    let mut pids = vec![];
+    for r in &snap.waiting {
+        let Some(Meta::External {
+            pipeline: None,
+            pid,
+            ..
+        }) = st.meta.get(&r.id)
+        else {
+            continue;
+        };
+        if st
+            .lease_tasks
+            .get(&r.id)
+            .is_some_and(|t| !st.wait_credit.contains_key(t))
+        {
+            out.insert(r.id, "its task's step has ended");
+        } else if *pid > 0 {
+            pids.push((r.id, *pid));
+        }
+    }
+    if !pids.is_empty() {
+        let list: Vec<String> = pids.iter().map(|(_, p)| p.to_string()).collect();
+        let text = std::process::Command::new("ps")
+            .args(["-o", "pid=,ppid=", "-p", &list.join(",")])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
+        let parents: HashMap<u32, u32> = text
+            .lines()
+            .filter_map(|l| {
+                let mut f = l.split_whitespace();
+                Some((f.next()?.parse().ok()?, f.next()?.parse().ok()?))
+            })
+            .collect();
+        for (id, pid) in pids {
+            if parents.get(&pid) == Some(&1) {
+                out.insert(id, "its caller has gone");
+            }
+        }
+    }
+    out
 }
 
 /// Why a compile waits, as a code and a short phrase for the home page.
@@ -3229,6 +3379,47 @@ mod tests {
         if let Some(Meta::External { last_poll, .. }) = lock(&b.st).meta.get_mut(&id) {
             *last_poll = Instant::now().checked_sub(by).expect("uptime");
         }
+    }
+
+    #[test]
+    fn a_step_that_ends_closes_its_waiting_run_and_the_next_waiter_moves_up() {
+        // 2026-11-19: star #669's abandoned `mason run` kept first place for an hour after
+        // its step was over (s688).
+        let dir = tempfile::tempdir().unwrap();
+        let (b, first, second) = waiting_broker(dir.path());
+        let one = BTreeMap::from([("compile".to_string(), 1)]);
+        let third = b.lease_open("a person's", &one);
+        b.lease_set_task(second, TaskId(669));
+        let closed = b.close_task_leases(TaskId(669));
+        assert_eq!(closed.len(), 1);
+        assert_eq!((closed[0].id, closed[0].held), (second, false));
+        assert!(matches!(b.lease_poll(second), LeaseState::Gone));
+        // The person's request (no task) is still queued; the holder is untouched.
+        assert!(matches!(b.lease_poll(third), LeaseState::Waiting { .. }));
+        assert!(b.lease_holds(first));
+        // Another task's lease is not closed by this task's end.
+        b.lease_set_task(third, TaskId(7));
+        assert!(b.close_task_leases(TaskId(669)).is_empty());
+        assert!(matches!(b.lease_poll(third), LeaseState::Waiting { .. }));
+        // The holder ends and the person's request is granted.
+        b.lease_close(first);
+        assert!(matches!(b.lease_poll(third), LeaseState::Granted { .. }));
+    }
+
+    #[test]
+    fn a_granted_run_of_an_ended_step_is_reported_not_released() {
+        let dir = tempfile::tempdir().unwrap();
+        let (b, first, second) = waiting_broker(dir.path());
+        b.lease_set_task(first, TaskId(669));
+        b.lease_set_pid(first, 4242);
+        let closed = b.close_task_leases(TaskId(669));
+        assert_eq!(closed.len(), 1);
+        assert!(closed[0].held && closed[0].pid == 4242 && closed[0].id == first);
+        assert!(b.lease_holds(first));
+        assert!(matches!(b.lease_poll(second), LeaseState::Waiting { .. }));
+        // Once the command has been stopped the caller closes it, and the waiter is granted.
+        b.lease_close(first);
+        assert!(matches!(b.lease_poll(second), LeaseState::Granted { .. }));
     }
 
     #[test]

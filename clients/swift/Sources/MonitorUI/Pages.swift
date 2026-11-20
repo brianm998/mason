@@ -1078,6 +1078,7 @@ struct StageRows: View {
     let model: MonitorModel
     let name: String
     var compact = false
+    @State private var askAll = false
 
     var body: some View {
         let rows = model.sectionRows(name)
@@ -1090,6 +1091,21 @@ struct StageRows: View {
                 if let n = model.skipNotice ?? model.lastResult {
                     Text(n).font(theme.body()).foregroundStyle(theme.attention)
                         .accessibilityIdentifier("testing:skip-notice")
+                }
+            }
+            if name == "landing", !rows.isEmpty {
+                Button("Land now for all") { askAll = true }
+                    .buttonStyle(.bordered).accessibilityIdentifier("landing:land-all")
+                    .disabled(model.landDisabledReason != nil)
+                    .help(model.landDisabledReason ?? "Land every task here that allows it")
+                    .alert("Land \(model.landableRows(rows).count) tasks now? Their remaining tests run after the merge; a red result raises an alert.",
+                           isPresented: $askAll) {
+                        Button("Land now") { model.landAllNow(rows) }
+                        Button("Cancel", role: .cancel) {}
+                    }
+                if let n = model.landNotice ?? model.lastResult {
+                    Text(n).font(theme.body()).foregroundStyle(theme.attention)
+                        .accessibilityIdentifier("landing:land-notice")
                 }
             }
             if rows.isEmpty { Text("Nothing here.").font(theme.body()).foregroundStyle(theme.muted) }
@@ -1114,6 +1130,9 @@ struct StageRows: View {
             if name == "testing", model.canAct, r.allowedActions.contains("skip_test") {
                 Button("Skip testing") { model.skipTest(r.id, step: r.step) }
                     .buttonStyle(.bordered).accessibilityIdentifier("testing:skip:\(r.id)")
+            }
+            if name == "landing" {
+                LandNowButton(model: model, target: .task(r.id), shown: model.canAct && r.allowedActions.contains("land_now"))
             }
             if Self.showsApprove(page: name, canAct: model.canAct, row: r) {
                 Button { model.approve(r.id) } label: {
