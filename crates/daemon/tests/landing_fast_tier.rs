@@ -36,7 +36,12 @@ fn a_skipped_batch_whose_merge_breaks_a_unit_test_is_parked_naming_that_test() {
         w.sent_back(left).is_some() && w.sent_back(right).is_some()
     });
     let why = w.sent_back(left).unwrap();
-    assert!(why.contains("matrix_events"), "{why}");
+    assert!(
+        why.contains("matrix_events"),
+        "reason: {why}\nright's reason: {:?}\nfast tier output:\n{}",
+        w.sent_back(right),
+        w.fast_tier_logs()
+    );
     assert!(!w.on_main("x/joint.a") && !w.on_main("x/joint.b"));
 }
 
