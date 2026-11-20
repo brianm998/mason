@@ -1115,6 +1115,13 @@ struct StageRows: View {
                 Button("Skip testing") { model.skipTest(r.id, step: r.step) }
                     .buttonStyle(.bordered).accessibilityIdentifier("testing:skip:\(r.id)")
             }
+            if Self.showsApprove(page: name, canAct: model.canAct, row: r) {
+                Button { model.approve(r.id) } label: {
+                    Text(model.pendingLabel(task: r.id, action: "approve") ?? "Approve")
+                }
+                .buttonStyle(.bordered).disabled(model.isBusy(task: r.id))
+                .accessibilityIdentifier("row:\(r.id):approve")
+            }
         }
         .accessibilityIdentifier("stage-row:\(name):\(r.id)")
     }
@@ -1127,6 +1134,11 @@ struct StageRows: View {
          Format.duration(ms: r.inState(now: model.daemonNow())),
          r.display.isEmpty ? r.model : r.display]
             .filter { !$0.isEmpty }.joined(separator: " · ")
+    }
+
+    /// Approve on a row of the proposed page: the sidebar row's rule.
+    static func showsApprove(page: String, canAct: Bool, row: TaskRow) -> Bool {
+        page == "proposed" && canAct && row.allowedActions.contains("approve")
     }
 
     @ViewBuilder func detail(_ r: TaskRow) -> some View {
