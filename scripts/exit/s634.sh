@@ -43,13 +43,15 @@ out="$tmp/out"
 (cd "$fx" && env -u RUSTC_BOOTSTRAP RUSTDOC="$root/scripts/rustdoc-bootstrap.sh" cargo test \
   --config 'target."cfg(unix)".runner=["env","RUSTC_BOOTSTRAP=1"]' -- -Z unstable-options --report-time) > "$out" 2>&1 || { cat "$out" >&2; exit 1; }
 pass=$(sed -n "s/^pass_regex = '\(.*\)'$/\1/p" .mason/mason.toml | head -1)
+# pass_regex is a Rust regex; grep -E (POSIX ERE) has no `(?:` group, so use a plain group.
+ere=${pass//'(?:'/'('}
 for t in quick waits_for_a_file; do
   line=$(grep -E "^test tests::$t \.\.\. ok" "$out") || { echo "no result line for $t" >&2; cat "$out" >&2; exit 1; }
   echo "$line" | grep -Eq '<[0-9]+\.[0-9]+s>$' || { echo "no time on: $line" >&2; exit 1; }
-  echo "$line" | grep -Eq -- "$pass" || { echo "pass_regex does not match: $line" >&2; exit 1; }
+  echo "$line" | grep -Eq -- "$ere" || { echo "pass_regex does not match: $line" >&2; exit 1; }
 done
 doc=$(grep -E '^test src/lib\.rs - one .* \.\.\. ok' "$out") || { echo "no doc test line" >&2; cat "$out" >&2; exit 1; }
-echo "$doc" | grep -Eq -- "$pass" || { echo "pass_regex does not match: $doc" >&2; exit 1; }
+echo "$doc" | grep -Eq -- "$ere" || { echo "pass_regex does not match: $doc" >&2; exit 1; }
 cd "$root"
 cargo test -p mason-testing report_time
 cargo test -p mason-store --test test_times

@@ -300,6 +300,23 @@ class MonitorCoreTest {
         assertEquals(Page.Landing, m.page)
     }
 
+    @Test fun doubleClickOnStuckOrProposedWithSeveralTasksOpensTheirPage() {
+        for (state in listOf("needs_attention", "proposed")) {
+            val m = model()
+            m.sidebar = m.sidebar!!.copy(sections = m.sidebar!!.sections + section(state, rows = listOf(row(40, state), row(41, state))))
+            m.tileClicked(state, 2)
+            assertEquals(state, m.scrollTarget)
+            assertEquals(Page.Section(state), m.page)
+            assertEquals(listOf(40L, 41L), m.sectionRows(state).map { it.id })
+            val one = model()
+            one.sidebar = one.sidebar!!.copy(sections = one.sidebar!!.sections + section(state, rows = listOf(row(42, state))))
+            one.tileClicked(state, 2)
+            assertEquals(Page.Task(42), one.page)
+        }
+        assertEquals("Needs you", SectionPages.title("needs_attention"))
+        assertEquals("Proposed", SectionPages.title("proposed"))
+    }
+
     @Test fun sectionUrlsRoundTripToTheirPages() {
         for (name in Page.sectionNames) {
             val page = Page.sectionPage(name)

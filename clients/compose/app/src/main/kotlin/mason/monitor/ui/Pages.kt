@@ -1023,6 +1023,9 @@ private fun StageRows(model: MonitorModel, name: String) {
                     Pill("Skip testing", modifier = Modifier.testTag("testing:skip:${r.id}")) { model.skipTest(r.id, r.step) }
                 }
                 if (name == "landing") LandNowButton(model, LandNowTarget.Task(r.id), model.canAct && "land_now" in r.allowed_actions)
+                if (name == "proposed" && model.canAct && "approve" in r.allowed_actions) {
+                    PendingPill(model, r.id, "approve", "Approve", prominent = true, modifier = Modifier.testTag("row:${r.id}:approve")) { model.approve(r.id, MonitorModel.DEFAULT_APPROVAL_PRIORITY) }
+                }
             }
         }
     }

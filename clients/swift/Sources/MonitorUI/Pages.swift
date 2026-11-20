@@ -1128,8 +1128,20 @@ struct StageRows: View {
             if name == "landing" {
                 LandNowButton(model: model, target: .task(r.id), shown: model.canAct && r.allowedActions.contains("land_now"))
             }
+            if Self.showsApprove(page: name, canAct: model.canAct, row: r) {
+                Button { model.approve(r.id) } label: {
+                    Text(model.pendingLabel(task: r.id, action: "approve") ?? "Approve")
+                }
+                .buttonStyle(.bordered).disabled(model.isBusy(task: r.id))
+                .accessibilityIdentifier("row:\(r.id):approve")
+            }
         }
         .accessibilityIdentifier("stage-row:\(name):\(r.id)")
+    }
+
+    /// Approve on a row of the proposed page: the sidebar row's rule.
+    static func showsApprove(page: String, canAct: Bool, row: TaskRow) -> Bool {
+        page == "proposed" && canAct && row.allowedActions.contains("approve")
     }
 
     @ViewBuilder func detail(_ r: TaskRow) -> some View {
