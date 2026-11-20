@@ -21,6 +21,8 @@ use support::*;
 struct Base {
     runs: Mutex<Vec<ActionsRun>>,
     jobs: Mutex<BTreeMap<u64, Vec<ActionsJob>>>,
+    /// Jobs whose annotations say they hit the time limit.
+    noted: Mutex<Vec<u64>>,
 }
 
 impl Base {
@@ -67,8 +69,9 @@ impl Source for Base {
     fn log_tail(&self, job: u64) -> Option<String> {
         Some(format!("log of job {job}\nFAILED test_x"))
     }
-    fn annotations(&self, _job: u64) -> Option<String> {
-        Some("The job has exceeded the maximum execution time of 1h0m0s".into())
+    fn annotations(&self, job: u64) -> Option<String> {
+        let timed_out = self.noted.lock().unwrap().contains(&job);
+        timed_out.then(|| "The job has exceeded the maximum execution time of 1h0m0s".into())
     }
 }
 
@@ -475,6 +478,7 @@ fn a_shard_that_fails_once_then_times_out_is_filed_once_and_cleared_by_a_green()
     // The host reports a timed-out job as `cancelled` inside a run that finished `failure`.
     for (i, id) in [3u64, 4, 5].into_iter().enumerate() {
         b.run(id, "CI", "failure", &[(shard, "cancelled")]);
+        b.noted.lock().unwrap().push(id * 10);
         pass(&d, pid, &r, &b, 30_000 + i as u64).unwrap();
         let saved =
             mason_daemon::ci_watch::decode(&d.store.ci_watch_state(&p.id).unwrap().unwrap());
@@ -493,6 +497,7 @@ fn a_shard_that_fails_once_then_times_out_is_filed_once_and_cleared_by_a_green()
     assert!(t[0].body.contains("maximum execution time of 1h0m0s"));
     // A run superseded by a newer push (run `cancelled`) says nothing.
     b.run(6, "CI", "cancelled", &[(shard, "cancelled")]);
+    b.noted.lock().unwrap().push(60);
     pass(&d, pid, &r, &b, 40_000).unwrap();
     // A green clears the line.
     b.run(7, "CI", "success", &[(shard, "success")]);
