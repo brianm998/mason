@@ -80,6 +80,14 @@ jobs:
         # the whole workspace was cut off at 40 minutes on both systems in 13-14 of 16
         # runs (2026-11-18/19). Each leg gets 45 minutes; the limit still catches a hung test.
         scope: [rest, daemon]
+        # Task 720 (decision 0714): the daemon leg still hit 45 minutes on a 4-vCPU runner,
+        # where world_limit() allows only 2 scratch daemons at once. The daemon scope is
+        # split into 3 shards by test-name checksum (scripts/daemon-shard.sh); the rest leg
+        # ignores `dshard`. check-daemon-shards.sh proves every test is in exactly one.
+        dshard: [1, 2, 3]
+        exclude:
+          - { scope: rest, dshard: 2 }
+          - { scope: rest, dshard: 3 }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
@@ -87,7 +95,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --exclude mason-daemon
         if: matrix.scope == 'rest'
-      - run: cargo test -p mason-daemon
+      - run: bash scripts/check-daemon-shards.sh 3
+        if: matrix.scope == 'daemon' && matrix.dshard == 1
+      - run: |
+          cargo test -p mason-daemon --no-run
+          cargo test -p mason-daemon -- --exact $(bash scripts/daemon-shard.sh ${{ matrix.dshard }} 3)
         if: matrix.scope == 'daemon'
 
   # The exit scripts, in six shards per system, assigned by weight (scripts/exit/weights.txt).
