@@ -1,0 +1,26 @@
+2026-11-20T01:02:00.1234567Z ##[group]Run cargo test --workspace
+2026-11-20T01:02:01.1234567Z env:
+2026-11-20T01:02:02.1234567Z   CARGO_TERM_COLOR: always
+2026-11-20T01:02:03.1234567Z ##[endgroup]
+2026-11-20T01:02:04.1234567Z running 3 tests
+2026-11-20T01:02:05.1234567Z test a::ok ... ok
+2026-11-20T01:02:06.1234567Z test ci_watch::tests::red_is_filed ... FAILED
+2026-11-20T01:02:07.1234567Z test b::ok ... ok
+2026-11-20T01:02:08.1234567Z 
+2026-11-20T01:02:09.1234567Z failures:
+2026-11-20T01:02:10.1234567Z 
+2026-11-20T01:02:11.1234567Z ---- ci_watch::tests::red_is_filed stdout ----
+2026-11-20T01:02:12.1234567Z thread 'ci_watch::tests::red_is_filed' panicked at crates/core/src/ci_watch.rs:900:9:
+2026-11-20T01:02:13.1234567Z assertion failed: f.is_empty()
+2026-11-20T01:02:14.1234567Z 
+2026-11-20T01:02:15.1234567Z failures:
+2026-11-20T01:02:16.1234567Z     ci_watch::tests::red_is_filed
+2026-11-20T01:02:17.1234567Z 
+2026-11-20T01:02:18.1234567Z test result: FAILED. 2 passed; 1 failed; 0 ignored
+2026-11-20T01:02:19.1234567Z error: test failed, to rerun pass `--lib`
+2026-11-20T01:02:20.1234567Z ##[error]Process completed with exit code 101.
+2026-11-20T01:02:21.1234567Z ##[group]Post job cleanup.
+2026-11-20T01:02:22.1234567Z Post job cleanup.
+2026-11-20T01:02:23.1234567Z [command]/usr/bin/git config --local --unset-all http.https://github.com/.extraheader
+2026-11-20T01:02:24.1234567Z ##[endgroup]
+2026-11-20T01:02:25.1234567Z Node.js 20 actions are deprecated.

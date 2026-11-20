@@ -31,6 +31,7 @@
 //! mason doctor
 //! mason init [--yes] [--tracker T] [--agent A] [--sessions N] [--workflow W] [--suites accept|skip] [--base B] [--landing L] [--alerts LIST|none] [--no-prove]
 //! mason adopt | mason remove [--yes]
+//! mason remote setup --project P [--runs-on L]
 //! ```
 //! Global: `--data-dir D`, `--config-dir C` (or `MASON_DATA_DIR`, `MASON_CONFIG_DIR`).
 
@@ -41,6 +42,7 @@ mod definition;
 mod doctor;
 mod init;
 mod progress;
+mod remote;
 mod remove;
 mod resources;
 mod service;
@@ -127,6 +129,7 @@ mason: command-line client for the MASON pipeline
                                       opens the monitor; every question has a flag
   mason init --prove-only             file the one harmless first task, once masond knows the project
   mason adopt [--id ID] [--base B] [--test CMD]   register a project that already has .mason/ (never writes it)
+  mason remote setup --project P [--runs-on L]   write .github/workflows/mason-run.yml on a mason/setup-remote branch (nothing pushed)
   mason remove [--yes] [--id ID]      delete the project file, .mason/ and the Filing notes (lists first without --yes)
   mason run --needs compile[=N],... [--exclusive] [--label L] [--origin O] -- <cmd>...
                                       queue for the pipeline's resources, ahead of its work
@@ -521,6 +524,9 @@ fn main() {
             &data_dir,
             &config_dir,
         ));
+    }
+    if cmd == "remote" {
+        exit(remote::run(std::mem::take(&mut a.rest), &config_dir));
     }
     if cmd == "remove" {
         exit(remove::run(std::mem::take(&mut a.rest), &config_dir));

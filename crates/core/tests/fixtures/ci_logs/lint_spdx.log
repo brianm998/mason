@@ -1,0 +1,21 @@
+2026-11-20T01:02:00.1234567Z ##[group]Run actions/checkout@v4
+2026-11-20T01:02:01.1234567Z Syncing repository
+2026-11-20T01:02:02.1234567Z ##[endgroup]
+2026-11-20T01:02:03.1234567Z ##[group]Run bash scripts/check-spdx.sh
+2026-11-20T01:02:04.1234567Z bash scripts/check-spdx.sh
+2026-11-20T01:02:05.1234567Z shell: /usr/bin/bash -e {0}
+2026-11-20T01:02:06.1234567Z env:
+2026-11-20T01:02:07.1234567Z   CARGO_TERM_COLOR: always
+2026-11-20T01:02:08.1234567Z   RUSTFLAGS: -D warnings
+2026-11-20T01:02:09.1234567Z ##[endgroup]
+2026-11-20T01:02:10.1234567Z [31mmissing SPDX-License-Identifier: GPL-3.0-or-later in scripts/exit/s653.sh[0m
+2026-11-20T01:02:11.1234567Z ##[error]Process completed with exit code 1.
+2026-11-20T01:02:12.1234567Z ##[group]Post job cleanup.
+2026-11-20T01:02:13.1234567Z Post job cleanup.
+2026-11-20T01:02:14.1234567Z [command]/usr/bin/git config --local --unset-all http.https://github.com/.extraheader
+2026-11-20T01:02:15.1234567Z ##[endgroup]
+2026-11-20T01:02:16.1234567Z Node.js 20 actions are deprecated.
+2026-11-20T01:02:17.1234567Z ##[group]Run cargo clippy --workspace
+2026-11-20T01:02:18.1234567Z env:
+2026-11-20T01:02:19.1234567Z   CARGO_TERM_COLOR: always
+2026-11-20T01:02:20.1234567Z ##[endgroup]

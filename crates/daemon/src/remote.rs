@@ -516,6 +516,141 @@ pub fn parse_iso(s: &str) -> Option<u64> {
     u64::try_from(days * 86400 + h * 3600 + mi * 60 + sec).ok()
 }
 
+// ---- stale run refs ---------------------------------------------------------------------------
+
+/// A run ref older than this with no live record is a leftover of a crash or a killed run.
+pub const STALE_REF_AGE_S: u64 = 24 * 3600;
+/// The sweep looks at the remote this often, not on every pass.
+const STALE_SWEEP_EVERY_MS: u64 = 30 * 60 * 1000;
+
+/// The refs the run records under `roots` name as still in use: pushed, not collected, not
+/// deleted. Records sit next to a run's log, in a task's directory or a landing directory.
+pub fn live_run_refs(roots: &[PathBuf]) -> std::collections::HashSet<String> {
+    fn walk(dir: &Path, depth: u32, out: &mut std::collections::HashSet<String>) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            let Ok(ft) = e.file_type() else { continue };
+            if ft.is_dir() {
+                if depth > 0 {
+                    walk(&p, depth - 1, out);
+                }
+            } else if p.extension().is_some_and(|x| x == "remote") {
+                if let Some(st) = State::load(&p) {
+                    if !st.ref_deleted && !st.collected {
+                        out.insert(st.ref_name);
+                    }
+                }
+            }
+        }
+    }
+    let mut out = std::collections::HashSet::new();
+    for r in roots {
+        walk(r, 3, &mut out);
+    }
+    out
+}
+
+/// Delete the stale run refs among `refs` (`(ref name, sha)` as the remote lists them): older
+/// than [`STALE_REF_AGE_S`] by `time_of` (the commit's time, `None` when unknown, which keeps
+/// the ref) and not in `live`. `delete` removes one and says whether it did. Each deletion is
+/// logged. Returns the refs deleted.
+pub fn sweep_run_refs(
+    refs: &[(String, String)],
+    live: &std::collections::HashSet<String>,
+    now_s: u64,
+    time_of: &dyn Fn(&str) -> Option<u64>,
+    delete: &mut dyn FnMut(&str) -> bool,
+) -> Vec<String> {
+    let aged: Vec<(String, Option<u64>)> = refs
+        .iter()
+        .filter(|(r, _)| !live.contains(r))
+        .map(|(r, sha)| (r.clone(), time_of(sha)))
+        .collect();
+    let mut gone = vec![];
+    for r in mason_adapters::runref::stale_refs(&aged, live, now_s, STALE_REF_AGE_S) {
+        if delete(&r) {
+            tracing::info!(ref_name = %r, "deleted a stale run ref (older than 24 h, no live run record)");
+            gone.push(r);
+        }
+    }
+    gone
+}
+
+/// The safety sweep's part: for each project with `[remote]`, delete its stale run refs. At most
+/// every half hour; a remote that cannot be reached is tried again next time.
+pub fn sweep_stale_refs(d: &Arc<Daemon>) {
+    static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    if !any_remote(d) {
+        return;
+    }
+    let now = now_ms();
+    let last = LAST.load(std::sync::atomic::Ordering::SeqCst);
+    if last != 0 && now.saturating_sub(last) < STALE_SWEEP_EVERY_MS {
+        return;
+    }
+    LAST.store(now, std::sync::atomic::Ordering::SeqCst);
+    // Off the sweep's thread: it lists the remote and asks GitHub for each ref's age.
+    let d = d.clone();
+    std::thread::spawn(move || sweep_stale_refs_now(&d, now));
+}
+
+fn sweep_stale_refs_now(d: &Daemon, now: u64) {
+    let mut roots = vec![d.cfg.landing_dir()];
+    if let Ok(rd) = std::fs::read_dir(d.cfg.data_dir.join("t")) {
+        roots.extend(rd.flatten().map(|e| e.path()));
+    }
+    let live = live_run_refs(&roots);
+    let projects: Vec<String> = d
+        .projects()
+        .values()
+        .filter(|p| p.services.remote.is_some())
+        .map(|p| p.id.clone())
+        .collect();
+    for id in projects {
+        let Some(p) = project_cfg(d, &id) else {
+            continue;
+        };
+        let Some(site) = site_for(d, &id, &p.path) else {
+            continue;
+        };
+        let Ok(listing) = git::run(
+            &site.cwd,
+            &["ls-remote", &site.remote, "refs/heads/mason/run/*"],
+        ) else {
+            continue;
+        };
+        let refs: Vec<(String, String)> = listing
+            .lines()
+            .filter_map(|l| {
+                let (sha, r) = l.split_once('\t')?;
+                Some((r.strip_prefix("refs/heads/")?.to_string(), sha.to_string()))
+            })
+            .collect();
+        if refs.is_empty() {
+            continue;
+        }
+        let gone = sweep_run_refs(
+            &refs,
+            &live,
+            now / 1000,
+            &|sha| site.gh.commit_time(sha),
+            &mut |r| {
+                git::run(
+                    &site.cwd,
+                    &["push", &site.remote, "--delete", &format!("refs/heads/{r}")],
+                )
+                .is_ok()
+            },
+        );
+        if !gone.is_empty() {
+            tracing::info!(project = %id, count = gone.len(), "swept stale run refs");
+        }
+    }
+}
+
 // ---- running ----------------------------------------------------------------------------------
 
 pub enum Outcome {
@@ -1209,6 +1344,61 @@ pub fn run_or_fallback(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_sweep_deletes_only_old_refs_with_no_live_record() {
+        use std::collections::{HashMap, HashSet};
+        let day = 24 * 3600;
+        let now = 100 * day;
+        let refs: Vec<(String, String)> = [
+            ("mason/run/p/old", "s1"),
+            ("mason/run/p/fresh", "s2"),
+            ("mason/run/p/kept", "s3"),
+            ("mason/run/p/nodate", "s4"),
+        ]
+        .iter()
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect();
+        let times: HashMap<&str, u64> = [
+            ("s1", now - 3 * day),
+            ("s2", now - 3600),
+            ("s3", now - 9 * day),
+        ]
+        .into();
+        let live: HashSet<String> = ["mason/run/p/kept".to_string()].into();
+        let mut deleted = vec![];
+        let gone = sweep_run_refs(
+            &refs,
+            &live,
+            now,
+            &|sha| times.get(sha).copied(),
+            &mut |r| {
+                deleted.push(r.to_string());
+                true
+            },
+        );
+        assert_eq!(gone, vec!["mason/run/p/old"]);
+        assert_eq!(deleted, vec!["mason/run/p/old"]);
+    }
+
+    #[test]
+    fn a_record_that_is_pushed_and_not_collected_keeps_its_ref() {
+        let d = tempfile::tempdir().unwrap();
+        let mk = |id: &str, name: &str, deleted: bool| {
+            let st = State {
+                ref_name: name.into(),
+                sha: "abc".into(),
+                ref_deleted: deleted,
+                ..State::default()
+            };
+            st.save(&record_path(d.path(), id));
+        };
+        mk("a", "mason/run/p/a", false);
+        mk("b", "mason/run/p/b", true);
+        let live = live_run_refs(&[d.path().to_path_buf()]);
+        assert!(live.contains("mason/run/p/a"));
+        assert!(!live.contains("mason/run/p/b"));
+    }
+
     use super::*;
     use mason_adapter_api::http::{Request, Response, Transport};
     use std::sync::atomic::{AtomicU64, Ordering};
