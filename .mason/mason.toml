@@ -171,6 +171,37 @@ when = ["development", "test_step"]
 "schemas/**" = ["cargo-workspace", "swift-clients", "compose-clients"]
 "docs/**" = ["cargo-workspace"]
 "**/*.md" = ["cargo-workspace"]
+# Paths that used to run every suite whole (s685, decision 0678). Each choice follows what reads the
+# file; `.mason/mason.toml` is left unmapped on purpose, so a definition change tests everything.
+# CI runs the workflows itself and the CI watch checks them; only ci.yml is read by a cargo test.
+".github/**" = []
+".github/workflows/ci.yml" = ["cargo-workspace"]
+".cargo/**" = ["cargo-workspace"]
+".gitignore" = []
+".claude/**" = []
+"LICENSE*" = []
+"deny.toml" = []
+"packaging/**" = []
+"site/**" = []
+"spikes/**" = []
+"prompts/**" = []
+# `mason init` embeds the templates and the cli tests parse them.
+"templates/**" = ["cargo-workspace"]
+".mason/landing.toml" = []
+".mason/smoke-tests.txt" = ["cargo-workspace"]
+".mason/serial-tests.txt" = ["cargo-workspace"]
+# The conformance crate reads the mascot art list.
+"clients/mascot.toml" = ["cargo-workspace", "swift-clients", "compose-clients"]
+"scripts/*.sh" = ["exit-scripts"]
+"scripts/lib/**" = ["exit-scripts"]
+"scripts/tests/**" = ["exit-scripts"]
+"scripts/package/**" = ["swift-clients"]
+"scripts/bundle-monitor.sh" = ["swift-clients"]
+"scripts/gen-app-icon-macos.swift" = ["swift-clients"]
+"scripts/install.sh" = []
+"scripts/rustdoc-bootstrap.sh" = ["cargo-workspace"]
+"scripts/test-parallel.py" = ["cargo-workspace"]
+"scripts/spike/**" = []
 
 [step.land]
 type = "landing"
