@@ -89,7 +89,7 @@ fn a_commit_made_after_the_task_was_pinned_does_not_join_the_batch() {
     let late = sh(&wt, &["rev-parse", "HEAD"]);
     assert_ne!(late, t1.head);
     let b = fx.batch(None, true);
-    let a = b.assemble(&[t1.clone()], &nop).unwrap();
+    let a = b.assemble(std::slice::from_ref(&t1), &nop).unwrap();
     assert_eq!(a.merged, vec![1]);
     assert!(fx.int_wt.join("a.txt").is_file());
     assert!(!fx.int_wt.join("late.txt").exists());
