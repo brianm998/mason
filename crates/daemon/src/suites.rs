@@ -2258,15 +2258,28 @@ fn narrow_packages_for_step(c: &Ctx, suite: &Suite) -> Option<(Suite, String)> {
     let (paths, dropped) = split_for_suite(&c.def, suite, &all);
     // A `{tests_for_change}` command narrows to test targets and adds the smoke set (decision
     // 0539); a `{packages}` one to whole packages.
-    let n = crate::scope::narrow_for(&c.wt, &paths, crate::scope::wants_tests(dc), true);
-    let Some(n) = n else {
-        // A path outside every package (a root file) or no cargo means the suite runs whole.
-        eprintln!(
-            "suite {}: narrowing found no list for {} changed paths; running whole",
-            suite.name,
-            paths.len()
-        );
-        return None;
+    let named = [
+        Some(suite.command.as_str()),
+        suite.build.as_deref(),
+        suite.dev_command.as_deref(),
+        suite.dev_build.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join("\n");
+    let n = crate::scope::narrow_for(&c.wt, &paths, crate::scope::wants_tests(dc), true, &named);
+    let n = match n {
+        Ok(n) => n,
+        Err(why) => {
+            // A path that reaches every target (a root file) or no cargo: the suite runs whole.
+            eprintln!(
+                "suite {}: runs whole because {why} ({} changed paths)",
+                suite.name,
+                paths.len()
+            );
+            return None;
+        }
     };
     let mut s = suite.clone();
     s.command = crate::scope::expand(dc, &n, false);
