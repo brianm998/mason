@@ -242,9 +242,11 @@ fun HomePage(model: MonitorModel) {
                         Text("${r.project} ${r.key}", style = theme.linked(theme.body(FontWeight.SemiBold)))
                         Text(r.title, style = theme.linked(theme.body()))
                         r.wait?.let { WaitBadge(it.cause) }
-                        Text(
+                        // LinkedText: a task this line names opens that task; elsewhere the row's click still applies.
+                        LinkedText(
+                            model,
                             if (r.why_waiting.isEmpty()) Format.duration(r.inState(model.daemonNow())) else "${r.why_waiting}, ${Format.duration(r.inState(model.daemonNow()))}",
-                            style = theme.small(color = if (r.slow) theme.slow else theme.muted),
+                            theme.small(color = if (r.slow) theme.slow else theme.muted),
                         )
                     }
                 }
@@ -345,7 +347,7 @@ fun CompilationSection(model: MonitorModel, c: Compilation, open: (() -> Unit)? 
             Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.testTag("compile:lease:$i")) {
                 who(l.label, 0L, l.command)
-                Text(QueueWait.leaseDetail(l, now), style = theme.body(color = theme.muted))
+                LinkedText(model, QueueWait.leaseDetail(l, now), theme.body(color = theme.muted))
             }
         }
         c.notes.forEachIndexed { i, n ->
@@ -545,7 +547,7 @@ fun LandingPage(model: MonitorModel) {
                 if (l.batches.isEmpty()) Text("No batch has formed yet.", style = theme.body(color = theme.muted))
                 l.batches.forEach { b ->
                     Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing)) {
-                        Text(batchText(b), style = theme.body())
+                        LinkedText(model, batchText(b), theme.body())
                         LandNowButton(model, LandNowTarget.Batch(b.id), model.canLandNow(b))
                     }
                     b.ci?.let { ci ->
@@ -732,7 +734,11 @@ fun HealthPage(model: MonitorModel, lateness: () -> LatenessWindow = { UiLatenes
                     Text("Nothing found yet.", style = theme.body(color = theme.muted))
                 }
                 i.findings.forEach { f ->
-                    Text("#${f.id} [${f.verdict}] ${f.title} (proposal #${f.task}, metric ${f.metric})", style = theme.body())
+                    // The finding's own #id is not a task; only "(proposal #N)" is.
+                    Row {
+                        Text("#${f.id} [${f.verdict}] ${f.title} ", style = theme.body())
+                        LinkedText(model, "(proposal #${f.task}, metric ${f.metric})", theme.body())
+                    }
                     if (f.text.isNotEmpty()) Text(f.text, style = theme.body(color = theme.muted))
                 }
             }
@@ -765,7 +771,7 @@ internal fun LandingItems(model: MonitorModel, items: List<mason.v1.TaskLanding>
         // The running batches that offer Land now are drawn here too (Home; the Landing page lists its own).
         landNowBatches(batches).forEach { b ->
             Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing)) {
-                Text("Batch #${b.id} ${b.phase}: ${b.tasks.joinToString(" ") { "#$it" }}", style = theme.body())
+                LinkedText(model, "Batch #${b.id} ${b.phase}: ${b.tasks.joinToString(" ") { "#$it" }}", theme.body())
                 LandNowButton(model, LandNowTarget.Batch(b.id), model.canLandNow(b))
             }
         }
@@ -986,6 +992,7 @@ fun SectionPage(model: MonitorModel, name: String) {
 private fun StageRows(model: MonitorModel, name: String) {
     val theme = LocalTheme.current
     val rows = model.sectionRows(name)
+    var askAll by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
     Section(SectionPages.title(name), name) {
         if (name == "testing" && rows.isNotEmpty()) {
             Pill("Skip testing for all", modifier = Modifier.testTag("testing:skip-all")) { model.skipAllTests(rows) }
@@ -993,20 +1000,38 @@ private fun StageRows(model: MonitorModel, name: String) {
                 Text(it, style = theme.body(color = theme.attention), modifier = Modifier.testTag("testing:skip-notice"))
             }
         }
+        if (name == "landing" && rows.isNotEmpty()) {
+            Pill("Land now for all", modifier = Modifier.testTag("landing:land-all")) { askAll = true }
+            (model.landDisabledReason ?: model.landNotice ?: model.lastResult)?.let {
+                Text(it, style = theme.body(color = theme.attention), modifier = Modifier.testTag("landing:land-notice"))
+            }
+            if (askAll) {
+                androidx.compose.material3.AlertDialog(
+                    onDismissRequest = { askAll = false },
+                    text = { Text("Land ${model.landableRows(rows).size} tasks now? Their remaining tests run after the merge; a red result raises an alert.") },
+                    confirmButton = { androidx.compose.material3.Button(onClick = { askAll = false; model.landAllNow(rows) }) { Text("Land now") } },
+                    dismissButton = { androidx.compose.material3.Button(onClick = { askAll = false }) { Text("Cancel") } },
+                )
+            }
+        }
         if (rows.isEmpty()) Text("Nothing here.", style = theme.body(color = theme.muted))
         rows.forEach { r ->
             Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.fillMaxWidth().testTag("stage-row:$name:${r.id}")) {
                 ProgressCells(model, r.progress, r.slow)
-                Text("${r.project} ${r.key}  ${r.title}", style = theme.body(), modifier = Modifier.weight(1f).clickable { model.go(Page.Task(r.id)) })
-                Text(
+                Text("${r.project} ", style = theme.body())
+                Text(r.key, style = theme.linked(theme.body()), modifier = Modifier.pointingHand().clickable { model.go(Page.Task(r.id)) })
+                Text("  ${r.title}", style = theme.body(), modifier = Modifier.weight(1f).clickable { model.go(Page.Task(r.id)) })
+                LinkedText(
+                    model,
                     listOf(r.step, SectionPages.suiteProgress(r), r.why_waiting, Format.duration(r.inState(model.daemonNow())), r.display.ifEmpty { r.model })
                         .filter { it.isNotEmpty() }.joinToString(" · "),
-                    style = theme.small(color = if (r.slow) theme.slow else theme.muted),
+                    theme.small(color = if (r.slow) theme.slow else theme.muted),
                 )
                 if (name == "testing" && model.canAct && "skip_test" in r.allowed_actions) {
                     Pill("Skip testing", modifier = Modifier.testTag("testing:skip:${r.id}")) { model.skipTest(r.id, r.step) }
                 }
+                if (name == "landing") LandNowButton(model, LandNowTarget.Task(r.id), model.canAct && "land_now" in r.allowed_actions)
                 if (name == "proposed" && model.canAct && "approve" in r.allowed_actions) {
                     PendingPill(model, r.id, "approve", "Approve", prominent = true, modifier = Modifier.testTag("row:${r.id}:approve")) { model.approve(r.id, MonitorModel.DEFAULT_APPROVAL_PRIORITY) }
                 }
@@ -1042,7 +1067,7 @@ internal fun QueueHoldBanner(model: MonitorModel, h: mason.v1.QueueHold) {
     ) {
         val lines = queueHoldLines(h, model.daemonNow())
         LinkedText(model, lines.first(), theme.body(FontWeight.SemiBold, color = theme.attention))
-        lines.drop(1).forEach { Text(it, style = theme.small(color = theme.muted), modifier = Modifier.testTag("home:queue-hold:lease")) }
+        lines.drop(1).forEach { LinkedText(model, it, theme.small(color = theme.muted), Modifier.testTag("home:queue-hold:lease")) }
         if (h.kind == "red") h.tasks.take(8).forEach { t -> Link("#$t") { model.go(Page.Task(t)) } }
     }
 }

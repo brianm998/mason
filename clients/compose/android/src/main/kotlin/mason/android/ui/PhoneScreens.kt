@@ -158,8 +158,22 @@ private fun SectionPage(model: MonitorModel, name: String, open: (Page) -> Unit)
         OutlinedButton(onClick = { model.skipAllTests(rows) }, Modifier.padding(horizontal = 16.dp), enabled = model.skipDisabledReason == null) { Text("Skip testing for all") }
         (model.skipDisabledReason ?: model.skipNotice ?: model.lastResult)?.let { Text(it, Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall) }
     }
+    if (name == "landing" && rows.isNotEmpty()) {
+        var askAll by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+        OutlinedButton(onClick = { askAll = true }, Modifier.padding(horizontal = 16.dp), enabled = model.landDisabledReason == null) { Text("Land now for all") }
+        (model.landDisabledReason ?: model.landNotice ?: model.lastResult)?.let { Text(it, Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall) }
+        if (askAll) {
+            AlertDialog(
+                onDismissRequest = { askAll = false },
+                text = { Text("Land ${model.landableRows(rows).size} tasks now? Their remaining tests run after the merge; a red result raises an alert.") },
+                confirmButton = { Button(onClick = { askAll = false; model.landAllNow(rows) }) { Text("Land now") } },
+                dismissButton = { OutlinedButton(onClick = { askAll = false }) { Text("Cancel") } },
+            )
+        }
+    }
     for (r in rows) {
         TaskRowItem(r) { open(Page.Task(r.id)) }
+        if (name == "landing") LandNowButton(model, LandNowTarget.Task(r.id), model.canAct && "land_now" in r.allowed_actions)
         val progress = SectionPages.suiteProgress(r)
         if (progress.isNotEmpty()) Text(progress, Modifier.padding(horizontal = 24.dp), style = MaterialTheme.typography.bodySmall)
     }

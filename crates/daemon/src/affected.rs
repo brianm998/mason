@@ -474,9 +474,13 @@ pub fn render(groups: &BTreeMap<String, Group>) -> Vec<String> {
 }
 
 /// Add the lines of a smoke file (`-p pkg --test name`, `#` comments) to `groups`. A line this
-/// cannot read is returned as written, to be run as a group of its own.
+/// cannot read is returned as written, to be run as a group of its own. A line with a test
+/// filter (`-p pkg --test it -- module::`) cannot merge into a group, since cargo applies a
+/// filter to every target of its command: it is returned as a command group of its own, unless
+/// the groups already run its targets whole.
 pub fn add_smoke(groups: &mut BTreeMap<String, Group>, text: &str) -> Vec<String> {
     let mut raw = vec![];
+    let mut filtered: Vec<(String, Group, Vec<String>)> = vec![];
     for line in text.lines() {
         let line = line.split('#').next().unwrap_or("").trim();
         if line.is_empty() {
@@ -485,9 +489,14 @@ pub fn add_smoke(groups: &mut BTreeMap<String, Group>, text: &str) -> Vec<String
         let mut pkg: Option<String> = None;
         let mut g = Group::default();
         let mut ok = true;
+        let mut filters: Vec<String> = vec![];
         let mut it = line.split_whitespace();
         while let Some(w) = it.next() {
             match w {
+                "--" => {
+                    filters = it.by_ref().map(String::from).collect();
+                    ok &= !filters.is_empty();
+                }
                 "-p" => pkg = it.next().map(String::from),
                 "--lib" => g.lib = true,
                 "--bins" => g.bins = true,
@@ -502,6 +511,14 @@ pub fn add_smoke(groups: &mut BTreeMap<String, Group>, text: &str) -> Vec<String
             }
         }
         match (pkg, ok) {
+            (Some(p), true) if !filters.is_empty() => {
+                // A filter on the doc tests, or on no target at all, is not a smoke group.
+                if g.doc || !(g.lib || g.bins || !g.tests.is_empty()) {
+                    raw.push(line.to_string());
+                } else {
+                    filtered.push((p, g, filters));
+                }
+            }
             (Some(p), true) => {
                 let e = groups.entry(p).or_default();
                 e.lib |= g.lib;
@@ -510,6 +527,29 @@ pub fn add_smoke(groups: &mut BTreeMap<String, Group>, text: &str) -> Vec<String
                 e.tests.extend(g.tests);
             }
             _ => raw.push(line.to_string()),
+        }
+    }
+    for (p, g, filters) in filtered {
+        let covered = groups.get(&p).is_some_and(|e| {
+            e.whole || ((!g.lib || e.lib) && (!g.bins || e.bins) && g.tests.is_subset(&e.tests))
+        });
+        if covered {
+            continue;
+        }
+        let mut s = format!("-p {p}");
+        if g.lib {
+            s.push_str(" --lib");
+        }
+        if g.bins {
+            s.push_str(" --bins");
+        }
+        for t in &g.tests {
+            s.push_str(&format!(" --test {t}"));
+        }
+        s.push_str(" -- ");
+        s.push_str(&filters.join(" "));
+        if !raw.contains(&s) {
+            raw.push(s);
         }
     }
     raw
@@ -783,6 +823,36 @@ mod tests {
         );
         assert_eq!(render(&g), vec!["-p leaf --test own", "-p top --lib"]);
         assert_eq!(raw, vec!["--workspace"]);
+    }
+
+    #[test]
+    fn a_filtered_smoke_line_is_its_own_group_unless_the_target_runs_whole() {
+        let mut g = BTreeMap::new();
+        let raw = add_smoke(&mut g, "-p top --test it -- landing_floor:: e2e::smoke\n");
+        assert!(render(&g).is_empty());
+        assert_eq!(raw, vec!["-p top --test it -- landing_floor:: e2e::smoke"]);
+        let mut sel = BTreeMap::new();
+        sel.entry("top".to_string())
+            .or_insert_with(Group::default)
+            .tests
+            .insert("it".into());
+        assert!(add_smoke(&mut sel, "-p top --test it -- a::\n").is_empty());
+        let mut whole = BTreeMap::new();
+        whole
+            .entry("top".to_string())
+            .or_insert_with(Group::default)
+            .whole = true;
+        assert!(add_smoke(&mut whole, "-p top --test it -- a::\n").is_empty());
+        // An unfiltered smoke line for the same target also covers it.
+        let mut both = BTreeMap::new();
+        let raw = add_smoke(&mut both, "-p top --test it -- a::\n-p top --test it\n");
+        assert!(raw.is_empty());
+        // Unreadable: a bare `--` is run raw.
+        let mut bad = BTreeMap::new();
+        assert_eq!(
+            add_smoke(&mut bad, "-p top --test it --\n"),
+            vec!["-p top --test it --"]
+        );
     }
 
     #[test]
