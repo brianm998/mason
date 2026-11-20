@@ -2471,6 +2471,7 @@ pub fn run_alone(
         failed: Default::default(),
         notes: vec![],
         failing: Default::default(),
+        ..Default::default()
     };
     for (name, tests) in failing {
         let red = |out: &mut OverRun, note: String| {
@@ -4634,6 +4635,7 @@ pub fn ledger_run(d: &Arc<Daemon>, task: TaskId) -> Result<String, String> {
 }
 
 /// What running suites over a batch's integration branch said.
+#[derive(Default)]
 pub struct OverRun {
     pub green: bool,
     /// The suites that were red.
@@ -4779,6 +4781,7 @@ pub fn run_over(
         failed: Default::default(),
         notes: vec![],
         failing: Default::default(),
+        ..Default::default()
     };
     for name in suites {
         let Some(suite) = def.testing.suite(name) else {
