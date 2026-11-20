@@ -322,7 +322,11 @@ pub fn note(project: &str, task: Option<u64>, name: &str, kind: &'static str, pl
     let mut m = SEEN.lock().unwrap_or_else(|e| e.into_inner());
     let at = now_ms();
     m.insert(
-        (project.to_string(), task.unwrap_or(0), format!("{kind}:{name}")),
+        (
+            project.to_string(),
+            task.unwrap_or(0),
+            format!("{kind}:{name}"),
+        ),
         Seen {
             project: project.into(),
             task,
@@ -443,10 +447,7 @@ mod tests {
         );
         row(
             "task none follows global",
-            Facts {
-                task: None,
-                ..on()
-            },
+            Facts { task: None, ..on() },
             gh("ubuntu-latest", Source::Global),
         );
         row(
