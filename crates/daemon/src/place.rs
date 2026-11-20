@@ -4,8 +4,7 @@
 //!
 //! One decision, [`decide`], from plain facts, so a table test can cover every row. The facts
 //! come from [`facts_for`]: the global switch (`remote.toml`, read live on every call, so a
-//! change needs no restart and no `project reload`), the task's own choice (#699; none until it
-//! lands), the project's `[remote]`, and the suite's `remote`, `runs_on`, environment and
+//! change needs no restart and no `project reload`), the task's own choice (#699, its `run_on` override), the project's `[remote]`, and the suite's `remote`, `runs_on`, environment and
 //! `uses`. Moving a run changes no gate: the same command is judged by the same parser and
 //! minimum.
 //!
@@ -70,7 +69,7 @@ impl Source {
 /// Everything the decision reads.
 #[derive(Clone, Debug)]
 pub struct Facts {
-    /// The task's own choice (#699); `None` until it lands, and for a run no task owns.
+    /// The task's own choice (#699); `None` for a task that has none and for a run no task owns.
     pub task: Option<Choice>,
     pub global: Global,
     /// The project's `[remote] runs_on`; `None` when the project has no `[remote]`.
@@ -280,8 +279,51 @@ pub fn status(d: &Daemon) -> Value {
 
 // ---- the facts of a real run ---------------------------------------------------------------
 
-/// The facts for a suite of a project. `task` is the task's own choice (#699).
-pub fn facts_for(d: &Daemon, project: &str, suite: &mason_testing::Suite) -> Facts {
+/// The task's own choice (#699): its `run_on` override, read live so a change applies from the
+/// next suite or check. Nothing, or a value that is not `github` or `local`, is no choice.
+pub fn task_choice(d: &Daemon, task: Option<u64>) -> Option<Choice> {
+    let v = d.store.task_overrides(task?).ok()?;
+    match v
+        .iter()
+        .find(|(k, _)| k == mason_definition::layers::RUN_ON)?
+        .1
+        .as_str()
+    {
+        "github" => Some(Choice::GitHub),
+        "local" => Some(Choice::Local),
+        _ => None,
+    }
+}
+
+/// "runs on: GitHub (task choice)" / "runs on: this Mac (global switch)": the place a task's
+/// runs go before the suite's own rules, and where that came from. For `mason task show` and
+/// the task detail the monitors read.
+pub fn effective_line(d: &Daemon, task: u64) -> Value {
+    let (choice, global) = (task_choice(d, Some(task)), read_global(d).0);
+    let (github, source) = match choice {
+        Some(c) => (c == Choice::GitHub, Source::Task),
+        None => (global == Global::GitHub, Source::Global),
+    };
+    let place = if github { "GitHub" } else { "this Mac" };
+    let from = match source {
+        Source::Task => "task choice",
+        _ => "global switch",
+    };
+    json!({
+        "where": if github { "github" } else { "local" },
+        "from": if choice.is_some() { "task" } else { "global" },
+        "line": format!("runs on: {place} ({from})"),
+    })
+}
+
+/// The facts for a suite of a project. `task` is the task whose run it is (its own choice,
+/// #699, comes from it).
+pub fn facts_for(
+    d: &Daemon,
+    project: &str,
+    task: Option<u64>,
+    suite: &mason_testing::Suite,
+) -> Facts {
     let pid = d.project_id_by_name(project);
     let device = pid.is_some_and(|p| {
         d.current_def(p)
@@ -290,7 +332,7 @@ pub fn facts_for(d: &Daemon, project: &str, suite: &mason_testing::Suite) -> Fac
             .is_some_and(|e| mason_testing::env::device_of(e).is_some())
     });
     Facts {
-        task: None,
+        task: task_choice(d, task),
         global: read_global(d).0,
         project_runs_on: pid
             .and_then(|p| d.project(p))
@@ -375,7 +417,7 @@ pub fn place_of(
     suite: &mason_testing::Suite,
     kind: &'static str,
 ) -> Place {
-    let p = decide(&facts_for(d, project, suite));
+    let p = decide(&facts_for(d, project, task, suite));
     note(project, task, &suite.name, kind, &p);
     p
 }
@@ -390,7 +432,7 @@ pub fn config_view(d: &Daemon, project: &str) -> Vec<Value> {
         .suites
         .iter()
         .map(|s| {
-            let p = decide(&facts_for(d, project, s));
+            let p = decide(&facts_for(d, project, None, s));
             json!({"suite": s.name, "where": if p.is_github() {"github"} else {"local"},
                    "text": p.text(), "from": p.from().label()})
         })
