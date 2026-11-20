@@ -11,6 +11,7 @@ use mason_daemon::update;
 use std::path::Path;
 use std::time::Duration;
 use support::lw::*;
+use support::orphans::blocking_loop;
 use support::*;
 
 const LANDING: &str = "window = \"0s\"\n[[tier]]\nname = \"batch\"\nsuites = [\"integration\"]\n";

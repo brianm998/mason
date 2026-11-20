@@ -387,7 +387,7 @@ pub mod orphans {
 }
 
 #[cfg(unix)]
-pub use orphans::{blocking_loop, claim, sweep_orphans, Owner};
+use orphans::{claim, sweep_orphans, Owner};
 
 /// Orphan sweeping needs `ps` and signals; other platforms skip it.
 #[cfg(not(unix))]

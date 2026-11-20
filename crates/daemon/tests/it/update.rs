@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+use support::orphans::blocking_loop;
 use support::*;
 
 // The copies are signed because macOS's syspolicyd adds a signature to an unsigned
