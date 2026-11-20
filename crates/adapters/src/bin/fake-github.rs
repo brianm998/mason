@@ -30,7 +30,8 @@
 //! answers with one completed, successful run (id 9001) whose branch is the `mason/run/**` ref of
 //! the bare repository named in `origin-path` that points at SHA (none: no run). Its jobs, its
 //! artifact list and the artifact's zip (the file's bytes) are answered, and
-//! `POST .../actions/runs/9001/cancel` is appended to `cancel.log`.
+//! `POST .../actions/runs/9001/cancel` is appended to `cancel.log`. While a file `run-hold`
+//! exists in DIR the run is `queued`, not completed.
 //!
 //! A comment is appended to `comments.log`; closing an issue (`PATCH`) marks it
 //! closed in `issues.json`. Every request is appended to `requests.log`.
@@ -207,9 +208,16 @@ fn serve(dir: &Path, stream: std::net::TcpStream) {
                 .nth(1)
                 .and_then(|r| r.split('&').next())
                 .unwrap_or("");
+            // While `run-hold` exists in DIR the run is still queued (#700).
+            let held = dir.join("run-hold").exists();
+            let (status, conclusion) = if held {
+                ("queued", Value::Null)
+            } else {
+                ("completed", json!("success"))
+            };
             let runs: Vec<Value> = run_branch(dir, sha)
                 .map(|branch| {
-                    json!({"id": 9001, "status": "completed", "conclusion": "success",
+                    json!({"id": 9001, "status": status, "conclusion": conclusion,
                            "head_branch": branch, "event": "push",
                            "html_url": "https://github.com/o/r/actions/runs/9001",
                            "created_at": "2026-11-20T10:00:00Z"})

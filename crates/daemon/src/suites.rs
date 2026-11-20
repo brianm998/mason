@@ -445,7 +445,7 @@ fn run_hosted_resuming(
         crate::remote::executor_for(d, project, crate::remote::Kind::Suite)
     {
         if let Some(ran) = run_remote(
-            d, project, id, cmd, cwd, limit, log_dir, &check, watch, &env, &runs_on,
+            d, project, id, cmd, cwd, limit, log_dir, &check, run, watch, &env, &runs_on,
         )? {
             return Ok(ran);
         }
@@ -529,6 +529,7 @@ fn run_remote(
     limit: Duration,
     log_dir: &Path,
     check: &Check,
+    run: Option<StepRunId>,
     watch: Option<&Suite>,
     env: &[(String, String)],
     runs_on: &str,
@@ -543,6 +544,13 @@ fn run_remote(
         Stop::Skipped => Some(rm::StopWhy::Skipped),
         Stop::Gone => Some(rm::StopWhy::Gone),
     };
+    // The units the run holds, on record until it ends, for a daemon that restarts (#700).
+    let task = run.and_then(|r| d.world().ok().and_then(|w| w.task_of_open_run(r)));
+    let (key, label) = match task {
+        Some(t) => (format!("task {}", t.0), format!("#{}", t.0)),
+        None => (id.to_string(), id.to_string()),
+    };
+    let _hold = rm::HoldGuard::new(&d.cfg.hosts_dir(), &spec, &key, &label, 1, log_dir);
     Ok(match rm::run_or_fallback(&site, &spec, log_dir, &stop)? {
         None => None,
         Some(rm::Outcome::Stopped(why)) => Some(Ran {

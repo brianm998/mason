@@ -79,6 +79,8 @@ pub struct Wait {
     pub thawed_ms: Option<u64>,
     /// `thawed_ms` is for a converted request that froze `compile` only (s681).
     pub thawed_compile: bool,
+    /// For a GitHub runner pool: (units held, limit), for "4 of 4 in use" (#700).
+    pub pool: Option<(u32, u32)>,
 }
 
 pub fn ordinal(n: usize) -> String {
@@ -361,6 +363,27 @@ fn explain_cause(w: &Wait, now_ms: u64) -> String {
         )
     };
     match &w.cause {
+        WaitCause::Full { resource } | WaitCause::Behind { resource }
+            if crate::plan::is_gha_pool(resource) =>
+        {
+            let what = if resource == crate::plan::GHA_MACOS {
+                "a GitHub macOS runner"
+            } else {
+                "a GitHub runner"
+            };
+            let mut text = format!("waiting for {what}");
+            if let Some((used, limit)) = w.pool {
+                text.push_str(&format!(": {used} of {limit} in use"));
+            }
+            let labels: Vec<String> = w.held_by.iter().map(|h| short_label(&h.label)).collect();
+            if !labels.is_empty() {
+                text.push_str(&format!(" ({})", labels.join(", ")));
+            }
+            if w.position > 1 {
+                text.push_str(&format!(", {} in line", ordinal(w.position)));
+            }
+            text
+        }
         WaitCause::Full { resource } | WaitCause::Behind { resource } => queue(w, resource),
         WaitCause::Exclusive => {
             let mut s = queue(w, "the whole machine");
@@ -499,6 +522,7 @@ mod tests {
             aged_ms: None,
             thawed_ms: None,
             thawed_compile: false,
+            pool: None,
         };
         // (wait, the code, a fragment the sentence must have)
         let cases = [
@@ -666,6 +690,7 @@ mod tests {
             aged_ms: None,
             thawed_ms: None,
             thawed_compile: false,
+            pool: None,
         }
     }
 
@@ -717,6 +742,7 @@ mod tests {
             aged_ms: None,
             thawed_ms: None,
             thawed_compile: false,
+            pool: None,
         };
         let s = explain(&w, 30_000);
         assert_eq!(

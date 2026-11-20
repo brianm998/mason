@@ -180,6 +180,20 @@ pub struct CompilePace {
 /// The resource the CPU gate applies to.
 pub const COMPILE: &str = "compile";
 
+/// The pool every GitHub Actions job a remote run uses is leased from (#700). GitHub's free plan
+/// runs 20 jobs at once per account, so MASON keeps to 16 and leaves the rest to workflows it
+/// does not start.
+pub const GHA: &str = "gha";
+
+/// The pool of the macOS jobs among them: GitHub allows 5 at once, MASON takes 4. A macOS run
+/// holds one unit of each pool.
+pub const GHA_MACOS: &str = "gha-macos";
+
+/// Whether `name` is one of the two GitHub runner pools.
+pub fn is_gha_pool(name: &str) -> bool {
+    name == GHA || name == GHA_MACOS
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Plan {
     /// In the order they were granted.
@@ -221,6 +235,11 @@ impl Usage {
             }
         }
     }
+}
+
+/// A request for the GitHub runner pools and nothing else: a remote run.
+fn only_gha_pools(n: &Needs) -> bool {
+    !n.exclusive && !n.amounts.is_empty() && n.amounts.keys().all(|k| is_gha_pool(k))
 }
 
 fn kind_of(capacity: &BTreeMap<String, Capacity>, r: &str) -> Option<Kind> {
@@ -518,7 +537,10 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
         );
         let fitted = fit(capacity, &usage, &r.needs);
         let low_memory = match (world.free_memory_mb, world.memory_floor_mb) {
-            (Some(free), Some(floor)) if usage.any && free < floor => Some((free, floor)),
+            // A remote run uses none of this machine, so memory here does not hold it (#700).
+            (Some(free), Some(floor)) if usage.any && free < floor && !only_gha_pools(&r.needs) => {
+                Some((free, floor))
+            }
             _ => None,
         };
         let compile_running = usage.used.get(COMPILE).is_some_and(|n| *n > 0);
@@ -773,7 +795,20 @@ fn build_wait(
     } else {
         None
     };
+    let pool = match &cause {
+        WaitCause::Full { resource } | WaitCause::Behind { resource } if is_gha_pool(resource) => {
+            capacity.get(resource).map(|c| {
+                let used: u32 = holders
+                    .iter()
+                    .filter_map(|h| h.needs.amounts.get(resource))
+                    .sum();
+                (used, c.units)
+            })
+        }
+        _ => None,
+    };
     Wait {
+        pool,
         blocker,
         kind: match &cause {
             WaitCause::Full { resource }
