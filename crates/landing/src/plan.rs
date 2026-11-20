@@ -166,7 +166,7 @@ pub fn pin(ids: &[u64], red: &mut dyn FnMut(&[u64]) -> bool) -> Pin {
 pub fn pin_paired(
     ids: &[u64],
     red: &mut dyn FnMut(&[u64]) -> bool,
-    pair: &mut dyn FnMut(&[u64], &[u64]) -> (bool, bool),
+    pair: PairFn,
 ) -> Pin {
     pin_with(ids, red, Some(pair))
 }
