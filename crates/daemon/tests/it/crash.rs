@@ -233,34 +233,55 @@ fn crash_at(point: &str) -> Result<(), String> {
     check_landed_exactly_once(&s, 0)
 }
 
-#[test]
-fn killing_the_daemon_at_every_effect_boundary_loses_nothing_and_repeats_nothing() {
-    let mut failures: Vec<String> = vec![];
-    // Seven at a time: each scenario has its own repository, data directory and daemon.
-    for chunk in POINTS.chunks(7) {
-        let results: Vec<(String, Result<(), String>)> = std::thread::scope(|sc| {
-            let hs: Vec<_> = chunk
-                .iter()
-                .map(|p| (p.to_string(), sc.spawn(move || crash_at(p))))
-                .collect();
-            hs.into_iter()
-                .map(|(p, h)| {
-                    (
-                        p,
-                        h.join()
-                            .unwrap_or_else(|_| Err("the scenario panicked".into())),
-                    )
-                })
-                .collect()
-        });
-        for (p, r) in results {
-            match r {
-                Ok(()) => eprintln!("ok   {p}"),
-                Err(e) => failures.push(format!("{p}: {e}")),
-            }
+/// One `#[test]` per crash point, so libtest runs each within its world limit and the shard
+/// script can place them on different shards. `GENERATED` lists the same points.
+macro_rules! crash_tests {
+    ($($name:ident => $point:literal,)*) => {
+        mod at {
+            $(
+                #[test]
+                fn $name() {
+                    if let Err(e) = super::crash_at($point) {
+                        panic!("{}: {e}", $point);
+                    }
+                }
+            )*
         }
-    }
-    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+        const GENERATED: &[&str] = &[$($point),*];
+    };
+}
+
+crash_tests! {
+    after_append_taskfiled => "after_append:TaskFiled",
+    after_append_admitted => "after_append:Admitted",
+    job_started_exploring => "job_started:Exploring",
+    accepted_persisted_1 => "accepted_persisted@1",
+    before_event_exploring => "before_event:Exploring",
+    after_append_stepsucceeded_1 => "after_append:StepSucceeded@1",
+    job_started_developing => "job_started:Developing",
+    accepted_persisted_2 => "accepted_persisted@2",
+    before_event_developing => "before_event:Developing",
+    after_append_stepsucceeded_2 => "after_append:StepSucceeded@2",
+    job_started_testing => "job_started:Testing",
+    before_event_testing => "before_event:Testing",
+    after_append_stepsucceeded_3 => "after_append:StepSucceeded@3",
+    job_started_landing => "job_started:Landing",
+    batch_formed => "batch_formed",
+    batch_merged => "batch_merged",
+    land_after_fetch => "land_after_fetch",
+    land_after_ff => "land_after_ff",
+    batch_verified => "batch_verified",
+    batch_before_promote => "batch_before_promote",
+    batch_after_promote => "batch_after_promote",
+    land_after_push => "land_after_push",
+    land_before_event => "land_before_event",
+    after_append_stepsucceeded_4 => "after_append:StepSucceeded@4",
+    land_after_event => "land_after_event",
+}
+
+#[test]
+fn every_crash_point_has_its_own_test() {
+    assert_eq!(GENERATED, POINTS, "a crash point has no generated test");
 }
 
 /// A develop step that takes a few seconds, so there is time to kill the daemon in the middle of it.

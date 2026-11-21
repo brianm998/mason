@@ -259,9 +259,43 @@ fn killing_the_daemon_at_each_landing_phase_of_a_batch_with_a_culprit_loses_and_
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));
 }
 
+/// One `#[test]` per (mode, point), so libtest runs each within its world limit and the shard
+/// script can place them on different shards. `GENERATED_CASES` lists the same pairs.
+macro_rules! ci_crash_tests {
+    ($($name:ident => ($mode:literal, $point:literal),)*) => {
+        mod ci_at {
+            $(
+                #[test]
+                fn $name() {
+                    if let Err(e) = super::run($point, $mode) {
+                        panic!("{} @ {}: {e}", $mode, $point);
+                    }
+                }
+            )*
+        }
+        const GENERATED_CASES: &[(&str, &str)] = &[$(($mode, $point)),*];
+    };
+}
+
+ci_crash_tests! {
+    direct_ci_ci_pushed => ("direct-ci", "ci_pushed"),
+    direct_ci_ci_finished => ("direct-ci", "ci_finished"),
+    direct_ci_batch_red => ("direct-ci", "batch_red"),
+    direct_ci_batch_before_promote => ("direct-ci", "batch_before_promote"),
+    direct_ci_batch_after_promote => ("direct-ci", "batch_after_promote"),
+    pr_batch_pr_pushed => ("pr-batch", "pr_pushed"),
+    pr_batch_pr_opened => ("pr-batch", "pr_opened"),
+    pr_batch_pr_checked => ("pr-batch", "pr_checked"),
+    pr_batch_batch_before_promote => ("pr-batch", "batch_before_promote"),
+    pr_batch_batch_after_promote => ("pr-batch", "batch_after_promote"),
+    host_queue_pr_opened => ("host-queue", "pr_opened"),
+    host_queue_batch_before_promote => ("host-queue", "batch_before_promote"),
+    host_queue_batch_after_promote => ("host-queue", "batch_after_promote"),
+}
+
 #[test]
-fn killing_the_daemon_during_ci_or_a_pull_request_leaves_nothing_behind_and_lands_once() {
-    let cases: &[(&str, &[&str])] = &[
+fn every_ci_crash_case_has_its_own_test() {
+    let want: &[(&str, &[&str])] = &[
         (
             "direct-ci",
             &[
@@ -287,32 +321,13 @@ fn killing_the_daemon_during_ci_or_a_pull_request_leaves_nothing_behind_and_land
             &["pr_opened", "batch_before_promote", "batch_after_promote"],
         ),
     ];
-    let jobs: Vec<(String, String)> = cases
+    let want: Vec<(&str, &str)> = want
         .iter()
-        .flat_map(|(m, ps)| ps.iter().map(move |p| (m.to_string(), p.to_string())))
+        .flat_map(|(m, ps)| ps.iter().map(move |p| (*m, *p)))
         .collect();
-    let mut failures = vec![];
-    for chunk in jobs.chunks(6) {
-        let results: Vec<(String, Result<(), String>)> = std::thread::scope(|sc| {
-            let hs: Vec<_> = chunk
-                .iter()
-                .map(|(m, p)| (format!("{m} @ {p}"), sc.spawn(move || run(p, m))))
-                .collect();
-            hs.into_iter()
-                .map(|(n, h)| {
-                    (
-                        n,
-                        h.join()
-                            .unwrap_or_else(|_| Err("the scenario panicked".into())),
-                    )
-                })
-                .collect()
-        });
-        failures.extend(
-            results
-                .into_iter()
-                .filter_map(|(n, r)| r.err().map(|e| format!("{n}: {e}"))),
-        );
-    }
-    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    assert_eq!(
+        GENERATED_CASES,
+        want.as_slice(),
+        "a case has no generated test"
+    );
 }
