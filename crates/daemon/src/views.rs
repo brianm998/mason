@@ -1380,7 +1380,6 @@ impl<'a> Ctx<'a> {
                 .map(|f| f.fix_task);
             let cfg = crate::landing::load_config(self.d, *pid).ok();
             let mut seen = std::collections::BTreeSet::new();
-            let mut histories = std::collections::HashMap::new();
             for b in &live {
                 let (index, phase) = batch_phase(&b.phase);
                 let ci = self
