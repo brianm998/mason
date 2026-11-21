@@ -814,6 +814,31 @@ const STEPS: &[&str] = &[
          at_ms   INTEGER NOT NULL,
          PRIMARY KEY (project, suite, target, key)
      );",
+    // The record of full tests (s782, decision 0775): which base commit each one tested, how it
+    // started, how it ended and where to look. A row with `finished_ms` 0 is running. Additive.
+    "CREATE TABLE full_tests (
+         id          INTEGER PRIMARY KEY AUTOINCREMENT,
+         project     TEXT NOT NULL,
+         schedule    TEXT NOT NULL,
+         commit_sha  TEXT NOT NULL,
+         trigger     TEXT NOT NULL,
+         started_ms  INTEGER NOT NULL,
+         finished_ms INTEGER NOT NULL DEFAULT 0,
+         verdict     TEXT NOT NULL DEFAULT '',
+         link        TEXT NOT NULL DEFAULT ''
+     );
+     CREATE INDEX full_tests_by_schedule ON full_tests(project, schedule, id);",
+    // 46: the last red run of a suite on a project's base branch (#774): the base it ran at,
+    // the failing tests one per line (empty when none could be named) and when. Read by the
+    // idle debt pass so a suite that was red is not run again for debts on every new tip.
+    "CREATE TABLE suite_red (
+         project TEXT NOT NULL,
+         suite   TEXT NOT NULL,
+         base    TEXT NOT NULL,
+         tests   TEXT NOT NULL,
+         at_ms   INTEGER NOT NULL,
+         PRIMARY KEY (project, suite)
+     );",
     // When each batch entered each phase (s788), so the monitor can say how long a batch has
     // been in its state and how long that state usually takes; and the split round it is in.
     // Additive.

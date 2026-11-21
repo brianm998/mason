@@ -52,7 +52,7 @@ pub struct CheckSpec {
     pub label: String,
     /// The task and suite a develop-phase `run_check` runs for, so that the one function that
     /// decides where runs go (#698) can say. `None` for everything else.
-    pub place: Option<(mason_core::TaskId, Box<mason_testing::Suite>)>,
+    pub place: Option<(Option<mason_core::TaskId>, Box<mason_testing::Suite>)>,
     /// A landing check (#702): no task owns it, so it follows the global switch alone.
     pub global: bool,
 }
@@ -466,7 +466,7 @@ pub fn where_ran(d: &Arc<Daemon>, spec: &CheckSpec) -> String {
         return local();
     };
     let exec = match spec.place.as_ref() {
-        Some((t, s)) => rm::executor_for(d, &project, rm::Kind::Check, Some((Some(*t), &**s))),
+        Some((t, s)) => rm::executor_for(d, &project, rm::Kind::Check, Some((*t, &**s))),
         None if spec.global => rm::executor_global(d, &project),
         None => rm::Executor::Local,
     };
@@ -485,7 +485,7 @@ fn runs_on_github(d: &Arc<Daemon>, spec: &CheckSpec) -> Option<String> {
     let project = rm::project_of(d, &spec.cwd)?;
     let place = spec.place.as_ref().map(|(t, s)| (*t, &**s));
     let exec = match place {
-        Some((t, s)) => rm::executor_for(d, &project, rm::Kind::Check, Some((Some(t), s))),
+        Some((t, s)) => rm::executor_for(d, &project, rm::Kind::Check, Some((t, s))),
         None if spec.global => rm::executor_global(d, &project),
         None => rm::executor_for(d, &project, rm::Kind::Check, None),
     };
@@ -516,11 +516,14 @@ fn remote_check(d: &Arc<Daemon>, spec: &CheckSpec, id: &str) -> Option<Shared> {
         .and_then(|(_, s)| s.build.as_deref())
         .filter(|b| !spec.cmd.starts_with(b));
     let site = rm::site_for(d, &project, &spec.cwd)?;
-    let rs = rm::with_build(
-        rm::spec_for(
-            &project, id, None, &spec.cmd, spec.limit, &spec.env, &runs_on, &spec.tree,
+    let rs = rm::with_site_env(
+        rm::with_build(
+            rm::spec_for(
+                &project, id, None, &spec.cmd, spec.limit, &spec.env, &runs_on, &spec.tree,
+            ),
+            build,
         ),
-        build,
+        &site,
     );
     // The units it holds, on record until it ends, for a daemon that restarts (#700).
     let _hold = rm::HoldGuard::new(
@@ -530,8 +533,12 @@ fn remote_check(d: &Arc<Daemon>, spec: &CheckSpec, id: &str) -> Option<Shared> {
         id,
         1,
         &spec.log_dir,
-        if spec.global { "batch" } else { "check" },
-        place.map_or(0, |(t, _)| t.0),
+        if spec.global || place.is_some_and(|(t, _)| t.is_none()) {
+            "batch"
+        } else {
+            "check"
+        },
+        place.and_then(|(t, _)| t).map_or(0, |t| t.0),
     );
     let note: Mutex<Option<String>> = Mutex::new(None);
     let stop = || {
