@@ -1048,7 +1048,7 @@ fn acquire_needs_as(
     // A project whose runs go to GitHub holds runner pool units for them, not this machine's
     // slots (#700). A daemon that restarted counted the units of its run still out: they are
     // this step's, and its lease takes them over.
-    let needs = match crate::remote::pool_needs(d, &c.project.id, &needs) {
+    let needs = match crate::remote::pool_needs(d, &c.project.id, &needs, Some(c.task)) {
         Some(n) => {
             d.broker.take_over_remote(&format!("task {}", c.task.0));
             n
