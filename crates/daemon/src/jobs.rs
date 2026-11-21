@@ -1986,7 +1986,7 @@ impl TestChecks {
             let limit = suite.timeout.unwrap_or(self.timeout).min(self.timeout);
             // The one function that decides where runs go (#698) is asked for this suite.
             let placed = |mut s: crate::hostedcheck::CheckSpec, suite: &mason_testing::Suite| {
-                s.place = Some((TaskId(self.task), Box::new(suite.clone())));
+                s.place = Some((Some(TaskId(self.task)), Box::new(suite.clone())));
                 s
             };
             let before = suite.command.clone();
