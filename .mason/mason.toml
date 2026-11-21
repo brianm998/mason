@@ -149,7 +149,7 @@ uses = {}
 # lint errors and five unformatted files landed in two days because neither the batch's tests nor
 # the rebuild of a skipped batch ran them (s521).
 [suite.lint]
-command = "bash scripts/check-spdx.sh && bash scripts/check-exit-guards.sh && bash scripts/check-exit-portability.sh && cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings"
+command = "bash scripts/check-spdx.sh && bash scripts/check-workflows.sh && bash scripts/check-exit-guards.sh && bash scripts/check-exit-portability.sh && cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings"
 parser = "regex"
 pass_regex = '^$'
 fail_regex = '^error'
