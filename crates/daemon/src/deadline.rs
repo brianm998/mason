@@ -65,17 +65,24 @@ impl Extender {
     }
 }
 
-/// Write the credit and grants to `path` if they changed since `last`; returns what is
-/// now on disk. The host counts its limit from when it started, so a restarted daemon
-/// that forgot the credit would stop a re-attached agent that had only been queueing.
-pub fn save(extra: &DeadlineExtra, path: &std::path::Path, last: (u64, u64)) -> (u64, u64) {
+/// Write the credit, grants and the GitHub part of the credit to `path` if they changed since
+/// `last`; returns what is now on disk. The host counts its limit from when it started, so a
+/// restarted daemon that forgot the credit would stop a re-attached agent that had only been
+/// queueing.
+pub fn save(
+    extra: &DeadlineExtra,
+    path: &std::path::Path,
+    last: (u64, u64, u64),
+) -> (u64, u64, u64) {
+    let ms = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
     let now = (
-        u64::try_from(extra.waited().as_millis()).unwrap_or(u64::MAX),
-        u64::try_from(extra.progressed().as_millis()).unwrap_or(u64::MAX),
+        ms(extra.waited()),
+        ms(extra.progressed()),
+        ms(extra.remote()),
     );
     if now != last {
         let tmp = path.with_extension("tmp");
-        if std::fs::write(&tmp, format!("{} {}\n", now.0, now.1)).is_ok() {
+        if std::fs::write(&tmp, format!("{} {} {}\n", now.0, now.1, now.2)).is_ok() {
             let _ = std::fs::rename(&tmp, path);
         }
     }
@@ -83,15 +90,20 @@ pub fn save(extra: &DeadlineExtra, path: &std::path::Path, last: (u64, u64)) -> 
 }
 
 /// Read what [`save`] wrote into `extra`; returns it. Nothing there leaves `extra` as it is.
-pub fn load(extra: &DeadlineExtra, path: &std::path::Path) -> (u64, u64) {
-    let Some((w, p)) = std::fs::read_to_string(path).ok().and_then(|t| {
+/// A file from before the GitHub part has two numbers; that part is then zero.
+pub fn load(extra: &DeadlineExtra, path: &std::path::Path) -> (u64, u64, u64) {
+    let Some((w, p, r)) = std::fs::read_to_string(path).ok().and_then(|t| {
         let mut it = t.split_whitespace().map(|x| x.parse::<u64>().ok());
-        Some((it.next()??, it.next()??))
+        let w = it.next()??;
+        let p = it.next()??;
+        let r = it.next().flatten().unwrap_or(0);
+        Some((w, p, r))
     }) else {
-        return (0, 0);
+        return (0, 0, 0);
     };
     extra.restore(Duration::from_millis(w), Duration::from_millis(p));
-    (w, p)
+    extra.restore_remote(Duration::from_millis(r));
+    (w, p, r)
 }
 
 fn secs(d: Duration) -> String {
@@ -100,25 +112,37 @@ fn secs(d: Duration) -> String {
 }
 
 /// The failure note of a step that ran out of time: how the time divided.
-/// `silent` is how long the agent had produced nothing when it was stopped.
+/// `elapsed` counts from the step's launch (not from this daemon's start); `restarted` says
+/// the daemon started again after the launch. `silent` is how long the agent had produced
+/// nothing when it was stopped.
 pub fn timeout_note(
     budget: Duration,
     elapsed: Duration,
+    restarted: bool,
     extra: &DeadlineExtra,
     silent: Duration,
     commits: usize,
 ) -> String {
     let waited = extra.waited();
+    let github = extra.remote().min(waited);
+    let queues = waited - github;
     let working = elapsed.saturating_sub(waited);
+    let restart = if restarted {
+        " The daemon restarted during the step; the time counts from the step's launch."
+    } else {
+        ""
+    };
     format!(
-        "the step ran out of time: {} of the {} budget (+{} queue credit, +{} for progress); \
-         waiting in queues (run_check, mason run) {}, working {}, silent for the last {}, \
-         {} commit(s) on the branch. Lease waits are not credited or measured here.",
+        "the step ran out of time: {} of the {} budget (+{} wait credit, +{} for progress); \
+         waiting in queues (run_check, mason run) {}, waiting on GitHub {}, working {}, \
+         silent for the last {}, {} commit(s) on the branch. Lease waits are not credited or \
+         measured here.{restart}",
         secs(elapsed),
         secs(budget),
         secs(waited),
         secs(extra.progressed()),
-        secs(waited),
+        secs(queues),
+        secs(github),
         secs(working),
         secs(silent),
         commits
@@ -172,7 +196,7 @@ mod tests {
         let a = DeadlineExtra::default();
         a.add(Duration::from_secs(7200));
         a.add_progress(H);
-        save(&a, &f, (0, 0));
+        save(&a, &f, (0, 0, 0));
         let b = DeadlineExtra::default();
         assert_eq!(load(&b, &f).0, 7_200_000);
         assert_eq!(b.waited(), 2 * H);
@@ -196,12 +220,53 @@ mod tests {
     fn the_timeout_note_names_waiting_and_working_time() {
         let extra = DeadlineExtra::default();
         extra.add(Duration::from_secs(3600));
-        let n = timeout_note(4 * H, 5 * H, &extra, Duration::from_secs(90), 3);
+        let n = timeout_note(4 * H, 5 * H, false, &extra, Duration::from_secs(90), 3);
         assert!(
-            n.contains("waiting in queues (run_check, mason run) 1h00m00s"),
+            n.contains(
+                "waiting in queues (run_check, mason run) 1h00m00s, waiting on GitHub 0h00m00s"
+            ),
             "{n}"
         );
         assert!(n.contains("working 4h00m00s"), "{n}");
         assert!(n.contains("silent for the last 0h01m30s"), "{n}");
+        assert!(!n.contains("restarted"), "{n}");
+    }
+
+    #[test]
+    fn the_note_counts_from_the_launch_names_the_restart_and_the_github_wait() {
+        let extra = DeadlineExtra::default();
+        extra.add(Duration::from_secs(600));
+        extra.add_remote(Duration::from_secs(3000));
+        // Launched 4 h ago; this daemon started 59 minutes ago. The caller passes the elapsed
+        // time from the launch, so the note says 4 h, not 59 min.
+        let n = timeout_note(4 * H, 4 * H, true, &extra, Duration::ZERO, 1);
+        assert!(n.contains("4h00m00s of the 4h00m00s budget"), "{n}");
+        assert!(
+            n.contains("waiting in queues (run_check, mason run) 0h10m00s"),
+            "{n}"
+        );
+        assert!(n.contains("waiting on GitHub 0h50m00s"), "{n}");
+        assert!(n.contains("working 3h00m00s"), "{n}");
+        assert!(n.contains("daemon restarted during the step"), "{n}");
+    }
+
+    #[test]
+    fn the_github_part_of_the_credit_survives_a_restart() {
+        let dir = std::env::temp_dir().join(format!("mason-dl-gh-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("x.kv");
+        let a = DeadlineExtra::default();
+        a.add(Duration::from_secs(5));
+        a.add_remote(Duration::from_secs(7));
+        save(&a, &path, (0, 0, 0));
+        let b = DeadlineExtra::default();
+        load(&b, &path);
+        assert_eq!(b.waited(), Duration::from_secs(12));
+        assert_eq!(b.remote(), Duration::from_secs(7));
+        // An older file with two numbers still loads.
+        std::fs::write(&path, "9000 0\n").unwrap();
+        let c = DeadlineExtra::default();
+        assert_eq!(load(&c, &path), (9000, 0, 0));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

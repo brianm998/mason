@@ -580,6 +580,18 @@ fn main() {
         });
     }
 
+    // A word that is no remote command is the typist's error, whether or not masond runs.
+    if cmd == "remote" {
+        if let Some(other) = a.rest.first().filter(|w| !w.starts_with('-')) {
+            if !matches!(other.as_str(), "on" | "off" | "status") {
+                die(&format!(
+                    "unknown remote command {other:?}: {}\n\n{HELP}",
+                    remote::COMMANDS
+                ));
+            }
+        }
+    }
+
     let d: Daemon = or_die(client::find(&data_dir));
     if cmd == "run" {
         let mut uses = resources::parse_needs(
