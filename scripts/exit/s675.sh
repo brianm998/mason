@@ -47,9 +47,11 @@ kill -KILL "$cargo_pid" 2>/dev/null
 wait "$cargo_pid" 2>/dev/null
 
 # Another test of the same binary: its first world sweeps.
-cargo test -q -p mason-daemon --test it a_failed_takeover_lets_landing_resume >"$out" 2>&1 || { echo "s675: the second test failed"; tail -20 "$out"; exit 1; }
+cargo test -q -p mason-daemon --test it a_failed_takeover_lets_landing_resume >"$out" 2>&1 || { echo "s675: the second test (a_failed_takeover_lets_landing_resume) failed"; tail -20 "$out"; exit 1; }
 
 left=$(/bin/ps -axo pid=,command= | grep -F -- "$root/" | grep -v grep || true)
-if [ -n "$left" ]; then echo "s675: processes remain under $root:"; echo "$left"; exit 1; fi
-if [ -e "$root" ]; then echo "s675: $root remains"; exit 1; fi
+if [ -n "$left" ]; then echo "s675: processes remain under $root:"; echo "$left"; tail -20 "$out"; exit 1; fi
+# Dead roots are removed on a background thread, so wait a bounded time for it.
+for _ in $(seq 1 120); do [ -e "$root" ] || break; sleep 0.5; done
+if [ -e "$root" ]; then echo "s675: $root remains after 60 s"; ls -la "$root" | head -20; tail -20 "$out"; exit 1; fi
 echo "s675: ok, $root and its hosts are gone"
