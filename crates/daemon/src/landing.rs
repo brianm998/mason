@@ -3149,7 +3149,7 @@ impl Runner {
                     let (d, m) = (d.clone(), members.clone());
                     Arc::new(move || m.forced(&d))
                 }),
-                place: Some((None, Box::new(suite.clone()))),
+                place: Some((None, Box::new(crate::hostedcheck::without_build(suite)))),
                 global: false,
             };
             match crate::hostedcheck::run(d, &spec) {
@@ -3295,7 +3295,9 @@ impl Runner {
                     Arc::new(move || m.forced(&d)) as crate::hostedcheck::StopFn
                 }),
                 place: match (github, self.member_tasks.first()) {
-                    (true, Some(t)) => Some((Some(*t), Box::new(suite.clone()))),
+                    (true, Some(t)) => {
+                        Some((Some(*t), Box::new(crate::hostedcheck::without_build(suite))))
+                    }
                     _ => None,
                 },
                 global: false,
@@ -3514,7 +3516,7 @@ impl Runner {
                 }),
                 // #815: the suite's own placement (its `runs_on`, `remote = false`, device rules)
                 // decides; no task owns a batch.
-                place: Some((None, Box::new(suite.clone()))),
+                place: Some((None, Box::new(crate::hostedcheck::without_build(suite)))),
                 global: false,
             };
             match crate::hostedcheck::run(d, &spec) {
