@@ -12,32 +12,36 @@ ls -d /tmp/ms* 2>/dev/null | sort >"$before"
 # Build once, so the killed run starts at once.
 cargo test -q -p mason-daemon --test it --no-run >/dev/null 2>&1 || { echo "s675: build failed"; exit 1; }
 
-cargo test -q -p mason-daemon --test it a_takeover_waits_for_running_landing_batches >"$out" 2>&1 &
-cargo_pid=$!
-# Partway: the test binary is the `it` binary (cargo may be wrapped, so not necessarily its
-# child) that holds a new root's owner.lock, with a host under that root. Other runs on this
-# machine make roots too; their lock pids name other binaries or are not `it` runs of ours.
-# Wait on the run itself, not a clock: on a loaded machine the world first waits up to ten
-# minutes for a shared world slot. A run that ends without one is reported below.
-root=""
-tpid=""
-while kill -0 "$cargo_pid" 2>/dev/null; do
-  for r in $(ls -d /tmp/ms* 2>/dev/null | sort | comm -13 "$before" -); do
-    p=$(cat "$r/owner.lock" 2>/dev/null)
-    [ -n "$p" ] || continue
-    /bin/ps -o command= -p "$p" 2>/dev/null | grep -q '/deps/it-' || continue
-    # Ours: a descendant of the cargo job we started.
-    q=$p
-    ours=0
-    for _ in 1 2 3 4 5 6; do
-      q=$(/bin/ps -o ppid= -p "$q" 2>/dev/null | tr -d ' ')
-      [ -n "$q" ] || break
-      [ "$q" = "$cargo_pid" ] && { ours=1; break; }
+root=""; tpid=""
+# The window is a few seconds on a fast machine: a run that ends before it was seen is run again.
+for attempt in 1 2 3; do
+  cargo test -q -p mason-daemon --test it a_takeover_waits_for_running_landing_batches >"$out" 2>&1 &
+  cargo_pid=$!
+  # Partway: the test binary is the `it` binary (cargo may be wrapped, so not necessarily its
+  # child) that holds a new root's owner.lock, with a host under that root. Other runs on this
+  # machine make roots too; their lock pids name other binaries or are not `it` runs of ours.
+  # Wait on the run itself, not a clock: on a loaded machine the world first waits up to ten
+  # minutes for a shared world slot. A run that ends without one is reported below.
+  while kill -0 "$cargo_pid" 2>/dev/null; do
+    for r in $(ls -d /tmp/ms* 2>/dev/null | sort | comm -13 "$before" -); do
+      p=$(cat "$r/owner.lock" 2>/dev/null)
+      [ -n "$p" ] || continue
+      /bin/ps -o command= -p "$p" 2>/dev/null | grep -q '/deps/it-' || continue
+      # Ours: a descendant of the cargo job we started.
+      q=$p
+      ours=0
+      for _ in 1 2 3 4 5 6; do
+        q=$(/bin/ps -o ppid= -p "$q" 2>/dev/null | tr -d ' ')
+        [ -n "$q" ] || break
+        [ "$q" = "$cargo_pid" ] && { ours=1; break; }
+      done
+      [ "$ours" = 1 ] || continue
+      if /bin/ps -axo command= | grep -F -- "/tmp/$(basename "$r")/" | grep -q -e '--dir' -e '--data-dir'; then root=$r; tpid=$p; break 2; fi
     done
-    [ "$ours" = 1 ] || continue
-    if /bin/ps -axo command= | grep -F -- "/tmp/$(basename "$r")/" | grep -q -e '--dir' -e '--data-dir'; then root=$r; tpid=$p; break 2; fi
+    sleep 0.1
   done
-  sleep 0.5
+  [ -n "$root" ] && break
+  echo "s675: attempt $attempt ended before a blocking world appeared"; tail -5 "$out"
 done
 [ -n "$root" ] || { echo "s675: the run ended before a blocking world appeared"; tail -20 "$out"; exit 1; }
 echo "killing the run whose root is $root"
