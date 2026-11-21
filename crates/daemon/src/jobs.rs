@@ -1963,7 +1963,7 @@ impl TestChecks {
                 .map(|p| crate::suites::split_for_suite(&def, &sel.suite, p).0);
             let limit = suite.timeout.unwrap_or(self.timeout).min(self.timeout);
             // The one function that decides where runs go (#698) is asked for this suite.
-            let placed = |mut s: crate::hostedcheck::CheckSpec| {
+            let placed = |mut s: crate::hostedcheck::CheckSpec, suite: &mason_testing::Suite| {
                 s.place = Some((TaskId(self.task), Box::new(suite.clone())));
                 s
             };
@@ -2122,12 +2122,15 @@ impl TestChecks {
                         ok
                     }
                     None => {
-                        let bspec = placed(spec(
-                            format!("{}-{name}-build", self.id_prefix),
-                            b,
-                            &build_uses(),
-                            limit,
-                        ));
+                        let bspec = placed(
+                            spec(
+                                format!("{}-{name}-build", self.id_prefix),
+                                b,
+                                &build_uses(),
+                                limit,
+                            ),
+                            &suite,
+                        );
                         let queue = !crate::hostedcheck::pending(&self.slots.d, &bspec);
                         self.phase(mason_core::checks::CheckPhase::Waiting);
                         let merges = self.reds.merges();
@@ -2141,12 +2144,15 @@ impl TestChecks {
                         let bspec = if self.reds.merges() == merges {
                             bspec
                         } else {
-                            placed(spec(
-                                format!("{}-{name}-build", self.id_prefix),
-                                b,
-                                &build_uses(),
-                                limit,
-                            ))
+                            placed(
+                                spec(
+                                    format!("{}-{name}-build", self.id_prefix),
+                                    b,
+                                    &build_uses(),
+                                    limit,
+                                ),
+                                &suite,
+                            )
                         };
                         self.phase(mason_core::checks::CheckPhase::Building);
                         self.phase(mason_core::checks::CheckPhase::Building);
@@ -2188,12 +2194,15 @@ impl TestChecks {
             if small && suite.command != before {
                 uses = small_lane(&def, uses);
             }
-            let rspec = placed(spec(
-                format!("{}-{name}", self.id_prefix),
-                &suite.command,
-                &uses,
-                limit,
-            ));
+            let rspec = placed(
+                spec(
+                    format!("{}-{name}", self.id_prefix),
+                    &suite.command,
+                    &uses,
+                    limit,
+                ),
+                &suite,
+            );
             let queue = !crate::hostedcheck::pending(&self.slots.d, &rspec);
             self.phase(mason_core::checks::CheckPhase::Waiting);
             let merges = self.reds.merges();
@@ -2207,12 +2216,15 @@ impl TestChecks {
             let rspec = if self.reds.merges() == merges {
                 rspec
             } else {
-                placed(spec(
-                    format!("{}-{name}", self.id_prefix),
-                    &suite.command,
-                    &uses,
-                    limit,
-                ))
+                placed(
+                    spec(
+                        format!("{}-{name}", self.id_prefix),
+                        &suite.command,
+                        &uses,
+                        limit,
+                    ),
+                    &suite,
+                )
             };
             self.phase(mason_core::checks::CheckPhase::Running);
             let usual = self.estimate(&name, "run").unwrap_or(0);
