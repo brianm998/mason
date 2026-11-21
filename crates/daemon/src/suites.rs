@@ -1823,6 +1823,7 @@ fn run_suite(
         .and_then(|t| crate::knownred::skip_command(t, &quarantined));
     let limit = suite.timeout.unwrap_or(Duration::from_secs(1800));
     let mut attempt = 0u32;
+    let mut remote_env_fails = 0u32;
     let mut waiting = false;
     loop {
         // A skip may arrive at any time, even before the suite starts.
@@ -1941,7 +1942,13 @@ fn run_suite(
                 );
                 waiting = true;
                 attempt += 1;
-                std::thread::sleep(d.cfg.env_retry);
+                // A runner that fails the same way again and again is not helped by trying at
+                // once: wait twice as long each time.
+                remote_env_fails += 1;
+                std::thread::sleep(crate::remote::env_backoff(
+                    d.cfg.env_retry,
+                    remote_env_fails - 1,
+                ));
                 continue;
             }
             Err(e) => {
