@@ -173,6 +173,13 @@ fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
+/// Does `text` read the repository's own copy of a `.mason/` file? A fixture
+/// that writes its own `.mason/mason.toml` does not; one that names
+/// `../../<path>` or `root().join("<path>")` does.
+fn reads_repo_file(text: &str, path: &str) -> bool {
+    text.contains(&format!("../../{path}")) || text.contains(&format!("root().join(\"{path}\")"))
+}
+
 /// Does `text` hold `word` as a whole identifier?
 pub fn contains_word(text: &str, word: &str) -> bool {
     if word.is_empty() {
@@ -514,6 +521,8 @@ pub fn select_with(
                     .or_insert_with(|| target_text(t, files, read));
                 let hit = if only.is_some() && !tokens.is_empty() {
                     tokens.iter().any(|w| contains_word(text, w))
+                } else if path.starts_with(".mason/") {
+                    reads_repo_file(text, path)
                 } else {
                     text.contains(path.as_str()) || text.contains(file)
                 };
@@ -917,6 +926,42 @@ mod tests {
             fx.pick(&[".github/workflows/ci.yml"]),
             Pick::Some(BTreeMap::new())
         );
+    }
+
+    #[test]
+    fn a_mason_file_selects_only_the_targets_that_read_the_repository_copy() {
+        let mut fx = Fx::new();
+        for f in ["crates/top/tests/plain.rs", "crates/leaf/tests/own.rs"] {
+            fx.files.insert(
+                f.into(),
+                "std::fs::write(d.join(\".mason/mason.toml\"), \"x\");".into(),
+            );
+        }
+        fx.files.insert(
+            "crates/top/tests/names.rs".into(),
+            "include_str!(\"../../../.mason/mason.toml\");".into(),
+        );
+        assert_eq!(
+            fx.rendered(&[".mason/mason.toml"]),
+            vec!["-p top --test names"]
+        );
+        fx.files.insert(
+            "crates/top/tests/uses.rs".into(),
+            "std::fs::read_to_string(root().join(\".mason/mason.toml\"));".into(),
+        );
+        assert_eq!(
+            fx.rendered(&[".mason/mason.toml"]),
+            vec!["-p top --test names --test uses"]
+        );
+        // Outside `.mason/` the bare file name still matches.
+        fx.files.insert(
+            "crates/top/tests/tpl.rs".into(),
+            "write(\"mason.toml\");".into(),
+        );
+        assert!(fx
+            .rendered(&["templates/x/mason.toml"])
+            .iter()
+            .any(|r| r.contains("--test tpl")));
     }
 
     #[test]
