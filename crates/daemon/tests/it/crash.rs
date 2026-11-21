@@ -264,10 +264,10 @@ fn killing_the_daemon_at_every_effect_boundary_loses_nothing_and_repeats_nothing
 }
 
 /// A develop step that takes a few seconds, so there is time to kill the daemon in the middle of it.
-fn slow_develop_script() -> Value {
+fn slow_develop_script(sleep_ms: u64) -> Value {
     json!({"steps": {"explore": [explore_turn()], "develop": [[
         {"sh": TASK_SCRIPT_COMMIT},
-        {"sleep_ms": 60000},
+        {"sleep_ms": sleep_ms},
         {"call": {"tool": "submit_change", "args": {"summary": "done after a wait", "head": "$HEAD"}}}
     ]]}})
 }
@@ -283,7 +283,7 @@ fn running_hosts(s: &Scratch) -> Vec<mason_step_host::registry::HostStatus> {
 
 #[test]
 fn kill_9_in_the_middle_of_an_agent_session_loses_nothing() {
-    let s = Scratch::new("test -f hello.txt", slow_develop_script());
+    let s = Scratch::new("test -f hello.txt", slow_develop_script(60_000));
     let mut m = s.masond(&[], &[]);
     s.wait_daemon(&mut m);
     s.mason_ok(&["task", "add", "Slow develop"]);
@@ -402,7 +402,7 @@ fn kill_9_in_the_middle_of_a_test_run_loses_nothing() {
 fn a_task_that_finished_while_the_daemon_was_down_is_picked_up_on_restart() {
     // The agent finishes its work and submits while nobody is listening; it waits (retrying)
     // for the daemon, and the session resumes the moment a new daemon is up.
-    let s = Scratch::new("test -f hello.txt", slow_develop_script());
+    let s = Scratch::new("test -f hello.txt", slow_develop_script(4000));
     let mut m = s.masond(&[], &[]);
     s.wait_daemon(&mut m);
     s.mason_ok(&["task", "add", "Finishes while down"]);
