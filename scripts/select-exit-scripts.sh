@@ -7,10 +7,14 @@
 # of a changed integration-test target. Docs-only changes select nothing.
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)"
-base=${1:?usage: select-exit-scripts.sh BASE_COMMIT}
+base=${1-}
+# A remote run's checkout is shallow and has no base; MASON writes the change's files into the
+# snapshot (s759), and that list is used instead of a diff.
+list=.mason/changed-files.txt
+[ -f "$list" ] || [ -n "$base" ] || { echo "usage: select-exit-scripts.sh BASE_COMMIT" >&2; exit 2; }
 all=$(ls scripts/exit/*.sh 2>/dev/null | grep -Ev -- '-(real|manual)\.sh$' || true)
 [ -n "$all" ] || exit 0
-changed=$(git diff --name-only --diff-filter=ACDMRT "$base" HEAD)
+if [ -f "$list" ]; then changed=$(cat "$list"); else changed=$(git diff --name-only --diff-filter=ACDMRT "$base" HEAD); fi
 sel=$(mktemp); trap 'rm -f "$sel"' EXIT
 pick() { # pick FIXED_STRING | pick -E REGEX
   local s

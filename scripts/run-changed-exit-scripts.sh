@@ -13,11 +13,10 @@ set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 cd "$(git rev-parse --show-toplevel)"
 base_ref=${MASON_BASE:-origin/develop}
-if ! base=$(git merge-base "$base_ref" HEAD 2>/dev/null) \
-  && ! { [ "$(git rev-parse --is-shallow-repository)" = true ] \
-         && git fetch --quiet --unshallow origin >/dev/null 2>&1 \
-         && base=$(git merge-base "$base_ref" HEAD 2>/dev/null); }; then
-  # A hosted run checks out one commit (fetch-depth 1), so the base is missing until the history is fetched (#754).
+if [ -f .mason/changed-files.txt ]; then
+  # A remote run: the checkout is shallow, so MASON listed the change's files (s759).
+  base=
+elif ! base=$(git merge-base "$base_ref" HEAD 2>/dev/null); then
   echo "FAIL no-merge-base-with-$base_ref"
   exit 1
 fi
