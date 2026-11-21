@@ -98,6 +98,9 @@ struct State {
     /// A self-update is waiting for the running batches to finish: no new batch starts and
     /// the queues keep what they hold. It only holds batches back; it never changes a verdict.
     draining: bool,
+    /// Per project, the tasks the queue is collecting for: still moving toward landing while a
+    /// batch waits out its window. Empty when nothing waits on anyone.
+    collecting: HashMap<ProjectId, Vec<u64>>,
 }
 
 impl State {
@@ -151,6 +154,11 @@ impl Landing {
 
     pub fn idle_ms(&self, p: ProjectId) -> u64 {
         self.lock().idle_ms.get(&p).copied().unwrap_or(0)
+    }
+
+    /// The tasks a waiting batch is held for (still moving toward landing), as of the last look.
+    pub fn collecting(&self, p: ProjectId) -> Vec<u64> {
+        self.lock().collecting.get(&p).cloned().unwrap_or_default()
     }
 
     pub fn queued(&self, p: ProjectId) -> Vec<TaskId> {
@@ -924,6 +932,13 @@ fn form_and_start(
         start(d, pid, vec![w], cfg.clone(), &kind);
     }
     let now = landing_clock(d);
+    let moving = moving_tasks(d, pid);
+    // `moving.len()` is what the plan sees; the setting makes the window always count.
+    let others = if d.cfg.landing_window_always {
+        moving.len().max(1)
+    } else {
+        moving.len()
+    };
     let mut next_wait = None;
     let mut guard = 0;
     loop {
@@ -933,10 +948,11 @@ fn form_and_start(
         } else {
             cfg.max_size
         };
-        match plan::form_batch(&normal, now, cfg.window, max_size) {
+        match plan::form_batch(&normal, now, cfg.window, max_size, others) {
             Formation::Empty => break,
             Formation::Wait(t) => {
-                next_wait = Some(t);
+                // Look again soon: a task that stops moving has no event to wake this.
+                next_wait = Some(t.min(Duration::from_secs(1)));
                 break;
             }
             Formation::Form(ids) => {
@@ -968,8 +984,49 @@ fn form_and_start(
             break;
         }
     }
+    {
+        let mut g = d.landing.lock();
+        if next_wait.is_some() {
+            g.collecting.insert(pid, moving);
+        } else {
+            g.collecting.remove(&pid);
+        }
+    }
     let left = d.landing.lock().waiting.get(&pid).map_or(0, Vec::len);
     (left, next_wait)
+}
+
+/// The project's tasks that are still on their way to landing: in a step that can lead there,
+/// not held behind a blocker, paused, failed, proposed or deferred, and neither in the landing
+/// queue nor in a running batch. A batch waits out its window only while there are any.
+fn moving_tasks(d: &Daemon, pid: ProjectId) -> Vec<u64> {
+    let Ok(w) = d.world() else {
+        return vec![]; // nothing known to wait for
+    };
+    let g = d.landing.lock();
+    let queued: HashSet<TaskId> = g
+        .waiting
+        .get(&pid)
+        .map(|v| v.iter().map(|x| x.task).collect())
+        .unwrap_or_default();
+    let mut v: Vec<u64> = w
+        .tasks
+        .values()
+        .filter(|t| t.project == pid && !t.paused)
+        .filter(|t| !queued.contains(&t.id) && !g.owed.contains(&t.id))
+        .filter(|t| match t.state {
+            mason_core::State::Exploring
+            | mason_core::State::Developing
+            | mason_core::State::Testing
+            | mason_core::State::Review
+            | mason_core::State::Landing => true,
+            mason_core::State::Queued => t.blockers.is_empty(),
+            _ => false,
+        })
+        .map(|t| t.id.0)
+        .collect();
+    v.sort_unstable();
+    v
 }
 
 fn take(d: &Daemon, pid: ProjectId, task: TaskId) {
@@ -1877,6 +1934,7 @@ impl Runner {
                     &int_wt,
                     &log_dir,
                     &format!("b{batch_id}-r{rounds}-lintblame"),
+                    floor,
                 ) {
                     let blamed = blame_by_files(&files, &active, &self.fps);
                     if !blamed.is_empty() {
@@ -3142,6 +3200,7 @@ impl Runner {
         wt: &Path,
         log_dir: &Path,
         prefix: &str,
+        floor_red: bool,
     ) -> Option<Vec<String>> {
         let tier_suites: Vec<String> = self
             .cfg
@@ -3152,6 +3211,14 @@ impl Runner {
             return None;
         }
         if vr.failed.iter().all(|f| tier_suites.contains(f)) {
+            let f = self
+                .lint_files
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            return Some(f);
+        }
+        if floor_red && !vr.failed.is_empty() {
             let f = self
                 .lint_files
                 .lock()
@@ -3210,19 +3277,9 @@ impl Runner {
                 out.notes.push(format!("{name}: not run: {why}"));
                 continue;
             }
-            let _lease = match self.hold(
-                def,
-                crate::sched::needs_of(&crate::jobs::build_uses(), None),
-                true,
-            ) {
-                Ok(l) => l,
-                Err(e) => {
-                    self.fail_service(e.clone());
-                    out.green = false;
-                    out.notes.push(e);
-                    return out;
-                }
-            };
+            // #811: the lint tier runs on this Mac unless the tier says `where = "github"`;
+            // then the suite's own `remote`/`runs_on` decide, as for any suite.
+            let github = tier.place.as_deref() == Some("github");
             let spec = crate::hostedcheck::CheckSpec {
                 id_prefix: format!("{prefix}-lint-{name}"),
                 log_dir: log_dir.to_path_buf(),
@@ -3237,24 +3294,58 @@ impl Runner {
                     let (d, m) = (d.clone(), members.clone());
                     Arc::new(move || m.forced(&d)) as crate::hostedcheck::StopFn
                 }),
-                place: None,
-                global: true,
+                place: match (github, self.member_tasks.first()) {
+                    (true, Some(t)) => Some((*t, Box::new(suite.clone()))),
+                    _ => None,
+                },
+                global: false,
+            };
+            let remote = github && crate::hostedcheck::goes_remote(d, &spec);
+            // Work that goes to GitHub holds no local slot while it waits there.
+            let _lease = if remote {
+                None
+            } else {
+                match self.hold(
+                    def,
+                    crate::sched::needs_of(&crate::jobs::build_uses(), None),
+                    true,
+                ) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        self.fail_service(e.clone());
+                        out.green = false;
+                        out.notes.push(e);
+                        return out;
+                    }
+                }
+            };
+            let began = std::time::Instant::now();
+            let ran_on = if remote { "on GitHub" } else { "on this Mac" };
+            let took = |s: u64| {
+                if s >= 60 {
+                    format!("{}m{:02}s", s / 60, s % 60)
+                } else {
+                    format!("{s}s")
+                }
             };
             match crate::hostedcheck::run(d, &spec) {
                 Ok(o) if o.stopped.is_some() => out.notes.push(format!(
                     "{name}: not run to the end: {}",
                     o.stopped.unwrap_or_default()
                 )),
-                Ok(o) if o.passed => out.notes.push(format!("{name}: clean")),
+                Ok(o) if o.passed => out.notes.push(format!(
+                    "{name}: clean ({ran_on}, {})",
+                    took(began.elapsed().as_secs())
+                )),
                 Ok(o) => {
                     out.green = false;
                     out.failed.insert(name.clone());
                     *self.lint_files.lock().unwrap_or_else(|e| e.into_inner()) =
-                        lint_files(&o.output);
+                        lint_files(&o.full);
                     out.notes.push(format!(
-                        "{name}: the batch is not lint clean{}{}\n{}",
+                        "{name}: the batch is not lint clean ({ran_on}){}{}\n{}",
                         if o.timed_out { " (timed out)" } else { "" },
-                        lint_places(&o.output),
+                        lint_places(&o.full),
                         crate::jobs::tail(&o.output, 15)
                     ));
                 }
@@ -3433,13 +3524,17 @@ impl Runner {
                 Ok(o) => {
                     out.green = false;
                     out.failed.insert(name.clone());
+                    // A build error names `--> file:line` too: the floor blames by file.
+                    *self.lint_files.lock().unwrap_or_else(|e| e.into_inner()) =
+                        lint_files(&o.full);
                     out.notes.push(format!(
-                        "{name}: {what} does not build{}\n{}",
+                        "{name}: {what} does not build{}{}\n{}",
                         if o.timed_out {
                             " (the build timed out)"
                         } else {
                             ""
                         },
+                        lint_places(&o.full),
                         crate::jobs::tail(&o.output, 15)
                     ));
                 }
@@ -4839,9 +4934,31 @@ fn is_gate_test(name: &str) -> bool {
     n == "workspace_is_fmt_clean" || n.contains("spdx")
 }
 
+/// `s` without ANSI escape sequences (CSI `ESC [ ... final`, and other two-byte escapes):
+/// GitHub's runs colour cargo's output, which hides `-->` from the line parsers.
+pub(crate) fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.chars();
+    while let Some(c) = it.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        if it.next() == Some('[') {
+            for n in it.by_ref() {
+                if ('\u{40}'..='\u{7e}').contains(&n) {
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
+
 /// The distinct files a lint's output names, without lines: rustfmt's `Diff in file:line`
 /// and clippy's `--> file:line:col`.
 fn lint_files(output: &str) -> Vec<String> {
+    let output = strip_ansi(output);
     let mut v: Vec<String> = vec![];
     for l in output.lines() {
         let t = l.trim();
@@ -4890,6 +5007,7 @@ fn blame_by_files(
 /// The `file:line` places a lint's output points at: clippy's `--> file:line:col` and
 /// rustfmt's `Diff in file:line`. At most ten, as ` (at a.rs:1, b.rs:2)`; empty when none.
 fn lint_places(output: &str) -> String {
+    let output = strip_ansi(output);
     let mut seen: Vec<String> = vec![];
     for l in output.lines() {
         let t = l.trim();
@@ -4925,6 +5043,23 @@ fn lint_places(output: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lint_parsers_read_coloured_output_and_rustfmt_diffs() {
+        let out = "\x1b[1m\x1b[91merror\x1b[0m: x\n  \x1b[1m\x1b[94m--> \x1b[0mcrates/a/b.rs:969:42\nDiff in c/d.rs:3:\n";
+        assert_eq!(lint_files(out), vec!["crates/a/b.rs", "c/d.rs"]);
+        assert_eq!(lint_places(out), " (at crates/a/b.rs:969, c/d.rs:3)");
+    }
+
+    #[test]
+    fn a_file_far_from_the_end_is_found_in_the_full_output() {
+        let mut out = String::from("\x1b[94m--> \x1b[0mfar/away.rs:1:2\n");
+        for i in 0..100 {
+            out.push_str(&format!("note {i}\n"));
+        }
+        assert_eq!(lint_files(&out), vec!["far/away.rs"]);
+        assert!(lint_files(&crate::jobs::tail(&out, 40)).is_empty());
+    }
 
     #[test]
     fn lint_places_names_the_files_and_lines_of_clippy_and_rustfmt() {
@@ -4964,11 +5099,11 @@ mod tests {
             footprint: Footprint::default(),
         };
         assert!(matches!(
-            plan::form_batch(&[cand(4000)], clock, window, 0),
+            plan::form_batch(&[cand(4000)], clock, window, 0, 1),
             Formation::Form(_)
         ));
         assert!(matches!(
-            plan::form_batch(&[cand(0)], clock, window, 0),
+            plan::form_batch(&[cand(0)], clock, window, 0, 1),
             Formation::Wait(_)
         ));
     }

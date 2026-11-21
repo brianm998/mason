@@ -580,6 +580,18 @@ fn main() {
         });
     }
 
+    // A word that is no remote command is the typist's error, whether or not masond runs.
+    if cmd == "remote" {
+        if let Some(other) = a.rest.first().filter(|w| !w.starts_with('-')) {
+            if !matches!(other.as_str(), "on" | "off" | "status") {
+                die(&format!(
+                    "unknown remote command {other:?}: {}\n\n{HELP}",
+                    remote::COMMANDS
+                ));
+            }
+        }
+    }
+
     let d: Daemon = or_die(client::find(&data_dir));
     if cmd == "run" {
         let mut uses = resources::parse_needs(
@@ -2551,6 +2563,24 @@ fn main() {
                     p["running_batches"],
                     p["queue_idle_ms"].as_u64().unwrap_or(0) / 1000
                 );
+                let queued = p["queued"].as_array().map_or(0, Vec::len);
+                let moving: Vec<String> = p["collecting_for"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|t| t.as_u64().map(|t| format!("#{t}")))
+                    .collect();
+                if queued > 0 && p["running_batches"].as_u64().unwrap_or(0) == 0 {
+                    if moving.is_empty() {
+                        println!("  forming now: nothing else is moving");
+                    } else {
+                        println!(
+                            "  collecting for {} s while {} still moving",
+                            p["queue_idle_ms"].as_u64().unwrap_or(0) / 1000,
+                            moving.join(", ")
+                        );
+                    }
+                }
             }
             for f in r["freezes"].as_array().into_iter().flatten() {
                 println!(
