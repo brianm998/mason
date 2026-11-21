@@ -44,6 +44,7 @@ mod hosted_check;
 mod idle;
 mod introspection_policy;
 mod landing;
+mod landing_collect;
 mod landing_crash;
 mod landing_floor;
 mod landing_modes;

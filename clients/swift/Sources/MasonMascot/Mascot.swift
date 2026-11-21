@@ -4,6 +4,7 @@
 // an id (or size) that is not in the manifest gives nil, never a crash. Every image is
 // decorative: callers put `.accessibilityHidden(true)` on it.
 
+#if canImport(SwiftUI)
 import Foundation
 import SwiftUI
 
@@ -196,3 +197,4 @@ public enum Mascot {
         return ok
     }
 }
+#endif

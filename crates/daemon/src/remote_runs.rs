@@ -9,7 +9,7 @@
 //! Jobs are read by the run's own poll (`remote::poll`), never by a second loop here.
 
 use crate::daemon::{now_ms, Daemon};
-use mason_protocol::{RemoteJob, RemoteRun, RemoteRuns};
+use mason_protocol::{GithubJob, GithubRun, GithubRunList};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -60,12 +60,12 @@ fn classify(id: &str, key: &str, kind: &str) -> (u64, String, String) {
         .and_then(|n| n.parse::<u64>().ok())
         .or_else(|| crate::sweep::parse_host_id(id).map(|(t, _)| t));
     if let Some(n) = task {
-        let owner = if kind == "debt payment" {
+        let owner = if kind == "debt" {
             format!("debt #{n}")
         } else {
             format!("#{n}")
         };
-        return (n, owner, kind.to_string());
+        return (n, owner, shown(kind));
     }
     match crate::sweep::parse_batch_host_id(id) {
         Some(n) => {
@@ -76,8 +76,20 @@ fn classify(id: &str, key: &str, kind: &str) -> (u64, String, String) {
             };
             (0, format!("b{n}"), k.to_string())
         }
-        None => (0, id.to_string(), kind.to_string()),
+        None if kind == "debt" => (0, id.to_string(), shown(kind)),
+        None => (0, id.to_string(), shown(kind)),
     }
+}
+
+/// The words for a run's kind: the holds say `check`, `test_step`, `batch` or `debt`.
+fn shown(kind: &str) -> String {
+    match kind {
+        "check" => "agent check",
+        "test_step" => "test step",
+        "debt" => "debt payment",
+        k => k,
+    }
+    .to_string()
 }
 
 /// A request for a pool unit that has not been granted: removed when dropped.
@@ -178,7 +190,7 @@ pub fn set_jobs(record: &Path, jobs: Vec<Job>) {
 
 /// The record's stage, for the run's own line.
 fn stage(record: &Path) -> (String, String, Option<u64>) {
-    match crate::remote::record_view(record) {
+    match crate::remote::run_stage(record) {
         Some(v) => v,
         None => ("queued".into(), String::new(), None),
     }
@@ -197,7 +209,7 @@ pub fn view(
     d: &Daemon,
     rows: &dyn Fn(u64) -> Option<(String, String, String, String)>,
     project: &str,
-) -> RemoteRuns {
+) -> GithubRunList {
     let now = now_ms();
     let scope = d.cfg.hosts_dir().display().to_string();
     let enabled = crate::remote::any_remote(d);
@@ -216,7 +228,7 @@ pub fn view(
     // (the order they asked), then the finished.
     let rank = |e: &Entry| (e.finished_ms.is_some() as u8, e.waiting as u8, e.since_ms);
     mine.sort_by_key(rank);
-    let runs: Vec<RemoteRun> = mine
+    let runs: Vec<GithubRun> = mine
         .iter()
         .map(|e| {
             let (title, task_state, activity, project_name) = rows(e.task).unwrap_or_default();
@@ -239,10 +251,10 @@ pub fn view(
             } else {
                 now.saturating_sub(since) / 1000
             };
-            let jobs: Vec<RemoteJob> = e
+            let jobs: Vec<GithubJob> = e
                 .jobs
                 .iter()
-                .map(|j| RemoteJob {
+                .map(|j| GithubJob {
                     name: j.name.clone(),
                     state: j.state.clone(),
                     conclusion: j.conclusion.clone(),
@@ -271,7 +283,7 @@ pub fn view(
                 }
                 p
             };
-            RemoteRun {
+            GithubRun {
                 id: e.id.clone(),
                 task: e.task,
                 title,
@@ -295,7 +307,7 @@ pub fn view(
     let used = d.broker.used(mason_scheduler::GHA);
     let limit = d.broker.limit(mason_scheduler::GHA).unwrap_or(0);
     let waiting = runs.iter().filter(|r| r.state == "waiting").count() as u32;
-    RemoteRuns {
+    GithubRunList {
         enabled,
         pool_used: used,
         pool_limit: limit,

@@ -653,6 +653,8 @@ pub struct ActionsRun {
     pub created_ms: u64,
     /// `None`: not finished.
     pub conclusion: Option<String>,
+    /// `push`, `workflow_dispatch`, ...
+    pub event: String,
 }
 
 /// One run of a named workflow, finished or not, as a scheduled CI run needs it (s175).
@@ -733,6 +735,7 @@ impl GitHub {
                     url: r["html_url"].as_str().unwrap_or_default().to_string(),
                     created_ms: iso_ms(r["created_at"].as_str().unwrap_or_default()),
                     conclusion: r["conclusion"].as_str().map(String::from),
+                    event: r["event"].as_str().unwrap_or_default().to_string(),
                 })
             })
             .collect())
@@ -1136,6 +1139,9 @@ fn action_run(v: &Value) -> Option<ActionRun> {
     })
 }
 
+/// The jobs of a run and the ETag of the answer.
+pub type JobsAnswer = (Vec<ActionJob>, Option<String>);
+
 /// A job of a run: whether a runner has taken it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ActionJob {
@@ -1144,8 +1150,40 @@ pub struct ActionJob {
     pub started_at: Option<String>,
     /// success, failure, cancelled... once the job is done.
     pub conclusion: Option<String>,
-    /// The step the job is on now (the first one in progress, else the next queued).
-    pub step: Option<String>,
+    /// The job's steps, in order, as far as GitHub reports them.
+    pub steps: Vec<ActionStep>,
+}
+
+/// A step of a job: what a runner is doing now.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ActionStep {
+    pub name: String,
+    pub status: String,
+    pub started_at: Option<String>,
+}
+
+fn action_jobs(v: &Value) -> Vec<ActionJob> {
+    v["jobs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|j| ActionJob {
+            name: j["name"].as_str().unwrap_or_default().to_string(),
+            status: j["status"].as_str().unwrap_or_default().to_string(),
+            started_at: j["started_at"].as_str().map(String::from),
+            conclusion: j["conclusion"].as_str().map(String::from),
+            steps: j["steps"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|s| ActionStep {
+                    name: s["name"].as_str().unwrap_or_default().to_string(),
+                    status: s["status"].as_str().unwrap_or_default().to_string(),
+                    started_at: s["started_at"].as_str().map(String::from),
+                })
+                .collect(),
+        })
+        .collect()
 }
 
 impl GitHub {
@@ -1158,6 +1196,21 @@ impl GitHub {
     pub fn actions_readable(&self) -> Result<(), ApiError> {
         self.send(Request::get(&self.url("/actions/permissions")))
             .map(|_| ())
+    }
+
+    /// Delete the Actions caches saved by `git_ref` (`DELETE /actions/caches?ref=`), so a deleted
+    /// run branch leaves none behind. Returns how many GitHub says it deleted.
+    pub fn delete_caches_for_ref(&self, git_ref: &str) -> Result<u64, ApiError> {
+        let v = self.json(
+            Request::get(&self.url(&format!("/actions/caches?ref={git_ref}"))).method("DELETE"),
+        )?;
+        Ok(v["total_count"].as_u64().unwrap_or(0))
+    }
+
+    /// The bytes the repository's Actions caches use (`GET /actions/cache/usage`).
+    pub fn cache_usage_bytes(&self) -> Result<u64, ApiError> {
+        let v = self.json(Request::get(&self.url("/actions/cache/usage")))?;
+        Ok(v["active_caches_size_in_bytes"].as_u64().unwrap_or(0))
     }
 
     /// The commit time of `sha` in seconds since the epoch (`GET /commits/{sha}`).
@@ -1213,25 +1266,36 @@ impl GitHub {
         let v = self.json(Request::get(&self.url(&format!(
             "/actions/runs/{id}/jobs?filter=latest&per_page=100"
         ))))?;
-        Ok(v["jobs"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(|j| ActionJob {
-                name: j["name"].as_str().unwrap_or_default().to_string(),
-                status: j["status"].as_str().unwrap_or_default().to_string(),
-                started_at: j["started_at"].as_str().map(String::from),
-                conclusion: j["conclusion"].as_str().map(String::from),
-                step: j["steps"].as_array().and_then(|st| {
-                    let pick = |s: &str| {
-                        st.iter()
-                            .find(|x| x["status"].as_str() == Some(s))
-                            .and_then(|x| x["name"].as_str().map(String::from))
-                    };
-                    pick("in_progress").or_else(|| pick("queued"))
-                }),
-            })
-            .collect())
+        Ok(action_jobs(&v))
+    }
+
+    /// The jobs of a run, with the ETag of the last look: `None` on a 304, which does not count
+    /// against the rate limit.
+    pub fn remote_run_jobs_changed(
+        &self,
+        id: u64,
+        etag: Option<&str>,
+    ) -> Result<Option<JobsAnswer>, ApiError> {
+        let mut r = Request::get(&self.url(&format!(
+            "/actions/runs/{id}/jobs?filter=latest&per_page=100"
+        )));
+        if let Some(e) = etag {
+            r = r.with("If-None-Match", e);
+        }
+        let resp = self.send(r)?;
+        if resp.status == 304 {
+            return Ok(None);
+        }
+        let v: Value = serde_json::from_str(&resp.body).map_err(|e| {
+            ApiError::new(
+                ErrorKind::Unavailable,
+                format!("the answer is not JSON: {e}"),
+            )
+        })?;
+        Ok(Some((
+            action_jobs(&v),
+            resp.header("etag").map(String::from),
+        )))
     }
 
     /// Cancel a run MASON started on a `mason/run/**` or `mason/ci/**` ref; any other is

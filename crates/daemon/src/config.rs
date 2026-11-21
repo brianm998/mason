@@ -24,6 +24,9 @@ pub struct DaemonConfig {
     /// How often open debts are looked at: closed when their suite has been green since, the
     /// rest run when the machine is idle (s393).
     pub debt_interval: Duration,
+    /// After a suite was red on the base for a debt, the idle pass does not run it again for
+    /// debts until a landing touched a module of the red tests or this long has passed (#774).
+    pub debt_red_backoff: Duration,
     /// How long after a step run closes (and its hosts exited) the sweep leaves its host
     /// directories in `h/` before moving them to `t/<task>/hosts/` (default a day;
     /// `MASON_HOST_GRACE_MS` sets it for the exit script).
@@ -77,6 +80,10 @@ pub struct DaemonConfig {
     /// How long a suite waits before trying again after an environmental
     /// failure (no device, the stack would not come up). Charged to no task.
     pub env_retry: Duration,
+    /// Wait out the landing window even when no other task is moving toward landing (the
+    /// behaviour before #731). Off in production; tests that file several tasks one after the
+    /// other and expect one batch turn it on.
+    pub landing_window_always: bool,
     /// How often a task waiting because the base is red the same way looks at whether the base
     /// branch has moved (s246).
     pub base_red_poll: Duration,
@@ -503,6 +510,7 @@ impl DaemonConfig {
             disk_every: crate::disk::DEFAULT_EVERY,
             sweep_interval: Duration::from_secs(120),
             debt_interval: Duration::from_secs(3600),
+            debt_red_backoff: Duration::from_secs(24 * 3600),
             host_grace: std::env::var("MASON_HOST_GRACE_MS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -532,6 +540,7 @@ impl DaemonConfig {
             speech_timeout: Duration::from_secs(30),
             attention_interval: Duration::from_secs(5),
             env_retry: Duration::from_secs(30),
+            landing_window_always: false,
             base_red_poll: Duration::from_secs(60),
             auto_retry_delays: vec![Duration::from_secs(120), Duration::from_secs(600)],
             auto_retry_window: Duration::from_secs(24 * 3600),
@@ -890,6 +899,9 @@ pub struct RemoteCfg {
     pub pickup_timeout_s: u64,
     /// With `fallback = "local"` a run that cannot go remote runs here instead.
     pub fallback_local: bool,
+    /// `test_env = { MASON_X = "v" }`: variables every run's `run.json` carries to the runner
+    /// (only `MASON_*` names reach it). The owner's configuration.
+    pub test_env: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1198,6 +1210,26 @@ fn parse_services(id: &str, doc: &DocumentMut) -> Result<ServicesCfg, String> {
             runs_on: get(t, "runs_on").unwrap_or_else(|| "ubuntu-latest".into()),
             pickup_timeout_s: int(t, "pickup_timeout", 1200),
             fallback_local,
+            test_env: match t.get("test_env") {
+                None => vec![],
+                Some(v) => {
+                    let bad = || {
+                        format!("{id}: `[remote_runs] test_env` is a table of `MASON_*` names to strings")
+                    };
+                    let tb = v.as_table_like().ok_or_else(bad)?;
+                    let mut out = Vec::new();
+                    for (k, v) in tb.iter() {
+                        let s = v.as_str().ok_or_else(bad)?;
+                        if !k.starts_with("MASON_")
+                            || !k.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                        {
+                            return Err(bad());
+                        }
+                        out.push((k.to_string(), s.to_string()));
+                    }
+                    out
+                }
+            },
         });
     }
     if let Some(t) = table("tracker") {
@@ -1770,7 +1802,7 @@ mod tests {
                 false
             )
         );
-        let own = "[remote_runs]\nkind=\"github-actions\"\nrepo=\"a/b\"\ntoken=\"file:/t\"\nworkflow=\"w.yml\"\nruns_on=\"macos-latest\"\npickup_timeout=60\nfallback=\"local\"\n";
+        let own = "[remote_runs]\nkind=\"github-actions\"\nrepo=\"a/b\"\ntoken=\"file:/t\"\nworkflow=\"w.yml\"\nruns_on=\"macos-latest\"\npickup_timeout=60\nfallback=\"local\"\ntest_env={ MASON_TEST_MIN_WAIT_S = \"180\" }\n";
         let r = parse_project("p", &format!("{base}{ci}{own}"))
             .unwrap()
             .services
@@ -1786,6 +1818,10 @@ mod tests {
             ("a/b", "file:/t", "w.yml", "macos-latest")
         );
         assert!(r.fallback_local && r.pickup_timeout_s == 60);
+        assert_eq!(
+            r.test_env,
+            vec![("MASON_TEST_MIN_WAIT_S".to_string(), "180".to_string())]
+        );
         // Without `[ci]` there is nothing to default from; a literal token and unknown values
         // are refused.
         for (bad, want) in [

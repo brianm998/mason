@@ -494,6 +494,11 @@ impl Daemon {
         });
     }
 
+    /// Set the message of a run's progress (what it is doing now), nothing else.
+    pub fn progress_message(&self, run: StepRunId, message: &str) {
+        self.progress_report(run, |p, now| p.set_message(message, now));
+    }
+
     /// Change one named sub-count of a run (created if missing), then bring the step's own
     /// figures up to the sum of its sub-counts. A count that only moved is output-grade;
     /// a changed total or message is sent at once.

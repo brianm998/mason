@@ -130,7 +130,15 @@ struct HomePage: View {
                 pair {
                     section("Active models", theme: theme, open: { model.go(.section("active_models")) }) {
                         let active = model.home?.active ?? []
-                        if active.isEmpty { Text("Nothing is running.").font(theme.body()).foregroundStyle(theme.muted) }
+                        if let head = ActiveSummary.header(active) {
+                            Text(head).font(theme.body(.semibold)).accessibilityIdentifier("active:header")
+                        } else {
+                            Text("Nothing is running.").font(theme.body()).foregroundStyle(theme.muted)
+                        }
+                        if let gh = ActiveSummary.github(model.home?.hasRemote == true ? model.home?.remote : nil) {
+                            Text("On GitHub: \(gh)").font(theme.body()).foregroundStyle(theme.muted)
+                                .accessibilityIdentifier("active:github")
+                        }
                         ForEach(active, id: \.task) { a in
                             let line = compact
                                 ? AnyLayout(VStackLayout(alignment: .leading, spacing: theme.spacingSmall))
@@ -139,6 +147,7 @@ struct HomePage: View {
                                 Text(a.display.isEmpty ? a.model : a.display).font(theme.body(.semibold))
                                 TaskLink(title: "\(a.project) #\(a.task)") { model.go(.task(a.task)) }
                                 Text(a.step).foregroundStyle(theme.muted)
+                                Text(ActiveSummary.state(a)).foregroundStyle(theme.muted)
                             }
                             .font(theme.body())
                             .accessibilityIdentifier("active:\(a.task)")
@@ -1042,15 +1051,32 @@ struct SectionPage: View {
                 case "active_models":
                     section(MonitorModel.sectionTitle(name), theme: theme) {
                         let active = model.home?.active ?? []
-                        if active.isEmpty { Text("Nothing is running.").font(theme.body()).foregroundStyle(theme.muted) }
+                        if let head = ActiveSummary.header(active) {
+                            Text(head).font(theme.body(.semibold))
+                        } else {
+                            Text("Nothing is running.").font(theme.body()).foregroundStyle(theme.muted)
+                        }
                         ForEach(active, id: \.task) { a in
                             HStack(spacing: theme.spacing) {
                                 Text(a.display.isEmpty ? a.model : a.display).font(theme.body(.semibold))
                                 TaskLink(title: "\(a.project) #\(a.task)") { model.go(.task(a.task)) }
                                 Text(a.step).foregroundStyle(theme.muted)
+                                Text(ActiveSummary.state(a)).foregroundStyle(theme.muted)
+                                if let u = URL(string: a.runURL), !a.runURL.isEmpty { Link("run", destination: u) }
                             }
                             .font(theme.body())
                             .accessibilityIdentifier("active:\(a.task)")
+                        }
+                        if let r = model.home?.remote, model.home?.hasRemote == true,
+                           let gh = ActiveSummary.github(r) {
+                            Text("On GitHub: \(gh)").font(theme.body(.semibold))
+                            ForEach(Array(r.runs.enumerated()), id: \.offset) { _, run in
+                                HStack(spacing: theme.spacing) {
+                                    Text(ActiveSummary.runLine(run)).font(theme.body())
+                                    if let u = URL(string: run.url), !run.url.isEmpty { Link("run", destination: u) }
+                                    else { Text("starting").foregroundStyle(theme.muted) }
+                                }
+                            }
                         }
                         SessionStepper(model: model)
                     }

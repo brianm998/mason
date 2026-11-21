@@ -1988,7 +1988,7 @@ impl TestChecks {
             let limit = suite.timeout.unwrap_or(self.timeout).min(self.timeout);
             // The one function that decides where runs go (#698) is asked for this suite.
             let placed = |mut s: crate::hostedcheck::CheckSpec, suite: &mason_testing::Suite| {
-                s.place = Some((TaskId(self.task), Box::new(suite.clone())));
+                s.place = Some((Some(TaskId(self.task)), Box::new(suite.clone())));
                 s
             };
             let before = suite.command.clone();
@@ -3335,7 +3335,9 @@ fn agent_job(c: &Ctx) {
     };
 
     // With the task's checks on GitHub, the agent's own shell refuses test runs (#704).
-    let remote_shims = std::env::var("MASON_REMOTE_SHIM").as_deref() != Ok("off")
+    // The shims are POSIX sh scripts: never on Windows (#704, #743).
+    let remote_shims = cfg!(unix)
+        && std::env::var("MASON_REMOTE_SHIM").as_deref() != Ok("off")
         && matches!(kind, StepKind::Develop | StepKind::Review)
         && crate::place::task_checks_on_github(&c.d, &c.project.id, c.task.0);
     let prompt = if remote_shims && kind == StepKind::Develop {

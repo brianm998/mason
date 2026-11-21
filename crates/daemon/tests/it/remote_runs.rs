@@ -60,7 +60,8 @@ fn the_home_lists_each_run_with_its_owner_state_and_jobs() {
         &ia,
         1,
         logs.path(),
-        "agent check",
+        "check",
+        a.0,
     );
     // One sharded debt run: 8 jobs, 3 done.
     let ib = format!("t{}r2-debt", b.0);
@@ -72,7 +73,8 @@ fn the_home_lists_each_run_with_its_owner_state_and_jobs() {
         &ib,
         8,
         logs.path(),
-        "debt payment",
+        "debt",
+        b.0,
     );
     let body: Vec<serde_json::Value> = (1..=8)
         .map(|k| {
@@ -102,7 +104,7 @@ fn the_home_lists_each_run_with_its_owner_state_and_jobs() {
     // One landing lint out, and a step waiting for a pool unit.
     let il = "b480-r1-lint".to_string();
     record(logs.path(), &il, 13, None);
-    let _lint = HoldGuard::new(&hosts, &spec(&il, 1), &il, &il, 1, logs.path(), "test step");
+    let _lint = HoldGuard::new(&hosts, &spec(&il, 1), &il, &il, 1, logs.path(), "batch", 0);
     let _wait = remote_runs::waiting(&d, c.0, "test step", &format!("#{}", c.0));
 
     let world = d.world().unwrap();

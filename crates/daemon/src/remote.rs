@@ -281,11 +281,19 @@ pub struct Site {
     pub workflow: String,
     pub pickup_timeout: Duration,
     pub fallback_local: bool,
+    /// `[remote_runs] test_env`, added to every run's environment.
+    pub test_env: Vec<(String, String)>,
     pub gh: GitHub,
     pub clock: Arc<dyn Clock>,
     /// Seconds between looks at a run.
     pub poll_s: u64,
+    /// Told what a run in progress is doing ("on GitHub: running, 4 min"), whenever that text
+    /// changes. For display only.
+    pub on_phase: Option<PhaseFn>,
 }
+
+/// A sink for the text of a run's current phase.
+pub type PhaseFn = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// What a project's `[remote_runs]` gives, for one worktree. `None`: the project has no `[remote_runs]`.
 pub fn site_for(d: &Daemon, project: &str, cwd: &Path) -> Option<Site> {
@@ -305,9 +313,11 @@ pub fn site_for(d: &Daemon, project: &str, cwd: &Path) -> Option<Site> {
         workflow: r.workflow,
         pickup_timeout: Duration::from_secs(r.pickup_timeout_s),
         fallback_local: r.fallback_local,
+        test_env: r.test_env,
         gh: GitHub::new(http, &r.api, &r.repo, token),
         clock: Arc::new(SystemClock),
         poll_s: 10,
+        on_phase: None,
     })
 }
 
@@ -322,6 +332,19 @@ fn remote_base_ref(repo: &Path, remote: &str, base: &str) -> String {
 }
 
 // ---- the snapshot -----------------------------------------------------------------------------
+
+/// The toolchains a run of `suite` needs (`rust`, `java`, `swift`); the workflow sets up only
+/// these. MASON's own suites: `swift*` needs Xcode and `compose*` needs Java and Gradle; every
+/// other suite, and a check with no suite, is Rust.
+pub fn toolchains(suite: &str) -> Vec<&'static str> {
+    if suite.starts_with("swift") {
+        vec!["swift"]
+    } else if suite.starts_with("compose") {
+        vec!["java"]
+    } else {
+        vec!["rust"]
+    }
+}
 
 /// The Xcode version a command asks for (`DEVELOPER_DIR=/Applications/Xcode_16.4.app`): `16.4`.
 /// The runner prefers it and falls back to the image's default Xcode when it is not installed.
@@ -359,6 +382,7 @@ pub fn run_json(spec: &RunSpec) -> String {
     env.insert("NO_COLOR".into(), "1".into());
     let timeout_min = spec.limit.as_secs().div_ceil(60).max(1);
     serde_json::json!({
+        "toolchains": toolchains(&spec.suite),
         "run": spec.id,
         "project": spec.project,
         "suite": spec.suite,
@@ -856,11 +880,15 @@ fn sweep_stale_refs_now(d: &Daemon, now: u64) {
             now / 1000,
             &|sha| site.gh.commit_time(sha),
             &mut |r| {
-                git::run(
+                let gone = git::run(
                     &site.cwd,
                     &["push", &site.remote, "--delete", &format!("refs/heads/{r}")],
                 )
-                .is_ok()
+                .is_ok();
+                if gone {
+                    delete_ref_caches(&site, &format!("refs/heads/{r}"));
+                }
+                gone
             },
         );
         if !gone.is_empty() {
@@ -881,6 +909,14 @@ fn record_path(dir: &Path, id: &str) -> PathBuf {
     dir.join(format!("{id}.remote"))
 }
 
+/// Delete the Actions caches a deleted run ref saved (best effort: they would only crowd the
+/// repository's 10 GB limit, and GitHub evicts them after 7 days anyway).
+fn delete_ref_caches(site: &Site, git_ref: &str) {
+    if let Err(e) = site.gh.delete_caches_for_ref(git_ref) {
+        tracing::warn!(ref_name = %git_ref, "could not delete the run ref's caches: {e}");
+    }
+}
+
 /// Delete the run's ref (best effort, remembered in the record).
 fn delete_ref(site: &Site, st: &mut State, rec: &Path) {
     if st.ref_deleted {
@@ -894,6 +930,7 @@ fn delete_ref(site: &Site, st: &mut State, rec: &Path) {
             .is_err_and(|e| e.stderr.contains("does not exist"))
     {
         st.ref_deleted = true;
+        delete_ref_caches(site, &target);
     } else if let Err(e) = r {
         tracing::warn!(ref_name = %st.ref_name, "could not delete the run ref: {e}");
     }
@@ -1112,6 +1149,7 @@ pub fn execute(
     let mut poller = Poller::new(site.poll_s);
     let mut outage_since: Option<u64> = None;
     let mut artifact_misses = 0u32;
+    let mut live = Live::default();
     let scratch = dir.join(format!("{}.remote-artifact", spec.id));
     loop {
         if let Some(why) = stop() {
@@ -1156,6 +1194,7 @@ pub fn execute(
             &mut poller,
             &mut check_pushed,
             &mut artifact_misses,
+            &mut live,
             &scratch,
             &rec,
             now,
@@ -1316,13 +1355,12 @@ fn poll(
     poller: &mut Poller,
     check_pushed: &mut bool,
     misses: &mut u32,
+    live: &mut Live,
     scratch: &Path,
     rec: &Path,
     now: u64,
 ) -> Result<Step, mason_adapter_api::service::ApiError> {
     let secs = now / 1000;
-    // Did the run change since the last look? Only then are its jobs read again for the monitor.
-    let mut fresh = false;
     let run = match st.run_id {
         None => {
             let found = site
@@ -1344,12 +1382,10 @@ fn poll(
             st.created_at = r.created_at.clone();
             st.save(rec);
             poller.observe(secs, Observed::Changed { etag: None });
-            fresh = true;
             r
         }
         Some(id) => match site.gh.run_changed(id, poller.etag.as_deref())? {
             Some((r, etag)) => {
-                fresh = true;
                 poller.observe(secs, Observed::Changed { etag });
                 r
             }
@@ -1372,41 +1408,49 @@ fn poll(
             }
         },
     };
-    // Has a runner taken the job? A 304 on the run says nothing about its jobs.
-    let mut read = false;
-    if st.picked_ms.is_none() && run.status != "completed" {
-        let jobs = site.gh.remote_run_jobs(run.id)?;
-        read = true;
-        crate::remote_runs::set_jobs(rec, job_view(&jobs));
-        if let Some(j) = jobs.iter().find(|j| {
-            is_run_job(&j.name) && matches!(j.status.as_str(), "in_progress" | "completed")
-        }) {
-            st.picked_ms = Some(now);
-            let from_github = match (
-                j.started_at.as_deref().and_then(parse_iso),
-                parse_iso(&st.created_at),
-            ) {
-                (Some(a), Some(b)) => Some(a.saturating_sub(b)),
-                _ => None,
-            };
-            st.pickup_s =
-                Some(from_github.unwrap_or_else(|| now.saturating_sub(st.pushed_ms) / 1000));
-            st.save(rec);
+    // The jobs, for whether a runner has the job and for what it is doing. A 304 on the run says
+    // nothing about its jobs, so they have their own ETag (a 304 does not count against the
+    // rate limit); the last answer stands until they change.
+    if run.status != "completed" {
+        live.refresh(site, run.id)?;
+        let jobs = &live.jobs;
+        // What the monitor shows of each job (no second read: the last answer stands).
+        crate::remote_runs::set_jobs(rec, job_view(jobs));
+        if st.picked_ms.is_none() {
+            if let Some(j) = jobs.iter().find(|j| {
+                is_run_job(&j.name) && matches!(j.status.as_str(), "in_progress" | "completed")
+            }) {
+                st.picked_ms = Some(now);
+                let from_github = match (
+                    j.started_at.as_deref().and_then(parse_iso),
+                    parse_iso(&st.created_at),
+                ) {
+                    (Some(a), Some(b)) => Some(a.saturating_sub(b)),
+                    _ => None,
+                };
+                st.pickup_s =
+                    Some(from_github.unwrap_or_else(|| now.saturating_sub(st.pushed_ms) / 1000));
+                st.save(rec);
+            }
+        }
+        if let Some(f) = &site.on_phase {
+            let text = phase_text(jobs, st.shards.len(), now, st.pushed_ms);
+            if live.said.as_deref() != Some(text.as_str()) {
+                f(&text);
+                live.said = Some(text);
+            }
         }
     }
     if run.status != "completed" {
-        if fresh && !read {
-            // What the monitor shows of each job; a failed read is not the run's problem.
-            if let Ok(jobs) = site.gh.remote_run_jobs(run.id) {
-                crate::remote_runs::set_jobs(rec, job_view(&jobs));
-            }
-        }
         // A shard that never got a runner while the others are done would hold the run until its
         // limit: end the run, and its missing artifact has that shard alone run again (#701).
         if let (false, Some(p)) = (st.shards.is_empty(), st.picked_ms) {
             if now >= p.saturating_add(site.pickup_timeout.as_millis() as u64) {
-                let jobs = site.gh.remote_run_jobs(run.id)?;
-                let of = |s: &str| jobs.iter().any(|j| is_run_job(&j.name) && j.status == s);
+                let of = |s: &str| {
+                    live.jobs
+                        .iter()
+                        .any(|j| is_run_job(&j.name) && j.status == s)
+                };
                 if of("queued") && !of("in_progress") {
                     cancel(site, st);
                 }
@@ -1500,12 +1544,83 @@ pub fn job_view(jobs: &[mason_adapters::github::ActionJob]) -> Vec<crate::remote
             .into(),
             conclusion: j.conclusion.clone().unwrap_or_default(),
             step: if j.status == "in_progress" {
-                j.step.clone().unwrap_or_default()
+                j.steps
+                    .iter()
+                    .find(|s| s.status == "in_progress")
+                    .or_else(|| j.steps.iter().find(|s| s.status == "queued"))
+                    .map(|s| s.name.clone())
+                    .unwrap_or_default()
             } else {
                 String::new()
             },
         })
         .collect()
+}
+
+/// What a run still going has looked like at the last look at its jobs.
+#[derive(Default)]
+struct Live {
+    etag: Option<String>,
+    jobs: Vec<mason_adapters::github::ActionJob>,
+    /// The phase text last handed to `Site::on_phase`.
+    said: Option<String>,
+}
+
+impl Live {
+    fn refresh(
+        &mut self,
+        site: &Site,
+        id: u64,
+    ) -> Result<(), mason_adapter_api::service::ApiError> {
+        if let Some((jobs, etag)) = site.gh.remote_run_jobs_changed(id, self.etag.as_deref())? {
+            self.jobs = jobs;
+            self.etag = etag;
+        }
+        Ok(())
+    }
+}
+
+/// What a run on GitHub is doing, in words, from its jobs: "on GitHub: waiting for a runner,
+/// 2 min", "on GitHub: running, 4 min" (how long the runner has been in that step) or, for a run
+/// split in `shards` jobs, "on GitHub: 3 of 8 shards done". Never a percentage: nothing here is
+/// counted.
+pub fn phase_text(
+    jobs: &[mason_adapters::github::ActionJob],
+    shards: usize,
+    now_ms: u64,
+    pushed_ms: u64,
+) -> String {
+    let mins = |from_s: u64| format!("{} min", (now_ms / 1000).saturating_sub(from_s) / 60);
+    let runs: Vec<_> = jobs.iter().filter(|j| is_run_job(&j.name)).collect();
+    let started = runs.iter().any(|j| j.status != "queued");
+    if !started {
+        return format!(
+            "on GitHub: waiting for a runner, {}",
+            mins(pushed_ms / 1000)
+        );
+    }
+    if shards > 0 {
+        let done = runs.iter().filter(|j| j.status == "completed").count();
+        return format!("on GitHub: {done} of {shards} shards done");
+    }
+    let Some(j) = runs.first() else {
+        return "on GitHub: starting".into();
+    };
+    match j.steps.iter().rev().find(|s| s.status == "in_progress") {
+        Some(s) => {
+            let what = match s.name.as_str() {
+                "run" => "running",
+                "Set up job" => "setting up",
+                other => other,
+            };
+            match s.started_at.as_deref().and_then(parse_iso) {
+                Some(t) => format!("on GitHub: {what}, {}", mins(t)),
+                None => format!("on GitHub: {what}"),
+            }
+        }
+        None if j.status == "completed" => "on GitHub: collecting the result".into(),
+        None => "on GitHub: starting".into(),
+    }
 }
 
 /// Is this job one that runs the command: `run`, or `run (3)` of a sharded run?
@@ -1632,7 +1747,7 @@ pub fn pool_needs(
 
 /// What a remote run holds, written when it starts and removed when it ends, so a daemon that
 /// restarts counts the units of runs still out.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RemoteHold {
     /// `task N` when a task's step holds them (its lease takes them over when it asks again),
     /// else the run's id.
@@ -1641,6 +1756,16 @@ pub struct RemoteHold {
     pub units: std::collections::BTreeMap<String, u32>,
     /// The run's record (`<id>.remote`): the run has ended when it is gone or collected.
     pub record: PathBuf,
+    /// What the run is for: `check`, `test_step`, `batch` or `debt` (empty in a hold written
+    /// before the monitor showed it).
+    pub kind: String,
+    /// The task the run is for; 0 for a run no task owns.
+    pub task: u64,
+}
+
+/// The URL of the run behind `record` (empty until GitHub has made it) and its runner label.
+pub fn record_view(record: &Path) -> (String, String) {
+    State::load(record).map_or_else(Default::default, |s| (s.url, s.runs_on))
 }
 
 /// Where the holds are kept, beside the step hosts' directory.
@@ -1673,6 +1798,8 @@ pub fn write_hold(dir: &Path, id: &str, h: &RemoteHold) {
             ("label", h.label.clone()),
             ("units", units.join(",")),
             ("record", h.record.display().to_string()),
+            ("kind", h.kind.clone()),
+            ("task", h.task.to_string()),
         ],
     );
 }
@@ -1684,7 +1811,7 @@ pub fn remove_hold(dir: &Path, id: &str) {
 
 /// Where a run stands, for the monitor: `queued` (pushed, or on GitHub with no runner yet),
 /// `running`, or `done`; its GitHub URL, and when a runner took it.
-pub fn record_view(record: &Path) -> Option<(String, String, Option<u64>)> {
+pub fn run_stage(record: &Path) -> Option<(String, String, Option<u64>)> {
     let s = State::load(record)?;
     let stage = if s.collected {
         "done"
@@ -1729,6 +1856,8 @@ pub fn running_holds(dir: &Path) -> Vec<RemoteHold> {
                 label: kv.get("label").cloned().unwrap_or_default(),
                 units,
                 record,
+                kind: kv.get("kind").cloned().unwrap_or_default(),
+                task: kv.get("task").and_then(|t| t.parse().ok()).unwrap_or(0),
             })
         })
         .collect();
@@ -1915,6 +2044,7 @@ pub struct HoldGuard {
 }
 
 impl HoldGuard {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         hosts: &Path,
         spec: &RunSpec,
@@ -1923,6 +2053,7 @@ impl HoldGuard {
         shards: u32,
         dir: &Path,
         kind: &str,
+        task: u64,
     ) -> Self {
         let holds = holds_dir(hosts);
         crate::remote_runs::started(
@@ -1943,6 +2074,8 @@ impl HoldGuard {
                 label: label.to_string(),
                 units: units_for(&spec.runs_on, shards),
                 record: record_path(dir, &spec.id),
+                kind: kind.to_string(),
+                task,
             },
         );
         HoldGuard {
@@ -2000,6 +2133,17 @@ pub fn spec_for(
         shard_lists: vec![],
         shard_command: None,
     }
+}
+
+/// The project's `[remote_runs] test_env` added to the run's environment; a name the run
+/// already sets keeps its own value.
+pub fn with_site_env(mut spec: RunSpec, site: &Site) -> RunSpec {
+    for (k, v) in &site.test_env {
+        if !spec.env.iter().any(|(n, _)| n == k) {
+            spec.env.push((k.clone(), v.clone()));
+        }
+    }
+    spec
 }
 
 /// The suite's build as its own field: the runner runs it in a separate `sh -c` before the
@@ -2298,6 +2442,9 @@ mod tests {
                     body: "{}".into(),
                 });
             }
+            if r.method == "DELETE" && u.contains("/actions/caches?ref=") {
+                return ok(serde_json::json!({"total_count": 1, "actions_caches": []}));
+            }
             if u.contains("/actions/runs?head_sha=") {
                 let sha = u
                     .split("head_sha=")
@@ -2442,6 +2589,7 @@ mod tests {
             workflow: "mason-run.yml".into(),
             pickup_timeout: Duration::from_secs(1200),
             fallback_local: fallback,
+            test_env: vec![],
             gh: GitHub::new(
                 gh,
                 "https://api.github.com",
@@ -2450,6 +2598,7 @@ mod tests {
             ),
             clock,
             poll_s: 10,
+            on_phase: None,
         }
     }
 
@@ -2558,6 +2707,22 @@ mod tests {
     }
 
     #[test]
+    fn the_projects_test_env_reaches_run_json_without_overriding_the_run() {
+        let r = repo();
+        token();
+        let gh = FakeGh::new(&r, &r.wt.join("none.zip"), Mode::Normal);
+        let mut site = site(&r, gh, clock(), false);
+        site.test_env = vec![
+            ("MASON_TEST_MIN_WAIT_S".into(), "180".into()),
+            ("MASON_TASK".into(), "other".into()),
+        ];
+        let v: serde_json::Value =
+            serde_json::from_str(&run_json(&with_site_env(spec("r1"), &site))).unwrap();
+        assert_eq!(v["env"]["MASON_TEST_MIN_WAIT_S"], "180");
+        assert_eq!(v["env"]["MASON_TASK"], "7");
+    }
+
+    #[test]
     fn the_run_json_carries_only_masons_environment_and_the_pinned_definition() {
         let v: serde_json::Value = serde_json::from_str(&run_json(&spec("x3"))).unwrap();
         assert_eq!(v["command"], "cargo test --workspace");
@@ -2568,6 +2733,39 @@ mod tests {
         assert_eq!(v["env"]["MASON_TASK"], "7");
         assert!(v["xcode"].is_null());
         assert!(v["env"].get("SECRET_TOKEN").is_none());
+    }
+
+    #[test]
+    fn run_json_names_the_toolchains_each_of_masons_suites_needs() {
+        for (suite, want) in [
+            ("cargo-workspace", "rust"),
+            ("exit-scripts", "rust"),
+            ("exit-scripts-landing", "rust"),
+            ("fmt", "rust"),
+            ("lint", "rust"),
+            ("", "rust"),
+            ("swift-clients", "swift"),
+            ("compose-clients", "java"),
+        ] {
+            let mut sp = spec("tc");
+            sp.suite = suite.into();
+            let v: serde_json::Value = serde_json::from_str(&run_json(&sp)).unwrap();
+            assert_eq!(v["toolchains"], serde_json::json!([want]), "{suite}");
+        }
+    }
+
+    #[test]
+    fn the_workflows_restore_one_shared_key_and_only_the_base_branch_saves_it() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows");
+        let run = std::fs::read_to_string(root.join("mason-run.yml")).unwrap();
+        assert!(run.contains("shared-key: mason-run"));
+        assert!(run.contains("save-if: ${{ github.ref == 'refs/heads/develop' }}"));
+        assert!(run.contains("toolchains"));
+        let warm = std::fs::read_to_string(root.join("mason-cache.yml")).unwrap();
+        assert!(warm.contains("shared-key: mason-run"));
+        assert!(warm.contains("cancel-in-progress: true"));
+        assert!(warm.contains("--no-run"));
+        assert!(!warm.contains("save-if"), "the warm-up always saves");
     }
 
     #[test]
@@ -2607,6 +2805,18 @@ mod tests {
         assert_eq!(kv["sha"].len(), 40);
         assert_eq!(kv["collected"], "1");
         assert!(gh.requests().iter().any(|q| q.contains("head_sha=")));
+        let deletes: Vec<String> = gh
+            .requests()
+            .into_iter()
+            .filter(|q| {
+                q.starts_with("DELETE ") && q.contains("/actions/caches?ref=refs/heads/mason/run/")
+            })
+            .collect();
+        assert_eq!(
+            deletes.len(),
+            1,
+            "one cache DELETE for the ref deleted: {deletes:?}"
+        );
     }
 
     #[test]
@@ -2689,6 +2899,7 @@ mod tests {
                 label: id.into(),
                 units: units_for("ubuntu-latest", 1),
                 record: rec.clone(),
+                ..Default::default()
             },
         );
         (holds, rec)
@@ -2976,6 +3187,8 @@ mod tests {
             label: "#4".into(),
             units: units_for("macos-14", 1),
             record: rec.clone(),
+            kind: "debt".into(),
+            task: 4,
         };
         write_hold(&holds, "a", &h);
         assert_eq!(running_holds(&holds), vec![h]);
@@ -2985,6 +3198,91 @@ mod tests {
         }
         .save(&rec);
         assert!(running_holds(&holds).is_empty());
+    }
+
+    fn job(
+        name: &str,
+        status: &str,
+        steps: &[(&str, &str, &str)],
+    ) -> mason_adapters::github::ActionJob {
+        mason_adapters::github::ActionJob {
+            name: name.into(),
+            status: status.into(),
+            started_at: None,
+            conclusion: None,
+            steps: steps
+                .iter()
+                .map(|(n, st, at)| mason_adapters::github::ActionStep {
+                    name: (*n).into(),
+                    status: (*st).into(),
+                    started_at: (!at.is_empty()).then(|| (*at).into()),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn the_phase_of_a_run_in_progress_is_its_current_step_not_a_percentage() {
+        let t0 = parse_iso("2026-11-20T10:00:00Z").unwrap() * 1000;
+        let now = t0 + 4 * 60_000 + 5_000;
+        let jobs = vec![
+            job("plan", "completed", &[]),
+            job(
+                "run",
+                "in_progress",
+                &[
+                    ("Set up job", "completed", "2026-11-20T10:00:00Z"),
+                    ("run", "in_progress", "2026-11-20T10:00:00Z"),
+                ],
+            ),
+        ];
+        let text = phase_text(&jobs, 0, now, t0);
+        assert_eq!(text, "on GitHub: running, 4 min");
+        assert!(!text.contains('%'));
+        let queued = vec![job("run", "queued", &[])];
+        assert_eq!(
+            phase_text(&queued, 0, now, t0),
+            "on GitHub: waiting for a runner, 4 min"
+        );
+    }
+
+    #[test]
+    fn a_sharded_run_says_how_many_shards_are_done() {
+        let mut jobs: Vec<_> = (1..=8)
+            .map(|k| {
+                let st = if k <= 3 { "completed" } else { "in_progress" };
+                job(&format!("run ({k})"), st, &[])
+            })
+            .collect();
+        jobs.insert(0, job("plan", "completed", &[]));
+        assert_eq!(phase_text(&jobs, 8, 0, 0), "on GitHub: 3 of 8 shards done");
+    }
+
+    #[test]
+    fn a_run_in_progress_reports_its_phase_without_repeating_it() {
+        token();
+        let r = repo();
+        let t = tempfile::tempdir().unwrap();
+        let zip = artifact(t.path(), GREEN, 0, None);
+        let gh = FakeGh::new(&r, &zip, Mode::Normal);
+        let mut s = site(&r, gh, clock(), false);
+        let said: Arc<Mutex<Vec<String>>> = Arc::default();
+        let sink = said.clone();
+        s.on_phase = Some(Arc::new(move |t: &str| {
+            sink.lock().unwrap().push(t.to_string())
+        }));
+        let logs = tempfile::tempdir().unwrap();
+        let Ok(Outcome::Done(_)) = execute(&s, &spec("ph1"), logs.path(), &|| None) else {
+            panic!("not done")
+        };
+        let said = said.lock().unwrap();
+        assert!(!said.is_empty());
+        assert!(
+            said.iter()
+                .all(|t| t.starts_with("on GitHub: ") && !t.contains('%')),
+            "{said:?}"
+        );
+        assert!(said.windows(2).all(|w| w[0] != w[1]), "{said:?}");
     }
 
     #[test]
@@ -3130,6 +3428,7 @@ mod tests {
             workflow: "mason-run.yml".into(),
             pickup_timeout: Duration::from_secs(1200),
             fallback_local: false,
+            test_env: vec![],
             gh: GitHub::new(
                 gh.clone(),
                 "https://api.github.com",
@@ -3138,6 +3437,7 @@ mod tests {
             ),
             clock: clock(),
             poll_s: 10,
+            on_phase: None,
         };
         let dir = r._t.path().join("runs");
         let spec = sharded_spec("sh1", &[&["a", "b"], &["c"], &["d"]]);

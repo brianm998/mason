@@ -3,9 +3,9 @@
 import Foundation
 import MasonProtocol
 
-public typealias RemoteRuns = Mason_V1_RemoteRuns
-public typealias RemoteRun = Mason_V1_RemoteRun
-public typealias RemoteJob = Mason_V1_RemoteJob
+public typealias GithubRunList = Mason_V1_GithubRunList
+public typealias GithubRun = Mason_V1_GithubRun
+public typealias GithubJob = Mason_V1_GithubJob
 
 /// The text of home's GitHub section. The daemon sends every number; this only words them, the
 /// same way in both clients (`GitHubRuns.kt`).
@@ -13,7 +13,7 @@ public enum GitHubRuns {
     public static let empty = "Nothing on GitHub."
 
     /// "MASON 7 of 20 runners, 13 waiting".
-    public static func header(_ g: RemoteRuns) -> String {
+    public static func header(_ g: GithubRunList) -> String {
         "MASON \(g.poolUsed) of \(g.poolLimit) runners, \(g.waiting) waiting"
     }
 
@@ -23,12 +23,12 @@ public enum GitHubRuns {
     }
 
     /// "#12 Check me".
-    public static func task(_ r: RemoteRun) -> String {
+    public static func task(_ r: GithubRun) -> String {
         r.title.isEmpty ? r.owner : "\(r.owner) \(r.title)"
     }
 
     /// "agent check unit on ubuntu-latest, 8 shards".
-    public static func kind(_ r: RemoteRun) -> String {
+    public static func kind(_ r: GithubRun) -> String {
         var t = r.suite.isEmpty ? r.kind : "\(r.kind) \(r.suite)"
         if !r.runsOn.isEmpty { t += " on \(r.runsOn)" }
         if r.shards > 1 { t += ", \(r.shards) shards" }
@@ -36,7 +36,7 @@ public enum GitHubRuns {
     }
 
     /// "waiting for a runner", "queued on GitHub 40 s", "running 4 min", "green".
-    public static func state(_ r: RemoteRun) -> String {
+    public static func state(_ r: GithubRun) -> String {
         switch r.state {
         case "waiting": return "waiting for a runner, \(duration(r.elapsedS))"
         case "queued": return "queued on GitHub \(duration(r.elapsedS))"
@@ -46,7 +46,7 @@ public enum GitHubRuns {
     }
 
     /// The whole row as one line, for tests and accessibility.
-    public static func row(_ r: RemoteRun) -> String {
+    public static func row(_ r: GithubRun) -> String {
         var parts = [task(r)]
         if !r.taskState.isEmpty { parts.append(r.taskState) }
         parts.append(kind(r))
@@ -57,7 +57,7 @@ public enum GitHubRuns {
     }
 
     /// A job's line on the section's page: "run (3): running, step run".
-    public static func job(_ j: RemoteJob) -> String {
+    public static func job(_ j: GithubJob) -> String {
         var t = "\(j.name): \(j.state)"
         if !j.conclusion.isEmpty { t += " (\(j.conclusion))" }
         if !j.step.isEmpty { t += ", step \(j.step)" }

@@ -52,7 +52,7 @@ pub struct CheckSpec {
     pub label: String,
     /// The task and suite a develop-phase `run_check` runs for, so that the one function that
     /// decides where runs go (#698) can say. `None` for everything else.
-    pub place: Option<(mason_core::TaskId, Box<mason_testing::Suite>)>,
+    pub place: Option<(Option<mason_core::TaskId>, Box<mason_testing::Suite>)>,
     /// A landing check (#702): no task owns it, so it follows the global switch alone.
     pub global: bool,
 }
@@ -466,7 +466,7 @@ pub fn where_ran(d: &Arc<Daemon>, spec: &CheckSpec) -> String {
         return local();
     };
     let exec = match spec.place.as_ref() {
-        Some((t, s)) => rm::executor_for(d, &project, rm::Kind::Check, Some((Some(*t), &**s))),
+        Some((t, s)) => rm::executor_for(d, &project, rm::Kind::Check, Some((*t, &**s))),
         None if spec.global => rm::executor_global(d, &project),
         None => rm::Executor::Local,
     };
@@ -485,7 +485,7 @@ fn runs_on_github(d: &Arc<Daemon>, spec: &CheckSpec) -> Option<String> {
     let project = rm::project_of(d, &spec.cwd)?;
     let place = spec.place.as_ref().map(|(t, s)| (*t, &**s));
     let exec = match place {
-        Some((t, s)) => rm::executor_for(d, &project, rm::Kind::Check, Some((Some(t), s))),
+        Some((t, s)) => rm::executor_for(d, &project, rm::Kind::Check, Some((t, s))),
         None if spec.global => rm::executor_global(d, &project),
         None => rm::executor_for(d, &project, rm::Kind::Check, None),
     };
@@ -505,6 +505,21 @@ pub fn goes_remote(d: &Arc<Daemon>, spec: &CheckSpec) -> bool {
 /// (#697); `None` for the local path, which is every run until #698. The result is the same
 /// `CheckOutcome`: `passed` is what the command's exit says. A remote run that is lost is run
 /// again, not resumed. No live counts come from it.
+/// The suite's `build` is a template until a caller expands it. A landing check carries either
+/// its expanded build as `cmd` or a suite with no build (#817); a template is never passed on.
+fn build_choice<'a>(suite: Option<&'a mason_testing::Suite>, cmd: &str) -> Option<&'a str> {
+    suite
+        .and_then(|s| s.build.as_deref())
+        .filter(|b| !b.contains('{') && !cmd.starts_with(b))
+}
+
+/// The suite as a landing check's place: its placement rules, but no build step of its own.
+pub fn without_build(suite: &mason_testing::Suite) -> mason_testing::Suite {
+    let mut s = suite.clone();
+    s.build = None;
+    s
+}
+
 fn remote_check(d: &Arc<Daemon>, spec: &CheckSpec, id: &str) -> Option<Shared> {
     use crate::remote as rm;
     let runs_on = runs_on_github(d, spec)?;
@@ -512,15 +527,16 @@ fn remote_check(d: &Arc<Daemon>, spec: &CheckSpec, id: &str) -> Option<Shared> {
     let place = spec.place.as_ref().map(|(t, s)| (*t, &**s));
     // The suite's build is the first part of what runs there (it was not run here).
     // It goes in `RunSpec.build`, a separate process, not joined with `&&` (two `cd`s break).
-    let build = place
-        .and_then(|(_, s)| s.build.as_deref())
-        .filter(|b| !spec.cmd.starts_with(b));
+    let build = build_choice(place.map(|(_, s)| s), &spec.cmd);
     let site = rm::site_for(d, &project, &spec.cwd)?;
-    let rs = rm::with_build(
-        rm::spec_for(
-            &project, id, None, &spec.cmd, spec.limit, &spec.env, &runs_on, &spec.tree,
+    let rs = rm::with_site_env(
+        rm::with_build(
+            rm::spec_for(
+                &project, id, None, &spec.cmd, spec.limit, &spec.env, &runs_on, &spec.tree,
+            ),
+            build,
         ),
-        build,
+        &site,
     );
     // The units it holds, on record until it ends, for a daemon that restarts (#700).
     let _hold = rm::HoldGuard::new(
@@ -530,7 +546,12 @@ fn remote_check(d: &Arc<Daemon>, spec: &CheckSpec, id: &str) -> Option<Shared> {
         id,
         1,
         &spec.log_dir,
-        "agent check",
+        if spec.global || place.is_some_and(|(t, _)| t.is_none()) {
+            "batch"
+        } else {
+            "check"
+        },
+        place.and_then(|(t, _)| t).map_or(0, |t| t.0),
     );
     let note: Mutex<Option<String>> = Mutex::new(None);
     let stop = || {
@@ -656,4 +677,29 @@ fn collect(
         id: id.to_string(),
         stopped,
     })
+}
+
+#[cfg(test)]
+mod build_choice_tests {
+    use super::*;
+
+    fn suite(build: Option<&str>) -> mason_testing::Suite {
+        let mut s = mason_testing::Suite::new("t", "c", mason_testing::ParserKind::Junit);
+        s.build = build.map(str::to_string);
+        s
+    }
+
+    #[test]
+    fn a_raw_template_is_never_passed_through() {
+        let s = suite(Some("{project_test} --no-run"));
+        assert_eq!(build_choice(Some(&s), "cargo test --no-run"), None);
+    }
+
+    #[test]
+    fn an_expanded_build_is_kept_and_none_is_none() {
+        let s = suite(Some("cargo build"));
+        assert_eq!(build_choice(Some(&s), "cargo test"), Some("cargo build"));
+        assert_eq!(build_choice(None, "x"), None);
+        assert_eq!(build_choice(Some(&without_build(&s)), "x"), None);
+    }
 }

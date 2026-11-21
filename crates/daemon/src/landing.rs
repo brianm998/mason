@@ -98,6 +98,9 @@ struct State {
     /// A self-update is waiting for the running batches to finish: no new batch starts and
     /// the queues keep what they hold. It only holds batches back; it never changes a verdict.
     draining: bool,
+    /// Per project, the tasks the queue is collecting for: still moving toward landing while a
+    /// batch waits out its window. Empty when nothing waits on anyone.
+    collecting: HashMap<ProjectId, Vec<u64>>,
 }
 
 impl State {
@@ -151,6 +154,11 @@ impl Landing {
 
     pub fn idle_ms(&self, p: ProjectId) -> u64 {
         self.lock().idle_ms.get(&p).copied().unwrap_or(0)
+    }
+
+    /// The tasks a waiting batch is held for (still moving toward landing), as of the last look.
+    pub fn collecting(&self, p: ProjectId) -> Vec<u64> {
+        self.lock().collecting.get(&p).cloned().unwrap_or_default()
     }
 
     pub fn queued(&self, p: ProjectId) -> Vec<TaskId> {
@@ -924,6 +932,13 @@ fn form_and_start(
         start(d, pid, vec![w], cfg.clone(), &kind);
     }
     let now = landing_clock(d);
+    let moving = moving_tasks(d, pid);
+    // `moving.len()` is what the plan sees; the setting makes the window always count.
+    let others = if d.cfg.landing_window_always {
+        moving.len().max(1)
+    } else {
+        moving.len()
+    };
     let mut next_wait = None;
     let mut guard = 0;
     loop {
@@ -933,10 +948,11 @@ fn form_and_start(
         } else {
             cfg.max_size
         };
-        match plan::form_batch(&normal, now, cfg.window, max_size) {
+        match plan::form_batch(&normal, now, cfg.window, max_size, others) {
             Formation::Empty => break,
             Formation::Wait(t) => {
-                next_wait = Some(t);
+                // Look again soon: a task that stops moving has no event to wake this.
+                next_wait = Some(t.min(Duration::from_secs(1)));
                 break;
             }
             Formation::Form(ids) => {
@@ -968,8 +984,49 @@ fn form_and_start(
             break;
         }
     }
+    {
+        let mut g = d.landing.lock();
+        if next_wait.is_some() {
+            g.collecting.insert(pid, moving);
+        } else {
+            g.collecting.remove(&pid);
+        }
+    }
     let left = d.landing.lock().waiting.get(&pid).map_or(0, Vec::len);
     (left, next_wait)
+}
+
+/// The project's tasks that are still on their way to landing: in a step that can lead there,
+/// not held behind a blocker, paused, failed, proposed or deferred, and neither in the landing
+/// queue nor in a running batch. A batch waits out its window only while there are any.
+fn moving_tasks(d: &Daemon, pid: ProjectId) -> Vec<u64> {
+    let Ok(w) = d.world() else {
+        return vec![]; // nothing known to wait for
+    };
+    let g = d.landing.lock();
+    let queued: HashSet<TaskId> = g
+        .waiting
+        .get(&pid)
+        .map(|v| v.iter().map(|x| x.task).collect())
+        .unwrap_or_default();
+    let mut v: Vec<u64> = w
+        .tasks
+        .values()
+        .filter(|t| t.project == pid && !t.paused)
+        .filter(|t| !queued.contains(&t.id) && !g.owed.contains(&t.id))
+        .filter(|t| match t.state {
+            mason_core::State::Exploring
+            | mason_core::State::Developing
+            | mason_core::State::Testing
+            | mason_core::State::Review
+            | mason_core::State::Landing => true,
+            mason_core::State::Queued => t.blockers.is_empty(),
+            _ => false,
+        })
+        .map(|t| t.id.0)
+        .collect();
+    v.sort_unstable();
+    v
 }
 
 fn take(d: &Daemon, pid: ProjectId, task: TaskId) {
@@ -3092,8 +3149,8 @@ impl Runner {
                     let (d, m) = (d.clone(), members.clone());
                     Arc::new(move || m.forced(&d))
                 }),
-                place: None,
-                global: true,
+                place: Some((None, Box::new(crate::hostedcheck::without_build(suite)))),
+                global: false,
             };
             match crate::hostedcheck::run(d, &spec) {
                 Ok(o) if o.stopped.is_some() => out.notes.push(format!(
@@ -3238,7 +3295,9 @@ impl Runner {
                     Arc::new(move || m.forced(&d)) as crate::hostedcheck::StopFn
                 }),
                 place: match (github, self.member_tasks.first()) {
-                    (true, Some(t)) => Some((*t, Box::new(suite.clone()))),
+                    (true, Some(t)) => {
+                        Some((Some(*t), Box::new(crate::hostedcheck::without_build(suite))))
+                    }
                     _ => None,
                 },
                 global: false,
@@ -3441,6 +3500,14 @@ impl Runner {
                     return out;
                 }
             };
+            // #816: the floor builds on this Mac (warm target directory, no runner queue) unless
+            // `floor_where = "github"`, or the suite names a runner of another OS than this
+            // Mac's. Then the suite's own placement (#815) decides, as before.
+            let here = self.cfg.floor_where.as_deref() != Some("github")
+                && suite
+                    .runs_on
+                    .as_deref()
+                    .is_none_or(|r| r.starts_with("macos"));
             let spec = crate::hostedcheck::CheckSpec {
                 id_prefix: format!("{prefix}-floor-{name}"),
                 log_dir: log_dir.to_path_buf(),
@@ -3455,15 +3522,33 @@ impl Runner {
                     let (d, m, name) = (d.clone(), members.clone(), name.clone());
                     Arc::new(move || m.stop(&d, &name)) as crate::hostedcheck::StopFn
                 }),
-                place: None,
-                global: true,
+                // #815: the suite's own placement (its `runs_on`, `remote = false`, device rules)
+                // decides; no task owns a batch.
+                place: (!here).then(|| (None, Box::new(crate::hostedcheck::without_build(suite)))),
+                global: false,
+            };
+            let ran_on = if !here && crate::hostedcheck::goes_remote(d, &spec) {
+                "on GitHub"
+            } else {
+                "on this Mac"
+            };
+            let began = std::time::Instant::now();
+            let took = || {
+                let s = began.elapsed().as_secs();
+                if s >= 60 {
+                    format!("{}m{:02}s", s / 60, s % 60)
+                } else {
+                    format!("{s}s")
+                }
             };
             match crate::hostedcheck::run(d, &spec) {
                 Ok(o) if o.stopped.is_some() => out.notes.push(format!(
                     "{name}: {what} not built to the end: {}",
                     o.stopped.unwrap_or_default()
                 )),
-                Ok(o) if o.passed => out.notes.push(format!("{name}: {what} builds")),
+                Ok(o) if o.passed => out
+                    .notes
+                    .push(format!("{name}: {what} builds ({ran_on}, {})", took())),
                 Ok(o) => {
                     out.green = false;
                     out.failed.insert(name.clone());
@@ -3471,7 +3556,8 @@ impl Runner {
                     *self.lint_files.lock().unwrap_or_else(|e| e.into_inner()) =
                         lint_files(&o.full);
                     out.notes.push(format!(
-                        "{name}: {what} does not build{}{}\n{}",
+                        "{name}: {what} does not build ({ran_on}, {}){}{}\n{}",
+                        took(),
                         if o.timed_out {
                             " (the build timed out)"
                         } else {
@@ -5042,11 +5128,11 @@ mod tests {
             footprint: Footprint::default(),
         };
         assert!(matches!(
-            plan::form_batch(&[cand(4000)], clock, window, 0),
+            plan::form_batch(&[cand(4000)], clock, window, 0, 1),
             Formation::Form(_)
         ));
         assert!(matches!(
-            plan::form_batch(&[cand(0)], clock, window, 0),
+            plan::form_batch(&[cand(0)], clock, window, 0, 1),
             Formation::Wait(_)
         ));
     }

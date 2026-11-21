@@ -49,6 +49,24 @@ pub struct ScheduleRow {
     pub follow: String,
 }
 
+/// One full test (s782): a start on a base commit and, once it ends, its verdict.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FullTestRow {
+    pub id: u64,
+    pub project: String,
+    pub schedule: String,
+    pub commit: String,
+    /// `nightly`, `quiet` or `manual`.
+    pub trigger: String,
+    pub started_ms: u64,
+    /// 0 while it runs.
+    pub finished_ms: u64,
+    /// `green`, `red` or `cut off`; empty while it runs.
+    pub verdict: String,
+    /// The CI run, or MASON's own run.
+    pub link: String,
+}
+
 /// One suggestion of the triage agent, kept for the owner's review.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TriageRow {
@@ -240,6 +258,77 @@ impl Store {
                 ],
             )
             .map(|_| ())
+        })
+    }
+
+    // ---- full tests ----
+
+    /// Record a full test starting; returns its id.
+    pub fn add_full_test(&self, r: &FullTestRow) -> Result<u64, StoreError> {
+        let r = r.clone();
+        self.write(move |c| {
+            c.execute(
+                "INSERT INTO full_tests(project, schedule, commit_sha, trigger, started_ms, link)
+                 VALUES (?1,?2,?3,?4,?5,?6)",
+                params![
+                    r.project,
+                    r.schedule,
+                    r.commit,
+                    r.trigger,
+                    r.started_ms as i64,
+                    r.link
+                ],
+            )?;
+            Ok(c.last_insert_rowid() as u64)
+        })
+    }
+
+    /// Record how a running full test ended. `link` replaces the stored one when not empty.
+    pub fn finish_full_test(
+        &self,
+        id: u64,
+        finished_ms: u64,
+        verdict: &str,
+        link: &str,
+    ) -> Result<(), StoreError> {
+        let (v, l) = (verdict.to_string(), link.to_string());
+        self.write(move |c| {
+            c.execute(
+                "UPDATE full_tests SET finished_ms = ?2, verdict = ?3,
+                        link = CASE WHEN ?4 = '' THEN link ELSE ?4 END
+                 WHERE id = ?1",
+                params![id as i64, finished_ms.max(1) as i64, v, l],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// A schedule's full tests, newest first.
+    pub fn full_tests(
+        &self,
+        project: &str,
+        schedule: &str,
+    ) -> Result<Vec<FullTestRow>, StoreError> {
+        let (p, s) = (project.to_string(), schedule.to_string());
+        self.read(move |c| {
+            let mut st = c.prepare(
+                "SELECT id, project, schedule, commit_sha, trigger, started_ms, finished_ms, verdict, link
+                 FROM full_tests WHERE project = ?1 AND schedule = ?2 ORDER BY id DESC LIMIT 200",
+            )?;
+            let rows = st.query_map(params![p, s], |r| {
+                Ok(FullTestRow {
+                    id: r.get::<_, i64>(0)? as u64,
+                    project: r.get(1)?,
+                    schedule: r.get(2)?,
+                    commit: r.get(3)?,
+                    trigger: r.get(4)?,
+                    started_ms: r.get::<_, i64>(5)? as u64,
+                    finished_ms: r.get::<_, i64>(6)? as u64,
+                    verdict: r.get(7)?,
+                    link: r.get(8)?,
+                })
+            })?;
+            rows.collect()
         })
     }
 

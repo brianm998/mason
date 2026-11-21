@@ -15,11 +15,11 @@ import mason.monitor.GitHubRuns
 import mason.monitor.Linkify
 import mason.monitor.MonitorModel
 import mason.monitor.Page
-import mason.v1.RemoteRuns
+import mason.v1.GithubRunList
 
 /** Home's GitHub section (#767): every run MASON has on GitHub; the page adds every shard's job. */
 @Composable
-internal fun GitHubSection(model: MonitorModel, g: RemoteRuns, open: (() -> Unit)? = null, detail: Boolean = false) {
+internal fun GitHubSection(model: MonitorModel, g: GithubRunList, open: (() -> Unit)? = null, detail: Boolean = false) {
     val theme = LocalTheme.current
     val uri = LocalUriHandler.current
     Section("GitHub", open = open) {

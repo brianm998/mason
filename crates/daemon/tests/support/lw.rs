@@ -105,6 +105,23 @@ pub fn world_full(
     test_cmd: &str,
     test_step: bool,
 ) -> W {
+    world_full_window(landing_toml, extra, files, test_cmd, test_step, true)
+}
+
+/// A world whose landing queue forms a batch as soon as no other task is moving (#731), the
+/// way the daemon does outside tests; every other world waits out the window.
+pub fn world_collecting(landing_toml: &str) -> W {
+    world_full_window(landing_toml, &|_| String::new(), &[], "true", false, false)
+}
+
+fn world_full_window(
+    landing_toml: &str,
+    extra: &dyn Fn(&Scratch) -> String,
+    files: &[(&str, &str)],
+    test_cmd: &str,
+    test_step: bool,
+    window_always: bool,
+) -> W {
     let s = Scratch::new("true", json!({"steps": {}}));
     s.write_project("scratch", test_cmd, &extra(&s));
     let mut definition = def();
@@ -127,7 +144,10 @@ pub fn world_full(
     all.extend_from_slice(files);
     s.push_files(&all, "project setup");
     sh(&s.repo, &["fetch", "-q", "origin"]);
-    let d = s.start_with(|c| c.env_retry = Duration::from_millis(200));
+    let d = s.start_with(|c| {
+        c.env_retry = Duration::from_millis(200);
+        c.landing_window_always = window_always;
+    });
     // Nothing is claimed by the scheduler: the test places tasks itself.
     mason_daemon::attention::pause(&d, "", "claims", "test", 3600).unwrap();
     W { s, d }
@@ -151,8 +171,13 @@ echo "ok 1 - matrix_events"
 
 /// `world_built`, and when `fast`, `alpha` declares `fast_command = "sh fast.sh"`.
 pub fn world_built_fast(landing_toml: &str, files: &[(&str, &str)], fast: bool) -> W {
+    world_built_extra(landing_toml, "", files, fast)
+}
+
+/// `world_built_fast`, with `extra` appended to the project file (a `[remote_runs]` table).
+pub fn world_built_extra(landing_toml: &str, extra: &str, files: &[(&str, &str)], fast: bool) -> W {
     let s = Scratch::new("true", json!({"steps": {}}));
-    s.write_project("scratch", "true", "");
+    s.write_project("scratch", "true", extra);
     let mut definition = def().replacen(
         "category = \"developing\"\nnext = \"land\"",
         "category = \"developing\"\nnext = \"test\"",

@@ -7,15 +7,15 @@ import XCTest
 
 /// #767: the words of home's GitHub section.
 final class GitHubRunsTests: XCTestCase {
-    private func run(_ f: (inout RemoteRun) -> Void) -> RemoteRun {
-        var r = RemoteRun()
+    private func run(_ f: (inout GithubRun) -> Void) -> GithubRun {
+        var r = GithubRun()
         r.runsOn = "ubuntu-latest"
         f(&r)
         return r
     }
 
     func testTheHeaderAndTheEmptyState() {
-        var g = RemoteRuns()
+        var g = GithubRunList()
         g.poolUsed = 7
         g.poolLimit = 20
         g.waiting = 13
@@ -47,7 +47,7 @@ final class GitHubRunsTests: XCTestCase {
     }
 
     func testAJobLine() {
-        var j = RemoteJob()
+        var j = GithubJob()
         j.name = "run (3)"; j.state = "running"; j.step = "run"
         XCTAssertEqual(GitHubRuns.job(j), "run (3): running, step run")
         j.state = "done"; j.conclusion = "success"; j.step = ""

@@ -8,7 +8,7 @@ import SwiftUI
 struct GitHubSection: View {
     @Environment(\.theme) var theme
     let model: MonitorModel
-    let g: RemoteRuns
+    let g: GithubRunList
     var open: (() -> Void)?
     var detail = false
 

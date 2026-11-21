@@ -27,8 +27,16 @@ pub fn bin(package: &str, name: &str) -> PathBuf {
     let mut built = BUILT.lock().unwrap();
     if !built.iter().any(|b| b == name) {
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+        // Build into the target directory this test binary came from. The suite passes
+        // `--target-dir` on the command line, which a nested cargo does not inherit, so without
+        // this the binary lands in the worktree's `target/` while we return a path under the
+        // suite's: a narrowed run (`-p mason-daemon --test it`) then finds no `mason` at all,
+        // or a stale one left in a restored cache.
+        let target_root = target.parent().unwrap();
         let ok = std::process::Command::new(cargo)
             .args(["build", "-q", "-p", package, "--bin", name])
+            .arg("--target-dir")
+            .arg(target_root)
             // The suite's runner gives this process RUSTC_BOOTSTRAP=1 for `--report-time`
             // (s634); build scripts rerun when it changes, so a build that kept it would
             // recompile the workspace the suite's build just compiled without it.
@@ -476,6 +484,9 @@ impl Scratch {
         // host that is slow to come up on a busy Mac must not raise an alert in every other
         // test's daemon (the notify tests count alerts and announcements exactly).
         c.launch_frozen_alert = false;
+        // Tests file their tasks one after another and expect them in one batch: the window
+        // stays whole unless a test is about the early formation (#731).
+        c.landing_window_always = true;
         c
     }
 
@@ -658,6 +669,19 @@ pub fn steps_run(d: &Arc<Daemon>, t: TaskId) -> Vec<String> {
 /// launch on a busy or syspolicyd-stalled Mac, and that is not a test failure.
 const MIN_WAIT_SECS: u64 = 900;
 
+/// The floor: `MASON_TEST_MIN_WAIT_S` when it holds a whole number of seconds, else
+/// [`MIN_WAIT_SECS`]. A runner with nothing competing sets it lower, so a wait that can never
+/// succeed gives up sooner; a wait that succeeds is unchanged.
+fn min_wait_secs() -> u64 {
+    floor_from(std::env::var("MASON_TEST_MIN_WAIT_S").ok().as_deref())
+}
+
+fn floor_from(v: Option<&str>) -> u64 {
+    v.and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(MIN_WAIT_SECS)
+}
+
 /// What one look at a wait's condition found.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Poll {
@@ -761,7 +785,7 @@ pub fn wait_for(what: &str, secs: u64, mut f: impl FnMut() -> bool) {
 
 /// As [`wait_for`], and the condition can also say the wait can no longer succeed.
 pub fn wait_poll(what: &str, secs: u64, poll: impl FnMut() -> Poll) {
-    real_wait(what, secs.max(MIN_WAIT_SECS), 50, poll);
+    real_wait(what, secs.max(min_wait_secs()), 50, poll);
 }
 
 /// As [`wait_for_exact`], but the failure comes back as a message.
@@ -1021,6 +1045,31 @@ pub fn maybe_record(d: &Arc<Daemon>, name: &str) {
 #[cfg(test)]
 mod wait_tests {
     use super::*;
+
+    #[test]
+    fn the_floor_comes_from_the_variable_and_is_900_without_it() {
+        assert_eq!(floor_from(None), 900);
+        assert_eq!(floor_from(Some("180")), 180);
+        assert_eq!(floor_from(Some(" 60 ")), 60);
+        assert_eq!(floor_from(Some("")), 900);
+        assert_eq!(floor_from(Some("soon")), 900);
+        assert_eq!(floor_from(Some("0")), 900);
+        // What the real helper uses is the same function of the real environment.
+        let set = std::env::var("MASON_TEST_MIN_WAIT_S").ok();
+        assert_eq!(min_wait_secs(), floor_from(set.as_deref()));
+    }
+
+    #[test]
+    fn a_wait_that_gives_up_names_the_floor_it_was_given() {
+        let r = wait_loop(
+            "x",
+            floor_from(Some("180")),
+            &mut || true,
+            &mut || {},
+            &mut || Poll::Pending,
+        );
+        assert_eq!(r.unwrap_err(), "timed out after 180s waiting for x");
+    }
 
     #[test]
     fn a_wait_that_can_no_longer_succeed_stops_at_once() {
