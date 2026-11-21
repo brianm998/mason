@@ -870,11 +870,11 @@ pub struct ServicesCfg {
     pub host: Option<HostCfg>,
     pub ci: Option<CiCfg>,
     pub tracker: Option<TrackerCfg>,
-    /// `[remote]`: where a run may go instead of this machine (#697).
+    /// `[remote_runs]`: where a run may go instead of this machine (#697).
     pub remote: Option<RemoteCfg>,
 }
 
-/// `[remote]` of the project file: runs of suites and checks on GitHub Actions.
+/// `[remote_runs]` of the project file: runs of suites and checks on GitHub Actions.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RemoteCfg {
     pub api: String,
@@ -1139,12 +1139,17 @@ fn parse_services(id: &str, doc: &DocumentMut) -> Result<ServicesCfg, String> {
             timeout_s: int(t, "timeout_s", 7200),
         });
     }
-    if let Some(t) = table("remote") {
-        match need(t, "remote", "kind")?.as_str() {
+    if table("remote").is_some() {
+        return Err(format!(
+            "{id}: `[remote]` would clash with the git remote key `remote`; put remote-run settings under `[remote_runs]`"
+        ));
+    }
+    if let Some(t) = table("remote_runs") {
+        match need(t, "remote_runs", "kind")?.as_str() {
             "github-actions" => {}
             o => {
                 return Err(format!(
-                    "{id}: `[remote] kind` is `github-actions`, not {o:?}"
+                    "{id}: `[remote_runs] kind` is `github-actions`, not {o:?}"
                 ))
             }
         }
@@ -1160,26 +1165,26 @@ fn parse_services(id: &str, doc: &DocumentMut) -> Result<ServicesCfg, String> {
             _ => ci_gh
                 .as_ref()
                 .map(|c| c.1.clone())
-                .ok_or_else(|| format!("{id}: `[remote] repo` is required"))?,
+                .ok_or_else(|| format!("{id}: `[remote_runs] repo` is required"))?,
         };
         let token = match get(t, "token") {
             Some(v) if v.starts_with("env:") || v.starts_with("file:") => v,
             Some(_) => {
                 return Err(format!(
-                    "{id}: `[remote] token` is a reference, `env:NAME` or `file:/path`, never the token itself"
+                    "{id}: `[remote_runs] token` is a reference, `env:NAME` or `file:/path`, never the token itself"
                 ))
             }
             None => ci_gh
                 .as_ref()
                 .map(|c| c.2.clone())
-                .ok_or_else(|| format!("{id}: `[remote] token` is required"))?,
+                .ok_or_else(|| format!("{id}: `[remote_runs] token` is required"))?,
         };
         let fallback_local = match get(t, "fallback").as_deref() {
             None | Some("none") => false,
             Some("local") => true,
             Some(o) => {
                 return Err(format!(
-                    "{id}: `[remote] fallback` is `local` or `none`, not {o:?}"
+                    "{id}: `[remote_runs] fallback` is `local` or `none`, not {o:?}"
                 ))
             }
         };
@@ -1733,10 +1738,18 @@ mod tests {
     }
 
     #[test]
+    fn remote_runs_sit_beside_the_git_remote_key() {
+        let f = "path=\"/r\"\nbase=\"m\"\ntest=\"t\"\nremote=\"origin\"\n[ci]\nkind=\"github-actions\"\nrepo=\"o/r\"\ntoken=\"env:T\"\n[remote_runs]\nkind=\"github-actions\"\n";
+        let p = parse_project("p", f).unwrap();
+        assert_eq!(p.remote.as_deref(), Some("origin"));
+        assert_eq!(p.services.remote.unwrap().repo, "o/r");
+    }
+
+    #[test]
     fn the_remote_section_defaults_to_the_ci_repository_and_token() {
         let base = "path=\"/r\"\nbase=\"m\"\ntest=\"t\"\n";
         let ci = "[ci]\nkind=\"github-actions\"\nrepo=\"o/r\"\ntoken=\"env:T\"\n";
-        let rem = "[remote]\nkind=\"github-actions\"\n";
+        let rem = "[remote_runs]\nkind=\"github-actions\"\n";
         let p = parse_project("p", &format!("{base}{ci}{rem}")).unwrap();
         let r = p.services.remote.unwrap();
         assert_eq!(
@@ -1757,7 +1770,7 @@ mod tests {
                 false
             )
         );
-        let own = "[remote]\nkind=\"github-actions\"\nrepo=\"a/b\"\ntoken=\"file:/t\"\nworkflow=\"w.yml\"\nruns_on=\"macos-latest\"\npickup_timeout=60\nfallback=\"local\"\n";
+        let own = "[remote_runs]\nkind=\"github-actions\"\nrepo=\"a/b\"\ntoken=\"file:/t\"\nworkflow=\"w.yml\"\nruns_on=\"macos-latest\"\npickup_timeout=60\nfallback=\"local\"\n";
         let r = parse_project("p", &format!("{base}{ci}{own}"))
             .unwrap()
             .services
@@ -1776,18 +1789,19 @@ mod tests {
         // Without `[ci]` there is nothing to default from; a literal token and unknown values
         // are refused.
         for (bad, want) in [
-            (format!("{base}{rem}"), "`[remote] repo` is required"),
+            (format!("{base}[remote]\nkind=\"github-actions\"\n"), "would clash with the git remote key"),
+            (format!("{base}{rem}"), "`[remote_runs] repo` is required"),
             (
-                format!("{base}[remote]\nkind=\"github-actions\"\nrepo=\"a/b\"\ntoken=\"abc\"\n"),
+                format!("{base}[remote_runs]\nkind=\"github-actions\"\nrepo=\"a/b\"\ntoken=\"abc\"\n"),
                 "a reference",
             ),
             (
-                format!("{base}{ci}[remote]\nkind=\"github-actions\"\nfallback=\"x\"\n"),
+                format!("{base}{ci}[remote_runs]\nkind=\"github-actions\"\nfallback=\"x\"\n"),
                 "fallback",
             ),
             (
-                format!("{base}{ci}[remote]\nkind=\"jenkins\"\n"),
-                "`[remote] kind`",
+                format!("{base}{ci}[remote_runs]\nkind=\"jenkins\"\n"),
+                "`[remote_runs] kind`",
             ),
         ] {
             let e = parse_project("p", &bad).unwrap_err();

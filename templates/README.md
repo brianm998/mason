@@ -20,5 +20,5 @@ proposed, and takes the landing mode and base branch from your answers.
 ## `github/mason-run.yml`
 
 Not a workflow pipeline: the GitHub Actions workflow MASON uses to run a suite or a check on a
-GitHub-hosted runner (the `[remote]` section of a project file). Put it at
+GitHub-hosted runner (the `[remote_runs]` section of a project file). Put it at
 `.github/workflows/mason-run.yml` on the base branch and fill in its setup step.

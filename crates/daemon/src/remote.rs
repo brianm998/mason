@@ -62,7 +62,7 @@ pub enum Kind {
 /// run, a debt) has `None` for the task and follows the global switch and the suite's own rules:
 /// a batch spans tasks, so no one task's choice can decide it (#702). Without a suite it stays
 /// here. A test can force a project remote (`MASON_TEST_FORCE_REMOTE=1` in the daemon's own
-/// environment, which a task cannot set, and only for a project that has a `[remote]`).
+/// environment, which a task cannot set, and only for a project that has a `[remote_runs]`).
 pub fn executor_for(
     d: &Daemon,
     project: &str,
@@ -88,7 +88,7 @@ pub fn executor_for(
 }
 
 /// Where a check no task owns and no suite describes (a landing lint or re-test) goes: the global
-/// switch alone, for a project with a `[remote]` (#702).
+/// switch alone, for a project with a `[remote_runs]` (#702).
 pub fn executor_global(d: &Daemon, project: &str) -> Executor {
     if forced_for_tests() {
         if let Some(r) = remote_cfg(d, project) {
@@ -105,7 +105,7 @@ fn forced_for_tests() -> bool {
     std::env::var("MASON_TEST_FORCE_REMOTE").is_ok_and(|v| v == "1")
 }
 
-/// Does any project have a `[remote]` section? (Cheap: lets a seam skip finding its project.)
+/// Does any project have a `[remote_runs]` section? (Cheap: lets a seam skip finding its project.)
 pub fn any_remote(d: &Daemon) -> bool {
     d.projects().values().any(|p| p.services.remote.is_some())
 }
@@ -287,7 +287,7 @@ pub struct Site {
     pub poll_s: u64,
 }
 
-/// What a project's `[remote]` gives, for one worktree. `None`: the project has no `[remote]`.
+/// What a project's `[remote_runs]` gives, for one worktree. `None`: the project has no `[remote_runs]`.
 pub fn site_for(d: &Daemon, project: &str, cwd: &Path) -> Option<Site> {
     let p = project_cfg(d, project)?;
     let r = p.services.remote.clone()?;
@@ -682,7 +682,7 @@ pub fn sweep_run_refs(
     gone
 }
 
-/// The safety sweep's part: for each project with `[remote]`, delete its stale run refs. At most
+/// The safety sweep's part: for each project with `[remote_runs]`, delete its stale run refs. At most
 /// every half hour; a remote that cannot be reached is tried again next time.
 pub fn sweep_stale_refs(d: &Arc<Daemon>) {
     static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

@@ -119,7 +119,7 @@ claude_bin = "$bin/fake-claude"
 [agent_env]
 FAKE_CLAUDE_SCRIPT = "$root/script.json"
 
-[remote]
+[remote_runs]
 kind = "github-actions"
 api = "http://127.0.0.1:$port"
 repo = "o/r"

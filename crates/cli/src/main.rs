@@ -723,7 +723,7 @@ fn main() {
                 p["project"].as_str().unwrap_or("?"),
                 match p["runs_on"].as_str() {
                     Some(r) => format!("can run on GitHub ({r})"),
-                    None => "no [remote]: always runs here".to_string(),
+                    None => "no [remote_runs]: always runs here".to_string(),
                 }
             );
         }

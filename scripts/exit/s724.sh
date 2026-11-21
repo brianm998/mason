@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 # s724 exit test: remote runs are set up and checked.
-#  1. `mason doctor` on a scratch repository with [remote] and no workflow names the missing
+#  1. `mason doctor` on a scratch repository with [remote_runs] and no workflow names the missing
 #     workflow.
 #  2. `mason remote setup` writes .github/workflows/mason-run.yml on mason/setup-remote, pushes
 #     nothing, and leaves the checked-out branch and files alone.
@@ -25,7 +25,7 @@ project() { # id base
 path = "$repo"
 base = "$2"
 test = "cargo test"
-[remote]
+[remote_runs]
 kind = "github-actions"
 repo = "owner/name"
 token = "env:S724_NO_SUCH_TOKEN"

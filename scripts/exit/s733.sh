@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 # s733 exit test: landing on GitHub (#702). A real masond with `mason remote on`, a project whose
-# `[remote]` points at a fake GitHub on loopback, and a batch of two tasks, one of which holds a
+# `[remote_runs]` points at a fake GitHub on loopback, and a batch of two tasks, one of which holds a
 # file `red.marker`: the fake answers its runs with a red artifact. The suite's own command
 # always fails here, so a landed task proves its verdict came from GitHub. Checks:
 #  1. the origin was sent pushes to `mason/run/**` for the batch's runs (landing asked);
@@ -107,7 +107,7 @@ step_timeout_s = 300
 [agent_env]
 FAKE_CLAUDE_SCRIPT = "$root/script.json"
 
-[remote]
+[remote_runs]
 kind = "github-actions"
 api = "http://127.0.0.1:$port"
 repo = "o/r"

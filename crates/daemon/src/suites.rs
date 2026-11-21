@@ -544,7 +544,7 @@ fn run_remote(
 ) -> Result<Option<Ran>, String> {
     use crate::remote as rm;
     let Some(site) = rm::site_for(d, project, cwd) else {
-        return Err(rm::env_err("the project has no [remote] section"));
+        return Err(rm::env_err("the project has no [remote_runs] section"));
     };
     // A suite whose build runs as its own step here has none when it goes remote: the build
     // comes first in the command.

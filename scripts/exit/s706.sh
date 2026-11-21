@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 # s706 exit test: a suite run on GitHub Actions (#697). A real masond with one project whose
-# `[remote]` points at a fake GitHub on loopback and whose suite is forced remote by the
+# `[remote_runs]` points at a fake GitHub on loopback and whose suite is forced remote by the
 # test-only switch MASON_TEST_FORCE_REMOTE. The suite's own command would fail if it ran here;
 # the fake's artifact says three tests passed. Checks:
 #  1. the origin received a push to `mason/run/**`, and its tree has the base branch's
@@ -126,7 +126,7 @@ claude_bin = "$bin/fake-claude"
 [agent_env]
 FAKE_CLAUDE_SCRIPT = "$root/script.json"
 
-[remote]
+[remote_runs]
 kind = "github-actions"
 api = "http://127.0.0.1:$port"
 repo = "o/r"
