@@ -453,11 +453,29 @@ pub fn stop_unwanted(d: &Arc<Daemon>) -> usize {
     n
 }
 
-/// The check on GitHub Actions, when the one function that decides where runs go says so
-/// (#697); `None` for the local path, which is every run until #698. The result is the same
-/// `CheckOutcome`: `passed` is what the command's exit says. A remote run that is lost is run
-/// again, not resumed. No live counts come from it.
-fn remote_check(d: &Arc<Daemon>, spec: &CheckSpec, id: &str) -> Option<Shared> {
+/// Where `spec` runs, in words for the agent's result: "on GitHub Actions" or "on this Mac".
+pub fn where_ran(d: &Arc<Daemon>, spec: &CheckSpec) -> String {
+    use crate::remote as rm;
+    let local = || "on this Mac".to_string();
+    if !rm::any_remote(d) {
+        return local();
+    }
+    let Some(project) = rm::project_of(d, &spec.cwd) else {
+        return local();
+    };
+    let exec = match spec.place.as_ref() {
+        Some((t, s)) => rm::executor_for(d, &project, rm::Kind::Check, Some((Some(*t), &**s))),
+        None if spec.global => rm::executor_global(d, &project),
+        None => rm::Executor::Local,
+    };
+    match exec {
+        rm::Executor::GitHub { .. } => "on GitHub Actions".to_string(),
+        _ => local(),
+    }
+}
+
+/// The runner label when `spec` goes to GitHub, decided before anything is queued (#759).
+fn runs_on_github(d: &Arc<Daemon>, spec: &CheckSpec) -> Option<String> {
     use crate::remote as rm;
     if !rm::any_remote(d) {
         return None;
@@ -469,9 +487,27 @@ fn remote_check(d: &Arc<Daemon>, spec: &CheckSpec, id: &str) -> Option<Shared> {
         None if spec.global => rm::executor_global(d, &project),
         None => rm::executor_for(d, &project, rm::Kind::Check, None),
     };
-    let rm::Executor::GitHub { runs_on } = exec else {
-        return None;
-    };
+    match exec {
+        rm::Executor::GitHub { runs_on } => Some(runs_on),
+        _ => None,
+    }
+}
+
+/// Does `spec` go to GitHub? Then it needs no local `compile` or `test-suite` slot and no CPU
+/// or heat gate: it uses nothing on this Mac (#759).
+pub fn goes_remote(d: &Arc<Daemon>, spec: &CheckSpec) -> bool {
+    runs_on_github(d, spec).is_some()
+}
+
+/// The check on GitHub Actions, when the one function that decides where runs go says so
+/// (#697); `None` for the local path, which is every run until #698. The result is the same
+/// `CheckOutcome`: `passed` is what the command's exit says. A remote run that is lost is run
+/// again, not resumed. No live counts come from it.
+fn remote_check(d: &Arc<Daemon>, spec: &CheckSpec, id: &str) -> Option<Shared> {
+    use crate::remote as rm;
+    let runs_on = runs_on_github(d, spec)?;
+    let project = rm::project_of(d, &spec.cwd)?;
+    let place = spec.place.as_ref().map(|(t, s)| (*t, &**s));
     // The suite's build is the first part of what runs there (it was not run here).
     // It goes in `RunSpec.build`, a separate process, not joined with `&&` (two `cd`s break).
     let build = place
