@@ -104,6 +104,8 @@ command = "cd clients/swift && swift test"
 parser = "xctest"
 min_tests = 1
 level = "unit"
+# The monitor is SwiftUI and AppKit: it builds only on macOS, not on the default Linux runner.
+runs_on = "macos-latest"
 uses = { test-suite = 1 }
 
 # Read from Gradle's JUnit XML, not its console: Gradle 9 prints no per-test lines even at --info, and it
