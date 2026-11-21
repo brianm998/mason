@@ -14,7 +14,7 @@
 #   MASON_EXIT_PLAN=1             print the scripts of the shard and exit.
 #   MASON_EXIT_DIR, MASON_EXIT_WEIGHTS   other script directory / weights file (tests).
 #   MASON_EXIT_REPEAT=N           read by the repetition scripts (s80, s99, s169, s170, s482,
-#                                 s497): how many times each runs its cargo test.
+#                                 s497, s636): how many times each runs its cargo test.
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)"
 dir=${MASON_EXIT_DIR:-scripts/exit}
