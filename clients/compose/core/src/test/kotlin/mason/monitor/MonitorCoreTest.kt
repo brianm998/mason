@@ -1536,4 +1536,20 @@ class MonitorCoreTest {
         m.isOwner = false
         assertFalse(m.canAct && "land_now" in rows[0].allowed_actions)
     }
+
+    @Test
+    fun activeHeaderCountsWorkingAndWaiting() {
+        fun agent(task: Long, state: String, place: String = "") = ActiveModel(task = task, state = state, place = place)
+        assertNull(ActiveSummary.header(emptyList()))
+        val active = listOf(agent(1, "working"), agent(2, "working")) + (3L..7L).map { agent(it, "waiting_check", "github") }
+        assertEquals("7 agents: 2 working, 5 waiting on GitHub checks", ActiveSummary.header(active))
+        assertEquals("1 agent: 1 working", ActiveSummary.header(listOf(agent(1, ""))))
+        assertEquals("waiting on a GitHub check", ActiveSummary.state(agent(3, "waiting_check", "github")))
+        val r = RemoteSummary(
+            checks = 7, test_steps = 4, debts = 2,
+            pools = listOf(PoolUse(name = "gha", used = 13, limit = 16), PoolUse(name = "gha-macos", used = 2, limit = 4)),
+        )
+        assertEquals("13 of 16 runners: 7 checks, 4 test steps, 2 debts; macOS 2 of 4", ActiveSummary.github(r))
+        assertNull(ActiveSummary.github(null))
+    }
 }

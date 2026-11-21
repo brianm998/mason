@@ -973,6 +973,51 @@ impl<'a> Ctx<'a> {
         })
     }
 
+    /// What an agent is doing, for the home page: `working` (it holds its `llm` slot),
+    /// `waiting_check` (its `run_check` is out, on GitHub or queued here) or `waiting_slot`
+    /// (its step waits for an `llm` slot). `None` for a task that is no agent now.
+    /// Returns (state, place, runs_on, run_url, resource).
+    fn agent_state(
+        &self,
+        t: &Task,
+        llm_holders: &std::collections::HashSet<TaskId>,
+        holds: &[crate::remote::RemoteHold],
+    ) -> Option<(&'static str, &'static str, String, String, String)> {
+        if llm_holders.contains(&t.id) {
+            return Some(("working", "", String::new(), String::new(), String::new()));
+        }
+        if !t.state.is_step() {
+            return None;
+        }
+        if let Some(h) = holds.iter().find(|h| h.task == t.id.0 && h.kind == "check") {
+            let (url, runs_on) = crate::remote::record_view(&h.record);
+            return Some(("waiting_check", "github", runs_on, url, String::new()));
+        }
+        // A step that has not started its agent is queued, not an active model; one that
+        // has started (it has a live record) and waits for a session again is `waiting_slot`.
+        let live = self.develop_record(t)?;
+        if live.check_open().is_some() {
+            return Some((
+                "waiting_check",
+                "here",
+                String::new(),
+                String::new(),
+                String::new(),
+            ));
+        }
+        let w = self.wait_view.tasks.get(&t.id.0)?;
+        if w.resource.starts_with("llm") {
+            return Some((
+                "waiting_slot",
+                "",
+                String::new(),
+                String::new(),
+                w.resource.clone(),
+            ));
+        }
+        None
+    }
+
     pub fn home(&self, project: &str) -> HomeView {
         let tasks: Vec<&Task> = self
             .w
@@ -993,6 +1038,8 @@ impl<'a> Ctx<'a> {
             )
         });
         let llm_holders = self.d.broker.llm_holders();
+        let holds =
+            crate::remote::running_holds(&crate::remote::holds_dir(&self.d.cfg.hosts_dir()));
         HomeView {
             project: project.to_string(),
             status: self.header(project).status,
@@ -1006,8 +1053,9 @@ impl<'a> Ctx<'a> {
                 .collect(),
             active: tasks
                 .iter()
-                .filter(|t| llm_holders.contains(&t.id))
-                .map(|t| {
+                .filter_map(|t| {
+                    let (state, place, runs_on, run_url, resource) =
+                        self.agent_state(t, &llm_holders, &holds)?;
                     let r = self.row(t);
                     // A held session is never hidden: with no model on the
                     // row, fall back to its display name, then the step.
@@ -1018,16 +1066,22 @@ impl<'a> Ctx<'a> {
                     } else {
                         t.step.clone()
                     };
-                    ActiveModel {
+                    Some(ActiveModel {
                         model,
                         display: r.display,
                         model_use: r.model_use,
                         project: r.project,
                         task: t.id.0,
                         step: t.step.clone(),
-                    }
+                        state: state.into(),
+                        place: place.into(),
+                        runs_on,
+                        run_url,
+                        resource,
+                    })
                 })
                 .collect(),
+            remote: remote_summary(self.d, &holds),
             developing: {
                 let kinds: Vec<mason_core::checks::PhaseKind> = tasks
                     .iter()
@@ -1995,6 +2049,49 @@ fn queued_why(
         Some((_, w)) if w > 0 => format!("waiting for the {w}s window to close"),
         _ => "waiting for the next batch".into(),
     }
+}
+
+/// The runs out on GitHub now, by pool and by what they are for. `None` when there are none.
+pub fn remote_summary(
+    d: &crate::daemon::Daemon,
+    holds: &[crate::remote::RemoteHold],
+) -> Option<mason_protocol::RemoteSummary> {
+    if holds.is_empty() {
+        return None;
+    }
+    let mut out = mason_protocol::RemoteSummary::default();
+    for name in ["gha", "gha-macos"] {
+        if let Some(limit) = d.broker.limit(name) {
+            out.pools.push(mason_protocol::PoolUse {
+                name: name.into(),
+                used: d.broker.used(name),
+                limit,
+            });
+        }
+    }
+    for h in holds {
+        let units = h.units.get("gha").copied().unwrap_or(1);
+        match h.kind.as_str() {
+            "check" => out.checks += units,
+            "test_step" => out.test_steps += units,
+            "debt" => out.debts += units,
+            _ => out.batches += units,
+        }
+        let (url, runs_on) = crate::remote::record_view(&h.record);
+        out.runs.push(mason_protocol::RemoteRun {
+            kind: if h.kind.is_empty() {
+                "batch".into()
+            } else {
+                h.kind.clone()
+            },
+            task: h.task,
+            runs_on,
+            url,
+            units,
+            label: h.label.clone(),
+        });
+    }
+    Some(out)
 }
 
 #[cfg(test)]

@@ -476,6 +476,9 @@ impl Scratch {
         // host that is slow to come up on a busy Mac must not raise an alert in every other
         // test's daemon (the notify tests count alerts and announcements exactly).
         c.launch_frozen_alert = false;
+        // Tests file their tasks one after another and expect them in one batch: the window
+        // stays whole unless a test is about the early formation (#731).
+        c.landing_window_always = true;
         c
     }
 

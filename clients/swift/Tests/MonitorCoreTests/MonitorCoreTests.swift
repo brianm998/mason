@@ -1850,4 +1850,23 @@ final class MonitorCoreTests: XCTestCase {
             XCTAssertFalse(m.tileShowsCurrentTask(c), "\(state): the shown task left the state")
         }
     }
+
+    func testActiveHeaderCountsWorkingAndWaiting() {
+        func agent(_ task: UInt64, _ state: String, _ place: String = "") -> Mason_V1_ActiveModel {
+            var a = Mason_V1_ActiveModel(); a.task = task; a.state = state; a.place = place; return a
+        }
+        XCTAssertNil(ActiveSummary.header([]), "the page then says Nothing is running.")
+        let active = [agent(1, "working"), agent(2, "working")]
+            + (3...7).map { agent($0, "waiting_check", "github") }
+        XCTAssertEqual(ActiveSummary.header(active), "7 agents: 2 working, 5 waiting on GitHub checks")
+        XCTAssertEqual(ActiveSummary.header([agent(1, "")]), "1 agent: 1 working")
+        XCTAssertEqual(ActiveSummary.state(agent(3, "waiting_check", "github")), "waiting on a GitHub check")
+        var r = Mason_V1_RemoteSummary()
+        r.checks = 7; r.testSteps = 4; r.debts = 2
+        var gha = Mason_V1_PoolUse(); gha.name = "gha"; gha.used = 13; gha.limit = 16
+        var mac = Mason_V1_PoolUse(); mac.name = "gha-macos"; mac.used = 2; mac.limit = 4
+        r.pools = [gha, mac]
+        XCTAssertEqual(ActiveSummary.github(r), "13 of 16 runners: 7 checks, 4 test steps, 2 debts; macOS 2 of 4")
+        XCTAssertNil(ActiveSummary.github(nil))
+    }
 }
