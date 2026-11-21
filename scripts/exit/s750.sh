@@ -22,7 +22,7 @@ bin=$PWD/target/debug
 owner=${USER:-owner}
 m() { "$bin/mason" --data-dir "$root/d" --config-dir "$root/c" "$@"; }
 jq_state() { sed -n 's/^  "state": "\(.*\)",$/\1/p'; }
-fail() { echo "FAILED: $*" >&2; set +e; m task show 0 >&2 2>&1; tail -30 "$root/masond.log" >&2; cat "$root/pushes.log" >&2 2>/dev/null; exit 1; }
+fail() { echo "FAILED: $*" >&2; set +e; cat "$root/hold.out" >&2 2>/dev/null; m task show 0 >&2 2>&1; tail -30 "$root/masond.log" >&2; cat "$root/pushes.log" >&2 2>/dev/null; exit 1; }
 wait_state() {  # TASK STATE SECONDS
   local end=$((SECONDS + $3))
   until [ "$(m task show "$1" --json 2>/dev/null | jq_state)" = "$2" ]; do
@@ -106,7 +106,7 @@ cp "$root/repo/.github/workflows/mason-run.yml" "$root/base-workflow.yml"
 # The scripted agent edits the workflow to report green and adds one of its own: neither may
 # reach the runner.
 cat > "$root/agent.sh" <<SH
-echo hello > hello.txt
+pwd > hello.txt
 mkdir -p .github/workflows .mason
 printf 'name: evil\non: push\n' > .github/workflows/mason-run.yml
 printf 'name: evil2\non: push\n' > .github/workflows/evil.yml
@@ -141,7 +141,10 @@ start_daemon() {  # FORCE (1 or empty)
   until m status >/dev/null 2>&1; do kill -0 "$daemon" || { cat "$root/masond.log" >&2; exit 1; }; sleep 0.1; done
 }
 hold_slots() {
-  m hold --needs compile,test-suite --pipeline other --label "other work" >"$root/hold.out" &
+  # stdin must stay open: a background job gets /dev/null, and `mason hold` ends when stdin closes.
+  [ -p "$root/hold.in" ] || mkfifo "$root/hold.in"
+  exec 3<>"$root/hold.in"
+  m hold --needs compile,test-suite --pipeline other --label "other work" <"$root/hold.in" >"$root/hold.out" 2>&1 3>&- &
   holder=$!
   until grep -q granted "$root/hold.out" 2>/dev/null; do kill -0 "$holder" || fail "the hold ended"; sleep 0.1; done
 }
@@ -157,10 +160,10 @@ until grep -q 'head_sha=' "$root/gh/requests.log" 2>/dev/null; do
 done
 kill -0 "$holder" || fail "the held slots were released"
 wait_state 0 landed 180
-kill "$holder" 2>/dev/null || true; holder=""
+exec 3>&-; wait "$holder" || true; holder=""
 
 echo "== 2. remote off: the same check waits for the compile slot"
-kill -9 "$daemon"; daemon=""
+kill -9 "$daemon"; daemon=""; "$bin/step-host-ctl" reap "$root/d/h" >/dev/null 2>&1 || true
 : > "$root/gh/requests.log"
 start_daemon ""
 hold_slots
