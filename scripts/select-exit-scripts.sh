@@ -4,7 +4,8 @@
 # path per line (s669). Static, no timing. Usage: select-exit-scripts.sh BASE_COMMIT
 # A script is selected when it was added or edited, or its text names a changed path (or the changed
 # file's name when it is under scripts/), the `-p <package>` of a changed crate, or `--test <target>`
-# of a changed integration-test target. Docs-only changes select nothing.
+# of a changed integration-test target, except that a changed file under crates/<c>/tests/ selects
+# only scripts naming its module stem as a whole word (s785). Docs-only changes select nothing.
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)"
 base=${1-}
@@ -34,14 +35,17 @@ while IFS= read -r f; do
   case "$f" in
     crates/*/*)
       c=${f#crates/}; c=${c%%/*}
+      case "$f" in
+        crates/$c/tests/*)
+          # A test file is matched by its module name only (s785): crate-wide and --test matches
+          # would select hundreds of scripts; the cargo-workspace suite covers compile breaks.
+          stem=$(basename "$f" .rs)
+          case "$stem" in mod|main) stem=$(basename "$(dirname "$f")") ;; esac
+          pick -E "(^|[^A-Za-z0-9_])$stem([^A-Za-z0-9_-]|$)"
+          continue ;;
+      esac
       name=$(sed -n 's/^name *= *"\(.*\)"/\1/p' "crates/$c/Cargo.toml" 2>/dev/null | head -n 1)
       [ -n "$name" ] && pick -E "(-p|--package)[ =]+$name([^A-Za-z0-9_-]|$)"
-      t=
-      case "$f" in
-        crates/$c/tests/*/*) t=${f#crates/$c/tests/}; t=${t%%/*} ;;
-        crates/$c/tests/*.rs) t=$(basename "$f" .rs) ;;
-      esac
-      [ -n "$t" ] && pick -E "--test[ =]+$t([^A-Za-z0-9_-]|$)"
       ;;
   esac
 done <<< "$changed"
