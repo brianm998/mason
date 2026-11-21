@@ -363,7 +363,12 @@ fn a_pr_wait_shows_the_hosts_checks_and_the_batch_phases_on_each_member() {
         let p = seen(t).unwrap();
         assert_eq!(p.unit, "phases", "{p:?}");
         assert_eq!(p.total.value, 4, "{p:?}");
-        assert!(p.message.starts_with("batch: "), "{p:?}");
+        // The message is whatever the batch said last: its phase, or (each poll of the host's
+        // checks) the check that is running. Which one a read catches depends on timing.
+        assert!(
+            p.message.starts_with("batch: ") || p.message.starts_with("check running: "),
+            "{p:?}"
+        );
         assert!(
             p.subs.iter().any(|s| s.unit == "tests"),
             "the batch's suite counts are sub-counts: {p:?}"

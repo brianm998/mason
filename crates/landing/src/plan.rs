@@ -62,15 +62,22 @@ pub enum Formation {
 
 /// Form a batch from the waiting tasks. The window runs from the oldest
 /// waiting task; a full batch (`max_size`, 0 for no cap) goes at once. Tasks
-/// are taken by rank, then id.
-pub fn form_batch(waiting: &[Candidate], now: u64, window: Duration, max_size: usize) -> Formation {
+/// are taken by rank, then id. `moving` is how many other tasks of the project are on their
+/// way to the queue; with none the window has nobody to wait for and the batch forms now.
+pub fn form_batch(
+    waiting: &[Candidate],
+    now: u64,
+    window: Duration,
+    max_size: usize,
+    moving: usize,
+) -> Formation {
     if waiting.is_empty() {
         return Formation::Empty;
     }
     let oldest = waiting.iter().map(|c| c.ready_at).min().unwrap_or(now);
     let due = oldest.saturating_add(window.as_secs());
     let full = max_size > 0 && waiting.len() >= max_size;
-    if !full && now < due {
+    if !full && moving > 0 && now < due {
         return Formation::Wait(Duration::from_secs(due - now));
     }
     let mut v: Vec<&Candidate> = waiting.iter().collect();
@@ -247,14 +254,14 @@ mod tests {
 
     #[test]
     fn nothing_waiting_forms_nothing() {
-        assert_eq!(form_batch(&[], 100, Duration::ZERO, 0), Formation::Empty);
+        assert_eq!(form_batch(&[], 100, Duration::ZERO, 0, 1), Formation::Empty);
     }
 
     #[test]
     fn a_zero_window_goes_at_once_in_rank_order() {
         let w = [cand(3, 2, 10), cand(1, 5, 10), cand(2, 2, 10)];
         assert_eq!(
-            form_batch(&w, 10, Duration::ZERO, 0),
+            form_batch(&w, 10, Duration::ZERO, 0, 1),
             Formation::Form(vec![2, 3, 1])
         );
     }
@@ -264,22 +271,40 @@ mod tests {
         let w = [cand(1, 1, 100), cand(2, 1, 130)];
         let win = Duration::from_secs(60);
         assert_eq!(
-            form_batch(&w, 120, win, 0),
+            form_batch(&w, 120, win, 0, 1),
             Formation::Wait(Duration::from_secs(40))
         );
-        assert_eq!(form_batch(&w, 160, win, 0), Formation::Form(vec![1, 2]));
+        assert_eq!(form_batch(&w, 160, win, 0, 1), Formation::Form(vec![1, 2]));
     }
 
     #[test]
     fn a_full_batch_does_not_wait_and_takes_the_best_ranked() {
         let w = [cand(1, 9, 100), cand(2, 1, 100), cand(3, 5, 100)];
         let win = Duration::from_secs(600);
-        assert_eq!(form_batch(&w, 100, win, 2), Formation::Form(vec![2, 3]));
+        assert_eq!(form_batch(&w, 100, win, 2, 1), Formation::Form(vec![2, 3]));
         // Not full yet: wait.
         assert!(matches!(
-            form_batch(&w[..1], 100, win, 2),
+            form_batch(&w[..1], 100, win, 2, 1),
             Formation::Wait(_)
         ));
+    }
+
+    #[test]
+    fn with_nobody_moving_the_window_is_not_waited_out() {
+        let w = [cand(1, 1, 100)];
+        let win = Duration::from_secs(600);
+        assert_eq!(form_batch(&w, 100, win, 0, 0), Formation::Form(vec![1]));
+        assert_eq!(
+            form_batch(&w, 100, win, 0, 1),
+            Formation::Wait(Duration::from_secs(600))
+        );
+        // A full batch goes at once whoever is moving; nothing waiting is still empty.
+        let full = [cand(1, 1, 100), cand(2, 1, 100)];
+        assert_eq!(
+            form_batch(&full, 100, win, 2, 3),
+            Formation::Form(vec![1, 2])
+        );
+        assert_eq!(form_batch(&[], 100, win, 0, 0), Formation::Empty);
     }
 
     #[test]
@@ -408,7 +433,7 @@ mod tests {
             cap in 0usize..6,
         ) {
             let w: Vec<Candidate> = ranks.iter().enumerate().map(|(i, r)| cand(i as u64, *r, 0)).collect();
-            if let Formation::Form(ids) = form_batch(&w, 0, Duration::ZERO, cap) {
+            if let Formation::Form(ids) = form_batch(&w, 0, Duration::ZERO, cap, 1) {
                 let set: BTreeSet<_> = ids.iter().collect();
                 prop_assert_eq!(set.len(), ids.len());
                 if cap > 0 { prop_assert!(ids.len() <= cap); }
