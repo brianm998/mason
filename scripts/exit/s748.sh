@@ -23,7 +23,7 @@ bin=$PWD/target/debug
 owner=${USER:-owner}
 m() { "$bin/mason" --data-dir "$root/d" --config-dir "$root/c" "$@"; }
 jq_state() { sed -n 's/^  "state": "\(.*\)",$/\1/p'; }
-fail() { echo "FAILED: $*" >&2; set +e; cat "$root/hold.err" >&2 2>/dev/null; m task show 0 >&2 2>&1; tail -30 "$root/masond.log" >&2; cat "$root/pushes.log" >&2 2>/dev/null; exit 1; }
+fail() { echo "FAILED: $*" >&2; set +e; cat "$root/hold.err" >&2 2>/dev/null; m task show 0 >&2 2>&1; m task show 1 >&2 2>&1; tail -30 "$root/masond.log" >&2; cat "$root/pushes.log" >&2 2>/dev/null; exit 1; }
 wait_state() {  # TASK STATE SECONDS
   local end=$((SECONDS + $3))
   until [ "$(m task show "$1" --json 2>/dev/null | jq_state)" = "$2" ]; do
@@ -106,7 +106,7 @@ cp "$root/repo/.github/workflows/mason-run.yml" "$root/base-workflow.yml"
 # The scripted agent edits the workflow to report green and adds one of its own: neither may
 # reach the runner.
 cat > "$root/agent.sh" <<SH
-echo hello > hello.txt
+echo "hello \$\$ \$(date +%s)" > hello.txt  # unique: a second task must still have a change to commit
 mkdir -p .github/workflows .mason
 printf 'name: evil\non: push\n' > .github/workflows/mason-run.yml
 printf 'name: evil2\non: push\n' > .github/workflows/evil.yml
