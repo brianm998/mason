@@ -321,6 +321,83 @@ fn remote_base_ref(repo: &Path, remote: &str, base: &str) -> String {
     }
 }
 
+// ---- other workflows' jobs (#766) ---------------------------------------------------------
+
+/// What the repository's other workflows (not MASON's own) are running on GitHub's runners,
+/// read from the Actions API. The list of in-progress runs is asked with its last ETag, so a 304
+/// costs nothing and leaves the count as it was, with no job lookups.
+#[derive(Default)]
+pub struct OtherWorkflows {
+    etag: Option<String>,
+    /// Running jobs of other workflows.
+    pub jobs: u32,
+    /// A short label for them: `develop CI: 7 jobs`.
+    pub label: String,
+}
+
+impl OtherWorkflows {
+    /// Look once. `own` is MASON's workflow file name (`mason-run.yml`): its runs are not
+    /// counted, the pool counts them itself. Returns whether the count may have changed.
+    pub fn poll(&mut self, gh: &GitHub, own: &str) -> Result<bool, String> {
+        let found = gh
+            .in_progress_runs(self.etag.as_deref())
+            .map_err(|e| e.to_string())?;
+        let Some((runs, etag)) = found else {
+            return Ok(false);
+        };
+        let mut by_name: std::collections::BTreeMap<String, u32> = Default::default();
+        for (id, name, path) in runs {
+            if path.rsplit('/').next() == Some(own) {
+                continue;
+            }
+            let jobs = gh.remote_run_jobs(id).map_err(|e| e.to_string())?;
+            let running = jobs.iter().filter(|j| j.status == "in_progress").count() as u32;
+            if running > 0 {
+                *by_name.entry(name).or_default() += running;
+            }
+        }
+        self.etag = etag;
+        self.jobs = by_name.values().sum();
+        self.label = by_name
+            .iter()
+            .map(|(n, j)| format!("{n}: {j} job{}", if *j == 1 { "" } else { "s" }))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Ok(true)
+    }
+}
+
+/// Keep the broker told how many jobs other workflows run, every 30 seconds, for the first
+/// project with `[remote_runs]`. Nothing runs where no project has one.
+pub fn spawn_other_workflows(d: &Arc<Daemon>) {
+    if forced_for_tests() || !any_remote(d) {
+        return;
+    }
+    let mut seen = OtherWorkflows::default();
+    crate::bg::spawn_loop(d, "other-workflows", move |weak| {
+        std::thread::sleep(Duration::from_secs(30));
+        let Some(d) = weak.upgrade() else {
+            return false;
+        };
+        let Some(p) = d
+            .projects()
+            .values()
+            .find(|p| p.services.remote.is_some())
+            .cloned()
+        else {
+            return true;
+        };
+        if let Some(site) = site_for(&d, &p.id, &p.path) {
+            match seen.poll(&site.gh, &site.workflow) {
+                Ok(true) => d.broker.set_other_workflows(seen.jobs, &seen.label),
+                Ok(false) => {}
+                Err(e) => tracing::debug!("other workflows: {e}"),
+            }
+        }
+        true
+    });
+}
+
 // ---- the snapshot -----------------------------------------------------------------------------
 
 /// `.mason/run.json`: what the runner is told, from the pinned definition.
@@ -2735,5 +2812,88 @@ mod tests {
     fn job_names_of_a_sharded_run_are_run_jobs() {
         assert!(is_run_job("run") && is_run_job("run (3)"));
         assert!(!is_run_job("plan") && !is_run_job("running"));
+    }
+
+    /// An Actions API that lists in-progress runs with an ETag and counts the requests.
+    struct FakeActions {
+        etag: Mutex<String>,
+        running: Mutex<u32>,
+        log: Mutex<Vec<String>>,
+    }
+
+    impl Http for FakeActions {
+        fn send(
+            &self,
+            r: &mason_adapter_api::http::Request,
+        ) -> Result<mason_adapter_api::http::Response, mason_adapter_api::http::Transport> {
+            use mason_adapter_api::http::Response;
+            self.log.lock().unwrap().push(r.url.clone());
+            let ok = |body: serde_json::Value, etag: Option<String>| {
+                Ok(Response {
+                    status: 200,
+                    headers: etag.map(|e| ("etag".to_string(), e)).into_iter().collect(),
+                    body: body.to_string(),
+                })
+            };
+            if r.url.contains("/actions/runs?status=in_progress") {
+                let etag = self.etag.lock().unwrap().clone();
+                if r.headers
+                    .iter()
+                    .any(|(k, v)| k == "If-None-Match" && *v == etag)
+                {
+                    return Ok(Response {
+                        status: 304,
+                        headers: vec![],
+                        body: String::new(),
+                    });
+                }
+                return ok(
+                    serde_json::json!({"workflow_runs": [
+                        {"id": 1, "name": "CI", "path": ".github/workflows/ci.yml"},
+                        {"id": 2, "name": "MASON run", "path": ".github/workflows/mason-run.yml"}]}),
+                    Some(etag),
+                );
+            }
+            if r.url.contains("/actions/runs/1/jobs") {
+                let n = *self.running.lock().unwrap();
+                let jobs: Vec<_> = (0..n)
+                    .map(|i| serde_json::json!({"name": format!("j{i}"), "status": "in_progress"}))
+                    .collect();
+                return ok(serde_json::json!({"jobs": jobs}), None);
+            }
+            Err(mason_adapter_api::http::Transport(format!(
+                "unexpected {}",
+                r.url
+            )))
+        }
+    }
+
+    #[test]
+    fn other_workflows_are_counted_and_a_304_changes_nothing_and_asks_for_nothing_more() {
+        let api = Arc::new(FakeActions {
+            etag: Mutex::new("\"a\"".into()),
+            running: Mutex::new(3),
+            log: Mutex::new(vec![]),
+        });
+        let gh = GitHub::new(
+            api.clone(),
+            "https://api.github.com",
+            "o/r",
+            TokenRef::Env("MASON_TEST_REMOTE_TOKEN".into()),
+        );
+        let mut seen = OtherWorkflows::default();
+        assert!(seen.poll(&gh, "mason-run.yml").unwrap());
+        assert_eq!((seen.jobs, seen.label.as_str()), (3, "CI: 3 jobs"));
+        let asked = api.log.lock().unwrap().len();
+        // The jobs finish but GitHub says nothing changed: the count stays, and only the one
+        // conditional request is made.
+        *api.running.lock().unwrap() = 0;
+        assert!(!seen.poll(&gh, "mason-run.yml").unwrap());
+        assert_eq!(seen.jobs, 3);
+        assert_eq!(api.log.lock().unwrap().len(), asked + 1);
+        // A new ETag: the new count is read.
+        *api.etag.lock().unwrap() = "\"b\"".into();
+        assert!(seen.poll(&gh, "mason-run.yml").unwrap());
+        assert_eq!(seen.jobs, 0);
     }
 }

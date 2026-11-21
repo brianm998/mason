@@ -142,6 +142,12 @@ pub const DEFAULT_GHA: u32 = 16;
 /// The default size of the `gha-macos` pool: the macOS jobs among them.
 pub const DEFAULT_GHA_MACOS: u32 = 4;
 
+/// GitHub's job limit for the account: MASON's limit and other workflows' running jobs together
+/// stay under it (#766). `mason resources limit gha_ceiling N` changes it.
+pub const DEFAULT_GHA_CEILING: u32 = 20;
+/// The name of the ceiling in `mason resources limit` and limits.kv. It is not a pool.
+pub const GHA_CEILING: &str = "gha_ceiling";
+
 /// The default `thermal_max_c`. On 2026-11-18/19 the owner's iMac Pro sat at 90 °C or more for
 /// 647 minutes, 98 °C or more for 97 and peaked at 99.6 °C, with `pmset` reading 100 throughout.
 pub const DEFAULT_THERMAL_MAX_C: u32 = 97;
@@ -416,6 +422,10 @@ enum Meta {
         key: String,
         record: PathBuf,
     },
+    /// GitHub runner units used by something that is not MASON (#766): another workflow's
+    /// running jobs, or (`ceiling`) the part of MASON's limit that the account-wide ceiling
+    /// takes away. Counted as held, never granted or probed.
+    Other,
 }
 
 struct State {
@@ -434,6 +444,11 @@ struct State {
     /// not changed by a definition that happens to declare the same name.
     fixed: HashSet<String>,
     pools: HashSet<String>,
+    /// The account-wide cap on GitHub jobs (`gha_ceiling`), and the running jobs of other
+    /// workflows with a short label for them (#766).
+    gha_ceiling: u32,
+    other_jobs: u32,
+    other_label: String,
     floor_mb: Option<u64>,
     /// resources.toml as read, and the gates changed since (`gates.kv`).
     base: ResourceCfg,
@@ -787,6 +802,9 @@ impl Broker {
                 by_task: HashMap::new(),
                 fixed,
                 pools,
+                gha_ceiling: DEFAULT_GHA_CEILING,
+                other_jobs: 0,
+                other_label: String::new(),
                 floor_mb: cfg.memory_floor_mb,
                 base: cfg.clone(),
                 overrides: BTreeMap::new(),
@@ -864,6 +882,10 @@ impl Broker {
                 if let Some((name, n)) = line.split_once('\t') {
                     if let Ok(n) = n.trim().parse::<u32>() {
                         let mut st = lock(&b.st);
+                        if name == GHA_CEILING {
+                            st.gha_ceiling = n;
+                            continue;
+                        }
                         // A saved `compile` count is the owner's word and replaces
                         // cpu.compile_jobs; the CPU and disk gates still apply.
                         let kind = kind_for(&st, name);
@@ -873,6 +895,7 @@ impl Broker {
                 }
             }
         }
+        Self::refresh_other(&mut lock(&b.st));
         Ok(Arc::new(b))
     }
 
@@ -921,9 +944,16 @@ impl Broker {
         if name == COMPILE && units == 0 {
             return Err("`compile` needs at least 1: 0 would stop every build and test".into());
         }
-        let kind = kind_for(&st, name);
-        st.ledger.set_capacity(name, units, kind);
-        st.fixed.insert(name.to_string());
+        if name == GHA_CEILING {
+            st.gha_ceiling = units;
+        } else {
+            let kind = kind_for(&st, name);
+            st.ledger.set_capacity(name, units, kind);
+            st.fixed.insert(name.to_string());
+        }
+        if name == GHA_CEILING || name == GHA {
+            Self::refresh_other(&mut st);
+        }
         let mut lines: BTreeMap<String, u32> = std::fs::read_to_string(&self.limits_file)
             .unwrap_or_default()
             .lines()
@@ -939,6 +969,92 @@ impl Broker {
         drop(st);
         self.cv.notify_all();
         Ok(())
+    }
+
+    /// Set what other workflows on the repository are running, from the Actions API (#766):
+    /// `jobs` running jobs, described by `label` ("develop CI: 7 jobs"). They count against the
+    /// `gha` pool, and the ceiling keeps MASON's share under what the account has left.
+    pub fn set_other_workflows(&self, jobs: u32, label: &str) {
+        let mut st = lock(&self.st);
+        if st.other_jobs == jobs && st.other_label == label {
+            return;
+        }
+        st.other_jobs = jobs;
+        st.other_label = label.to_string();
+        Self::refresh_other(&mut st);
+        st = self.pass(st);
+        drop(st);
+        self.cv.notify_all();
+    }
+
+    /// Replace the two `Other` holders with what the numbers say now: the other workflows'
+    /// jobs, and the part of the `gha` limit above what the ceiling leaves after them.
+    fn refresh_other(st: &mut State) {
+        let old: Vec<u64> = st
+            .meta
+            .iter()
+            .filter_map(|(id, m)| matches!(m, Meta::Other).then_some(*id))
+            .collect();
+        for id in old {
+            st.ledger.release(id);
+            st.meta.remove(&id);
+        }
+        let limit = st.ledger.capacity(GHA).map_or(0, |c| c.units);
+        let slack = limit.saturating_sub(st.gha_ceiling);
+        let now = crate::daemon::now_ms();
+        for (units, label) in [
+            (
+                st.other_jobs.min(limit),
+                if st.other_label.is_empty() {
+                    format!("other workflows: {} jobs", st.other_jobs)
+                } else {
+                    st.other_label.clone()
+                },
+            ),
+            (
+                slack.min(limit.saturating_sub(st.other_jobs.min(limit))),
+                format!("above the account ceiling of {}", st.gha_ceiling),
+            ),
+        ] {
+            if units == 0 {
+                continue;
+            }
+            let id = st.ledger.adopt(Needs::of(&[(GHA, units)]), &label, now);
+            st.meta.insert(id, Meta::Other);
+        }
+    }
+
+    /// The `gha` pool as `mason resources` shows it: MASON's units, other workflows', the ceiling.
+    fn gha_view(st: &State) -> serde_json::Value {
+        let snap = st.ledger.snapshot();
+        let used: u32 = snap
+            .holders
+            .iter()
+            .filter(|h| !matches!(st.meta.get(&h.id), Some(Meta::Other)))
+            .filter_map(|h| h.needs.amounts.get(GHA))
+            .sum();
+        serde_json::json!({
+            "mason": used,
+            "other": st.other_jobs,
+            "other_label": st.other_label,
+            "ceiling": st.gha_ceiling,
+        })
+    }
+
+    /// How many requests wait for GitHub runner units: a debt payment starts only when this is 0.
+    pub fn gha_waiting(&self) -> usize {
+        let st = lock(&self.st);
+        st.ledger
+            .snapshot()
+            .waiting
+            .iter()
+            .filter(|r| {
+                r.needs
+                    .amounts
+                    .keys()
+                    .any(|k| mason_scheduler::is_gha_pool(k))
+            })
+            .count()
     }
 
     fn gates_file(&self) -> PathBuf {
@@ -1272,7 +1388,12 @@ impl Broker {
             .filter(|id| {
                 !matches!(
                     st.meta.get(id),
-                    Some(Meta::Outside { .. } | Meta::Host { .. } | Meta::Remote { .. })
+                    Some(
+                        Meta::Outside { .. }
+                            | Meta::Host { .. }
+                            | Meta::Remote { .. }
+                            | Meta::Other
+                    )
                 )
             })
             .collect();
@@ -1549,6 +1670,7 @@ impl Broker {
                     Some((*id, "held by a step host from before the restart".into()))
                 }
                 Meta::Remote { .. } => Some((*id, "a GitHub run from before the restart".into())),
+                Meta::Other => Some((*id, "not MASON's".into())),
                 Meta::Task => None,
             })
             .collect();
@@ -2942,6 +3064,7 @@ impl Broker {
         let gates = self.gates_locked(&st);
         json!({
             "resources": resources,
+            "gha": Self::gha_view(&st),
             "holders": holders,
             "waiting": waiting,
             "memory": { "floor_mb": st.floor_mb, "free_mb": free },
@@ -4331,5 +4454,69 @@ mod tests {
         )
         .unwrap();
         assert!(crate::remote::record_ended(&record));
+    }
+
+    fn gha(n: u32) -> BTreeMap<String, u32> {
+        BTreeMap::from([("gha".to_string(), n)])
+    }
+
+    /// A request with a given rank, queued like a task's.
+    fn queue_ranked(b: &Broker, t: u64, landing: bool, uses: &BTreeMap<String, u32>) -> u64 {
+        let mut st = lock(&b.st);
+        st.rank_seq += 1;
+        let rank = order(&st, Rank::new(false, 3, 0, t, st.rank_seq, landing));
+        let id = st
+            .ledger
+            .submit(rank, needs_of(uses, None), &format!("#{t}"), t);
+        st.meta.insert(id, Meta::Task);
+        st.by_task.insert(TaskId(t), id);
+        drop(b.pass(st));
+        id
+    }
+
+    #[test]
+    fn a_landing_lint_gets_the_next_runner_unit_before_a_debt_payment_that_came_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = runner_broker(dir.path(), 2, 1, 0);
+        let debt_run = queue_ranked(&b, 1, false, &gha(1));
+        let check = queue_ranked(&b, 2, false, &gha(1));
+        assert!(held(&b, debt_run) && held(&b, check));
+        // A new debt payment queues first, then the landing lint.
+        let debt = queue_ranked(&b, 3, false, &gha(1));
+        let lint = queue_ranked(&b, 4, true, &gha(1));
+        assert!(!held(&b, debt) && !held(&b, lint));
+        lock(&b.st).ledger.release(debt_run);
+        drop(b.pass(lock(&b.st)));
+        assert!(held(&b, lint), "the landing lint takes the unit that freed");
+        assert!(!held(&b, debt), "the debt payment waits");
+    }
+
+    #[test]
+    fn other_workflows_jobs_and_the_ceiling_limit_what_mason_can_take() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = runner_broker(dir.path(), 16, 4, 0);
+        b.set_limit("gha_ceiling", 4).unwrap();
+        b.set_other_workflows(3, "develop CI: 3 jobs");
+        let first = queue_ranked(&b, 1, false, &gha(1));
+        let second = queue_ranked(&b, 2, false, &gha(1));
+        assert!(held(&b, first), "one unit is left under the ceiling");
+        assert!(!held(&b, second));
+        let view = Broker::gha_view(&lock(&b.st));
+        assert_eq!(
+            (
+                view["mason"].as_u64(),
+                view["other"].as_u64(),
+                view["ceiling"].as_u64()
+            ),
+            (Some(1), Some(3), Some(4))
+        );
+        // The other workflow's jobs finish.
+        b.set_other_workflows(0, "");
+        assert!(held(&b, second));
+        let rest: Vec<u64> = (3..=5)
+            .map(|t| queue_ranked(&b, t, false, &gha(1)))
+            .collect();
+        assert!(rest.iter().all(|id| held(&b, *id)), "MASON can take all 4");
+        assert!(!held(&b, queue_ranked(&b, 6, false, &gha(1))));
     }
 }

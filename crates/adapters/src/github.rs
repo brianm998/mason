@@ -1204,6 +1204,42 @@ impl GitHub {
         Ok(Some((run, resp.header("etag").map(String::from))))
     }
 
+    /// The runs in progress (`GET /actions/runs?status=in_progress`), as `(id, workflow name,
+    /// workflow file)`, with the ETag of the last look: `None` when GitHub answered 304.
+    #[allow(clippy::type_complexity)]
+    pub fn in_progress_runs(
+        &self,
+        etag: Option<&str>,
+    ) -> Result<Option<(Vec<(u64, String, String)>, Option<String>)>, ApiError> {
+        let mut r = Request::get(&self.url("/actions/runs?status=in_progress&per_page=100"));
+        if let Some(e) = etag {
+            r = r.with("If-None-Match", e);
+        }
+        let resp = self.send(r)?;
+        if resp.status == 304 {
+            return Ok(None);
+        }
+        let v: Value = serde_json::from_str(&resp.body).map_err(|e| {
+            ApiError::new(
+                ErrorKind::Unavailable,
+                format!("the answer is not JSON: {e}"),
+            )
+        })?;
+        let runs = v["workflow_runs"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|r| {
+                Some((
+                    r["id"].as_u64()?,
+                    r["name"].as_str().unwrap_or_default().to_string(),
+                    r["path"].as_str().unwrap_or_default().to_string(),
+                ))
+            })
+            .collect();
+        Ok(Some((runs, resp.header("etag").map(String::from))))
+    }
+
     /// The latest attempt's jobs of a run.
     pub fn remote_run_jobs(&self, id: u64) -> Result<Vec<ActionJob>, ApiError> {
         let v = self.json(Request::get(&self.url(&format!(
