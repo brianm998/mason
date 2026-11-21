@@ -486,6 +486,52 @@ pub fn snapshot(
             ],
             None,
         )?;
+        // The runner's checkout is shallow and has no base, so the change's file list is made
+        // here, where the history is (s759): the files that differ from the merge base with the
+        // base branch, the dirty worktree included. Without a merge base there is no list, and
+        // the scripts that read it fall back to git.
+        if let Ok(mb) = g(&["merge-base", base_ref, "HEAD"], None) {
+            let tree = g(&["write-tree"], None)?;
+            let files = g(
+                &[
+                    "diff-tree",
+                    "-r",
+                    "--name-only",
+                    "--no-renames",
+                    "--diff-filter=ACDMRT",
+                    &mb,
+                    &tree,
+                ],
+                None,
+            )?;
+            let mut text = files;
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            let blob = g(&["hash-object", "-w", "--stdin"], Some(text.as_bytes()))?;
+            g(
+                &[
+                    "update-index",
+                    "--add",
+                    "--cacheinfo",
+                    &format!("100644,{blob},.mason/changed-files.txt"),
+                ],
+                None,
+            )?;
+            let base_blob = g(
+                &["hash-object", "-w", "--stdin"],
+                Some(format!("{mb}\n").as_bytes()),
+            )?;
+            g(
+                &[
+                    "update-index",
+                    "--add",
+                    "--cacheinfo",
+                    &format!("100644,{base_blob},.mason/base-sha"),
+                ],
+                None,
+            )?;
+        }
         let tree = g(&["write-tree"], None)?;
         g(&["commit-tree", &tree, "-p", "HEAD", "-m", message], None)
     })();
@@ -508,6 +554,10 @@ struct State {
     pickup_s: Option<u64>,
     runs_on: String,
     collected: bool,
+    /// GitHub finished the run while no thread of ours was collecting it, and its units were
+    /// given back (#787). The record is still attachable: a later call for the same run
+    /// clears this and collects the result from GitHub.
+    released: bool,
     ref_deleted: bool,
     code: i32,
     signal: i32,
@@ -537,6 +587,7 @@ impl State {
                 ("pickup_s", opt(self.pickup_s)),
                 ("runs_on", self.runs_on.clone()),
                 ("collected", (self.collected as u8).to_string()),
+                ("released", (self.released as u8).to_string()),
                 ("ref_deleted", (self.ref_deleted as u8).to_string()),
                 ("code", self.code.to_string()),
                 ("signal", self.signal.to_string()),
@@ -583,6 +634,7 @@ impl State {
             pickup_s: n("pickup_s"),
             runs_on: s("runs_on"),
             collected: flag("collected"),
+            released: flag("released"),
             ref_deleted: flag("ref_deleted"),
             code: s("code").parse().unwrap_or(0),
             signal: s("signal").parse().unwrap_or(0),
@@ -1010,6 +1062,11 @@ pub fn execute(
             (st, false)
         }
     };
+    if st.released {
+        // Attached again after the reaper gave its units back: the run is collected as usual.
+        st.released = false;
+        st.save(&rec);
+    }
     if st.collected {
         delete_ref(site, &mut st, &rec);
         return Ok(Outcome::Done(finished_from(&st, &log)));
@@ -1570,7 +1627,7 @@ pub fn remove_hold(dir: &Path, id: &str) {
 /// Has the run behind this record ended? A missing record is a run that was abandoned or
 /// never began; a collected one is done.
 pub fn record_ended(record: &Path) -> bool {
-    State::load(record).is_none_or(|s| s.collected)
+    State::load(record).is_none_or(|s| s.collected || s.released)
 }
 
 /// The holds of runs whose record says they are still out.
@@ -1605,6 +1662,176 @@ pub fn running_holds(dir: &Path) -> Vec<RemoteHold> {
         .collect();
     out.sort_by(|a, b| a.record.cmp(&b.record));
     out
+}
+
+/// The id of the run a record belongs to (`<id>.remote`).
+fn record_id(record: &Path) -> Option<String> {
+    Some(record.file_stem()?.to_str()?.to_string())
+}
+
+/// The project in a run's ref (`mason/run/<project>/<id>`).
+fn ref_project(ref_name: &str) -> Option<&str> {
+    ref_name.strip_prefix("mason/run/")?.split('/').next()
+}
+
+/// Look at an adopted run on GitHub; if it has completed, delete its ref, mark its record
+/// released and remove its hold. A run still going, or one GitHub cannot be asked about now, is
+/// kept. A run that was cancelled has nothing to collect: its record goes. Returns whether the
+/// hold was freed.
+pub fn reap_hold(site: &Site, holds: &Path, record: &Path) -> bool {
+    let Some(id) = record_id(record) else {
+        return false;
+    };
+    let Some(mut st) = State::load(record) else {
+        remove_hold(holds, &id);
+        return true;
+    };
+    if st.collected || st.released {
+        remove_hold(holds, &id);
+        return true;
+    }
+    let run = match st.run_id {
+        Some(rid) => match site.gh.run_changed(rid, None) {
+            Ok(r) => r.map(|(r, _)| r),
+            Err(_) => return false,
+        },
+        None => match site.gh.runs_for_sha(&st.sha) {
+            Ok(v) => v.into_iter().find(|r| r.branch == st.ref_name),
+            Err(_) => return false,
+        },
+    };
+    let Some(run) = run else { return false };
+    if run.status != "completed" {
+        return false;
+    }
+    st.run_id = Some(run.id);
+    if st.url.is_empty() {
+        st.url = run.url.clone();
+    }
+    let cancelled = run.conclusion.as_deref() == Some("cancelled");
+    st.released = true;
+    delete_ref(site, &mut st, record);
+    if cancelled {
+        let _ = std::fs::remove_file(record);
+    }
+    remove_hold(holds, &id);
+    true
+}
+
+/// Cancel an adopted run nobody will collect, delete its ref, end its record and remove its
+/// hold.
+pub fn cancel_hold(site: &Site, holds: &Path, record: &Path) {
+    let Some(id) = record_id(record) else { return };
+    if let Some(mut st) = State::load(record) {
+        cancel(site, &st);
+        delete_ref(site, &mut st, record);
+    }
+    let _ = std::fs::remove_file(record);
+    remove_hold(holds, &id);
+}
+
+/// `(task, run, prefix, number)` of an agent check's run id (`t731r4599-check-cargo-workspace2`).
+fn check_parts(id: &str) -> Option<(u64, u64, String, u64)> {
+    let (task, run) = crate::hostedcheck::check_owner(id)?;
+    let digits = id.chars().rev().take_while(char::is_ascii_digit).count();
+    let (prefix, n) = id.split_at(id.len() - digits);
+    Some((task, run, prefix.to_string(), n.parse().unwrap_or(0)))
+}
+
+/// Which of the adopted runs (key, record) nobody can collect: a check whose task's open run is
+/// another one or none; a step run of a task with no open run; a check superseded by a newer
+/// one of the same prefix for the same run. `open_run` gives a task's open run.
+pub fn unwanted(
+    adopted: &[(String, PathBuf)],
+    open_run: &dyn Fn(u64) -> Option<u64>,
+) -> Vec<PathBuf> {
+    let mut out = vec![];
+    let mut newest: std::collections::HashMap<(u64, u64, String), u64> = Default::default();
+    let parts: Vec<Option<(u64, u64, String, u64)>> = adopted
+        .iter()
+        .map(|(_, r)| record_id(r).and_then(|i| check_parts(&i)))
+        .collect();
+    for (t, r, p, n) in parts.iter().flatten() {
+        let e = newest.entry((*t, *r, p.clone())).or_insert(*n);
+        *e = (*e).max(*n);
+    }
+    for ((key, record), part) in adopted.iter().zip(&parts) {
+        let bad = match part {
+            Some((t, r, p, n)) => open_run(*t) != Some(*r) || newest[&(*t, *r, p.clone())] > *n,
+            None => key
+                .strip_prefix("task ")
+                .and_then(|t| t.parse::<u64>().ok())
+                .is_some_and(|t| open_run(t).is_none()),
+        };
+        if bad {
+            out.push(record.clone());
+        }
+    }
+    out
+}
+
+/// One pass over the runs adopted at start: free those GitHub has finished, cancel those no one
+/// can collect. Off the caller's thread, one pass at a time.
+pub fn reap_adopted(d: &Arc<Daemon>) {
+    static BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !any_remote(d) {
+        return;
+    }
+    let adopted = d.broker.adopted_remote();
+    if adopted.is_empty() || BUSY.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let d = d.clone();
+    std::thread::spawn(move || {
+        let holds = holds_dir(&d.cfg.hosts_dir());
+        let gone = d
+            .world()
+            .ok()
+            .map(|w| {
+                let open: std::collections::HashMap<u64, u64> = w
+                    .tasks
+                    .keys()
+                    .filter_map(|t| Some((t.0, w.open_run(*t)?.0)))
+                    .collect();
+                unwanted(&adopted, &|t| open.get(&t).copied())
+            })
+            .unwrap_or_default();
+        for (_, record) in &adopted {
+            let Some(st) = State::load(record) else {
+                if let Some(id) = record_id(record) {
+                    remove_hold(&holds, &id);
+                }
+                continue;
+            };
+            let Some(project) = ref_project(&st.ref_name) else {
+                continue;
+            };
+            let Some(pid) = d
+                .projects()
+                .values()
+                .find(|p| {
+                    p.services.remote.is_some()
+                        && ref_name(&p.id, "") == format!("mason/run/{project}/")
+                })
+                .map(|p| p.id.clone())
+            else {
+                continue;
+            };
+            let Some(p) = project_cfg(&d, &pid) else {
+                continue;
+            };
+            let Some(site) = site_for(&d, &pid, &p.path) else {
+                continue;
+            };
+            if gone.contains(record) {
+                cancel_hold(&site, &holds, record);
+                tracing::info!(record = %record.display(), "cancelled a GitHub run nobody can collect");
+            } else if reap_hold(&site, &holds, record) {
+                tracing::info!(record = %record.display(), "freed the units of a finished GitHub run");
+            }
+        }
+        BUSY.store(false, std::sync::atomic::Ordering::SeqCst);
+    });
 }
 
 /// A hold that is written while a remote run is out and removed when this is dropped.
@@ -2186,6 +2413,12 @@ mod tests {
             ]
         );
         assert_eq!(show(".github/workflows/ci.yml"), "name: ci");
+        // The change's files, made where the history is (s759); the dirty worktree is in it.
+        let changed = show(".mason/changed-files.txt");
+        assert!(changed.lines().any(|l| l == "a.txt"), "{changed}");
+        assert!(changed.lines().any(|l| l == "new.txt"), "{changed}");
+        assert!(changed.lines().any(|l| l == "gone.txt"), "{changed}");
+        assert!(!show(".mason/base-sha").is_empty());
         // The spec is MASON's, not the task's.
         assert_eq!(show(".mason/run.json"), json);
         assert!(!show(".mason/run.json").contains("\"true\""));
@@ -2306,7 +2539,8 @@ mod tests {
     #[test]
     fn a_skip_while_queued_or_running_cancels_the_run_and_deletes_the_ref() {
         token();
-        for polls_before_skip in [3u32, 40] {
+        // The 600 s limit counts from pickup (about 110 s), so 300 s is still running.
+        for skip_after_s in [30u64, 300] {
             let r = repo();
             let t = tempfile::tempdir().unwrap();
             let zip = artifact(t.path(), GREEN, 0, None);
@@ -2317,23 +2551,139 @@ mod tests {
             gh.queued = 10;
             gh.running = 1000;
             let gh = Arc::new(gh);
-            let s = site(&r, gh.clone(), clock(), false);
+            let clk = clock();
+            let s = site(&r, gh.clone(), clk.clone(), false);
             let logs = tempfile::tempdir().unwrap();
-            let n = std::cell::Cell::new(0u32);
+            let start = clk.now_ms();
             let out = execute(&s, &spec("x6"), logs.path(), &|| {
-                n.set(n.get() + 1);
-                (n.get() > polls_before_skip * 40).then_some(StopWhy::Skipped)
+                (clk.now_ms() - start >= skip_after_s * 1000).then_some(StopWhy::Skipped)
             })
             .unwrap();
             assert!(matches!(out, Outcome::Stopped(StopWhy::Skipped)));
-            assert_eq!(
-                gh.cancels.lock().unwrap().len(),
-                1,
-                "after {polls_before_skip}"
-            );
+            assert_eq!(gh.cancels.lock().unwrap().len(), 1, "after {skip_after_s}");
             assert_eq!(refs(&r.bare), "");
             assert!(!record_path(logs.path(), "x6").exists());
         }
+    }
+
+    /// An adopted run: its ref pushed, its record saying it is out with run 4242, and its hold.
+    fn adopted(r: &Repo, logs: &Path, id: &str) -> (PathBuf, PathBuf) {
+        let name = ref_name("proj", id);
+        let sha = git_ok(&r.wt, &["rev-parse", "HEAD"]);
+        git_ok(
+            &r.wt,
+            &["push", "-q", "origin", &format!("HEAD:refs/heads/{name}")],
+        );
+        let rec = record_path(logs, id);
+        State {
+            ref_name: name,
+            sha,
+            run_id: Some(4242),
+            runs_on: "ubuntu-latest".into(),
+            ..Default::default()
+        }
+        .save(&rec);
+        let holds = logs.join("remote-holds");
+        write_hold(
+            &holds,
+            id,
+            &RemoteHold {
+                key: id.into(),
+                label: id.into(),
+                units: units_for("ubuntu-latest", 1),
+                record: rec.clone(),
+            },
+        );
+        (holds, rec)
+    }
+
+    #[test]
+    fn a_hold_whose_run_completed_while_no_daemon_ran_is_freed_and_its_ref_deleted() {
+        token();
+        let r = repo();
+        let t = tempfile::tempdir().unwrap();
+        let zip = artifact(t.path(), GREEN, 0, None);
+        let mut gh = Arc::try_unwrap(FakeGh::new(&r, &zip, Mode::Normal))
+            .ok()
+            .unwrap();
+        gh.queued = 0;
+        gh.running = 0;
+        let s = site(&r, Arc::new(gh), clock(), false);
+        let logs = tempfile::tempdir().unwrap();
+        let (holds, rec) = adopted(&r, logs.path(), "d1");
+        assert_eq!(running_holds(&holds).len(), 1);
+        assert!(reap_hold(&s, &holds, &rec));
+        assert!(running_holds(&holds).is_empty());
+        assert!(record_ended(&rec), "the record no longer counts as out");
+        assert_eq!(refs(&r.bare), "", "the ref is deleted");
+        // The result is still there for a call that attaches later.
+        let st = State::load(&rec).unwrap();
+        assert!(st.released && st.ref_deleted && !st.collected);
+    }
+
+    #[test]
+    fn a_hold_whose_run_is_still_going_is_kept() {
+        token();
+        let r = repo();
+        let t = tempfile::tempdir().unwrap();
+        let zip = artifact(t.path(), GREEN, 0, None);
+        let mut gh = Arc::try_unwrap(FakeGh::new(&r, &zip, Mode::Normal))
+            .ok()
+            .unwrap();
+        gh.queued = 0;
+        gh.running = 1000;
+        let s = site(&r, Arc::new(gh), clock(), false);
+        let logs = tempfile::tempdir().unwrap();
+        let (holds, rec) = adopted(&r, logs.path(), "d2");
+        assert!(!reap_hold(&s, &holds, &rec));
+        assert_eq!(running_holds(&holds).len(), 1);
+        assert!(refs(&r.bare).contains("d2"));
+    }
+
+    #[test]
+    fn an_unwanted_run_is_cancelled_its_hold_removed_and_its_ref_deleted() {
+        token();
+        let r = repo();
+        let t = tempfile::tempdir().unwrap();
+        let zip = artifact(t.path(), GREEN, 0, None);
+        let gh = FakeGh::new(&r, &zip, Mode::Normal);
+        let s = site(&r, gh.clone(), clock(), false);
+        let logs = tempfile::tempdir().unwrap();
+        let (holds, rec) = adopted(&r, logs.path(), "t7r9-check-cargo-workspace0");
+        cancel_hold(&s, &holds, &rec);
+        assert_eq!(gh.cancels.lock().unwrap().len(), 1);
+        assert!(running_holds(&holds).is_empty());
+        assert!(!rec.exists());
+        assert_eq!(refs(&r.bare), "");
+    }
+
+    #[test]
+    fn checks_of_a_landed_task_or_an_older_run_or_superseded_are_unwanted() {
+        let rec = |id: &str| (id.to_string(), PathBuf::from(format!("/x/{id}.remote")));
+        let adopted = vec![
+            rec("t7r9-check-cargo-workspace0"),
+            rec("t7r9-check-cargo-workspace1"),
+            rec("t7r9-check-cargo-workspace2"),
+            rec("t7r9-check-other0"),
+            rec("t8r3-check-cargo-workspace0"),
+            ("task 9".to_string(), PathBuf::from("/x/step.remote")),
+            ("debt-1".to_string(), PathBuf::from("/x/debt.remote")),
+        ];
+        // Task 7's open run is 9; task 8 has landed; task 9 has none.
+        let open = |t: u64| (t == 7).then_some(9);
+        let got: Vec<String> = unwanted(&adopted, &open)
+            .iter()
+            .map(|p| p.file_stem().unwrap().to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                "t7r9-check-cargo-workspace0",
+                "t7r9-check-cargo-workspace1",
+                "t8r3-check-cargo-workspace0",
+                "step"
+            ]
+        );
     }
 
     #[test]
@@ -2517,8 +2867,12 @@ mod tests {
             6
         );
         assert_eq!(
-            parse_iso("2026-03-01T00:00:00Z").unwrap() - parse_iso("2026-02-28T00:00:00Z").unwrap(),
+            parse_iso("2028-03-01T00:00:00Z").unwrap() - parse_iso("2028-02-28T00:00:00Z").unwrap(),
             2 * 86400
+        );
+        assert_eq!(
+            parse_iso("2026-03-01T00:00:00Z").unwrap() - parse_iso("2026-02-28T00:00:00Z").unwrap(),
+            86400
         );
         assert_eq!(parse_iso("garbage"), None);
         assert_eq!(
