@@ -40,6 +40,7 @@ fn base(conclusion: &str, log: &str) -> Base {
             url: String::new(),
             created_ms: 1,
             conclusion: Some(conclusion.into()),
+            event: "push".into(),
         }],
         jobs: BTreeMap::from([(
             7,

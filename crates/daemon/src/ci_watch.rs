@@ -223,7 +223,7 @@ pub fn encode(s: &Saved) -> String {
                             "t_run": js.last_timeout.run, "t_job": js.last_timeout.job,
                             "t_sha": js.last_timeout.sha, "t_url": js.last_timeout.url,
                             "t_at_ms": js.last_timeout.at_ms,
-                            "absent": js.absent,
+                            "absent": js.absent, "full": js.full,
                         }),
                     )
                 })
@@ -296,6 +296,7 @@ pub fn decode(text: &str) -> Saved {
                         .collect(),
                     timeout_filed: jv["timeout_filed"].as_bool().unwrap_or(false),
                     absent: jv["absent"].as_u64().unwrap_or(0) as u32,
+                    full: jv["full"].as_bool().unwrap_or(false),
                     last_timeout: RunRef {
                         run: u(&jv["t_run"]),
                         job: u(&jv["t_job"]),
@@ -458,6 +459,8 @@ pub fn pass(
             url: a.url.clone(),
             created_ms: a.created_ms,
             conclusion: a.conclusion.clone(),
+            // A dispatched run is the full one (s800): push runs lack its jobs.
+            full: a.event == "workflow_dispatch",
             jobs: vec![],
         })
         .collect();
