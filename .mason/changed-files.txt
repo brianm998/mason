@@ -1,0 +1,8 @@
+.mason/run.json
+crates/daemon/src/config.rs
+crates/daemon/src/daemon.rs
+crates/daemon/src/jobs.rs
+crates/daemon/src/prompts.rs
+docs/decisions/0749-parked-agents-hold-no-session.md
+docs/stages/s756.md
+scripts/exit/s756.sh
