@@ -1240,6 +1240,8 @@ fn poll(
     now: u64,
 ) -> Result<Step, mason_adapter_api::service::ApiError> {
     let secs = now / 1000;
+    // Did the run change since the last look? Only then are its jobs read again for the monitor.
+    let mut fresh = false;
     let run = match st.run_id {
         None => {
             let found = site
@@ -1261,10 +1263,12 @@ fn poll(
             st.created_at = r.created_at.clone();
             st.save(rec);
             poller.observe(secs, Observed::Changed { etag: None });
+            fresh = true;
             r
         }
         Some(id) => match site.gh.run_changed(id, poller.etag.as_deref())? {
             Some((r, etag)) => {
+                fresh = true;
                 poller.observe(secs, Observed::Changed { etag });
                 r
             }
@@ -1288,8 +1292,11 @@ fn poll(
         },
     };
     // Has a runner taken the job? A 304 on the run says nothing about its jobs.
+    let mut read = false;
     if st.picked_ms.is_none() && run.status != "completed" {
         let jobs = site.gh.remote_run_jobs(run.id)?;
+        read = true;
+        crate::remote_runs::set_jobs(rec, job_view(&jobs));
         if let Some(j) = jobs.iter().find(|j| {
             is_run_job(&j.name) && matches!(j.status.as_str(), "in_progress" | "completed")
         }) {
@@ -1307,6 +1314,12 @@ fn poll(
         }
     }
     if run.status != "completed" {
+        if fresh && !read {
+            // What the monitor shows of each job; a failed read is not the run's problem.
+            if let Ok(jobs) = site.gh.remote_run_jobs(run.id) {
+                crate::remote_runs::set_jobs(rec, job_view(&jobs));
+            }
+        }
         // A shard that never got a runner while the others are done would hold the run until its
         // limit: end the run, and its missing artifact has that shard alone run again (#701).
         if let (false, Some(p)) = (st.shards.is_empty(), st.picked_ms) {
@@ -1391,6 +1404,27 @@ fn poll(
         Ok(a) => Ok(Step::Got(a)),
         Err(e) => Ok(Step::Fail(format!("run {}: {e}", run.url))),
     }
+}
+
+/// The jobs of a run as the monitor lists them.
+fn job_view(jobs: &[mason_adapters::github::ActionJob]) -> Vec<crate::remote_runs::Job> {
+    jobs.iter()
+        .map(|j| crate::remote_runs::Job {
+            name: j.name.clone(),
+            state: match j.status.as_str() {
+                "completed" => "done",
+                "in_progress" => "running",
+                _ => "queued",
+            }
+            .into(),
+            conclusion: j.conclusion.clone().unwrap_or_default(),
+            step: if j.status == "in_progress" {
+                j.step.clone().unwrap_or_default()
+            } else {
+                String::new()
+            },
+        })
+        .collect()
 }
 
 /// Is this job one that runs the command: `run`, or `run (3)` of a sharded run?
@@ -1567,6 +1601,20 @@ pub fn remove_hold(dir: &Path, id: &str) {
     let _ = std::fs::remove_file(hold_file(dir, id));
 }
 
+/// Where a run stands, for the monitor: `queued` (pushed, or on GitHub with no runner yet),
+/// `running`, or `done`; its GitHub URL, and when a runner took it.
+pub fn record_view(record: &Path) -> Option<(String, String, Option<u64>)> {
+    let s = State::load(record)?;
+    let stage = if s.collected {
+        "done"
+    } else if s.picked_ms.is_some() {
+        "running"
+    } else {
+        "queued"
+    };
+    Some((stage.into(), s.url, s.picked_ms))
+}
+
 /// Has the run behind this record ended? A missing record is a run that was abandoned or
 /// never began; a collected one is done.
 pub fn record_ended(record: &Path) -> bool {
@@ -1611,6 +1659,8 @@ pub fn running_holds(dir: &Path) -> Vec<RemoteHold> {
 pub struct HoldGuard {
     dir: PathBuf,
     id: String,
+    hosts: PathBuf,
+    record: PathBuf,
 }
 
 impl HoldGuard {
@@ -1621,8 +1671,19 @@ impl HoldGuard {
         label: &str,
         shards: u32,
         dir: &Path,
+        kind: &str,
     ) -> Self {
         let holds = holds_dir(hosts);
+        crate::remote_runs::started(
+            hosts,
+            &spec.id,
+            key,
+            kind,
+            &spec.suite,
+            &spec.runs_on,
+            shards,
+            &record_path(dir, &spec.id),
+        );
         write_hold(
             &holds,
             &spec.id,
@@ -1636,12 +1697,23 @@ impl HoldGuard {
         HoldGuard {
             dir: holds,
             id: spec.id.clone(),
+            hosts: hosts.to_path_buf(),
+            record: record_path(dir, &spec.id),
         }
     }
 }
 
 impl Drop for HoldGuard {
     fn drop(&mut self) {
+        // How it ended, for the monitor, before the record can go.
+        let outcome = State::load(&self.record).filter(|s| s.collected).map(|s| {
+            if s.code == 0 && s.signal == 0 {
+                "green"
+            } else {
+                "red"
+            }
+        });
+        crate::remote_runs::finished(&self.hosts, &self.id, outcome);
         remove_hold(&self.dir, &self.id);
     }
 }

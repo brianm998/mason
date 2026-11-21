@@ -70,6 +70,7 @@ mod pty;
 mod push_auth;
 mod red_base;
 mod registration;
+mod remote_runs;
 mod repin;
 mod replay;
 mod report;

@@ -71,6 +71,7 @@ pub mod protect;
 pub mod providers;
 pub mod release;
 pub mod remote;
+pub mod remote_runs;
 pub mod report;
 pub mod rerun;
 pub mod resume;

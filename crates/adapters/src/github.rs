@@ -1142,6 +1142,10 @@ pub struct ActionJob {
     pub name: String,
     pub status: String,
     pub started_at: Option<String>,
+    /// success, failure, cancelled... once the job is done.
+    pub conclusion: Option<String>,
+    /// The step the job is on now (the first one in progress, else the next queued).
+    pub step: Option<String>,
 }
 
 impl GitHub {
@@ -1217,6 +1221,15 @@ impl GitHub {
                 name: j["name"].as_str().unwrap_or_default().to_string(),
                 status: j["status"].as_str().unwrap_or_default().to_string(),
                 started_at: j["started_at"].as_str().map(String::from),
+                conclusion: j["conclusion"].as_str().map(String::from),
+                step: j["steps"].as_array().and_then(|st| {
+                    let pick = |s: &str| {
+                        st.iter()
+                            .find(|x| x["status"].as_str() == Some(s))
+                            .and_then(|x| x["name"].as_str().map(String::from))
+                    };
+                    pick("in_progress").or_else(|| pick("queued"))
+                }),
             })
             .collect())
     }

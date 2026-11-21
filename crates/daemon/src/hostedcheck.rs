@@ -521,7 +521,15 @@ fn remote_check(d: &Arc<Daemon>, spec: &CheckSpec, id: &str) -> Option<Shared> {
         build,
     );
     // The units it holds, on record until it ends, for a daemon that restarts (#700).
-    let _hold = rm::HoldGuard::new(&d.cfg.hosts_dir(), &rs, id, id, 1, &spec.log_dir);
+    let _hold = rm::HoldGuard::new(
+        &d.cfg.hosts_dir(),
+        &rs,
+        id,
+        id,
+        1,
+        &spec.log_dir,
+        "agent check",
+    );
     let note: Mutex<Option<String>> = Mutex::new(None);
     let stop = || {
         let n = spec.stop.as_ref().and_then(|f| f())?;

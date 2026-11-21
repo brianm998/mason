@@ -1046,6 +1046,21 @@ impl<'a> Ctx<'a> {
             compilation: Some(self.compilation_named()),
             queue_hold: self.queue_hold(project),
             cpu: Some(self.cpu_usage()),
+            github: Some(crate::remote_runs::view(
+                self.d,
+                &|id| {
+                    if id == 0 {
+                        return None;
+                    }
+                    let t = self.w.tasks.get(&TaskId(id))?;
+                    if !self.matches(t, project) {
+                        return None;
+                    }
+                    let r = self.row(t);
+                    Some((r.title, r.state, r.activity, r.project))
+                },
+                project,
+            )),
             stages: [
                 State::Exploring,
                 State::Developing,

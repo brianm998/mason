@@ -676,6 +676,15 @@ fn main() {
             "on" => Some("github"),
             "off" => Some("local"),
             "status" => None,
+            "runs" => {
+                finish(&a);
+                let r = or_die(d.call("GET", "/remote/runs", None));
+                if json_out {
+                    return println!("{r:#}");
+                }
+                remote::print_runs(&r);
+                return;
+            }
             other => die(&format!(
                 "unknown remote command {other:?}: {}\n\n{HELP}",
                 remote::COMMANDS
