@@ -528,6 +528,7 @@ fn main() {
     if cmd == "remote" && a.rest.first().map(String::as_str) == Some("setup") {
         exit(remote::run(std::mem::take(&mut a.rest), &config_dir));
     }
+<<<<<<< HEAD
     // A word that is no remote command is refused before any daemon is looked for.
     if cmd == "remote" {
         if let Some(other) = a.rest.first().filter(|w| !w.starts_with('-')) {
@@ -537,6 +538,17 @@ fn main() {
                     remote::COMMANDS
                 ));
             }
+=======
+    if cmd == "remote" {
+        // Validate the subcommand before the daemon lookup, so a typo gets the
+        // command list even when no daemon is running.
+        match a.rest.first().map(String::as_str) {
+            None | Some("on" | "off" | "status") => {}
+            Some(other) => die(&format!(
+                "unknown remote command {other:?}: {}\n\n{HELP}",
+                remote::COMMANDS
+            )),
+>>>>>>> origin/develop
         }
     }
     if cmd == "remove" {
@@ -2566,6 +2578,24 @@ fn main() {
                     p["running_batches"],
                     p["queue_idle_ms"].as_u64().unwrap_or(0) / 1000
                 );
+                let queued = p["queued"].as_array().map_or(0, Vec::len);
+                let moving: Vec<String> = p["collecting_for"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|t| t.as_u64().map(|t| format!("#{t}")))
+                    .collect();
+                if queued > 0 && p["running_batches"].as_u64().unwrap_or(0) == 0 {
+                    if moving.is_empty() {
+                        println!("  forming now: nothing else is moving");
+                    } else {
+                        println!(
+                            "  collecting for {} s while {} still moving",
+                            p["queue_idle_ms"].as_u64().unwrap_or(0) / 1000,
+                            moving.join(", ")
+                        );
+                    }
+                }
             }
             for f in r["freezes"].as_array().into_iter().flatten() {
                 println!(
