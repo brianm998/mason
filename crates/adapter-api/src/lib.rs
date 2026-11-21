@@ -56,6 +56,8 @@ pub struct DeadlineExtra(
     Arc<std::sync::atomic::AtomicU64>,
     Option<Arc<std::path::PathBuf>>,
     Arc<std::sync::atomic::AtomicU64>,
+    // The part of the queue credit that was spent waiting on GitHub (#799); in `waited` too.
+    Arc<std::sync::atomic::AtomicU64>,
 );
 
 impl DeadlineExtra {
@@ -71,6 +73,7 @@ impl DeadlineExtra {
             Arc::new(std::sync::atomic::AtomicU64::new(ms)),
             Some(Arc::new(path)),
             Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            Arc::new(std::sync::atomic::AtomicU64::new(0)),
         )
     }
     /// Queue time credited.
@@ -80,6 +83,22 @@ impl DeadlineExtra {
         if let Some(p) = &self.1 {
             let _ = std::fs::write(p.as_path(), total.to_string());
         }
+    }
+    /// Time credited for waiting on GitHub (a pool unit, a runner, the run): counted in
+    /// [`waited`](Self::waited) as well, and apart in [`remote`](Self::remote).
+    pub fn add_remote(&self, d: Duration) {
+        self.add(d);
+        let ms = u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
+        self.3.fetch_add(ms, Ordering::SeqCst);
+    }
+    /// The part of the credit that was waiting on GitHub.
+    pub fn remote(&self) -> Duration {
+        Duration::from_millis(self.3.load(Ordering::SeqCst))
+    }
+    /// Put back the GitHub part of the credit after a restart.
+    pub fn restore_remote(&self, d: Duration) {
+        let ms = u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
+        self.3.store(ms, Ordering::SeqCst);
     }
     /// Time granted for progress (commits or output).
     pub fn add_progress(&self, d: Duration) {
