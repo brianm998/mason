@@ -104,7 +104,7 @@ mason: command-line client for the MASON pipeline
   mason health                        the detectors' findings, verdicts on fixes, recurring jobs, triage review queue
   mason report [--days N] [--project P]   throughput, send-backs, waits, interventions, host losses, flakes, debts
   mason digest [--days N] [--project P]   landed, interventions, time by state, skips, forced landings (recorded data only)
-  mason schedule list | run <name>    recurring jobs (introspect, analyst:<project>, <project>/<schedule>); run one now
+  mason schedule list | run <name> [--force]    recurring jobs (introspect, analyst:<project>, <project>/<schedule>); run one now (a full test follows the record unless --force)
   mason triage list | review <id> (--agree | --disagree)   the triage agent's sampled suggestions; it never answers
   mason task skip <id> (--suite S | --step S | --all) [--reason R] [--deferred]
                                       skip a suite or step by force, even mid-run; records a debt;
@@ -1955,17 +1955,25 @@ fn main() {
                                 String::new()
                             }
                         );
+                        if let Some(line) = s["full"]["line"].as_str() {
+                            println!("    {line}");
+                        }
                     }
                 }
                 "run" => {
+                    let force = a.flag("--force");
                     let name = a
                         .pos()
-                        .unwrap_or_else(|| die("usage: mason schedule run <name>"));
+                        .unwrap_or_else(|| die("usage: mason schedule run <name> [--force]"));
                     finish(&a);
-                    let r = or_die(d.call("POST", "/schedules/run", Some(&json!({"name": name}))));
+                    let r = or_die(d.call(
+                        "POST",
+                        "/schedules/run",
+                        Some(&json!({"name": name, "force": force})),
+                    ));
                     println!("{}", r["said"].as_str().unwrap_or(""));
                 }
-                _ => die("usage: mason schedule list | run <name>"),
+                _ => die("usage: mason schedule list | run <name> [--force]"),
             }
         }
         "triage" => {
@@ -2879,6 +2887,14 @@ fn main() {
                         .as_u64()
                         .map_or("(run not listed yet)".to_string(), |n| format!("run {n}")),
                     r["waiting_for"].as_str().unwrap_or("?")
+                );
+            }
+            for f in s["full_tests"].as_array().into_iter().flatten() {
+                println!(
+                    "{}/{}: {}",
+                    f["project"].as_str().unwrap_or("?"),
+                    f["schedule"].as_str().unwrap_or("?"),
+                    f["line"].as_str().unwrap_or("?")
                 );
             }
             for p in s["definitions"].as_array().into_iter().flatten() {
