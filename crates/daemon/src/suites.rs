@@ -4145,6 +4145,7 @@ fn debt_wait_goes_on(d: &Daemon, debt: u64) -> bool {
 fn hold_for_debt(
     d: &Arc<Daemon>,
     def: &Definition,
+    project: &str,
     task: TaskId,
     debt: u64,
 ) -> Result<Option<crate::sched::Lease>, String> {
@@ -4159,6 +4160,8 @@ fn hold_for_debt(
     if !needs.exclusive && needs.amounts.is_empty() {
         return Ok(None);
     }
+    // A payment that runs on GitHub holds runner pool units, not this machine's slots (#761).
+    let needs = crate::remote::pool_needs(d, project, &needs, Some(task)).unwrap_or(needs);
     if needs.amounts.keys().any(|n| n.starts_with("device:")) {
         d.targets.declare_all(d);
     }
@@ -4332,7 +4335,7 @@ pub fn pay(d: &Arc<Daemon>, debt: u64) -> Result<String, String> {
     {
         return Ok("already paid".into());
     }
-    let _lease = hold_for_debt(d, &def, TaskId(row.task), debt)?;
+    let _lease = hold_for_debt(d, &def, &row.project, TaskId(row.task), debt)?;
     if p.remote.is_some() {
         let _ = d.fetch_remote(pid);
     }
