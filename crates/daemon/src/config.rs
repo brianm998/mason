@@ -1789,10 +1789,15 @@ mod tests {
         // Without `[ci]` there is nothing to default from; a literal token and unknown values
         // are refused.
         for (bad, want) in [
-            (format!("{base}[remote]\nkind=\"github-actions\"\n"), "would clash with the git remote key"),
+            (
+                format!("{base}[remote]\nkind=\"github-actions\"\n"),
+                "would clash with the git remote key",
+            ),
             (format!("{base}{rem}"), "`[remote_runs] repo` is required"),
             (
-                format!("{base}[remote_runs]\nkind=\"github-actions\"\nrepo=\"a/b\"\ntoken=\"abc\"\n"),
+                format!(
+                    "{base}[remote_runs]\nkind=\"github-actions\"\nrepo=\"a/b\"\ntoken=\"abc\"\n"
+                ),
                 "a reference",
             ),
             (
