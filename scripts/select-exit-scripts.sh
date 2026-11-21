@@ -27,6 +27,8 @@ while IFS= read -r f; do
   [ -n "$f" ] || continue
   case "$f" in
     docs/*|*.md) continue ;;
+    # MASON's own snapshot files in a remote run (s759), not part of the change.
+    .mason/run.json|.mason/changed-files.txt|.mason/base-sha) continue ;;
     scripts/exit/*.sh) echo "$f" | grep -Ev -- '-(real|manual)\.sh$' >> "$sel"; continue ;;
     scripts/exit/*) continue ;;
   esac
