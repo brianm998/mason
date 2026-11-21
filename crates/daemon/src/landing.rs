@@ -1877,6 +1877,7 @@ impl Runner {
                     &int_wt,
                     &log_dir,
                     &format!("b{batch_id}-r{rounds}-lintblame"),
+                    floor,
                 ) {
                     let blamed = blame_by_files(&files, &active, &self.fps);
                     if !blamed.is_empty() {
@@ -3142,6 +3143,7 @@ impl Runner {
         wt: &Path,
         log_dir: &Path,
         prefix: &str,
+        floor_red: bool,
     ) -> Option<Vec<String>> {
         let tier_suites: Vec<String> = self
             .cfg
@@ -3152,6 +3154,14 @@ impl Runner {
             return None;
         }
         if vr.failed.iter().all(|f| tier_suites.contains(f)) {
+            let f = self
+                .lint_files
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            return Some(f);
+        }
+        if floor_red && !vr.failed.is_empty() {
             let f = self
                 .lint_files
                 .lock()
@@ -3250,11 +3260,11 @@ impl Runner {
                     out.green = false;
                     out.failed.insert(name.clone());
                     *self.lint_files.lock().unwrap_or_else(|e| e.into_inner()) =
-                        lint_files(&o.output);
+                        lint_files(&o.full);
                     out.notes.push(format!(
                         "{name}: the batch is not lint clean{}{}\n{}",
                         if o.timed_out { " (timed out)" } else { "" },
-                        lint_places(&o.output),
+                        lint_places(&o.full),
                         crate::jobs::tail(&o.output, 15)
                     ));
                 }
@@ -3433,13 +3443,17 @@ impl Runner {
                 Ok(o) => {
                     out.green = false;
                     out.failed.insert(name.clone());
+                    // A build error names `--> file:line` too: the floor blames by file.
+                    *self.lint_files.lock().unwrap_or_else(|e| e.into_inner()) =
+                        lint_files(&o.full);
                     out.notes.push(format!(
-                        "{name}: {what} does not build{}\n{}",
+                        "{name}: {what} does not build{}{}\n{}",
                         if o.timed_out {
                             " (the build timed out)"
                         } else {
                             ""
                         },
+                        lint_places(&o.full),
                         crate::jobs::tail(&o.output, 15)
                     ));
                 }
@@ -4839,9 +4853,31 @@ fn is_gate_test(name: &str) -> bool {
     n == "workspace_is_fmt_clean" || n.contains("spdx")
 }
 
+/// `s` without ANSI escape sequences (CSI `ESC [ ... final`, and other two-byte escapes):
+/// GitHub's runs colour cargo's output, which hides `-->` from the line parsers.
+pub(crate) fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.chars();
+    while let Some(c) = it.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        if it.next() == Some('[') {
+            for n in it.by_ref() {
+                if ('\u{40}'..='\u{7e}').contains(&n) {
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
+
 /// The distinct files a lint's output names, without lines: rustfmt's `Diff in file:line`
 /// and clippy's `--> file:line:col`.
 fn lint_files(output: &str) -> Vec<String> {
+    let output = strip_ansi(output);
     let mut v: Vec<String> = vec![];
     for l in output.lines() {
         let t = l.trim();
@@ -4890,6 +4926,7 @@ fn blame_by_files(
 /// The `file:line` places a lint's output points at: clippy's `--> file:line:col` and
 /// rustfmt's `Diff in file:line`. At most ten, as ` (at a.rs:1, b.rs:2)`; empty when none.
 fn lint_places(output: &str) -> String {
+    let output = strip_ansi(output);
     let mut seen: Vec<String> = vec![];
     for l in output.lines() {
         let t = l.trim();
@@ -4925,6 +4962,23 @@ fn lint_places(output: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lint_parsers_read_coloured_output_and_rustfmt_diffs() {
+        let out = "\x1b[1m\x1b[91merror\x1b[0m: x\n  \x1b[1m\x1b[94m--> \x1b[0mcrates/a/b.rs:969:42\nDiff in c/d.rs:3:\n";
+        assert_eq!(lint_files(out), vec!["crates/a/b.rs", "c/d.rs"]);
+        assert_eq!(lint_places(out), " (at crates/a/b.rs:969, c/d.rs:3)");
+    }
+
+    #[test]
+    fn a_file_far_from_the_end_is_found_in_the_full_output() {
+        let mut out = String::from("\x1b[94m--> \x1b[0mfar/away.rs:1:2\n");
+        for i in 0..100 {
+            out.push_str(&format!("note {i}\n"));
+        }
+        assert_eq!(lint_files(&out), vec!["far/away.rs"]);
+        assert!(lint_files(&crate::jobs::tail(&out, 40)).is_empty());
+    }
 
     #[test]
     fn lint_places_names_the_files_and_lines_of_clippy_and_rustfmt() {
