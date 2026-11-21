@@ -62,10 +62,14 @@ fn a_draining_update_stops_a_red_batch_between_runs_and_the_next_batch_reuses_it
             .find(|b| b.phase == "yielded")
             .unwrap();
     assert!(b.note.contains("stopped for an update"), "{}", b.note);
-    assert_eq!(
-        reds(gate.path()),
-        1,
-        "no run after the first one: {:?}",
+    // A red run is followed at once, inside the same run, by a rerun of its failing tests
+    // (`rerun_failing` in suites.rs; this suite has no `rerun` template, so it is the whole
+    // suite again). So one run shows as one red line or two; a later run of the batch would
+    // add its own red and rerun on top of that.
+    let n = reds(gate.path());
+    assert!(
+        (1..=2).contains(&n),
+        "no run after the first one (and its rerun): {:?}",
         std::fs::read_to_string(gate.path().join("reds"))
     );
     for t in [t1, t2, t3] {
