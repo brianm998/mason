@@ -607,4 +607,5 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s744**: A remote run's snapshot now carries the base branch's copy of every workflow file, so tests that read `.github/workflows/ci.yml` pass on GitHub, and the run is refused if a base workflow runs on `mason/run/**`.
 - **s745**: A suite's build goes to GitHub in `RunSpec.build`, run as its own `sh -c`, instead of being joined to the command with `&&` (which broke suites whose build and command both start with `cd`).
 - **s748**: A develop agent's check that runs on GitHub no longer queues for or holds a local `compile` or `test-suite` slot, so it skips the CPU and heat gates too.
+- **s751**: A narrowed run whose target group has a module filter now puts the filter at the end of the template's own `--` section, so the template's `--config` no longer reaches the test binary.
 <!-- status:end -->
