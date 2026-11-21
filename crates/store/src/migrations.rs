@@ -814,6 +814,17 @@ const STEPS: &[&str] = &[
          at_ms   INTEGER NOT NULL,
          PRIMARY KEY (project, suite, target, key)
      );",
+    // 45: the last red run of a suite on a project's base branch (#774): the base it ran at,
+    // the failing tests one per line (empty when none could be named) and when. Read by the
+    // idle debt pass so a suite that was red is not run again for debts on every new tip.
+    "CREATE TABLE suite_red (
+         project TEXT NOT NULL,
+         suite   TEXT NOT NULL,
+         base    TEXT NOT NULL,
+         tests   TEXT NOT NULL,
+         at_ms   INTEGER NOT NULL,
+         PRIMARY KEY (project, suite)
+     );",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;
