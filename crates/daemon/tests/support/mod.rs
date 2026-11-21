@@ -759,17 +759,6 @@ pub fn wait_for(what: &str, secs: u64, mut f: impl FnMut() -> bool) {
     wait_poll(what, secs, || if f() { Poll::Done } else { Poll::Pending });
 }
 
-/// As [`wait_for`], but the failure comes back as a message, so a test can add what it saw.
-pub fn try_wait_for(what: &str, secs: u64, mut f: impl FnMut() -> bool) -> Result<(), String> {
-    try_wait(what, secs.max(MIN_WAIT_SECS), 50, || {
-        if f() {
-            Poll::Done
-        } else {
-            Poll::Pending
-        }
-    })
-}
-
 /// As [`wait_for`], and the condition can also say the wait can no longer succeed.
 pub fn wait_poll(what: &str, secs: u64, poll: impl FnMut() -> Poll) {
     real_wait(what, secs.max(MIN_WAIT_SECS), 50, poll);

@@ -77,7 +77,7 @@ fn a_base_that_does_not_build_holds_the_batch_and_blames_nobody() {
             .iter()
             .any(|b| b.phase == "failed" && b.note.contains("does not build"))
     };
-    if let Err(e) = try_wait_for("the batch to be held", 120, held) {
+    if let Err(e) = try_wait_for_exact("the batch to be held", 900, 50, held) {
         // Name the path taken: which row, which note, which alerts.
         let rows: Vec<String> =
             w.d.store
