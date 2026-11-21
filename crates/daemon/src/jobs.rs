@@ -1962,6 +1962,11 @@ impl TestChecks {
                 .as_deref()
                 .map(|p| crate::suites::split_for_suite(&def, &sel.suite, p).0);
             let limit = suite.timeout.unwrap_or(self.timeout).min(self.timeout);
+            // The one function that decides where runs go (#698) is asked for this suite.
+            let placed = |mut s: crate::hostedcheck::CheckSpec, suite: &mason_testing::Suite| {
+                s.place = Some((TaskId(self.task), Box::new(suite.clone())));
+                s
+            };
             let before = suite.command.clone();
             // What a changed path can be named in: the commands that run and build the suite.
             let named = [
@@ -2117,11 +2122,14 @@ impl TestChecks {
                         ok
                     }
                     None => {
-                        let bspec = spec(
-                            format!("{}-{name}-build", self.id_prefix),
-                            b,
-                            &build_uses(),
-                            limit,
+                        let bspec = placed(
+                            spec(
+                                format!("{}-{name}-build", self.id_prefix),
+                                b,
+                                &build_uses(),
+                                limit,
+                            ),
+                            &suite,
                         );
                         let queue = !crate::hostedcheck::pending(&self.slots.d, &bspec);
                         self.phase(mason_core::checks::CheckPhase::Waiting);
@@ -2136,11 +2144,14 @@ impl TestChecks {
                         let bspec = if self.reds.merges() == merges {
                             bspec
                         } else {
-                            spec(
-                                format!("{}-{name}-build", self.id_prefix),
-                                b,
-                                &build_uses(),
-                                limit,
+                            placed(
+                                spec(
+                                    format!("{}-{name}-build", self.id_prefix),
+                                    b,
+                                    &build_uses(),
+                                    limit,
+                                ),
+                                &suite,
                             )
                         };
                         self.phase(mason_core::checks::CheckPhase::Building);
@@ -2183,11 +2194,14 @@ impl TestChecks {
             if small && suite.command != before {
                 uses = small_lane(&def, uses);
             }
-            let rspec = spec(
-                format!("{}-{name}", self.id_prefix),
-                &suite.command,
-                &uses,
-                limit,
+            let rspec = placed(
+                spec(
+                    format!("{}-{name}", self.id_prefix),
+                    &suite.command,
+                    &uses,
+                    limit,
+                ),
+                &suite,
             );
             let queue = !crate::hostedcheck::pending(&self.slots.d, &rspec);
             self.phase(mason_core::checks::CheckPhase::Waiting);
@@ -2202,11 +2216,14 @@ impl TestChecks {
             let rspec = if self.reds.merges() == merges {
                 rspec
             } else {
-                spec(
-                    format!("{}-{name}", self.id_prefix),
-                    &suite.command,
-                    &uses,
-                    limit,
+                placed(
+                    spec(
+                        format!("{}-{name}", self.id_prefix),
+                        &suite.command,
+                        &uses,
+                        limit,
+                    ),
+                    &suite,
                 )
             };
             self.phase(mason_core::checks::CheckPhase::Running);
@@ -2221,7 +2238,10 @@ impl TestChecks {
                 Err(_) => {}
             }
             match res {
-                Ok(o) if o.passed => lines.push(format!("{name}: passed")),
+                Ok(o) if o.passed => lines.push(format!(
+                    "{name}: passed ({})",
+                    crate::hostedcheck::where_ran(&self.slots.d, &rspec)
+                )),
                 Ok(o) => {
                     failed = true;
                     if let Some(text) = read_whole_log(&self.log_dir.join(format!("{}.log", o.id)))
@@ -2508,7 +2528,7 @@ impl TestChecks {
                 label: format!("#{} check", self.task),
                 stop: None,
                 place: None,
-                global: false,
+                global: true,
             }
         };
         let merges = self.reds.merges();

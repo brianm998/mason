@@ -437,6 +437,45 @@ pub fn snapshot(
             ],
             None,
         )?;
+        // And the base branch's copy of every other workflow (tests read `ci.yml`), never the
+        // task's. None of them may run on `mason/run/**`: it would run with our secrets.
+        let listing = g(
+            &["ls-tree", "-r", base_ref, "--", ".github/workflows"],
+            None,
+        )?;
+        for line in listing.lines() {
+            let Some((meta, name)) = line.split_once('\t') else {
+                continue;
+            };
+            let mut m = meta.split_whitespace();
+            let (mode, kind, sha) = (m.next(), m.next(), m.next());
+            if name == path || kind != Some("blob") {
+                continue;
+            }
+            let (Some(mode), Some(sha)) = (mode, sha) else {
+                continue;
+            };
+            if name.ends_with(".yml") || name.ends_with(".yaml") {
+                let text = g(&["cat-file", "blob", sha], None)?;
+                if mason_adapters::runref::fires_on(
+                    &mason_adapters::runref::push_trigger(&text),
+                    "mason/run/x",
+                ) {
+                    return Err(format!(
+                        "the base branch ({base_ref}) has {name}, which runs on `mason/run/**`; a remote run would start it with the repository's secrets (see `mason doctor`)"
+                    ));
+                }
+            }
+            g(
+                &[
+                    "update-index",
+                    "--add",
+                    "--cacheinfo",
+                    &format!("{mode},{sha},{name}"),
+                ],
+                None,
+            )?;
+        }
         let spec_blob = g(&["hash-object", "-w", "--stdin"], Some(run_json.as_bytes()))?;
         g(
             &[
@@ -1632,6 +1671,13 @@ pub fn spec_for(
     }
 }
 
+/// The suite's build as its own field: the runner runs it in a separate `sh -c` before the
+/// command and before each shard's command, never joined with `&&` (two leading `cd`s break).
+pub fn with_build(mut spec: RunSpec, build: Option<&str>) -> RunSpec {
+    spec.build = build.map(str::to_string);
+    spec
+}
+
 /// A run for a seam: `Ok(Some(outcome))`, `Ok(None)` to take the local path (the run could not
 /// go remote and the project's `fallback` is `local`), or an error. An environmental failure is
 /// an `Err` made by [`env_err`].
@@ -1773,6 +1819,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(wt.join(".github/workflows/evil.yml"), "name: evil2\n").unwrap();
+        std::fs::write(wt.join(".github/workflows/ci.yml"), "name: ci-changed\n").unwrap();
         std::fs::create_dir_all(wt.join(".mason")).unwrap();
         std::fs::write(wt.join(".mason/run.json"), "{\"command\":\"true\"}").unwrap();
         git_ok(&wt, &["add", "-A"]);
@@ -2122,7 +2169,15 @@ mod tests {
             .lines()
             .map(String::from)
             .collect();
-        assert_eq!(wf, vec![".github/workflows/mason-run.yml".to_string()]);
+        // The base's ci.yml is there (the task's evil.yml is not).
+        assert_eq!(
+            wf,
+            vec![
+                ".github/workflows/ci.yml".to_string(),
+                ".github/workflows/mason-run.yml".to_string()
+            ]
+        );
+        assert_eq!(show(".github/workflows/ci.yml"), "name: ci");
         // The spec is MASON's, not the task's.
         assert_eq!(show(".mason/run.json"), json);
         assert!(!show(".mason/run.json").contains("\"true\""));
@@ -2133,6 +2188,22 @@ mod tests {
             git_ok(&r.wt, &["status", "--porcelain", "--untracked-files=all"])
         );
         assert_eq!(before.2, git_ok(&r.wt, &["diff", "--cached"]));
+    }
+
+    #[test]
+    fn a_base_workflow_that_runs_on_run_refs_refuses_the_snapshot() {
+        let r = repo();
+        git_ok(&r.wt, &["checkout", "-q", "main"]);
+        std::fs::write(
+            r.wt.join(".github/workflows/ci.yml"),
+            "on:\n  push:\n    branches: [\"**\"]\n",
+        )
+        .unwrap();
+        git_ok(&r.wt, &["commit", "-qam", "ci on every ref"]);
+        git_ok(&r.wt, &["push", "-q", "origin", "main"]);
+        git_ok(&r.wt, &["fetch", "-q", "origin"]);
+        let e = snapshot(&r.wt, "origin/main", "mason-run.yml", "{}", "m").unwrap_err();
+        assert!(e.contains("ci.yml") && e.contains("mason/run/**"), "{e}");
     }
 
     #[test]
@@ -2637,6 +2708,20 @@ mod tests {
         .unwrap();
         assert_eq!(second["matrix"], serde_json::json!([2]));
         assert_eq!(second["shards"], 3);
+    }
+
+    #[test]
+    fn a_build_goes_in_its_own_field_not_joined_to_the_command() {
+        let mut sp = spec("b1");
+        sp.command = "cd sub && true".into();
+        sp.shard_command = Some("cd sub && true {shard}".into());
+        let sp = with_build(sp, Some("cd sub && true"));
+        let v: serde_json::Value = serde_json::from_str(&run_json(&sp)).unwrap();
+        assert_eq!(v["build"], "cd sub && true");
+        assert_eq!(v["command"], "cd sub && true");
+        assert_eq!(v["shard_command"], "cd sub && true {shard}");
+        let none = with_build(spec("b2"), None);
+        assert!(none.build.is_none());
     }
 
     #[test]
