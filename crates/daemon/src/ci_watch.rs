@@ -223,7 +223,7 @@ pub fn encode(s: &Saved) -> String {
                             "t_run": js.last_timeout.run, "t_job": js.last_timeout.job,
                             "t_sha": js.last_timeout.sha, "t_url": js.last_timeout.url,
                             "t_at_ms": js.last_timeout.at_ms,
-                            "absent": js.absent,
+                            "absent": js.absent, "full": js.full,
                         }),
                     )
                 })
@@ -296,6 +296,7 @@ pub fn decode(text: &str) -> Saved {
                         .collect(),
                     timeout_filed: jv["timeout_filed"].as_bool().unwrap_or(false),
                     absent: jv["absent"].as_u64().unwrap_or(0) as u32,
+                    full: jv["full"].as_bool().unwrap_or(false),
                     last_timeout: RunRef {
                         run: u(&jv["t_run"]),
                         job: u(&jv["t_job"]),
@@ -336,6 +337,18 @@ fn save(d: &Daemon, project: &str, s: &Saved) {
     }
 }
 
+/// Whether five minutes have passed since the last look at CI runs for suite proof.
+fn ci_proof_due() -> bool {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    let now = now_ms();
+    let last = LAST.load(Ordering::SeqCst);
+    now.saturating_sub(last) >= 300_000
+        && LAST
+            .compare_exchange(last, now, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+}
+
 /// Start the watch. One loop looks at every project; a project whose definition has no
 /// `[watch.ci]` costs nothing (no call to the CI host).
 pub fn spawn(d: &Arc<Daemon>) {
@@ -345,6 +358,19 @@ pub fn spawn(d: &Arc<Daemon>) {
         };
         let mut every = 20;
         for (pid, p) in &d.projects() {
+            // Suites the CI jobs cover are recorded green from its runs, at most every five
+            // minutes (#774); it needs no `[watch.ci]`.
+            if d.current_def(*pid)
+                .testing
+                .suites
+                .iter()
+                .any(|s| !s.ci_jobs.is_empty())
+                && ci_proof_due()
+            {
+                if let Ok((gh, _)) = source(p, "ci_jobs") {
+                    crate::suites::record_ci_greens(&d, *pid, &gh);
+                }
+            }
             let Some(rules) = d.current_def(*pid).watch_ci.clone() else {
                 // Switched off: a freeze it held does not outlive it.
                 if d.store.clear_ci_freeze(&p.id).unwrap_or(false) {
@@ -433,6 +459,8 @@ pub fn pass(
             url: a.url.clone(),
             created_ms: a.created_ms,
             conclusion: a.conclusion.clone(),
+            // A dispatched run is the full one (s800): push runs lack its jobs.
+            full: a.event == "workflow_dispatch",
             jobs: vec![],
         })
         .collect();
