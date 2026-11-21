@@ -651,4 +651,5 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s799**: Landing's build floor, base floor and fast tier now place each suite by its own `runs_on`, `remote = false` and device rules, so a batch touching `clients/swift` builds Swift on macOS instead of failing as "develop does not build".
 - **s800**: a push to develop runs only `lint` and `windows`; the rest of `ci.yml` runs on `workflow_dispatch` (run-name `CI: full`, input `macos`, default true) from MASON's full-test schedule, there is no GitHub cron, and the base-branch CI watch judges each job by the latest run that ran it, so a job missing from a push run is neither stale nor "waiting for a newer run".
 - **s802**: Landing's build floor and its base re-check run on this Mac by default (`floor_where = "github"` restores #815 placement), and the batch note says where and how long.
+- **s803**: Landing's floor, fast-tier and lint checks pass their place's suite without its `build`, and `remote_check` never passes on a build containing `{`, so `{project_test}: not found` can no longer end a floor run.
 <!-- status:end -->
