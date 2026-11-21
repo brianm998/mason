@@ -366,6 +366,10 @@ pub fn run_json(spec: &RunSpec) -> String {
         })
         .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
         .collect();
+    // Colourless, so the daemon's line parsers read cargo's `--> file:line` as written.
+    let mut env = env;
+    env.insert("CARGO_TERM_COLOR".into(), "never".into());
+    env.insert("NO_COLOR".into(), "1".into());
     let timeout_min = spec.limit.as_secs().div_ceil(60).max(1);
     serde_json::json!({
         "toolchains": toolchains(&spec.suite),
