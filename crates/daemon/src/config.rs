@@ -898,6 +898,9 @@ pub struct RemoteCfg {
     pub pickup_timeout_s: u64,
     /// With `fallback = "local"` a run that cannot go remote runs here instead.
     pub fallback_local: bool,
+    /// `test_env = { MASON_X = "v" }`: variables every run's `run.json` carries to the runner
+    /// (only `MASON_*` names reach it). The owner's configuration.
+    pub test_env: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1206,6 +1209,26 @@ fn parse_services(id: &str, doc: &DocumentMut) -> Result<ServicesCfg, String> {
             runs_on: get(t, "runs_on").unwrap_or_else(|| "ubuntu-latest".into()),
             pickup_timeout_s: int(t, "pickup_timeout", 1200),
             fallback_local,
+            test_env: match t.get("test_env") {
+                None => vec![],
+                Some(v) => {
+                    let bad = || {
+                        format!("{id}: `[remote_runs] test_env` is a table of `MASON_*` names to strings")
+                    };
+                    let tb = v.as_table_like().ok_or_else(bad)?;
+                    let mut out = Vec::new();
+                    for (k, v) in tb.iter() {
+                        let s = v.as_str().ok_or_else(bad)?;
+                        if !k.starts_with("MASON_")
+                            || !k.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                        {
+                            return Err(bad());
+                        }
+                        out.push((k.to_string(), s.to_string()));
+                    }
+                    out
+                }
+            },
         });
     }
     if let Some(t) = table("tracker") {
@@ -1782,7 +1805,7 @@ mod tests {
                 false
             )
         );
-        let own = "[remote_runs]\nkind=\"github-actions\"\nrepo=\"a/b\"\ntoken=\"file:/t\"\nworkflow=\"w.yml\"\nruns_on=\"macos-latest\"\npickup_timeout=60\nfallback=\"local\"\n";
+        let own = "[remote_runs]\nkind=\"github-actions\"\nrepo=\"a/b\"\ntoken=\"file:/t\"\nworkflow=\"w.yml\"\nruns_on=\"macos-latest\"\npickup_timeout=60\nfallback=\"local\"\ntest_env={ MASON_TEST_MIN_WAIT_S = \"180\" }\n";
         let r = parse_project("p", &format!("{base}{ci}{own}"))
             .unwrap()
             .services
@@ -1798,6 +1821,10 @@ mod tests {
             ("a/b", "file:/t", "w.yml", "macos-latest")
         );
         assert!(r.fallback_local && r.pickup_timeout_s == 60);
+        assert_eq!(
+            r.test_env,
+            vec![("MASON_TEST_MIN_WAIT_S".to_string(), "180".to_string())]
+        );
         // Without `[ci]` there is nothing to default from; a literal token and unknown values
         // are refused.
         for (bad, want) in [
