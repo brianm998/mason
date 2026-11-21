@@ -287,8 +287,11 @@ pub struct Site {
     pub poll_s: u64,
     /// Told what a run in progress is doing ("on GitHub: running, 4 min"), whenever that text
     /// changes. For display only.
-    pub on_phase: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+    pub on_phase: Option<PhaseFn>,
 }
+
+/// A sink for the text of a run's current phase.
+pub type PhaseFn = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// What a project's `[remote_runs]` gives, for one worktree. `None`: the project has no `[remote_runs]`.
 pub fn site_for(d: &Daemon, project: &str, cwd: &Path) -> Option<Site> {
