@@ -41,7 +41,7 @@ final class LandingItemsTests: XCTestCase {
         h.id = 7; h.running = true; h.phase = "red"
         h.stateText = "red in lint, splitting (round 1, 2 tasks left)"
         h.severity = "warn"; h.phaseMs = 17 * 60_000; h.typicalMs = 6 * 60_000
-        h.members = [1, 2].map { var m = Mason_V1_BatchMember(); m.task = $0; m.standing = "verifying"; return m }
+        h.members = ([1, 2] as [UInt64]).map { var m = Mason_V1_BatchMember(); m.task = $0; m.standing = "verifying"; return m }
         h.allowedActions = ["land_now"]
         var loose = item(9, batch: 0); loose.status = "in_batch"
         let l = landingLayout([loose, member(1, 7), member(2, 7)], [h])
