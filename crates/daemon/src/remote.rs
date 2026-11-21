@@ -1686,7 +1686,7 @@ pub fn pool_needs(
 
 /// What a remote run holds, written when it starts and removed when it ends, so a daemon that
 /// restarts counts the units of runs still out.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RemoteHold {
     /// `task N` when a task's step holds them (its lease takes them over when it asks again),
     /// else the run's id.
@@ -1695,6 +1695,16 @@ pub struct RemoteHold {
     pub units: std::collections::BTreeMap<String, u32>,
     /// The run's record (`<id>.remote`): the run has ended when it is gone or collected.
     pub record: PathBuf,
+    /// What the run is for: `check`, `test_step`, `batch` or `debt` (empty in a hold written
+    /// before the monitor showed it).
+    pub kind: String,
+    /// The task the run is for; 0 for a run no task owns.
+    pub task: u64,
+}
+
+/// The URL of the run behind `record` (empty until GitHub has made it) and its runner label.
+pub fn record_view(record: &Path) -> (String, String) {
+    State::load(record).map_or_else(Default::default, |s| (s.url, s.runs_on))
 }
 
 /// Where the holds are kept, beside the step hosts' directory.
@@ -1727,6 +1737,8 @@ pub fn write_hold(dir: &Path, id: &str, h: &RemoteHold) {
             ("label", h.label.clone()),
             ("units", units.join(",")),
             ("record", h.record.display().to_string()),
+            ("kind", h.kind.clone()),
+            ("task", h.task.to_string()),
         ],
     );
 }
@@ -1769,6 +1781,8 @@ pub fn running_holds(dir: &Path) -> Vec<RemoteHold> {
                 label: kv.get("label").cloned().unwrap_or_default(),
                 units,
                 record,
+                kind: kv.get("kind").cloned().unwrap_or_default(),
+                task: kv.get("task").and_then(|t| t.parse().ok()).unwrap_or(0),
             })
         })
         .collect();
@@ -1953,6 +1967,7 @@ pub struct HoldGuard {
 }
 
 impl HoldGuard {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         hosts: &Path,
         spec: &RunSpec,
@@ -1960,6 +1975,8 @@ impl HoldGuard {
         label: &str,
         shards: u32,
         dir: &Path,
+        kind: &str,
+        task: u64,
     ) -> Self {
         let holds = holds_dir(hosts);
         write_hold(
@@ -1970,6 +1987,8 @@ impl HoldGuard {
                 label: label.to_string(),
                 units: units_for(&spec.runs_on, shards),
                 record: record_path(dir, &spec.id),
+                kind: kind.to_string(),
+                task,
             },
         );
         HoldGuard {
@@ -2706,6 +2725,7 @@ mod tests {
                 label: id.into(),
                 units: units_for("ubuntu-latest", 1),
                 record: rec.clone(),
+                ..Default::default()
             },
         );
         (holds, rec)
@@ -2993,6 +3013,8 @@ mod tests {
             label: "#4".into(),
             units: units_for("macos-14", 1),
             record: rec.clone(),
+            kind: "debt".into(),
+            task: 4,
         };
         write_hold(&holds, "a", &h);
         assert_eq!(running_holds(&holds), vec![h]);
