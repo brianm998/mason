@@ -546,21 +546,11 @@ fn run_remote(
     let Some(site) = rm::site_for(d, project, cwd) else {
         return Err(rm::env_err("the project has no [remote_runs] section"));
     };
-    // A suite whose build runs as its own step here has none when it goes remote: the build
-    // comes first in the command.
-    let with_build = |c: &str| match build {
-        Some(b) => format!("{b} && {c}"),
-        None => c.to_string(),
-    };
-    let mut spec = rm::spec_for(
-        project,
-        id,
-        watch,
-        &with_build(cmd),
-        limit,
-        env,
-        runs_on,
-        "",
+    // A suite whose build runs as its own step here goes in `RunSpec.build`, which the runner
+    // runs as a separate `sh -c` before the command: joined with `&&`, two leading `cd`s break.
+    let mut spec = rm::with_build(
+        rm::spec_for(project, id, watch, cmd, limit, env, runs_on, ""),
+        build,
     );
     // The whole command of a suite that has shards is split across runners (#701); a narrowed
     // run, a run without the known-red tests and the like are not the whole suite and run on one.
@@ -570,7 +560,7 @@ fn run_remote(
     });
     if let Some((s, sc)) = sharded {
         spec.shards = s.shards;
-        spec.shard_command = Some(with_build(sc));
+        spec.shard_command = Some(sc.to_string());
         spec.shard_lists = shard_lists(d, project, s);
     }
     let stop = || match check() {
