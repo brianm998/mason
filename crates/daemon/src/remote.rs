@@ -323,7 +323,6 @@ fn remote_base_ref(repo: &Path, remote: &str, base: &str) -> String {
 
 // ---- the snapshot -----------------------------------------------------------------------------
 
-<<<<<<< HEAD
 /// The toolchains a run of `suite` needs (`rust`, `java`, `swift`); the workflow sets up only
 /// these. MASON's own suites: `swift*` needs Xcode and `compose*` needs Java and Gradle; every
 /// other suite, and a check with no suite, is Rust.
@@ -335,7 +334,8 @@ pub fn toolchains(suite: &str) -> Vec<&'static str> {
     } else {
         vec!["rust"]
     }
-=======
+}
+
 /// The Xcode version a command asks for (`DEVELOPER_DIR=/Applications/Xcode_16.4.app`): `16.4`.
 /// The runner prefers it and falls back to the image's default Xcode when it is not installed.
 pub fn xcode_requested(cmd: &str) -> Option<String> {
@@ -353,7 +353,6 @@ pub fn xcode_requested(cmd: &str) -> Option<String> {
 /// the base doubled each time, up to 64 times the base.
 pub fn env_backoff(base: Duration, n: u32) -> Duration {
     base * (1u32 << n.min(6))
->>>>>>> origin/develop
 }
 
 /// `.mason/run.json`: what the runner is told, from the pinned definition.
