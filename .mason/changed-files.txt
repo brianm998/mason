@@ -1,0 +1,6 @@
+.mason/run.json
+README.md
+docs/decisions/0778-narrow-exit-selector-for-test-files.md
+docs/stages/s785.md
+scripts/exit/s785.sh
+scripts/select-exit-scripts.sh
