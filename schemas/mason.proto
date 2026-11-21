@@ -1175,6 +1175,27 @@ message BatchLine {
   optional BatchCi ci = 9;
   // What the owner may do to the batch: "land_now" while it has not started promoting.
   repeated string allowed_actions = 10;
+  // s788: the batch as one thing. The state in words ("running suites", "red in lint, splitting
+  // (round 1, 5 tasks left)", "red in lint, blamed #782"); never "running suites" for a red.
+  string state_text = 11;
+  // "ok" | "warn" | "stuck". Colour is never the only signal: `severity_reason` says why.
+  string severity = 12;
+  string severity_reason = 13;
+  // Milliseconds in the current phase, and the median for that phase over the project's
+  // recent batches; `typical_ms` is 0 (absent) with fewer than three samples.
+  uint64 phase_ms = 14;
+  uint64 typical_ms = 15;
+  // The verification round, and the tasks neither landed nor parked yet.
+  uint32 split_round = 16;
+  uint32 remaining = 17;
+  // Every task of the batch with its own standing in it.
+  repeated BatchMember members = 18;
+}
+
+// A task's standing within its batch: "verifying", "parked by blame", "landed", ...
+message BatchMember {
+  uint64 task = 1;
+  string standing = 2;
 }
 
 // One workflow's job counts in a CI run.
@@ -1249,6 +1270,8 @@ message TaskLanding {
   string ci_state = 13;
   // "land_now" while the task is queued or in a batch that has not started promoting.
   repeated string allowed_actions = 14;
+  // s788: the task's own standing in its batch ("verifying", "integrating", ...).
+  string standing = 15;
 }
 
 message ProviderStatus {

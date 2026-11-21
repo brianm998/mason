@@ -250,6 +250,16 @@ pub struct BatchRow {
     pub parked: String,
     pub note: String,
     pub head: String,
+    /// The verification round the batch is in (0 until the first one starts).
+    pub round: u64,
+}
+
+/// A batch entering a phase (s788).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BatchPhaseRow {
+    pub batch: u64,
+    pub phase: String,
+    pub at: u64,
 }
 
 /// Something a batch put on the outside: a candidate ref or a pull request.
@@ -2453,7 +2463,48 @@ impl Store {
                 "INSERT INTO batches(project, at, phase, tasks) VALUES (?1,?2,'forming',?3)",
                 params![p, now_ms as i64, t],
             )?;
-            Ok(c.last_insert_rowid() as u64)
+            let id = c.last_insert_rowid();
+            c.execute(
+                "INSERT INTO batch_phases(batch, phase, at) VALUES (?1,'forming',?2)",
+                params![id, now_ms as i64],
+            )?;
+            Ok(id as u64)
+        })
+    }
+
+    /// Record the verification round a batch is in.
+    pub fn set_batch_round(&self, id: u64, round: u64) -> Result<(), StoreError> {
+        self.write(move |c| {
+            c.execute(
+                "UPDATE batches SET round=?2 WHERE id=?1",
+                params![id as i64, round as i64],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// Every recorded phase entry of the project's newest `limit` batches, oldest first
+    /// within a batch.
+    pub fn batch_phases(
+        &self,
+        project: &str,
+        limit: u32,
+    ) -> Result<Vec<BatchPhaseRow>, StoreError> {
+        let p = project.to_string();
+        self.read(move |c| {
+            let mut st = c.prepare(
+                "SELECT batch, phase, at FROM batch_phases WHERE batch IN
+                 (SELECT id FROM batches WHERE project = ?1 ORDER BY id DESC LIMIT ?2)
+                 ORDER BY batch, rowid",
+            )?;
+            let rows = st.query_map(params![p, limit], |r| {
+                Ok(BatchPhaseRow {
+                    batch: r.get::<_, i64>(0)? as u64,
+                    phase: r.get(1)?,
+                    at: r.get::<_, i64>(2)? as u64,
+                })
+            })?;
+            rows.collect()
         })
     }
 
@@ -2479,6 +2530,19 @@ impl Store {
             head.to_string(),
         );
         self.write(move |c| {
+            let last: Option<String> = c
+                .query_row(
+                    "SELECT phase FROM batch_phases WHERE batch=?1 ORDER BY rowid DESC LIMIT 1",
+                    params![id as i64],
+                    |r| r.get(0),
+                )
+                .ok();
+            if last.as_deref() != Some(ph.as_str()) {
+                c.execute(
+                    "INSERT INTO batch_phases(batch, phase, at) VALUES (?1,?2,?3)",
+                    params![id as i64, ph, now_ms as i64],
+                )?;
+            }
             c.execute(
                 "UPDATE batches SET phase=?2, landed=?3, parked=?4, note=?5, head=?6,
                  finished_at = CASE WHEN ?7 THEN ?8 ELSE finished_at END WHERE id=?1",
@@ -2493,7 +2557,7 @@ impl Store {
         let p = project.map(String::from);
         self.read(move |c| {
             let mut st = c.prepare(
-                "SELECT id, project, at, finished_at, phase, tasks, landed, parked, note, head
+                "SELECT id, project, at, finished_at, phase, tasks, landed, parked, note, head, round
                  FROM batches WHERE (?1 IS NULL OR project = ?1) ORDER BY id DESC LIMIT ?2",
             )?;
             let rows = st.query_map(params![p, limit], |r| {
@@ -2508,6 +2572,7 @@ impl Store {
                     parked: r.get(7)?,
                     note: r.get(8)?,
                     head: r.get(9)?,
+                    round: r.get::<_, i64>(10)? as u64,
                 })
             })?;
             rows.collect()

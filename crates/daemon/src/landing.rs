@@ -1513,6 +1513,7 @@ impl Runner {
                 deliver(d, TaskId(pk.task), pk.verdict());
             }
             rounds += 1;
+            let _ = self.d.store.set_batch_round(batch_id, rounds as u64);
             self.stopped
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
