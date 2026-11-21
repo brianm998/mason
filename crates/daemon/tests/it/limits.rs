@@ -456,7 +456,10 @@ fn a_runtime_gate_survives_a_restart_wins_over_the_file_and_reset_returns_to_it(
 #[test]
 fn a_hot_die_holds_further_machine_work_but_never_what_runs() {
     let dir = scratch("thermal-die");
-    let cfg = mason_daemon::sched::parse_resource_cfg("[cpu]\ncompile_settle_s = 0\n").unwrap();
+    // Five compiles run at once; the default of 3 slots would fill before the power-limit step.
+    let cfg =
+        mason_daemon::sched::parse_resource_cfg("[cpu]\ncompile_settle_s = 0\ncompile_jobs = 8\n")
+            .unwrap();
     assert_eq!(cfg.thermal_max_c, 97, "the default die limit");
     let b = broker(&dir, &cfg, &FakeCpu::replacing_compile_count(0));
     // pmset reads 100 throughout: only the SMC readings change.

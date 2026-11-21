@@ -603,9 +603,17 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s733**: With the global switch on, landing batch and lint tiers, reruns, bisect runs, baseline runs and debts run on GitHub through the same placement as task runs, a bisect starts both halves of a split at once, and `mason landing` shows where each run went with its link.
 - **s735**: Remote-run settings move from `[remote]` to `[remote_runs]` so they no longer clash with the git remote key `remote`.
 - **s736**: `shards = 8` and `shard_command` are on for `[suite.cargo-workspace]`, so a whole-suite run on GitHub is eight jobs instead of one that outlives the 40-minute limit.
+- **s737**: Three `remote::tests` failures are fixed in the tests: a leap-year date pair, a skip test that outlasted the run's 600 s limit, and a rust-cache check that matched a template comment.
+- **s738**: The reuse test now asserts the 12-character tree abbreviation that the reuse note shows.
+- **s740**: The thermal limits test ran out of compile slots, so it now sets compile_jobs = 8.
+- **s741**: `scripts/test-shard.py` is mapped to `cargo-workspace` in `[impact]`, so `definition::tests::no_tracked_file_but_the_definition_is_unmapped` passes again.
 - **s743**: A develop agent's `run_check` now asks `place::place_of` for each suite it runs (global switch, the task's choice, the suite's `runs_on`) instead of always running on this Mac, a project-test check with no suite follows the global switch, and each passed suite line says where it ran.
 - **s744**: A remote run's snapshot now carries the base branch's copy of every workflow file, so tests that read `.github/workflows/ci.yml` pass on GitHub, and the run is refused if a base workflow runs on `mason/run/**`.
 - **s745**: A suite's build goes to GitHub in `RunSpec.build`, run as its own `sh -c`, instead of being joined to the command with `&&` (which broke suites whose build and command both start with `cd`).
 - **s748**: A develop agent's check that runs on GitHub no longer queues for or holds a local `compile` or `test-suite` slot, so it skips the CPU and heat gates too.
 - **s751**: A narrowed run whose target group has a module filter now puts the filter at the end of the template's own `--` section, so the template's `--config` no longer reaches the test binary.
+- **s752**: Added `CountTextTest` for `countText` in the Compose monitor, as a test of running `compose-clients` on GitHub and judging it from its JUnit XML.
+- **s753**: Edge-case tests for `mason_landing::config::parse_duration` (whitespace, upper-case units, bare number, empty, signed, overflow), and a fix so an overflowing value returns `None` instead of panicking (debug) or wrapping (release).
+- **s755**: The `swift-clients` suite sets `runs_on = "macos-latest"` so a remote run builds the Swift monitor on macOS, with a new `Format.percent` XCTest selecting it.
+- **s759**: Remote snapshots carry `.mason/changed-files.txt` (and `.mason/base-sha`), and the exit-script helpers read it, so `exit-scripts` no longer fails `no-merge-base` on GitHub.
 <!-- status:end -->
