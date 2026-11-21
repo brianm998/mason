@@ -560,6 +560,28 @@ fn lint_runs_before_the_batch_suite_and_parks_only_the_task_that_touches_the_fil
 }
 
 #[test]
+fn a_coloured_clippy_red_parks_the_task_that_touches_the_file_without_a_split() {
+    // s789: GitHub's coloured `--> file:line` lines named the file, and the batch was split.
+    let probe = tempfile::tempdir().unwrap();
+    let log = probe.path().join("calls");
+    let script = format!(
+        "#!/bin/sh\nn=\"$1\"\necho \"$n\" >> {}\necho \"1..1\"\nif [ \"$n\" = lint ] && [ -f x/bad.rs ]; then\n  printf '\\033[1m\\033[91merror\\033[0m: x\\n  \\033[1m\\033[94m--> \\033[0mx/bad.rs:3:4\\n'\n  echo \"not ok 1 - lint\"; exit 1\nfi\necho \"ok 1 - $n\"\n",
+        log.display()
+    );
+    let w = world(LINT_AND_BATCH, &[("checks.sh", &script)]);
+    let bad = w.task("borrow", &[("x/bad.rs", "fn main() {}")]);
+    let g1 = w.task("one", &[("a/one.txt", "1")]);
+    let g2 = w.task("two", &[("a/two.txt", "2")]);
+    wait_for("both clean tasks to land", 120, || {
+        w.landed(g1) && w.landed(g2)
+    });
+    wait_for("the offending task to be sent back", 60, || {
+        w.sent_back(bad).is_some()
+    });
+    assert!(!w.on_main("x/bad.rs"));
+}
+
+#[test]
 fn a_lint_red_in_a_file_no_task_touches_is_not_blamed_by_file() {
     // The file belongs to the base: the existing ladder (rerun, impact, split) handles it.
     let probe = tempfile::tempdir().unwrap();
