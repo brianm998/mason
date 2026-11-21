@@ -11,5 +11,5 @@ grep -q 'shared-key: mason-run' .github/workflows/mason-cache.yml
 grep -q -- '--no-run' .github/workflows/mason-cache.yml
 cargo test -q -p mason-daemon --lib remote::tests::run_json_names_the_toolchains
 cargo test -q -p mason-daemon --lib remote::tests::a_green_run_gives_its_output
-cargo test -q -p mason-cli the_cache_usage_warns
+cargo test -q -p mason --bin mason the_cache_usage_warns
 echo "s780: ok"
