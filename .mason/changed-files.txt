@@ -1,0 +1,8 @@
+.github/workflows/mason-run.yml
+.mason/run.json
+crates/daemon/src/daemon.rs
+crates/daemon/src/sweep.rs
+crates/step-host/src/registry.rs
+docs/decisions/0769-reused-host-pid.md
+docs/stages/s776.md
+scripts/exit/s776.sh
