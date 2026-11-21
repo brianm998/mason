@@ -9,6 +9,8 @@
 //! Real git, real suites, the real coordinator, as in `landing.rs`; no timing is asserted.
 
 use crate::support;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use support::lw::*;
 use support::*;
 
@@ -160,4 +162,43 @@ fn a_branch_that_adds_conflict_markers_goes_back_before_it_joins_a_batch() {
         rows.iter().all(|b| !b.tasks.split(',').any(|t| t == never)),
         "{rows:?}"
     );
+}
+
+// ---- #816: the floor builds on this Mac while the switch says GitHub --------------------------
+
+fn floor_github_world(landing: &str, files: &[(&str, &str)]) -> (W, Arc<AtomicUsize>) {
+    let (url, n) = crate::landing::silent_github();
+    std::env::set_var("MASON_T816_TOKEN", "x");
+    let extra = format!(
+        "[remote_runs]\nkind = \"github-actions\"\napi = \"{url}\"\nrepo = \"o/r\"\ntoken = \"env:MASON_T816_TOKEN\"\nruns_on = \"ubuntu-latest\"\n"
+    );
+    let w = world_built_extra(landing, &extra, files, false);
+    mason_daemon::place::set_global(&w.d, mason_daemon::place::Global::GitHub, "test").unwrap();
+    (w, n)
+}
+
+#[test]
+fn the_floor_builds_here_while_the_switch_says_github_and_lands() {
+    let (w, github) = floor_github_world("window = \"1s\"\n", &[]);
+    let t = w.task("alpha", &[("a/ok.txt", "1")]);
+    wait_for("the batch to land", 90, || w.landed(t));
+    assert_eq!(github.load(Ordering::SeqCst), 0, "the floor reached GitHub");
+}
+
+#[test]
+fn a_floor_set_to_github_goes_there() {
+    let (w, github) = floor_github_world("floor_where = \"github\"\nwindow = \"1s\"\n", &[]);
+    let _t = w.task("alpha", &[("a/ok.txt", "1")]);
+    wait_for("the floor to reach GitHub", 90, || {
+        github.load(Ordering::SeqCst) > 0
+    });
+}
+
+#[test]
+fn a_floor_red_built_here_parks_the_task() {
+    let (w, github) = floor_github_world("window = \"1s\"\n", &[]);
+    let t = w.task("alpha does not build", &[("a/red.build.alpha", "x")]);
+    wait_for("the task to be sent back", 90, || w.sent_back(t).is_some());
+    assert!(!w.on_main("a/red.build.alpha"));
+    assert_eq!(github.load(Ordering::SeqCst), 0);
 }
