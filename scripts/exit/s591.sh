@@ -7,6 +7,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 grep -q '^swift = "done"' <(sed -n '/^\[feature.disk-history\]/,/^\[feature\.[^d]/p' clients/features.toml)
 if ! command -v swift >/dev/null 2>&1; then echo "s591: swift missing, skipped"; exit 0; fi
+if [ "$(uname -s)" != Darwin ]; then echo "s591: not macOS (SwiftUI), skipped"; exit 0; fi
 cd clients/swift
 log=$(mktemp)
 trap 'rm -f "$log"' EXIT
