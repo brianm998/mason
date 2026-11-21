@@ -528,17 +528,6 @@ fn main() {
     if cmd == "remote" && a.rest.first().map(String::as_str) == Some("setup") {
         exit(remote::run(std::mem::take(&mut a.rest), &config_dir));
     }
-<<<<<<< HEAD
-    // A word that is no remote command is refused before any daemon is looked for.
-    if cmd == "remote" {
-        if let Some(other) = a.rest.first().filter(|w| !w.starts_with('-')) {
-            if !matches!(other.as_str(), "on" | "off" | "status") {
-                die(&format!(
-                    "unknown remote command {other:?}: {}\n\n{HELP}",
-                    remote::COMMANDS
-                ));
-            }
-=======
     if cmd == "remote" {
         // Validate the subcommand before the daemon lookup, so a typo gets the
         // command list even when no daemon is running.
@@ -548,7 +537,6 @@ fn main() {
                 "unknown remote command {other:?}: {}\n\n{HELP}",
                 remote::COMMANDS
             )),
->>>>>>> origin/develop
         }
     }
     if cmd == "remove" {
