@@ -996,7 +996,13 @@ mod tests {
                    test result: ok. 0 passed; 0 failed\n\
                    \x20    Running tests/it.rs (target/debug/deps/it-0123456789abcdef)\n\
                    test result: ok. 1 passed; 0 failed\n";
-        p1.record_green(&store, log, "0123456789abcdef0123456789abcdef01234567", 1, 1);
+        p1.record_green(
+            &store,
+            log,
+            "0123456789abcdef0123456789abcdef01234567",
+            1,
+            1,
+        );
         // Task 2 changes crate b only: a's targets are reused, naming task 1's tree.
         put(r, "crates/b/src/lib.rs", "pub fn f() -> u32 { 1 + 0 }\n");
         let p2 = plan_now();
