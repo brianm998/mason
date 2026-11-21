@@ -1,0 +1,8 @@
+.mason/mason.toml
+.mason/run.json
+crates/definition/tests/testing_tables.rs
+crates/testing/tests/parsers.rs
+docs/decisions/0771-clippy-in-test-step.md
+docs/stages/s778.md
+scripts/clippy-suite.sh
+scripts/exit/s778.sh
