@@ -852,6 +852,46 @@ message ActiveModel {
   // "deep (Opus medium)"; the old `model` stays for older clients.
   string display = 5;
   ModelUse model_use = 6;
+  // working (holds its llm slot), waiting_check, or waiting_slot. Empty from an older daemon.
+  string state = 7;
+  // For waiting_check: `github` or `here`.
+  string place = 8;
+  // For a check on GitHub: the runner label, and the run's link once GitHub has made it.
+  string runs_on = 9;
+  string run_url = 10;
+  // For waiting_slot: the resource it waits for (`llm:claude`).
+  string resource = 11;
+}
+
+// One pool of runner units (`gha`, `gha-macos`): held and the limit.
+message PoolUse {
+  string name = 1;
+  uint32 used = 2;
+  uint32 limit = 3;
+}
+
+// A run in flight on GitHub.
+message RemoteRun {
+  // check, test_step, batch or debt.
+  string kind = 1;
+  // The task it is for; 0 for none.
+  uint64 task = 2;
+  string runs_on = 3;
+  // Its link; empty until GitHub has made the run.
+  string url = 4;
+  // Runner units it holds in `gha`.
+  uint32 units = 5;
+  string label = 6;
+}
+
+// What is out on GitHub now: the pools, and the runner units by what they are for.
+message RemoteSummary {
+  repeated PoolUse pools = 1;
+  uint32 checks = 2;
+  uint32 test_steps = 3;
+  uint32 batches = 4;
+  uint32 debts = 5;
+  repeated RemoteRun runs = 6;
 }
 
 message HomeView {
@@ -874,6 +914,8 @@ message HomeView {
   QueueHold queue_hold = 10;
   // "31 developing: 23 waiting for a test slot, 6 running checks, 2 editing" (empty for none).
   string developing = 11;
+  // Runs in flight on GitHub, by pool. Unset when none.
+  RemoteSummary remote = 12;
 }
 
 // One bucket's share of the machine's CPU.

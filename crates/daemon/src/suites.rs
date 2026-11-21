@@ -581,6 +581,12 @@ fn run_remote(
         &label,
         spec.shards.max(1),
         log_dir,
+        match task {
+            Some(_) => "test_step",
+            None if id.starts_with("debt") || id.starts_with("ledger") => "debt",
+            None => "batch",
+        },
+        task.map_or(0, |t| t.0),
     );
     Ok(match rm::run_or_fallback(&site, &spec, log_dir, &stop)? {
         None => None,
@@ -2106,7 +2112,10 @@ fn run_suite(
                         now_ms(),
                     );
                 }
-                let rerun = if failures.is_empty() {
+                // A landing batch's run stops at the boundary for a waiting update (s705, s739):
+                // the immediate rerun is one more run, so it is left to the next batch.
+                let yielding = who.task.is_none() && d.landing.draining();
+                let rerun = if failures.is_empty() || yielding {
                     None
                 } else {
                     rerun_failing(who, suite, cwd, failures, attempt, dev.as_ref())
