@@ -1,0 +1,1 @@
+{"build":"cd clients/swift && swift build --build-tests","command":"cd clients/swift && swift test","env":{},"limit_s":1800,"matrix":[1],"project":"mason","rerun":null,"results_file":null,"run":"debt288-r1795277094293-swift-clients","runs_on":"macos-latest","shard_command":null,"shard_lists":[],"shards":1,"suite":"","timeout_min":30}
