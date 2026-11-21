@@ -94,7 +94,9 @@ fn a_batch_that_does_not_build_is_not_landed_and_the_task_that_broke_it_goes_bac
 fn two_changes_that_merge_cleanly_and_do_not_build_together_do_not_land() {
     // Each builds alone; the union does not (a call and the definition it calls, changed by
     // two tasks). Nothing can pin it on one of them: both go back, nothing lands.
-    let w = world_built("window = \"2s\"\nmax_size = 5\n", &[]);
+    // The batch forms when the second task is admitted (max_size), never on the timer, so a
+    // slow setup of the second task cannot let the first land alone.
+    let w = world_built("window = \"20m\"\nmax_size = 2\n", &[]);
     let left = w.task("left", &[("x/joint.a", "1")]);
     let right = w.task("right", &[("x/joint.b", "1")]);
     wait_for("both to go back", 120, || {
@@ -114,13 +116,27 @@ fn a_base_that_does_not_build_holds_the_batch_and_blames_nobody() {
         &[("a/red.build.alpha", "the base does not build")],
     );
     let t = w.task("innocent", &[("x/one.txt", "1")]);
-    wait_for("the batch to be held", 120, || {
+    let held = || {
         w.d.store
             .batches(Some("scratch"), 10)
             .unwrap()
             .iter()
             .any(|b| b.phase == "failed" && b.note.contains("does not build"))
-    });
+    };
+    if let Err(e) = try_wait_for_exact("the batch to be held", 900, 50, held) {
+        // Name the path taken: which row, which note, which alerts.
+        let rows: Vec<String> =
+            w.d.store
+                .batches(Some("scratch"), 10)
+                .unwrap()
+                .iter()
+                .map(|b| format!("phase={:?} note={:?}", b.phase, b.note))
+                .collect();
+        panic!(
+            "{e}\nbatch rows: {rows:#?}\nalerts: {:?}",
+            w.d.landing().attention()
+        );
+    }
     assert!(
         !w.on_main("x/one.txt"),
         "nothing lands on a base that does not build"
