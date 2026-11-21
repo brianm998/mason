@@ -1136,6 +1136,9 @@ fn action_run(v: &Value) -> Option<ActionRun> {
     })
 }
 
+/// The jobs of a run and the ETag of the answer.
+pub type JobsAnswer = (Vec<ActionJob>, Option<String>);
+
 /// A job of a run: whether a runner has taken it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ActionJob {
