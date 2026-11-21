@@ -9,7 +9,7 @@ import XCTest
 @testable import MonitorUI
 
 /// Task #288: a row is redrawn only when its own data changes. Counted by body evaluations, never
-/// by time; the view is hosted offscreen and never ordered in.
+/// by time; the view is rendered offscreen with ImageRenderer, never in a window.
 @MainActor
 final class RowRedrawTests: XCTestCase {
     static let tasks: UInt64 = 25
@@ -57,37 +57,25 @@ final class RowRedrawTests: XCTestCase {
         return p
     }
 
-    private var hostWindows: [NSWindow] = []
+    /// An offscreen ImageRenderer: no window, no display cycle. It renders synchronously, and reading
+    /// the image again re-renders only what the model changed.
+    private var renderers: [ImageRenderer<AnyView>] = []
 
-    private func host(_ m: MonitorModel) -> NSHostingView<AnyView> {
-        let h = NSHostingView(rootView: AnyView(
-            SidebarPane(model: m, width: 360).environment(\.theme, Theme(dark: false, scale: 1))))
-        h.frame = NSRect(x: 0, y: 0, width: 360, height: 20_000)
-        // A window that is never ordered in: a window-less host evaluates no bodies on the CI runner.
-        let w = NSWindow(contentRect: h.frame, styleMask: [.titled], backing: .buffered, defer: true)
-        w.isReleasedWhenClosed = false
-        w.contentView = h
-        hostWindows.append(w)
-        draw(h)
-        return h
+    private func host(_ m: MonitorModel) -> ImageRenderer<AnyView> {
+        let r = ImageRenderer(content: AnyView(
+            SidebarPane(model: m, width: 360).environment(\.theme, Theme(dark: false, scale: 1))
+                .frame(width: 360, height: 20_000)))
+        r.scale = 1
+        renderers.append(r)
+        draw(r)
+        return r
     }
 
-    /// A real display and update cycle without an on-screen window: flush pending transactions, lay
-    /// out, display, and draw into a bitmap, since SwiftUI evaluates bodies only once drawn. On a
-    /// headless runner one pass is not always enough, so the run loop is turned between passes.
-    private func draw(_ h: NSView) {
-        for _ in 0..<3 {
-            CATransaction.flush()
-            h.window?.layoutIfNeeded()
-            h.layoutSubtreeIfNeeded()
-            h.displayIfNeeded()
-            if let rep = h.bitmapImageRepForCachingDisplay(in: h.bounds) { h.cacheDisplay(in: h.bounds, to: rep) }
-            RunLoop.main.run(until: Date().addingTimeInterval(0.01))
-        }
+    private func draw(_ r: ImageRenderer<AnyView>) {
+        _ = r.cgImage
     }
 
-    private func settle(_ h: NSView) {
-        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+    private func settle(_ h: ImageRenderer<AnyView>) {
         draw(h)
     }
 
