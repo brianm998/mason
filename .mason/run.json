@@ -1,0 +1,1 @@
+{"build":null,"command":"bash scripts/run-changed-exit-scripts.sh","env":{"MASON_HELD":"compile,test-suite"},"limit_s":5400,"matrix":[1],"project":"mason","rerun":null,"results_file":null,"run":"t760r4772-check-exit-scripts1","runs_on":"ubuntu-latest","shard_command":null,"shard_lists":[],"shards":1,"suite":"","timeout_min":90}
