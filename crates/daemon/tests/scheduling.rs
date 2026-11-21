@@ -887,6 +887,59 @@ fn active_models_lists_only_tasks_that_hold_a_session() {
     d.broker.lease_close(id);
 }
 
+#[test]
+fn an_agent_whose_check_is_on_github_is_waiting_and_the_run_is_counted() {
+    let s = Scratch::new("test -f hello.txt", unique_script());
+    let d = s.start_with(|c| c.max_concurrent = 1);
+    d.broker.set_limit("llm:claude", 0).unwrap();
+    let t = file_task(&d, "Checking on GitHub");
+    let entry = d.entry_for(&task_of(&d, t));
+    d.emit(EventKind::Admitted {
+        task: t,
+        entry: Some(entry),
+    })
+    .unwrap();
+    wait_explained(&d, t);
+    // Its `run_check` is out on GitHub: a hold and a run record that has not ended.
+    let holds = mason_daemon::remote::holds_dir(&d.cfg.hosts_dir());
+    let record = holds.with_file_name("c1.remote");
+    std::fs::create_dir_all(&holds).unwrap();
+    mason_step_host::registry::write_kv(
+        &record,
+        &[
+            ("sha", "abc".to_string()),
+            ("collected", "0".to_string()),
+            ("url", "https://github.com/o/r/actions/runs/9".to_string()),
+            ("runs_on", "ubuntu-latest".to_string()),
+        ],
+    )
+    .unwrap();
+    mason_daemon::remote::write_hold(
+        &holds,
+        "c1",
+        &mason_daemon::remote::RemoteHold {
+            key: "c1".into(),
+            label: "c1".into(),
+            units: mason_daemon::remote::units_for("ubuntu-latest", 1),
+            record,
+            kind: "check".into(),
+            task: t.0,
+        },
+    );
+    let world = d.world().unwrap();
+    let h = mason_daemon::views::Ctx::new(&d, &world).home("");
+    let a = h.active.iter().find(|a| a.task == t.0).expect("listed");
+    assert_eq!(
+        (a.state.as_str(), a.place.as_str()),
+        ("waiting_check", "github")
+    );
+    assert_eq!(a.run_url, "https://github.com/o/r/actions/runs/9");
+    let r = h.remote.expect("a run is out");
+    assert_eq!((r.checks, r.test_steps, r.batches, r.debts), (1, 0, 0, 0));
+    assert_eq!(r.runs.len(), 1);
+    assert_eq!(r.runs[0].task, t.0);
+}
+
 fn file_in(d: &Arc<Daemon>, project: &str, title: &str) -> TaskId {
     let pid = d.project_id_by_name(project).unwrap();
     let a = d
