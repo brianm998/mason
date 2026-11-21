@@ -563,6 +563,52 @@ pub fn snapshot(
             ],
             None,
         )?;
+        // The runner's checkout is shallow and has no base, so the change's file list is made
+        // here, where the history is (s759): the files that differ from the merge base with the
+        // base branch, the dirty worktree included. Without a merge base there is no list, and
+        // the scripts that read it fall back to git.
+        if let Ok(mb) = g(&["merge-base", base_ref, "HEAD"], None) {
+            let tree = g(&["write-tree"], None)?;
+            let files = g(
+                &[
+                    "diff-tree",
+                    "-r",
+                    "--name-only",
+                    "--no-renames",
+                    "--diff-filter=ACDMRT",
+                    &mb,
+                    &tree,
+                ],
+                None,
+            )?;
+            let mut text = files;
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            let blob = g(&["hash-object", "-w", "--stdin"], Some(text.as_bytes()))?;
+            g(
+                &[
+                    "update-index",
+                    "--add",
+                    "--cacheinfo",
+                    &format!("100644,{blob},.mason/changed-files.txt"),
+                ],
+                None,
+            )?;
+            let base_blob = g(
+                &["hash-object", "-w", "--stdin"],
+                Some(format!("{mb}\n").as_bytes()),
+            )?;
+            g(
+                &[
+                    "update-index",
+                    "--add",
+                    "--cacheinfo",
+                    &format!("100644,{base_blob},.mason/base-sha"),
+                ],
+                None,
+            )?;
+        }
         let tree = g(&["write-tree"], None)?;
         g(&["commit-tree", &tree, "-p", "HEAD", "-m", message], None)
     })();
@@ -2263,6 +2309,12 @@ mod tests {
             ]
         );
         assert_eq!(show(".github/workflows/ci.yml"), "name: ci");
+        // The change's files, made where the history is (s759); the dirty worktree is in it.
+        let changed = show(".mason/changed-files.txt");
+        assert!(changed.lines().any(|l| l == "a.txt"), "{changed}");
+        assert!(changed.lines().any(|l| l == "new.txt"), "{changed}");
+        assert!(changed.lines().any(|l| l == "gone.txt"), "{changed}");
+        assert!(!show(".mason/base-sha").is_empty());
         // The spec is MASON's, not the task's.
         assert_eq!(show(".mason/run.json"), json);
         assert!(!show(".mason/run.json").contains("\"true\""));
