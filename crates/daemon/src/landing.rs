@@ -1015,12 +1015,12 @@ fn moving_tasks(d: &Daemon, pid: ProjectId) -> Vec<u64> {
         .filter(|t| t.project == pid && !t.paused)
         .filter(|t| !queued.contains(&t.id) && !g.owed.contains(&t.id))
         .filter(|t| match t.state {
-            State::Exploring
-            | State::Developing
-            | State::Testing
-            | State::Review
-            | State::Landing => true,
-            State::Queued => t.blockers.is_empty(),
+            mason_core::State::Exploring
+            | mason_core::State::Developing
+            | mason_core::State::Testing
+            | mason_core::State::Review
+            | mason_core::State::Landing => true,
+            mason_core::State::Queued => t.blockers.is_empty(),
             _ => false,
         })
         .map(|t| t.id.0)
