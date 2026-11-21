@@ -3910,7 +3910,7 @@ fn print_report(r: &serde_json::Value) {
     );
     let slow = r["slowest_tests"].as_array().cloned().unwrap_or_default();
     if !slow.is_empty() {
-        println!("slowest tests (median of the last runs, share of the suite's tests):");
+        println!("slowest tests (median run time of the last runs, without the wait for a test world; share of the suite's tests):");
         for t in &slow {
             println!(
                 "  {:>8}  {:>5}%  {}::{}",
