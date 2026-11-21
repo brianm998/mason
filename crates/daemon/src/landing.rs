@@ -4964,7 +4964,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn coloured_clippy_and_rustfmt_output_yields_plain_paths() {
+    fn lint_parsers_read_coloured_output_and_rustfmt_diffs() {
         let out = "\x1b[1m\x1b[91merror\x1b[0m: x\n  \x1b[1m\x1b[94m--> \x1b[0mcrates/a/b.rs:969:42\nDiff in c/d.rs:3:\n";
         assert_eq!(lint_files(out), vec!["crates/a/b.rs", "c/d.rs"]);
         assert_eq!(lint_places(out), " (at crates/a/b.rs:969, c/d.rs:3)");
