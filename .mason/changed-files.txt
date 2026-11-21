@@ -1,0 +1,6 @@
+.github/workflows/mason-run.yml
+.mason/run.json
+crates/daemon/src/suites.rs
+docs/decisions/0732-landing-yield-test-red-at-base.md
+docs/stages/s739.md
+scripts/exit/s739.sh
