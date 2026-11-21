@@ -267,7 +267,7 @@ fn killing_the_daemon_at_every_effect_boundary_loses_nothing_and_repeats_nothing
 fn slow_develop_script() -> Value {
     json!({"steps": {"explore": [explore_turn()], "develop": [[
         {"sh": TASK_SCRIPT_COMMIT},
-        {"sleep_ms": 4000},
+        {"sleep_ms": 60000},
         {"call": {"tool": "submit_change", "args": {"summary": "done after a wait", "head": "$HEAD"}}}
     ]]}})
 }
@@ -291,6 +291,10 @@ fn kill_9_in_the_middle_of_an_agent_session_loses_nothing() {
     wait_for("the agent's commit", 30, || {
         mason_landing::git::commits_ahead(&s.repo, "origin/main", "mason/scratch/t0").unwrap_or(0)
             >= 1
+    });
+
+    wait_for("the agent's step host to be running", 60, || {
+        !running_hosts(&s).is_empty()
     });
 
     // kill -9 the daemon while the agent is mid-session.
@@ -321,7 +325,7 @@ fn kill_9_in_the_middle_of_an_agent_session_loses_nothing() {
 
     let mut m3 = s.masond(&[], &[]);
     s.wait_daemon(&mut m3);
-    s.wait_task(0, "landed", 120);
+    s.wait_task(0, "landed", 240);
     let log = s.origin_log();
     assert_eq!(
         log.iter().filter(|m| *m == "add hello").count(),
