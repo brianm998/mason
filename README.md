@@ -654,4 +654,5 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s800**: a push to develop runs only `lint` and `windows`; the rest of `ci.yml` runs on `workflow_dispatch` (run-name `CI: full`, input `macos`, default true) from MASON's full-test schedule, there is no GitHub cron, and the base-branch CI watch judges each job by the latest run that ran it, so a job missing from a push run is neither stale nor "waiting for a newer run".
 - **s802**: Landing's build floor and its base re-check run on this Mac by default (`floor_where = "github"` restores #815 placement), and the batch note says where and how long.
 - **s803**: Landing's floor, fast-tier and lint checks pass their place's suite without its `build`, and `remote_check` never passes on a build containing `{`, so `{project_test}: not found` can no longer end a floor run.
+- **s808**: the unquoted `run-name` in `ci.yml` (a `: ` inside `'CI: full'`) is quoted so GitHub parses the workflow, and `scripts/check-workflows.sh` (run by the lint suite and `ci_gates.rs`) parses every workflow and template.
 <!-- status:end -->
