@@ -9,5 +9,5 @@ n=$(printf '%s\n' "$list" | grep -c '^crash::at::.*: test$')
 [ "$n" -eq "$pts" ] || { echo "FAILED: $n crash::at tests for $pts points" >&2; exit 1; }
 c=$(printf '%s\n' "$list" | grep -c '^landing_crash::ci_at::.*: test$')
 [ "$c" -eq 13 ] || { echo "FAILED: $c landing_crash::ci_at tests, want 13" >&2; exit 1; }
-printf '%s\n' "$list" | grep -q 'every_crash_point_has_its_own_test' || { echo "FAILED: no list test" >&2; exit 1; }
+[ "$(grep -c 'every_crash_point_has_its_own_test' <<<"$list")" -ge 1 ] || { echo "FAILED: no list test" >&2; exit 1; }
 echo "s783 passed"
