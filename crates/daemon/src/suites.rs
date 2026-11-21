@@ -581,6 +581,12 @@ fn run_remote(
         &label,
         spec.shards.max(1),
         log_dir,
+        match task {
+            Some(_) => "test_step",
+            None if id.starts_with("debt") || id.starts_with("ledger") => "debt",
+            None => "batch",
+        },
+        task.map_or(0, |t| t.0),
     );
     Ok(match rm::run_or_fallback(&site, &spec, log_dir, &stop)? {
         None => None,

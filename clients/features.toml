@@ -671,3 +671,11 @@ compose = "done"
 ios = "done"
 android = "todo"
 android_reason = "Not in the first Android phone app (stage 469): the Android module has no Compilation section yet; the queue-held banner names the lease that blocks"
+
+[feature.active-agents-summary]
+description = "Home's Active models header counts the agents by what they are doing, such as `7 agents: 2 working, 5 waiting on GitHub checks`, each row says its state (working, waiting on a GitHub check or a check here, waiting for a slot), and an On GitHub line shows the runner pool in use and the runs by kind (`13 of 16 runners: 7 checks, 4 test steps, 2 debts; macOS 2 of 4`); with no agent it says Nothing is running. The section's detail page (mason://section/active_models) lists each run on GitHub with a link (#763)"
+swift = "done"
+compose = "done"
+ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module's home does not draw the Active models header yet"

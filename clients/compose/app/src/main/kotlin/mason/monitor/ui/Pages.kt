@@ -210,12 +210,18 @@ fun HomePage(model: MonitorModel) {
         Row(horizontalArrangement = Arrangement.spacedBy(theme.spacingLarge * 2)) {
             Section("Active models", open = { model.go(Page.Section("active_models")) }) {
                 val active = h?.active.orEmpty()
-                if (active.isEmpty()) Text("Nothing is running.", style = theme.body(color = theme.muted))
+                val head = ActiveSummary.header(active)
+                if (head == null) Text("Nothing is running.", style = theme.body(color = theme.muted))
+                else Text(head, style = theme.body(FontWeight.SemiBold), modifier = Modifier.testTag("active:header"))
+                ActiveSummary.github(h?.remote)?.let {
+                    Text("On GitHub: $it", style = theme.body(color = theme.muted), modifier = Modifier.testTag("active:github"))
+                }
                 active.forEach { a ->
                     Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), modifier = Modifier.testTag("active:${a.task}")) {
                         Text(a.display.ifEmpty { a.model }, style = theme.body(FontWeight.SemiBold))
                         Link("${a.project} #${a.task}") { model.go(Page.Task(a.task)) }
                         Text(a.step, style = theme.body(color = theme.muted))
+                        Text(ActiveSummary.state(a), style = theme.body(color = theme.muted))
                     }
                 }
                 SessionStepper(model)
@@ -965,12 +971,28 @@ fun SectionPage(model: MonitorModel, name: String) {
         when (name) {
             "active_models" -> Section(SectionPages.title(name)) {
                 val active = model.home?.active.orEmpty()
-                if (active.isEmpty()) Text("Nothing is running.", style = theme.body(color = theme.muted))
+                val uri = androidx.compose.ui.platform.LocalUriHandler.current
+                val head = ActiveSummary.header(active)
+                if (head == null) Text("Nothing is running.", style = theme.body(color = theme.muted))
+                else Text(head, style = theme.body(FontWeight.SemiBold))
                 active.forEach { a ->
                     Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), modifier = Modifier.testTag("active:${a.task}")) {
                         Text(a.display.ifEmpty { a.model }, style = theme.body(FontWeight.SemiBold))
                         Link("${a.project} #${a.task}") { model.go(Page.Task(a.task)) }
                         Text(a.step, style = theme.body(color = theme.muted))
+                        Text(ActiveSummary.state(a), style = theme.body(color = theme.muted))
+                        if (a.run_url.isNotEmpty()) Link("run") { runCatching { uri.openUri(a.run_url) } }
+                    }
+                }
+                val remote = model.home?.remote
+                ActiveSummary.github(remote)?.let { gh ->
+                    Text("On GitHub: $gh", style = theme.body(FontWeight.SemiBold))
+                    remote?.runs.orEmpty().forEach { r ->
+                        Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing)) {
+                            Text(ActiveSummary.runLine(r), style = theme.body())
+                            if (r.url.isNotEmpty()) Link("run") { runCatching { uri.openUri(r.url) } }
+                            else Text("starting", style = theme.body(color = theme.muted))
+                        }
                     }
                 }
                 SessionStepper(model)
