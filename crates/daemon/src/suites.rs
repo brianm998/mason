@@ -5170,6 +5170,7 @@ mod remote_tests {
             timed_out: false,
             stop: None,
             ran_ms: Some(12_000),
+            phase: None,
             ran_on: "ran on GitHub (ubuntu-latest), run u, picked up after 6 s".into(),
             parts: vec![],
             missing: vec![],
