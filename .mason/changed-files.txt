@@ -1,0 +1,7 @@
+.mason/run.json
+crates/adapters/src/github.rs
+crates/cli/src/doctor.rs
+crates/daemon/src/remote.rs
+docs/decisions/0773-shared-warm-run-cache.md
+docs/stages/s780.md
+scripts/exit/s780.sh

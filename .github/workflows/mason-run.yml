@@ -15,8 +15,6 @@
 #     - uses: dtolnay/rust-toolchain@stable
 #     - uses: Swatinem/rust-cache@v2
 #       with:
-#         shared-key: mason-run
-#         save-if: ${{ github.ref == 'refs/heads/develop' }}
 #         cache-on-failure: true
 #
 # `cache-on-failure: true` matters: by default rust-cache saves its cache only after a green
@@ -38,7 +36,6 @@ jobs:
       timeout_min: ${{ steps.p.outputs.timeout_min }}
       matrix: ${{ steps.p.outputs.matrix }}
       sharded: ${{ steps.p.outputs.sharded }}
-      toolchains: ${{ steps.p.outputs.toolchains }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -50,8 +47,6 @@ jobs:
           # A suite split across runners (#701) has one job per shard, numbered from 1; a run
           # that is not sharded has the one job `run`.
           echo "matrix=$(jq -c '.matrix // [1]' .mason/run.json)" >> "$GITHUB_OUTPUT"
-          # The toolchains the run's suite needs (rust, java, swift); only those are set up.
-          echo "toolchains=$(jq -c '.toolchains // ["rust"]' .mason/run.json)" >> "$GITHUB_OUTPUT"
           echo "sharded=$(jq -r '(.shards // 1) > 1' .mason/run.json)" >> "$GITHUB_OUTPUT"
 
   run:
@@ -72,29 +67,14 @@ jobs:
       # MASON's own setup, for its four suites: Rust (the workspace and the exit scripts), Swift
       # (clients/swift, macOS runners) and Gradle (clients/compose).
       - uses: dtolnay/rust-toolchain@master
-        if: contains(fromJSON(needs.plan.outputs.toolchains), 'rust')
         with:
           toolchain: 1.96.0
           components: rustfmt, clippy
-      # The suites build into $HOME/.cache/mason-target/<checkout dir>, which rust-cache does
-      # not cache; point it at the workspace's ./target, which it does.
-      - name: Link the suite's target directory into the workspace
-        if: contains(fromJSON(needs.plan.outputs.toolchains), 'rust')
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "$PWD/target" "$HOME/.cache/mason-target"
-          ln -sfn "$PWD/target" "$HOME/.cache/mason-target/$(basename "$PWD")"
-      # One shared key for every MASON run. Run branches only restore; mason-cache.yml saves it
-      # from the base branch, so the ref-scoped caches of hundreds of run branches never pile up.
       - uses: Swatinem/rust-cache@v2
-        if: contains(fromJSON(needs.plan.outputs.toolchains), 'rust')
         with:
-          shared-key: mason-run
-          save-if: ${{ github.ref == 'refs/heads/develop' }}
           cache-on-failure: true
       - name: Select Xcode
-        if: runner.os == 'macOS' && contains(fromJSON(needs.plan.outputs.toolchains), 'swift')
+        if: runner.os == 'macOS'
         shell: bash
         run: |
           set -euo pipefail
@@ -103,10 +83,8 @@ jobs:
           sudo xcode-select -s "$xcode/Contents/Developer"
           xcodebuild -version
       - uses: actions/setup-java@v4
-        if: contains(fromJSON(needs.plan.outputs.toolchains), 'java')
         with: { distribution: temurin, java-version: "21" }
       - uses: gradle/actions/setup-gradle@v4
-        if: contains(fromJSON(needs.plan.outputs.toolchains), 'java')
         with: { gradle-version: "8.12" }
 
       - name: run
