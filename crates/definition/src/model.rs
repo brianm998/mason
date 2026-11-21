@@ -207,9 +207,6 @@ pub struct Definition {
     /// more than this many `run_check` and test-suite requests of the project wait. `None`: the
     /// default, twice the test-suite resource's count; `Some(0)`: off.
     pub max_check_queue: Option<u32>,
-    /// `[admission] park_extra` (#765): how many tasks beyond the LLM limit may be in agent steps
-    /// at once, while their agents are parked on checks. `None`: the LLM limit.
-    pub park_extra: Option<u32>,
     /// Suites, environments, bindings, the impact map and signatures.
     pub testing: mason_testing::Testing,
     /// `[watch.ci]` when it is switched on (decision 0149); `None` is off.
@@ -229,7 +226,6 @@ impl Definition {
             agents: BTreeMap::new(),
             resources: BTreeMap::new(),
             max_check_queue: None,
-            park_extra: None,
             testing: mason_testing::Testing::default(),
             watch_ci: None,
             hash: String::new(),

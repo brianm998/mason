@@ -1073,7 +1073,7 @@ impl Daemon {
             .projects()
             .into_iter()
             .filter(|(_, p)| p.account == account)
-            .filter_map(|(id, _)| self.current_def(id).park_extra)
+            .filter_map(|(_, p)| p.park_extra)
             .max();
         sessions_free(limit, used, unclaimed, parked, extra)
     }

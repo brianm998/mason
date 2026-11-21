@@ -413,7 +413,6 @@ pub fn parse_with(text: &str, plugins: Plugins<'_>) -> Result<Definition, Vec<Pr
     let mut resources = BTreeMap::new();
     let mut watch_ci = None;
     let mut max_check_queue = None;
-    let mut park_extra = None;
 
     for (k, v) in doc.iter() {
         match k {
@@ -514,16 +513,9 @@ pub fn parse_with(text: &str, plugins: Plugins<'_>) -> Result<Definition, Vec<Pr
                                 "admission.max_check_queue",
                                 "must be a whole number from 0 (0 turns it off)",
                             )),
-                            ("park_extra", Some(n)) if n >= 0 => park_extra = Some(n as u32),
-                            ("park_extra", _) => out.push(Problem::new(
-                                "admission.park_extra",
-                                "must be a whole number from 0",
-                            )),
-                            (other, _) => out.push(unknown_key(
-                                "admission",
-                                other,
-                                &["max_check_queue", "park_extra"],
-                            )),
+                            (other, _) => {
+                                out.push(unknown_key("admission", other, &["max_check_queue"]))
+                            }
                         }
                     }
                 }
@@ -559,7 +551,6 @@ pub fn parse_with(text: &str, plugins: Plugins<'_>) -> Result<Definition, Vec<Pr
         agents,
         resources,
         max_check_queue,
-        park_extra,
         testing,
         watch_ci,
         hash: hash(text),

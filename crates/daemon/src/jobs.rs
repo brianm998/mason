@@ -3322,6 +3322,8 @@ fn agent_job(c: &Ctx) {
         fn drop(&mut self) {
             self.0.d.broker.stop_crediting_waits(self.0.task);
             end_run_leases(&self.0.d, self.0.task);
+            // A check that ended without handing the session back leaves no parked mark (#765).
+            self.0.d.set_parked(self.0.task, false);
         }
     }
     let _credit = StopCrediting(c);
