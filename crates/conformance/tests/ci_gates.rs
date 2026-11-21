@@ -155,3 +155,38 @@ fn push_runs_only_the_fast_jobs_and_the_full_matrix_is_dispatched() {
         );
     }
 }
+
+fn check_workflows(files: &[&std::path::Path]) -> std::process::Output {
+    Command::new("bash")
+        .arg(root().join("scripts/check-workflows.sh"))
+        .args(files)
+        .current_dir(root())
+        .output()
+        .expect("check-workflows.sh runs")
+}
+
+/// A workflow GitHub cannot parse fails instantly on every push (s808): every workflow and
+/// template parses, and the checker rejects the unquoted `run-name` that broke `ci.yml`.
+#[test]
+fn every_workflow_parses() {
+    let out = check_workflows(&[]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(ci()
+        .lines()
+        .any(|l| l.starts_with("run-name: \"") && l.contains("CI: full")));
+}
+
+#[test]
+fn workflow_check_rejects_unquoted_colon_scalar() {
+    let dir = tempfile::tempdir().unwrap();
+    let bad = dir.path().join("bad.yml");
+    let good = dir.path().join("good.yml");
+    std::fs::write(&bad, "name: x\nrun-name: ${{ 'a: b' }}\non: push\n").unwrap();
+    std::fs::write(&good, "name: x\nrun-name: \"${{ 'a: b' }}\"\non: push\n").unwrap();
+    assert!(!check_workflows(&[&bad]).status.success());
+    assert!(check_workflows(&[&good]).status.success());
+}
