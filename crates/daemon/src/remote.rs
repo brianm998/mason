@@ -284,6 +284,8 @@ pub struct Site {
     pub workflow: String,
     pub pickup_timeout: Duration,
     pub fallback_local: bool,
+    /// `[remote_runs] test_env`, added to every run's environment.
+    pub test_env: Vec<(String, String)>,
     pub gh: GitHub,
     pub clock: Arc<dyn Clock>,
     /// Seconds between looks at a run.
@@ -314,6 +316,7 @@ pub fn site_for(d: &Daemon, project: &str, cwd: &Path) -> Option<Site> {
         workflow: r.workflow,
         pickup_timeout: Duration::from_secs(r.pickup_timeout_s),
         fallback_local: r.fallback_local,
+        test_env: r.test_env,
         gh: GitHub::new(http, &r.api, &r.repo, token),
         clock: Arc::new(SystemClock),
         poll_s: 10,
@@ -2056,6 +2059,17 @@ pub fn spec_for(
     }
 }
 
+/// The project's `[remote_runs] test_env` added to the run's environment; a name the run
+/// already sets keeps its own value.
+pub fn with_site_env(mut spec: RunSpec, site: &Site) -> RunSpec {
+    for (k, v) in &site.test_env {
+        if !spec.env.iter().any(|(n, _)| n == k) {
+            spec.env.push((k.clone(), v.clone()));
+        }
+    }
+    spec
+}
+
 /// The suite's build as its own field: the runner runs it in a separate `sh -c` before the
 /// command and before each shard's command, never joined with `&&` (two leading `cd`s break).
 pub fn with_build(mut spec: RunSpec, build: Option<&str>) -> RunSpec {
@@ -2496,6 +2510,7 @@ mod tests {
             workflow: "mason-run.yml".into(),
             pickup_timeout: Duration::from_secs(1200),
             fallback_local: fallback,
+            test_env: vec![],
             gh: GitHub::new(
                 gh,
                 "https://api.github.com",
@@ -2610,6 +2625,22 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let e = execute(&s, &spec("x2"), d.path(), &|| None).err().unwrap();
         assert!(matches!(e, Fail::Environmental(_)), "{e:?}");
+    }
+
+    #[test]
+    fn the_projects_test_env_reaches_run_json_without_overriding_the_run() {
+        let r = repo();
+        token();
+        let gh = FakeGh::new(&r, &r.wt.join("none.zip"), Mode::Normal);
+        let mut site = site(&r, gh, clock(), false);
+        site.test_env = vec![
+            ("MASON_TEST_MIN_WAIT_S".into(), "180".into()),
+            ("MASON_TASK".into(), "other".into()),
+        ];
+        let v: serde_json::Value =
+            serde_json::from_str(&run_json(&with_site_env(spec("r1"), &site))).unwrap();
+        assert_eq!(v["env"]["MASON_TEST_MIN_WAIT_S"], "180");
+        assert_eq!(v["env"]["MASON_TASK"], "7");
     }
 
     #[test]
@@ -3320,6 +3351,7 @@ mod tests {
             workflow: "mason-run.yml".into(),
             pickup_timeout: Duration::from_secs(1200),
             fallback_local: false,
+            test_env: vec![],
             gh: GitHub::new(
                 gh.clone(),
                 "https://api.github.com",
