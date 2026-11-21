@@ -627,6 +627,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s763**: scripts/exit/s592.sh now checks for the weighted greedy shard selection instead of the removed round-robin formula, turning CI exit-scripts green again.
 - **s764**: `scripts/exit/s636.sh` now reads `MASON_EXIT_REPEAT` (default 10) and has a weight, so the push run of `CI/exit-scripts` stays under the 900 s per-script limit.
 - **s765**: The kill -9 agent-session crash test keeps its agent asleep for 60 s and waits for a running step host before the kill, and the daemon tests' `bin()` helper now builds the `mason` CLI into the suite's own target directory, so narrowed runs no longer find no binary or a stale one.
+- **s767**: The swiftpm remote workflow test checks only `- uses: Swatinem` step lines, because the template's header comment legitimately contains `rust-cache` (the stale `!f.contains("rust-cache")` assertion was fixed in s737).
 - **s769**: s591 skips on non-macOS hosts, s675 names each failure and waits for root removal, s723 prints holders on failure.
 - **s770**: The Compose monitor's conformance run now waits for the daemon's sequence number after each demo step (read from `/status` after the step), and the model drops a view older than one already applied, so a slow runner no longer samples stale views.
 - **s771**: The row-redraw tests render the sidebar with ImageRenderer instead of an NSWindow display cycle, so RowView body evaluations are counted on the headless CI runner.
