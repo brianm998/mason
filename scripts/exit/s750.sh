@@ -22,7 +22,7 @@ bin=$PWD/target/debug
 owner=${USER:-owner}
 m() { "$bin/mason" --data-dir "$root/d" --config-dir "$root/c" "$@"; }
 jq_state() { sed -n 's/^  "state": "\(.*\)",$/\1/p'; }
-fail() { echo "FAILED: $*" >&2; set +e; m task show 0 >&2 2>&1; tail -30 "$root/masond.log" >&2; cat "$root/pushes.log" >&2 2>/dev/null; exit 1; }
+fail() { echo "FAILED: $*" >&2; set +e; m task show 0 >&2 2>&1; tail -30 "$root/masond.log" >&2; cat "$root/pushes.log" >&2 2>/dev/null; echo "FAILED (again): $*" >&2; exit 1; }
 wait_state() {  # TASK STATE SECONDS
   local end=$((SECONDS + $3))
   until [ "$(m task show "$1" --json 2>/dev/null | jq_state)" = "$2" ]; do
