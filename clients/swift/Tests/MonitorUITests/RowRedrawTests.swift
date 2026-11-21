@@ -167,6 +167,7 @@ final class RowRedrawTests: XCTestCase {
         let h = host(m)
         settle(h)
         let before = RowView.evaluations
+        let live = LiveProgressCounter.n
         var rowChanging = 0
         var done = [UInt32](repeating: 1, count: Int(Self.tasks) + 1)
         for i in 0..<2000 {
@@ -188,8 +189,10 @@ final class RowRedrawTests: XCTestCase {
         }
         settle(h)
         let used = RowView.evaluations - before
-        print("s237: \(used) RowView body evaluations for \(rowChanging) row-changing messages")
-        XCTAssertGreaterThan(used, 0, "the rows were drawn")
+        let progressViews = LiveProgressCounter.n - live
+        print("s237: \(used) RowView body evaluations for \(rowChanging) row-changing messages; \(before) rows drawn before, \(progressViews) progress views")
+        XCTAssertGreaterThan(before, 0, "the rows were drawn")
+        XCTAssertGreaterThan(progressViews, 0, "the progress views were drawn")
         XCTAssertLessThanOrEqual(used, 2 * rowChanging)
     }
 }
