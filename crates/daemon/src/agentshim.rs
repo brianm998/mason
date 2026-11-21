@@ -25,6 +25,7 @@ pub fn shim_dir(data_dir: &Path) -> PathBuf {
 }
 
 /// The first executable file called `name` on `path` that is not in `skip`.
+#[cfg(unix)]
 fn resolve(name: &str, path: &str, skip: &Path) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     std::env::split_paths(path)
@@ -90,6 +91,7 @@ pub fn script(tool: &str, real: &str) -> String {
 
 /// Write the wrappers into `dir` for every tool found on `path`. Returns the directory, or
 /// nothing when it could not be made.
+#[cfg(unix)]
 pub fn write(dir: &Path, path: &str) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(dir).ok()?;
@@ -113,6 +115,13 @@ pub fn write(dir: &Path, path: &str) -> Option<PathBuf> {
         }
     }
     Some(dir.to_path_buf())
+}
+
+/// The wrappers are POSIX sh scripts and cannot run on Windows, so nothing is written there and
+/// `apply` leaves `PATH` unchanged.
+#[cfg(not(unix))]
+pub fn write(_dir: &Path, _path: &str) -> Option<PathBuf> {
+    None
 }
 
 /// The agent environment's `PATH` with the shim directory first, over `path`.
@@ -142,7 +151,7 @@ pub const PROMPT_LINE: &str = "Tests for this task run on GitHub: run them with 
      `cargo test`, `swift test` and the like are refused in your shell. Local builds \
      (`cargo check`, `cargo build`, `swift build`) are fine.";
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::process::Command;
