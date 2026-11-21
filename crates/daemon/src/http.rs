@@ -4070,6 +4070,7 @@ async fn demo_next(Shared(d): Shared<Arc<Daemon>>) -> Res {
         "position": d.demo_position(),
         "total": crate::demo::checkpoints(),
         "advanced": at.is_some(),
+        "seq": d.store.last_seq().unwrap_or(0),
     })))
 }
 
