@@ -119,6 +119,24 @@ pub fn check_shell(found: Result<String, String>, out: &mut Vec<Finding>) {
     }
 }
 
+/// The `llvm-tools` rustup component, which the coverage map of the daemon's `it` tests needs
+/// (#780). Without it a map cannot be made on this machine: say so instead of the job skipping
+/// in silence. With remote runs on, GitHub makes the map and this machine does not need it.
+pub fn check_llvm_tools(found: bool, out: &mut Vec<Finding>) {
+    if found {
+        out.push(ok(
+            "llvm-tools is installed (the coverage map can be made here)",
+        ));
+    } else {
+        out.push(note(
+            "the llvm-tools component is not installed, so the coverage map that picks which \
+             integration-test modules a change reaches cannot be made on this machine \
+             (`rustup component add llvm-tools`); a project with [remote_runs] has GitHub make \
+             it, otherwise selection stays on the name scan",
+        ));
+    }
+}
+
 /// Is there a unit written by `mason service install`?
 pub fn check_service(dirs: &[PathBuf], out: &mut Vec<Finding>) {
     let found = dirs.iter().find_map(|d| {
@@ -693,6 +711,7 @@ pub fn run(data_dir: &Path, config_dir: &Path) -> Vec<Finding> {
 
     check_path_command(&mut out);
     check_shell(mason_platform::shell::describe(), &mut out);
+    check_llvm_tools(mason_daemon::covmap::llvm_tools().is_some(), &mut out);
     check_watchdog(&watchdog_dirs(), &mut out);
     check_service(&watchdog_dirs(), &mut out);
     let exe = std::env::current_exe().unwrap_or_default();
@@ -859,6 +878,19 @@ mod tests {
         assert!(out
             .iter()
             .any(|f| f.level == super::Level::Fail && f.text.contains("cannot push")));
+    }
+
+    #[test]
+    fn doctor_reports_missing_llvm_tools() {
+        let mut out = vec![];
+        super::check_llvm_tools(false, &mut out);
+        super::check_llvm_tools(true, &mut out);
+        assert!(out[0]
+            .text
+            .contains("llvm-tools component is not installed"));
+        assert!(out[0].text.contains("rustup component add llvm-tools"));
+        assert_ne!(out[0].level, super::Level::Ok);
+        assert_eq!(out[1].level, super::Level::Ok);
     }
 
     #[test]

@@ -2778,6 +2778,103 @@ mod tests {
         assert_eq!(refs(&r.bare), "");
     }
 
+    fn map_text(commit: &str, main_text: &str, made_at: u64) -> String {
+        crate::covmap::CoverageMap {
+            commit: commit.into(),
+            made_at,
+            target: "crates/daemon/tests/it/main.rs".into(),
+            main_hash: crate::covmap::hash_text(main_text),
+            modules: [(
+                "holds".to_string(),
+                ["crates/daemon/src/holds.rs".to_string()].into(),
+            )]
+            .into(),
+        }
+        .encode()
+    }
+
+    #[test]
+    fn a_due_map_pushes_one_covmap_run_and_returns_the_map_it_made_and_a_fresh_one_pushes_nothing() {
+        use crate::covmap::{make_remote, Want, REMOTE_COMMAND};
+        token();
+        let r = repo();
+        let t = tempfile::tempdir().unwrap();
+        let (tip, main_text) = ("0123456789abcdef0123", "mod holds;\n");
+        let text = map_text(tip, main_text, 5_000);
+        let zip = artifact(t.path(), "built\n", 0, Some(("covmap.kv", &text)));
+        let gh = FakeGh::new(&r, &zip, Mode::Normal);
+        let s = site(&r, gh.clone(), clock(), false);
+        let logs = tempfile::tempdir().unwrap();
+        let want = Want {
+            old: None,
+            tip,
+            main_text,
+            changed_src: true,
+            now_secs: 5_000,
+        };
+        let m = make_remote(&s, &want, "proj", logs.path(), Duration::from_secs(600), &|| None)
+            .unwrap()
+            .expect("a map was due");
+        assert_eq!(m.commit, tip);
+        assert!(m.knows("crates/daemon/src/holds.rs"));
+        assert_eq!(gh.runs_seen.lock().unwrap().len(), 1, "one run was pushed");
+        // The runner was told what to run, and that it is a covmap run.
+        let rec = read_kv(&record_path(logs.path(), "covmap-0123456789ab")).unwrap();
+        assert_eq!(rec["sha"].len(), 40);
+        let run_json = git_ok(
+            &r.bare,
+            &["show", &format!("{}:.mason/run.json", rec["sha"])],
+        );
+        let j: serde_json::Value = serde_json::from_str(&run_json).unwrap();
+        assert_eq!(j["suite"], "covmap");
+        assert_eq!(j["command"], REMOTE_COMMAND);
+        assert_eq!(j["results_file"], "covmap.kv");
+        assert_eq!(j["env"]["MASON_COVMAP_COMMIT"], tip);
+
+        // A fresh map for the same main.rs: nothing is pushed.
+        let gh2 = FakeGh::new(&r, &zip, Mode::Normal);
+        let s2 = site(&r, gh2.clone(), clock(), false);
+        let fresh = Want {
+            old: Some(&m),
+            tip: "fedcba9876543210fedc",
+            main_text,
+            changed_src: true,
+            now_secs: 5_000 + 3600,
+        };
+        let none = make_remote(&s2, &fresh, "proj", logs.path(), Duration::from_secs(600), &|| None)
+            .unwrap();
+        assert!(none.is_none());
+        assert!(gh2.requests().is_empty(), "{:?}", gh2.requests());
+        assert_eq!(refs(&r.bare), "");
+    }
+
+    #[test]
+    fn a_map_of_another_commit_is_not_kept() {
+        use crate::covmap::{make_remote, Want};
+        token();
+        let r = repo();
+        let t = tempfile::tempdir().unwrap();
+        let zip = artifact(
+            t.path(),
+            "built\n",
+            0,
+            Some(("covmap.kv", &map_text("other", "mod x;\n", 1))),
+        );
+        let gh = FakeGh::new(&r, &zip, Mode::Normal);
+        let s = site(&r, gh, clock(), false);
+        let logs = tempfile::tempdir().unwrap();
+        let want = Want {
+            old: None,
+            tip: "0123456789abcdef0123",
+            main_text: "mod x;\n",
+            changed_src: true,
+            now_secs: 1,
+        };
+        let e = make_remote(&s, &want, "proj", logs.path(), Duration::from_secs(600), &|| None)
+            .unwrap_err();
+        assert!(e.contains("not of"), "{e}");
+    }
+
     #[test]
     fn a_skip_while_queued_or_running_cancels_the_run_and_deletes_the_ref() {
         token();
