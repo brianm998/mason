@@ -1464,7 +1464,7 @@ fn poll(
 }
 
 /// The jobs of a run as the monitor lists them.
-fn job_view(jobs: &[mason_adapters::github::ActionJob]) -> Vec<crate::remote_runs::Job> {
+pub fn job_view(jobs: &[mason_adapters::github::ActionJob]) -> Vec<crate::remote_runs::Job> {
     jobs.iter()
         .map(|j| crate::remote_runs::Job {
             name: j.name.clone(),

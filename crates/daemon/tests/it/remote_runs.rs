@@ -2,12 +2,13 @@
 
 //! The home view's GitHub section (#767): every remote run with its owner, the owner's state,
 //! its kind, where it stands, its jobs and its URL. The jobs are put in the registry where the
-//! run's poll puts them, not read from a fake GitHub server.
+//! run's poll puts them; the debt run's jobs are read from a recorded GitHub answer (the jobs
+//! API of the run) and turned into the registry's view by the poll's own `job_view`.
 
 use crate::support::*;
 use mason_core::*;
 use mason_daemon::remote::{spec_for, HoldGuard};
-use mason_daemon::remote_runs::{self, Job};
+use mason_daemon::remote_runs;
 use std::time::Duration;
 
 fn record(dir: &std::path::Path, id: &str, run: u64, picked: Option<u64>) {
@@ -19,19 +20,6 @@ fn record(dir: &std::path::Path, id: &str, run: u64, picked: Option<u64>) {
         ),
     )
     .unwrap();
-}
-
-fn job(name: &str, state: &str, step: &str) -> Job {
-    Job {
-        name: name.into(),
-        state: state.into(),
-        conclusion: if state == "done" {
-            "success".into()
-        } else {
-            String::new()
-        },
-        step: step.into(),
-    }
 }
 
 #[test]
@@ -86,15 +74,30 @@ fn the_home_lists_each_run_with_its_owner_state_and_jobs() {
         logs.path(),
         "debt payment",
     );
-    let jobs: Vec<Job> = (1..=8)
+    let body: Vec<serde_json::Value> = (1..=8)
         .map(|k| {
             if k <= 3 {
-                job(&format!("run ({k})"), "done", "")
+                serde_json::json!({"name": format!("run ({k})"), "status": "completed",
+                                   "conclusion": "success"})
             } else {
-                job(&format!("run ({k})"), "running", "run")
+                serde_json::json!({"name": format!("run ({k})"), "status": "in_progress",
+                                   "steps": [{"name": "run", "status": "in_progress"}]})
             }
         })
         .collect();
+    let tok = logs.path().join("token");
+    std::fs::write(&tok, "ghp_test_token\n").unwrap();
+    let rec = serde_json::json!([{"method": "GET", "url": "/actions/runs/12/jobs",
+        "response": {"status": 200, "body": {"total_count": 8, "jobs": body}}}]);
+    let gh = mason_adapters::github::GitHub::new(
+        std::sync::Arc::new(
+            mason_adapter_api::http::Recorded::from_json(&rec.to_string()).unwrap(),
+        ),
+        "https://api.github.com",
+        "o/r",
+        mason_adapters::github::TokenRef::File(tok),
+    );
+    let jobs = mason_daemon::remote::job_view(&gh.remote_run_jobs(12).unwrap());
     remote_runs::set_jobs(&logs.path().join(format!("{ib}.remote")), jobs);
     // One landing lint out, and a step waiting for a pool unit.
     let il = "b480-r1-lint".to_string();
