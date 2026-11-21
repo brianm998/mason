@@ -1156,6 +1156,21 @@ impl GitHub {
             .map(|_| ())
     }
 
+    /// Delete the Actions caches saved by `git_ref` (`DELETE /actions/caches?ref=`), so a deleted
+    /// run branch leaves none behind. Returns how many GitHub says it deleted.
+    pub fn delete_caches_for_ref(&self, git_ref: &str) -> Result<u64, ApiError> {
+        let v = self.json(
+            Request::get(&self.url(&format!("/actions/caches?ref={git_ref}"))).method("DELETE"),
+        )?;
+        Ok(v["total_count"].as_u64().unwrap_or(0))
+    }
+
+    /// The bytes the repository's Actions caches use (`GET /actions/cache/usage`).
+    pub fn cache_usage_bytes(&self) -> Result<u64, ApiError> {
+        let v = self.json(Request::get(&self.url("/actions/cache/usage")))?;
+        Ok(v["active_caches_size_in_bytes"].as_u64().unwrap_or(0))
+    }
+
     /// The commit time of `sha` in seconds since the epoch (`GET /commits/{sha}`).
     pub fn commit_time(&self, sha: &str) -> Option<u64> {
         let v = self

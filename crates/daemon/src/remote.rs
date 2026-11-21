@@ -323,6 +323,19 @@ fn remote_base_ref(repo: &Path, remote: &str, base: &str) -> String {
 
 // ---- the snapshot -----------------------------------------------------------------------------
 
+/// The toolchains a run of `suite` needs (`rust`, `java`, `swift`); the workflow sets up only
+/// these. MASON's own suites: `swift*` needs Xcode and `compose*` needs Java and Gradle; every
+/// other suite, and a check with no suite, is Rust.
+pub fn toolchains(suite: &str) -> Vec<&'static str> {
+    if suite.starts_with("swift") {
+        vec!["swift"]
+    } else if suite.starts_with("compose") {
+        vec!["java"]
+    } else {
+        vec!["rust"]
+    }
+}
+
 /// `.mason/run.json`: what the runner is told, from the pinned definition.
 pub fn run_json(spec: &RunSpec) -> String {
     let env: serde_json::Map<String, serde_json::Value> = spec
@@ -336,6 +349,7 @@ pub fn run_json(spec: &RunSpec) -> String {
         .collect();
     let timeout_min = spec.limit.as_secs().div_ceil(60).max(1);
     serde_json::json!({
+        "toolchains": toolchains(&spec.suite),
         "run": spec.id,
         "project": spec.project,
         "suite": spec.suite,
@@ -832,11 +846,15 @@ fn sweep_stale_refs_now(d: &Daemon, now: u64) {
             now / 1000,
             &|sha| site.gh.commit_time(sha),
             &mut |r| {
-                git::run(
+                let gone = git::run(
                     &site.cwd,
                     &["push", &site.remote, "--delete", &format!("refs/heads/{r}")],
                 )
-                .is_ok()
+                .is_ok();
+                if gone {
+                    delete_ref_caches(&site, &format!("refs/heads/{r}"));
+                }
+                gone
             },
         );
         if !gone.is_empty() {
@@ -857,6 +875,14 @@ fn record_path(dir: &Path, id: &str) -> PathBuf {
     dir.join(format!("{id}.remote"))
 }
 
+/// Delete the Actions caches a deleted run ref saved (best effort: they would only crowd the
+/// repository's 10 GB limit, and GitHub evicts them after 7 days anyway).
+fn delete_ref_caches(site: &Site, git_ref: &str) {
+    if let Err(e) = site.gh.delete_caches_for_ref(git_ref) {
+        tracing::warn!(ref_name = %git_ref, "could not delete the run ref's caches: {e}");
+    }
+}
+
 /// Delete the run's ref (best effort, remembered in the record).
 fn delete_ref(site: &Site, st: &mut State, rec: &Path) {
     if st.ref_deleted {
@@ -870,6 +896,7 @@ fn delete_ref(site: &Site, st: &mut State, rec: &Path) {
             .is_err_and(|e| e.stderr.contains("does not exist"))
     {
         st.ref_deleted = true;
+        delete_ref_caches(site, &target);
     } else if let Err(e) = r {
         tracing::warn!(ref_name = %st.ref_name, "could not delete the run ref: {e}");
     }
@@ -2202,6 +2229,9 @@ mod tests {
                     body: "{}".into(),
                 });
             }
+            if r.method == "DELETE" && u.contains("/actions/caches?ref=") {
+                return ok(serde_json::json!({"total_count": 1, "actions_caches": []}));
+            }
             if u.contains("/actions/runs?head_sha=") {
                 let sha = u
                     .split("head_sha=")
@@ -2474,6 +2504,39 @@ mod tests {
     }
 
     #[test]
+    fn run_json_names_the_toolchains_each_of_masons_suites_needs() {
+        for (suite, want) in [
+            ("cargo-workspace", "rust"),
+            ("exit-scripts", "rust"),
+            ("exit-scripts-landing", "rust"),
+            ("fmt", "rust"),
+            ("lint", "rust"),
+            ("", "rust"),
+            ("swift-clients", "swift"),
+            ("compose-clients", "java"),
+        ] {
+            let mut sp = spec("tc");
+            sp.suite = suite.into();
+            let v: serde_json::Value = serde_json::from_str(&run_json(&sp)).unwrap();
+            assert_eq!(v["toolchains"], serde_json::json!([want]), "{suite}");
+        }
+    }
+
+    #[test]
+    fn the_workflows_restore_one_shared_key_and_only_the_base_branch_saves_it() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows");
+        let run = std::fs::read_to_string(root.join("mason-run.yml")).unwrap();
+        assert!(run.contains("shared-key: mason-run"));
+        assert!(run.contains("save-if: ${{ github.ref == 'refs/heads/develop' }}"));
+        assert!(run.contains("toolchains"));
+        let warm = std::fs::read_to_string(root.join("mason-cache.yml")).unwrap();
+        assert!(warm.contains("shared-key: mason-run"));
+        assert!(warm.contains("cancel-in-progress: true"));
+        assert!(warm.contains("--no-run"));
+        assert!(!warm.contains("save-if"), "the warm-up always saves");
+    }
+
+    #[test]
     fn a_green_run_gives_its_output_and_the_ref_is_deleted() {
         token();
         let r = repo();
@@ -2510,6 +2573,18 @@ mod tests {
         assert_eq!(kv["sha"].len(), 40);
         assert_eq!(kv["collected"], "1");
         assert!(gh.requests().iter().any(|q| q.contains("head_sha=")));
+        let deletes: Vec<String> = gh
+            .requests()
+            .into_iter()
+            .filter(|q| {
+                q.starts_with("DELETE ") && q.contains("/actions/caches?ref=refs/heads/mason/run/")
+            })
+            .collect();
+        assert_eq!(
+            deletes.len(),
+            1,
+            "one cache DELETE for the ref deleted: {deletes:?}"
+        );
     }
 
     #[test]
