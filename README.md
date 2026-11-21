@@ -618,4 +618,6 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s759**: Remote snapshots carry `.mason/changed-files.txt` (and `.mason/base-sha`), and the exit-script helpers read it, so `exit-scripts` no longer fails `no-merge-base` on GitHub.
 - **s760**: Runs adopted from before a restart are checked against GitHub: finished ones free their runner units and lose their ref, and checks nobody can collect are cancelled.
 - **s762**: Recorded that the Linux exit-scripts failure (`s80`, `s449`) could not be diagnosed because the failed-step log was unreadable here, and named the command that settles it; no fix is claimed.
+- **s784**: Batch #491's three base reds are traced to their panics; `mason remote <word>` now rejects an unknown subcommand before it needs masond, and the unmapped-file test ignores the three files a remote run's snapshot adds; the third red (landing_yield) was the test counting a run's immediate rerun as a second run, and now allows for it.
+- **s787**: A develop agent's `run_check` that goes to GitHub now has its whole wait (pool unit, runner pickup, run) credited to the step's deadline as it goes, and the timeout note counts from the step's recorded launch, names the daemon restart and shows the GitHub wait apart from the slot queue.
 <!-- status:end -->
