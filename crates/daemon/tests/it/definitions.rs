@@ -913,3 +913,32 @@ fn a_proposed_task_raises_an_alert_that_clears_on_approve_and_on_reject() {
     assert!(!keys.contains(&format!("proposed:{}", a.0)), "{keys:?}");
     assert!(!keys.contains(&format!("proposed:{}", b.0)), "{keys:?}");
 }
+
+#[test]
+fn a_develop_checks_suite_is_placed_by_the_switch_and_the_tasks_choice() {
+    use mason_daemon::place::{set_global, Global};
+    use mason_daemon::remote::{executor_for, Executor, Kind};
+    let s = scratch_with(Some(DEF_SKIP), happy_script());
+    s.write_project(
+        "scratch",
+        "test -f hello.txt",
+        "[remote_runs]\nkind = \"github-actions\"\nrepo = \"o/r\"\ntoken = \"env:MASON_T755_TOKEN\"\n",
+    );
+    let d = s.start();
+    let t = flagged(&d, "Checks");
+    let suite = mason_testing::Suite::new("unit", "true", mason_testing::ParserKind::Tap);
+    let now = mason_daemon::daemon::now_ms();
+    let at = |d: &std::sync::Arc<mason_daemon::Daemon>| {
+        executor_for(d, "scratch", Kind::Check, Some((Some(t), &suite)))
+    };
+    // The switch is off: here.
+    assert_eq!(at(&d), Executor::Local);
+    // On: GitHub.
+    set_global(&d, Global::GitHub, "brian").unwrap();
+    assert!(matches!(at(&d), Executor::GitHub { .. }));
+    // The task's choice of here beats the switch.
+    d.store
+        .set_task_override(t.0, "run_on", "local", "brian", now)
+        .unwrap();
+    assert_eq!(at(&d), Executor::Local);
+}
