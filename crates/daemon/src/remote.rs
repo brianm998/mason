@@ -2509,7 +2509,7 @@ mod tests {
             6
         );
         assert_eq!(
-            parse_iso("2026-03-01T00:00:00Z").unwrap() - parse_iso("2026-02-28T00:00:00Z").unwrap(),
+            parse_iso("2028-03-01T00:00:00Z").unwrap() - parse_iso("2028-02-28T00:00:00Z").unwrap(),
             2 * 86400
         );
         assert_eq!(parse_iso("garbage"), None);

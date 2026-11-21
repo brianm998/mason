@@ -1007,7 +1007,8 @@ mod tests {
         );
         assert!(!reused.iter().any(|l| l.starts_with("b:")), "{p2:?}");
         assert!(
-            p2.note().unwrap().contains("tree-one-0000"),
+            // The note names the first twelve characters of the tree.
+            p2.note().unwrap().contains("tree tree-one-000)"),
             "{:?}",
             p2.note()
         );

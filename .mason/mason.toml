@@ -215,6 +215,7 @@ when = ["development", "test_step"]
 "scripts/install.sh" = []
 "scripts/rustdoc-bootstrap.sh" = ["cargo-workspace"]
 "scripts/test-parallel.py" = ["cargo-workspace"]
+"scripts/test-shard.py" = ["cargo-workspace"]
 "scripts/spike/**" = []
 
 [step.land]
