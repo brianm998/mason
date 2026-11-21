@@ -55,6 +55,8 @@ pub struct CheckEntry {
     pub current: String,
     /// The longest this suite usually runs, from history (0: none known).
     pub usual_ms: u64,
+    /// The check is out on GitHub: waiting for a pool unit, a runner, or the run (#799).
+    pub github: bool,
     /// "" while going; "green", "red" or "ended" once done.
     pub result: String,
     pub failed: u32,
@@ -188,6 +190,10 @@ impl Progress {
                 }
             }
             CheckPhase::Building => format!("{head}: building, {}", dur(c.ran_now(now))),
+            CheckPhase::Running if c.github => format!(
+                "{head}: waiting on GitHub (a pool unit, a runner, the run), {}",
+                dur(c.ran_now(now))
+            ),
             CheckPhase::Running => {
                 let mut s = format!("{head}: running");
                 if let Some((d, t, u)) = self.check_counts() {
@@ -235,6 +241,9 @@ impl Progress {
                 format!("check: {w}")
             }
             CheckPhase::Building => format!("check: building, {}", dur(c.ran_now(now))),
+            CheckPhase::Running if c.github => {
+                format!("check: waiting on GitHub, {}", dur(c.ran_now(now)))
+            }
             CheckPhase::Running => match self.check_counts() {
                 Some((d, Some(t), u)) if t > 0 => {
                     format!("check: {d}/{t} {u}, {}", dur(c.ran_now(now)))
