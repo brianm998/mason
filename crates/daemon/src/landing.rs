@@ -3210,19 +3210,9 @@ impl Runner {
                 out.notes.push(format!("{name}: not run: {why}"));
                 continue;
             }
-            let _lease = match self.hold(
-                def,
-                crate::sched::needs_of(&crate::jobs::build_uses(), None),
-                true,
-            ) {
-                Ok(l) => l,
-                Err(e) => {
-                    self.fail_service(e.clone());
-                    out.green = false;
-                    out.notes.push(e);
-                    return out;
-                }
-            };
+            // #811: the lint tier runs on this Mac unless the tier says `where = "github"`;
+            // then the suite's own `remote`/`runs_on` decide, as for any suite.
+            let github = tier.place.as_deref() == Some("github");
             let spec = crate::hostedcheck::CheckSpec {
                 id_prefix: format!("{prefix}-lint-{name}"),
                 log_dir: log_dir.to_path_buf(),
@@ -3237,22 +3227,56 @@ impl Runner {
                     let (d, m) = (d.clone(), members.clone());
                     Arc::new(move || m.forced(&d)) as crate::hostedcheck::StopFn
                 }),
-                place: None,
-                global: true,
+                place: match (github, self.member_tasks.first()) {
+                    (true, Some(t)) => Some((*t, Box::new(suite.clone()))),
+                    _ => None,
+                },
+                global: false,
+            };
+            let remote = github && crate::hostedcheck::goes_remote(d, &spec);
+            // Work that goes to GitHub holds no local slot while it waits there.
+            let _lease = if remote {
+                None
+            } else {
+                match self.hold(
+                    def,
+                    crate::sched::needs_of(&crate::jobs::build_uses(), None),
+                    true,
+                ) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        self.fail_service(e.clone());
+                        out.green = false;
+                        out.notes.push(e);
+                        return out;
+                    }
+                }
+            };
+            let began = std::time::Instant::now();
+            let ran_on = if remote { "on GitHub" } else { "on this Mac" };
+            let took = |s: u64| {
+                if s >= 60 {
+                    format!("{}m{:02}s", s / 60, s % 60)
+                } else {
+                    format!("{s}s")
+                }
             };
             match crate::hostedcheck::run(d, &spec) {
                 Ok(o) if o.stopped.is_some() => out.notes.push(format!(
                     "{name}: not run to the end: {}",
                     o.stopped.unwrap_or_default()
                 )),
-                Ok(o) if o.passed => out.notes.push(format!("{name}: clean")),
+                Ok(o) if o.passed => out.notes.push(format!(
+                    "{name}: clean ({ran_on}, {})",
+                    took(began.elapsed().as_secs())
+                )),
                 Ok(o) => {
                     out.green = false;
                     out.failed.insert(name.clone());
                     *self.lint_files.lock().unwrap_or_else(|e| e.into_inner()) =
                         lint_files(&o.output);
                     out.notes.push(format!(
-                        "{name}: the batch is not lint clean{}{}\n{}",
+                        "{name}: the batch is not lint clean ({ran_on}){}{}\n{}",
                         if o.timed_out { " (timed out)" } else { "" },
                         lint_places(&o.output),
                         crate::jobs::tail(&o.output, 15)
