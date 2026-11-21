@@ -1330,7 +1330,11 @@ fn poll(
         // limit: end the run, and its missing artifact has that shard alone run again (#701).
         if let (false, Some(p)) = (st.shards.is_empty(), st.picked_ms) {
             if now >= p.saturating_add(site.pickup_timeout.as_millis() as u64) {
-                let of = |s: &str| live.jobs.iter().any(|j| is_run_job(&j.name) && j.status == s);
+                let of = |s: &str| {
+                    live.jobs
+                        .iter()
+                        .any(|j| is_run_job(&j.name) && j.status == s)
+                };
                 if of("queued") && !of("in_progress") {
                     cancel(site, st);
                 }
@@ -1421,7 +1425,11 @@ struct Live {
 }
 
 impl Live {
-    fn refresh(&mut self, site: &Site, id: u64) -> Result<(), mason_adapter_api::service::ApiError> {
+    fn refresh(
+        &mut self,
+        site: &Site,
+        id: u64,
+    ) -> Result<(), mason_adapter_api::service::ApiError> {
         if let Some((jobs, etag)) = site.gh.remote_run_jobs_changed(id, self.etag.as_deref())? {
             self.jobs = jobs;
             self.etag = etag;
@@ -1444,7 +1452,10 @@ pub fn phase_text(
     let runs: Vec<_> = jobs.iter().filter(|j| is_run_job(&j.name)).collect();
     let started = runs.iter().any(|j| j.status != "queued");
     if !started {
-        return format!("on GitHub: waiting for a runner, {}", mins(pushed_ms / 1000));
+        return format!(
+            "on GitHub: waiting for a runner, {}",
+            mins(pushed_ms / 1000)
+        );
     }
     if shards > 0 {
         let done = runs.iter().filter(|j| j.status == "completed").count();
