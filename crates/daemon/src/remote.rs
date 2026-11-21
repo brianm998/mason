@@ -518,7 +518,10 @@ pub fn snapshot(
                 ],
                 None,
             )?;
-            let base_blob = g(&["hash-object", "-w", "--stdin"], Some(format!("{mb}\n").as_bytes()))?;
+            let base_blob = g(
+                &["hash-object", "-w", "--stdin"],
+                Some(format!("{mb}\n").as_bytes()),
+            )?;
             g(
                 &[
                     "update-index",
