@@ -9,8 +9,9 @@ build=$(cargo test -q -p mason-daemon --test it --no-run 2>&1) \
     || { echo "$build" >&2; echo "FAILED: build" >&2; exit 1; }
 bin=$(echo "$build" | grep -oE "target/[^ )]*/deps/it-[0-9a-f]+" | tail -1)
 [ -x "$bin" ] || { echo "$build" >&2; echo "no test binary" >&2; exit 1; }
-for i in 1 2 3 4 5 6 7 8 9 10; do
-    echo "== run $i of 10"
+n=${MASON_EXIT_REPEAT:-10}
+for i in $(seq 1 "$n"); do
+    echo "== run $i of $n"
     out=$("$bin" --exact "$name" 2>&1) \
         || { echo "$out" >&2; echo "FAILED on run $i" >&2; exit 1; }
     echo "$out" | grep -E '^test result' | tail -1
