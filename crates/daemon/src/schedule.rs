@@ -54,6 +54,10 @@ pub struct CiSpec {
     pub run_name: String,
     /// Minutes after midnight, local time: once a day at this time (instead of `every`).
     pub at: Option<u32>,
+    /// Run a full test once the project has been quiet this long (s782); milliseconds.
+    pub when_quiet: Option<u64>,
+    /// `every` was written (as opposed to the placeholder a quiet-only schedule carries).
+    pub every: bool,
     /// Inline globs, or the workflow file whose `on.pull_request.paths` holds them.
     pub paths: Vec<String>,
     pub paths_from: Option<String>,
@@ -69,6 +73,8 @@ impl Default for CiSpec {
             inputs: vec![],
             run_name: String::new(),
             at: None,
+            when_quiet: None,
+            every: false,
             paths: vec![],
             paths_from: None,
             group_by: Default::default(),
@@ -163,6 +169,16 @@ pub fn parse(id: &str, doc: &DocumentMut) -> Result<Vec<Spec>, String> {
                         }
                     }
                 }
+                "when_quiet" => {
+                    ci_keys.push(k);
+                    ci.when_quiet = Some(
+                        mason_core::introspect::parse_every(&s()?)
+                            .filter(|ms| *ms >= 60_000)
+                            .ok_or_else(|| {
+                                format!("{at} `when_quiet` must be a duration of at least a minute, like \"30m\"")
+                            })?,
+                    );
+                }
                 "inputs" => {
                     ci_keys.push(k);
                     let tb = v
@@ -207,8 +223,15 @@ pub fn parse(id: &str, doc: &DocumentMut) -> Result<Vec<Spec>, String> {
             if ci.at.is_some() && spec.every_ms != 0 {
                 return Err(format!("{at} takes `at` or `every`, not both"));
             }
+            if ci.at.is_none() && spec.every_ms == 0 && ci.when_quiet.is_none() {
+                return Err(format!(
+                    "{at} needs `at = \"23:00\"`, an `every` or a `when_quiet = \"30m\"`"
+                ));
+            }
+            ci.every = spec.every_ms != 0;
             if ci.at.is_none() && spec.every_ms == 0 {
-                return Err(format!("{at} needs `at = \"23:00\"` or an `every`"));
+                // A quiet-only schedule has no cadence; the row wants a number.
+                spec.every_ms = 24 * 3_600_000;
             }
             if ci.paths_from.is_some() && !ci.paths.is_empty() {
                 return Err(format!("{at} takes `paths` or `paths_from`, not both"));
@@ -578,6 +601,9 @@ every = "7d"
             "[schedule.x]\nkind = \"ci\"\nworkflow = \"a.yml\"\nat = \"23:00\"\ngroup_by = \"feature\"\n",
             "[schedule.x]\nkind = \"ci\"\nworkflow = \"a.yml\"\nat = \"23:00\"\nfast = true\n",
             "[schedule.x]\nkind = \"ci\"\nworkflow = \"a.yml\"\nat = \"23:00\"\ninputs = { n = 3 }\n",
+            "[schedule.x]\nkind = \"ci\"\nworkflow = \"a.yml\"\nwhen_quiet = \"never\"\n",
+            "[schedule.x]\nkind = \"ci\"\nworkflow = \"a.yml\"\nwhen_quiet = \"10s\"\n",
+            "[schedule.x]\nkind = \"base-health\"\nevery = \"daily\"\nwhen_quiet = \"30m\"\n",
         ] {
             assert!(parse("web", &bad.parse().unwrap()).is_err(), "{bad}");
         }
@@ -616,6 +642,38 @@ paths = ["src/**", "Cargo.toml"]
         let c = i.ci.as_ref().unwrap();
         assert_eq!((c.paths.len(), c.max_tickets, c.at), (2, 6, None));
         assert!(s.iter().all(|s| s.kind == "ci"));
+    }
+
+    #[test]
+    fn a_full_test_schedule_reads_both_triggers() {
+        let doc: DocumentMut = r#"
+[schedule.full]
+kind = "ci"
+workflow = "ci.yml"
+at = "01:00"
+when_quiet = "30m"
+[schedule.only-quiet]
+kind = "ci"
+workflow = "ci.yml"
+when_quiet = "45m"
+"#
+        .parse()
+        .unwrap();
+        let s = parse("mason", &doc).unwrap();
+        let f = s
+            .iter()
+            .find(|s| s.name == "full")
+            .unwrap()
+            .ci
+            .clone()
+            .unwrap();
+        assert_eq!((f.at, f.when_quiet), (Some(60), Some(30 * 60_000)));
+        let q = s.iter().find(|s| s.name == "only-quiet").unwrap();
+        let c = q.ci.as_ref().unwrap();
+        assert_eq!(
+            (c.at, c.when_quiet, c.every),
+            (None, Some(45 * 60_000), false)
+        );
     }
 
     #[test]

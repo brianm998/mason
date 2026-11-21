@@ -1304,3 +1304,53 @@ fn a_batch_run_is_found_again_only_for_the_same_base_and_task_heads() {
         None
     );
 }
+
+#[test]
+fn full_test_rows_survive_a_restart_and_come_back_newest_first() {
+    let (_d, p) = db();
+    let row = |commit: &str, trigger: &str| mason_store::FullTestRow {
+        project: "p".into(),
+        schedule: "full".into(),
+        commit: commit.into(),
+        trigger: trigger.into(),
+        started_ms: 10,
+        ..Default::default()
+    };
+    let (a, b) = {
+        let s = Store::open(&p).unwrap();
+        let a = s.add_full_test(&row("aaa", "nightly")).unwrap();
+        s.finish_full_test(a, 20, "green", "https://ci/1").unwrap();
+        // Another schedule's rows are not this one's.
+        let mut other = row("zzz", "quiet");
+        other.schedule = "other".into();
+        s.add_full_test(&other).unwrap();
+        // One still running at the restart.
+        (a, s.add_full_test(&row("bbb", "quiet")).unwrap())
+    };
+    let s = Store::open(&p).unwrap();
+    let rows = s.full_tests("p", "full").unwrap();
+    assert_eq!(rows.iter().map(|r| r.id).collect::<Vec<_>>(), vec![b, a]);
+    assert_eq!(
+        (
+            rows[0].commit.as_str(),
+            rows[0].finished_ms,
+            rows[0].verdict.as_str()
+        ),
+        ("bbb", 0, "")
+    );
+    assert_eq!(
+        (
+            rows[1].verdict.as_str(),
+            rows[1].link.as_str(),
+            rows[1].finished_ms
+        ),
+        ("green", "https://ci/1", 20)
+    );
+    // It is finished after the restart; an empty link keeps the stored one.
+    s.finish_full_test(a, 30, "red", "").unwrap();
+    let rows = s.full_tests("p", "full").unwrap();
+    assert_eq!(
+        (rows[1].verdict.as_str(), rows[1].link.as_str()),
+        ("red", "https://ci/1")
+    );
+}
