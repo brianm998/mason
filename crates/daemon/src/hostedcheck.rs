@@ -191,6 +191,8 @@ pub struct CheckOutcome {
     pub timed_out: bool,
     /// The last lines of the output.
     pub output: String,
+    /// All of the output, for parsing files out of it; `output` is the tail kept for notes.
+    pub full: String,
     /// The id of the host that ran it.
     pub id: String,
     /// Why it was stopped before it ended, when [`CheckSpec::stop`] stopped it. Such a run
@@ -521,7 +523,16 @@ fn remote_check(d: &Arc<Daemon>, spec: &CheckSpec, id: &str) -> Option<Shared> {
         build,
     );
     // The units it holds, on record until it ends, for a daemon that restarts (#700).
-    let _hold = rm::HoldGuard::new(&d.cfg.hosts_dir(), &rs, id, id, 1, &spec.log_dir);
+    let _hold = rm::HoldGuard::new(
+        &d.cfg.hosts_dir(),
+        &rs,
+        id,
+        id,
+        1,
+        &spec.log_dir,
+        if spec.global { "batch" } else { "check" },
+        place.map_or(0, |(t, _)| t.0),
+    );
     let note: Mutex<Option<String>> = Mutex::new(None);
     let stop = || {
         let n = spec.stop.as_ref().and_then(|f| f())?;
@@ -535,6 +546,7 @@ fn remote_check(d: &Arc<Daemon>, spec: &CheckSpec, id: &str) -> Option<Shared> {
                 passed: false,
                 timed_out: false,
                 output: String::new(),
+                full: String::new(),
                 id: id.to_string(),
                 stopped: note.lock().unwrap_or_else(|e| e.into_inner()).clone(),
             }),
@@ -542,6 +554,7 @@ fn remote_check(d: &Arc<Daemon>, spec: &CheckSpec, id: &str) -> Option<Shared> {
                 passed: f.code == 0 && f.signal == 0 && !f.timed_out,
                 timed_out: f.timed_out,
                 output: format!("({})\n{}", f.ran_on, crate::jobs::tail(&f.output, 40)),
+                full: f.output.clone(),
                 id: id.to_string(),
                 stopped: None,
             }),
@@ -635,10 +648,12 @@ fn collect(
     let timed_out = stopped.is_none()
         && (fired.load(Ordering::SeqCst)
             || (rec.signal != 0 && rec.ended_ms > 0 && rec.ended_ms + 1500 >= deadline));
+    let full = std::fs::read_to_string(&log).unwrap_or_default();
     Ok(CheckOutcome {
         passed: stopped.is_none() && rec.code == 0 && rec.signal == 0 && !timed_out,
         timed_out,
-        output: crate::jobs::tail(&std::fs::read_to_string(&log).unwrap_or_default(), 40),
+        output: crate::jobs::tail(&full, 40),
+        full,
         id: id.to_string(),
         stopped,
     })

@@ -11,6 +11,7 @@ trap 'rc=$?; [ "$rc" -eq 0 ] || echo "FAILED (exit $rc) at line $LINENO: $BASH_C
 cd "$(git rev-parse --show-toplevel)"
 root=$(mktemp -d /tmp/mason-s748.XXXXXX); daemon=""; gh=""; holder=""
 cleanup() {
+  exec 3>&- 2>/dev/null || true
   [ -n "$holder" ] && kill "$holder" 2>/dev/null || true
   [ -n "$daemon" ] && kill -9 "$daemon" 2>/dev/null || true
   [ -n "$gh" ] && kill -9 "$gh" 2>/dev/null || true
@@ -142,7 +143,7 @@ start_daemon() {  # FORCE (1 or empty)
 }
 hold_slots() {
   # A background job reads /dev/null, which ends a hold at once: give it a fifo we keep open.
-  rm -f "$root/hold.in"; mkfifo "$root/hold.in"; exec 3<>"$root/hold.in"
+  rm -f "$root/hold.in" "$root/hold.out"; mkfifo "$root/hold.in"; exec 3<>"$root/hold.in"
   # Run mason itself (not the `m` function, whose subshell would be what $! and kill reach).
   "$bin/mason" --data-dir "$root/d" --config-dir "$root/c" hold --needs compile,test-suite --pipeline other --label "other work" <"$root/hold.in" >"$root/hold.out" 2>"$root/hold.err" &
   holder=$!
@@ -160,7 +161,7 @@ until grep -q 'head_sha=' "$root/gh/requests.log" 2>/dev/null; do
 done
 kill -0 "$holder" || fail "the held slots were released"
 wait_state 0 landed 180
-kill "$holder" 2>/dev/null || true; holder=""
+exec 3>&-; kill "$holder" 2>/dev/null || true; holder=""
 
 echo "== 2. remote off: the same check waits for the compile slot"
 kill -9 "$daemon"; daemon=""

@@ -489,3 +489,223 @@ fn with_no_ci_schedule_configured_the_tick_makes_no_ci_call_and_adds_no_row() {
     assert!(rows.iter().all(|r| r.kind != "ci"), "{rows:?}");
     assert!(d.projects().values().all(|p| p.schedules().is_empty()));
 }
+
+// ---- the record of full tests (s782, decision 0775) ----------------------------------------------
+
+fn repo_at(tip: &str, changed: Option<&[&str]>) -> FakeRepo {
+    FakeRepo {
+        tip: tip.into(),
+        changed: changed.map(|c| c.iter().map(|s| s.to_string()).collect()),
+        paths_file: None,
+    }
+}
+
+fn asked(trigger: &str, force: bool) -> mason_daemon::ci_schedule::Go<'_> {
+    mason_daemon::ci_schedule::Go {
+        schedule: "nightly",
+        trigger,
+        force,
+    }
+}
+
+fn dispatches(f: &Fake) -> usize {
+    f.calls()
+        .iter()
+        .filter(|c| c.starts_with("dispatch"))
+        .count()
+}
+
+#[test]
+fn the_record_decides_for_every_trigger_and_a_run_in_flight_is_followed_after_a_reload() {
+    use mason_daemon::ci_schedule::dispatch_as;
+    let (_s, d, pid) = start();
+    let f = Fake::default();
+    let ci = spec(6);
+    let mut r = row();
+    // The quiet trigger starts: nothing is on record. The start is recorded as running.
+    let say = dispatch_as(
+        &d,
+        pid,
+        &ci,
+        &f,
+        &repo_at("tip1", None),
+        &mut r,
+        100,
+        &asked("quiet", false),
+    );
+    assert!(
+        say.contains("dispatched") && say.contains("(quiet)"),
+        "{say}"
+    );
+    let rows = d.store.full_tests("scratch", "nightly").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        (
+            rows[0].commit.as_str(),
+            rows[0].trigger.as_str(),
+            rows[0].finished_ms
+        ),
+        ("tip1", "quiet", 0)
+    );
+    // A restart: the rows are read back, and the run in flight is followed, not started again.
+    d.store.put_schedule(&r).unwrap();
+    let mut r = d.store.schedule("scratch/nightly").unwrap().unwrap();
+    assert_eq!(d.store.full_tests("scratch", "nightly").unwrap(), rows);
+    f.run(50, "completed", "success", "tip1", "workflow_dispatch");
+    let said = follow_all(&d, pid, &ci, &f, &mut r);
+    assert!(said.last().unwrap().contains("green"), "{said:?}");
+    assert_eq!(dispatches(&f), 1);
+    let rows = d.store.full_tests("scratch", "nightly").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].verdict, "green");
+    assert!(
+        rows[0].finished_ms > 0 && rows[0].link.contains("runs/50"),
+        "{:?}",
+        rows[0]
+    );
+    // The nightly trigger on the same tip skips, and says why.
+    let say = dispatch_as(
+        &d,
+        pid,
+        &ci,
+        &f,
+        &repo_at("tip1", Some(&[])),
+        &mut row(),
+        200,
+        &asked("nightly", false),
+    );
+    assert!(
+        say.starts_with("not dispatched: the tip tip1")
+            && say.contains("fully tested")
+            && say.contains("(green)"),
+        "{say}"
+    );
+    // Only the README changed since: skip. A crate file changed: start.
+    let say = dispatch_as(
+        &d,
+        pid,
+        &ci,
+        &f,
+        &repo_at("tip2", Some(&["README.md"])),
+        &mut row(),
+        200,
+        &asked("nightly", false),
+    );
+    assert!(
+        say.contains("not dispatched") && say.contains("select no suite"),
+        "{say}"
+    );
+    assert_eq!(dispatches(&f), 1);
+    // Forced on a tested tip: starts anyway, and says it was forced.
+    let say = dispatch_as(
+        &d,
+        pid,
+        &ci,
+        &f,
+        &repo_at("tip1", Some(&[])),
+        &mut row(),
+        300,
+        &asked("manual", true),
+    );
+    assert!(
+        say.contains("dispatched") && say.contains("forced"),
+        "{say}"
+    );
+    assert_eq!(dispatches(&f), 2);
+    // A crate file changed since the last finished test: starts (the forced one is lost, cut off).
+    let say = dispatch_as(
+        &d,
+        pid,
+        &ci,
+        &f,
+        &repo_at("tip3", Some(&["README.md", "crates/core/src/lib.rs"])),
+        &mut row(),
+        400,
+        &asked("nightly", false),
+    );
+    assert!(say.contains("dispatched"), "{say}");
+    let rows = d.store.full_tests("scratch", "nightly").unwrap();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[1].verdict, "cut off");
+}
+
+#[test]
+fn a_red_full_test_is_recorded_red_and_its_tickets_name_the_range() {
+    let (_s, d, pid) = start();
+    let f = Fake::default();
+    // The last green full test is on record; the one in flight is for tipsha.
+    let green = d
+        .store
+        .add_full_test(&mason_store::FullTestRow {
+            project: "scratch".into(),
+            schedule: "nightly".into(),
+            commit: "oldsha".into(),
+            trigger: "nightly".into(),
+            started_ms: 1,
+            ..Default::default()
+        })
+        .unwrap();
+    d.store.finish_full_test(green, 2, "green", "").unwrap();
+    d.store
+        .add_full_test(&mason_store::FullTestRow {
+            project: "scratch".into(),
+            schedule: "nightly".into(),
+            commit: "tipsha".into(),
+            trigger: "quiet".into(),
+            started_ms: 3,
+            ..Default::default()
+        })
+        .unwrap();
+    finished(
+        &f,
+        9,
+        &[("alpha/linux", "failure")],
+        &[("alpha/linux", "failure")],
+    );
+    let mut r = row();
+    r.follow = following(9, 500);
+    follow_all(&d, pid, &spec(6), &f, &mut r);
+    let rows = d.store.full_tests("scratch", "nightly").unwrap();
+    assert_eq!(rows[0].verdict, "red");
+    assert!(rows[0].link.contains("runs/9"));
+    let t = tasks(&d);
+    assert_eq!(t.len(), 1);
+    assert!(
+        t[0].body.contains("Since the last green full test"),
+        "{}",
+        t[0].body
+    );
+}
+
+#[test]
+fn a_project_with_only_proposed_tasks_is_quiet_and_a_queued_one_is_busy() {
+    let (_s, d, pid) = start();
+    assert!(!mason_daemon::introspect::project_busy(&d, "scratch"));
+    d.emit(EventKind::TaskFiled {
+        project: pid,
+        title: "waiting for the owner".into(),
+        body: "b".into(),
+        priority: Priority::Low,
+        trust: TrustSource::OwnerAgent,
+        explored: true,
+        proposed: true,
+        blockers: vec![],
+        not_before: None,
+    })
+    .unwrap();
+    assert!(!mason_daemon::introspect::project_busy(&d, "scratch"));
+    // Admitted (queued; nothing runs it here): busy.
+    d.emit(EventKind::TaskFiled {
+        project: pid,
+        title: "admitted".into(),
+        body: "b".into(),
+        priority: Priority::Low,
+        trust: TrustSource::OwnerAgent,
+        explored: true,
+        proposed: false,
+        blockers: vec![],
+        not_before: None,
+    })
+    .unwrap();
+    assert!(mason_daemon::introspect::project_busy(&d, "scratch"));
+}

@@ -581,6 +581,12 @@ fn run_remote(
         &label,
         spec.shards.max(1),
         log_dir,
+        match task {
+            Some(_) => "test_step",
+            None if id.starts_with("debt") || id.starts_with("ledger") => "debt",
+            None => "batch",
+        },
+        task.map_or(0, |t| t.0),
     );
     Ok(match rm::run_or_fallback(&site, &spec, log_dir, &stop)? {
         None => None,
@@ -1817,6 +1823,7 @@ fn run_suite(
         .and_then(|t| crate::knownred::skip_command(t, &quarantined));
     let limit = suite.timeout.unwrap_or(Duration::from_secs(1800));
     let mut attempt = 0u32;
+    let mut remote_env_fails = 0u32;
     let mut waiting = false;
     loop {
         // A skip may arrive at any time, even before the suite starts.
@@ -1935,7 +1942,13 @@ fn run_suite(
                 );
                 waiting = true;
                 attempt += 1;
-                std::thread::sleep(d.cfg.env_retry);
+                // A runner that fails the same way again and again is not helped by trying at
+                // once: wait twice as long each time.
+                remote_env_fails += 1;
+                std::thread::sleep(crate::remote::env_backoff(
+                    d.cfg.env_retry,
+                    remote_env_fails - 1,
+                ));
                 continue;
             }
             Err(e) => {
@@ -2099,7 +2112,10 @@ fn run_suite(
                         now_ms(),
                     );
                 }
-                let rerun = if failures.is_empty() {
+                // A landing batch's run stops at the boundary for a waiting update (s705, s739):
+                // the immediate rerun is one more run, so it is left to the next batch.
+                let yielding = who.task.is_none() && d.landing.draining();
+                let rerun = if failures.is_empty() || yielding {
                     None
                 } else {
                     rerun_failing(who, suite, cwd, failures, attempt, dev.as_ref())
