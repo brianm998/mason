@@ -528,6 +528,17 @@ fn main() {
     if cmd == "remote" && a.rest.first().map(String::as_str) == Some("setup") {
         exit(remote::run(std::mem::take(&mut a.rest), &config_dir));
     }
+    if cmd == "remote" {
+        // Validate the subcommand before the daemon lookup, so a typo gets the
+        // command list even when no daemon is running.
+        match a.rest.first().map(String::as_str) {
+            None | Some("on" | "off" | "status") => {}
+            Some(other) => die(&format!(
+                "unknown remote command {other:?}: {}\n\n{HELP}",
+                remote::COMMANDS
+            )),
+        }
+    }
     if cmd == "remove" {
         exit(remove::run(std::mem::take(&mut a.rest), &config_dir));
     }
