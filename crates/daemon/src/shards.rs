@@ -160,6 +160,22 @@ mod tests {
     }
 
     #[test]
+    fn shard_lists_from_times_with_and_without_a_wait_differ() {
+        // Four tests that run 1 s each; two of them also waited 600 s for a world (#778).
+        let names: BTreeSet<String> = ["a", "b", "c", "d"].map(String::from).into();
+        let with_wait: BTreeMap<String, u64> =
+            [("a", 601_000), ("b", 601_000), ("c", 1_000), ("d", 1_000)]
+                .map(|(k, v)| (k.to_string(), v))
+                .into();
+        let run: BTreeMap<String, u64> = names.iter().map(|n| (n.clone(), 1_000)).collect();
+        let skewed = assign(&names, &with_wait, 2);
+        let even = assign(&names, &run, 2);
+        // The skewed times put a and b apart and c, d together on the light shard.
+        assert_ne!(skewed, even);
+        assert!(even.iter().all(|l| l.len() == 2));
+    }
+
+    #[test]
     fn weights_give_balanced_shards() {
         let (names, w) = (set(200), weights(200));
         let lists = assign(&names, &w, 8);
