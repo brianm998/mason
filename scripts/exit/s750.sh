@@ -22,7 +22,7 @@ bin=$PWD/target/debug
 owner=${USER:-owner}
 m() { "$bin/mason" --data-dir "$root/d" --config-dir "$root/c" "$@"; }
 jq_state() { sed -n 's/^  "state": "\(.*\)",$/\1/p'; }
-fail() { echo "FAILED: $*" >&2; set +e; m task show 0 >&2 2>&1; tail -30 "$root/masond.log" >&2; cat "$root/pushes.log" >&2 2>/dev/null; echo "FAILED (again): $*" >&2; exit 1; }
+fail() { echo "FAILED: $*" >&2; set +e; m task show 0 >&2 2>&1; tail -30 "$root/masond.log" >&2; cat "$root/pushes.log" >&2 2>/dev/null; exit 1; }
 wait_state() {  # TASK STATE SECONDS
   local end=$((SECONDS + $3))
   until [ "$(m task show "$1" --json 2>/dev/null | jq_state)" = "$2" ]; do
@@ -141,7 +141,7 @@ start_daemon() {  # FORCE (1 or empty)
   until m status >/dev/null 2>&1; do kill -0 "$daemon" || { cat "$root/masond.log" >&2; exit 1; }; sleep 0.1; done
 }
 hold_slots() {
-  "$bin/mason" --data-dir "$root/d" --config-dir "$root/c" hold --needs compile,test-suite --pipeline other --label "other work" < <(sleep 900) >"$root/hold.out" &
+  m hold --needs compile,test-suite --pipeline other --label "other work" >"$root/hold.out" &
   holder=$!
   until grep -q granted "$root/hold.out" 2>/dev/null; do kill -0 "$holder" || fail "the hold ended"; sleep 0.1; done
 }

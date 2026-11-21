@@ -141,7 +141,7 @@ start_daemon() {  # FORCE (1 or empty)
   until m status >/dev/null 2>&1; do kill -0 "$daemon" || { cat "$root/masond.log" >&2; exit 1; }; sleep 0.1; done
 }
 hold_slots() {
-  "$bin/mason" --data-dir "$root/d" --config-dir "$root/c" hold --needs compile,test-suite --pipeline other --label "other work" < <(sleep 900) >"$root/hold.out" &
+  m hold --needs compile,test-suite --pipeline other --label "other work" >"$root/hold.out" &
   holder=$!
   until grep -q granted "$root/hold.out" 2>/dev/null; do kill -0 "$holder" || fail "the hold ended"; sleep 0.1; done
 }
