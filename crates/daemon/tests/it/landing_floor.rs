@@ -23,25 +23,58 @@ fn conflicted() -> String {
     )
 }
 
+/// The tail of every file under `dir` whose path has `part` in it (a build floor's logs and
+/// its step hosts' records), so a timed-out wait can say what the floor was doing.
+fn logs_named(dir: &std::path::Path, part: &str) -> String {
+    fn walk(dir: &std::path::Path, part: &str, out: &mut String) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, part, out);
+            } else if p.to_string_lossy().contains(part) {
+                let text =
+                    String::from_utf8_lossy(&std::fs::read(&p).unwrap_or_default()).into_owned();
+                let tail: Vec<&str> = text.lines().rev().take(20).collect();
+                let tail: Vec<&str> = tail.into_iter().rev().collect();
+                out.push_str(&format!("--- {}\n{}\n", p.display(), tail.join("\n")));
+            }
+        }
+    }
+    let mut out = String::new();
+    walk(dir, part, &mut out);
+    out
+}
+
 #[test]
 fn a_batch_that_does_not_build_is_not_landed_and_the_task_that_broke_it_goes_back() {
     // No batch tier: the floor is the only thing that builds the union.
     let w = world_built("window = \"2s\"\nmax_size = 5\n", &[]);
     let fine = w.task("beta only", &[("b/ok.txt", "1")]);
     let broken = w.task("alpha does not build", &[("a/red.build.alpha", "x")]);
-    wait_for("the task that builds to land", 120, || w.landed(fine));
-    wait_for("the one that does not to go back", 60, || {
-        w.sent_back(broken).is_some()
-    });
+    // The red runs seen on GitHub were timeouts of these waits (no verdict in 900 s, s774), so
+    // a timeout says where the batch stood: its rows, both tasks, and the floor's build logs.
     let report = || {
         format!(
-            "broken sent back: {:?}\nfine sent back: {:?}\nbatches: {:?}\nfast tier: {}",
+            "broken sent back: {:?}\nfine sent back: {:?}\nbatches: {:?}\nfloor and fast-tier logs:\n{}{}",
             w.sent_back(broken),
             w.sent_back(fine),
             w.d.store.batches(Some("scratch"), 10).unwrap(),
+            logs_named(&w.s.data_dir, "-floor-"),
             w.fast_tier_logs()
         )
     };
+    let wait = |what: &str, f: &dyn Fn() -> bool| {
+        if let Err(e) = try_wait_for_exact(what, 900, 50, f) {
+            panic!("{e}\n{}", report());
+        }
+    };
+    wait("the task that builds to land", &|| w.landed(fine));
+    wait("the one that does not to go back", &|| {
+        w.sent_back(broken).is_some()
+    });
     let why = w.sent_back(broken).unwrap();
     assert!(why.contains("alpha"), "{why}\n{}", report());
     assert!(w.on_main("b/ok.txt"), "{}", report());
