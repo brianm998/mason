@@ -1,0 +1,9 @@
+.github/workflows/mason-run.yml
+.mason/run.json
+crates/daemon/tests/it/crash.rs
+crates/daemon/tests/it/landing_crash.rs
+docs/decisions/0776-crash-matrices-one-test-per-point.md
+docs/stages/s783.md
+scripts/exit/s15.sh
+scripts/exit/s170.sh
+scripts/exit/s783.sh
