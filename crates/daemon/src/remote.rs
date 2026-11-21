@@ -2610,6 +2610,7 @@ mod tests {
                 label: id.into(),
                 units: units_for("ubuntu-latest", 1),
                 record: rec.clone(),
+                ..Default::default()
             },
         );
         (holds, rec)
