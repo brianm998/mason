@@ -129,7 +129,7 @@ fun MonitorModel.visibleItems(): List<Item> {
             if (t != null && x != null) out += x.item(t.id, canAct)
         }
         h.active.forEachIndexed { i, a ->
-            out += Item("active:${a.task}", listOf(a.display.ifEmpty { a.model }, a.project, "#${a.task}", a.step), order = i)
+            out += Item("active:${a.task}", listOf(a.display.ifEmpty { a.model }, a.project, "#${a.task}", a.step, ActiveSummary.state(a)), order = i)
         }
         out += Item("sessions", listOf("${h.sessions_used} of ${h.sessions_limit}"), listOf("increase", "decrease"))
         h.compilation?.let { c ->

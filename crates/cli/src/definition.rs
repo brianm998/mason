@@ -59,7 +59,9 @@ fn tracked_files(root: &Path) -> Option<Vec<String>> {
 }
 
 /// Lines naming the tracked files no `[impact]` glob matches, by top-level directory.
-/// `.mason/mason.toml` stays unmapped on purpose (a definition change tests everything).
+/// `.mason/mason.toml` stays unmapped on purpose (a definition change tests everything), and
+/// so do the three files a remote run's snapshot commit adds to the tree it sends
+/// (`.mason/run.json`, `changed-files.txt`, `base-sha`; written by `daemon/src/remote.rs`).
 fn unmapped_report(impact: &mason_testing::model::ImpactMap, files: &[String]) -> Vec<String> {
     if impact.entries.is_empty() {
         return vec![];
@@ -70,7 +72,15 @@ fn unmapped_report(impact: &mason_testing::model::ImpactMap, files: &[String]) -
         .map(|(dir, fs)| {
             let fs: Vec<String> = fs
                 .into_iter()
-                .filter(|f| f != ".mason/mason.toml")
+                .filter(|f| {
+                    ![
+                        ".mason/mason.toml",
+                        ".mason/run.json",
+                        ".mason/changed-files.txt",
+                        ".mason/base-sha",
+                    ]
+                    .contains(&f.as_str())
+                })
                 .collect();
             (dir, fs)
         })
@@ -248,6 +258,12 @@ mod tests {
         let Some(files) = tracked_files(&root) else {
             return;
         };
+        // A remote runner's checkout carries `.mason/run.json`, which MASON writes into the
+        // snapshot it pushes; it is never a file of the repository.
+        let files: Vec<String> = files
+            .into_iter()
+            .filter(|f| f != ".mason/run.json")
+            .collect();
         let r = unmapped_report(&real_definition().testing.impact, &files);
         assert!(r.is_empty(), "{r:?}");
     }
