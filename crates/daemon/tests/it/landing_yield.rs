@@ -20,7 +20,7 @@ fn checks(gate: &std::path::Path) -> String {
 n="$1"
 echo "1..1"
 if [ -n "$(find . -name "red.$n" -not -path "./.git/*")" ]; then
-  echo x >> {g}/reds
+  echo "$PWD $$" >> {g}/reds
   if [ ! -f {g}/go ]; then echo x > {g}/first; while [ ! -f {g}/go ]; do sleep 0.1; done; fi
   echo "not ok 1 - $n"; exit 1
 fi
@@ -62,7 +62,12 @@ fn a_draining_update_stops_a_red_batch_between_runs_and_the_next_batch_reuses_it
             .find(|b| b.phase == "yielded")
             .unwrap();
     assert!(b.note.contains("stopped for an update"), "{}", b.note);
-    assert_eq!(reds(gate.path()), 1, "no run after the first one");
+    assert_eq!(
+        reds(gate.path()),
+        1,
+        "no run after the first one: {:?}",
+        std::fs::read_to_string(gate.path().join("reds"))
+    );
     for t in [t1, t2, t3] {
         assert!(!w.landed(t) && w.sent_back(t).is_none());
     }
