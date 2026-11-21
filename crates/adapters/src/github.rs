@@ -1251,7 +1251,7 @@ impl GitHub {
         &self,
         id: u64,
         etag: Option<&str>,
-    ) -> Result<Option<(Vec<ActionJob>, Option<String>)>, ApiError> {
+    ) -> Result<Option<JobsAnswer>, ApiError> {
         let mut r = Request::get(&self.url(&format!(
             "/actions/runs/{id}/jobs?filter=latest&per_page=100"
         )));
