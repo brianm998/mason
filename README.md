@@ -601,4 +601,5 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s731**: `mason remote setup` goes to the workflow writer and `on`/`off`/`status` to the daemon handler, and unknown subcommands name all four.
 - **s732**: A batch abandoned at start-up has its `b<id>-` step hosts stopped, and the sweep stops running batch hosts whose batch is not unfinished.
 - **s733**: With the global switch on, landing batch and lint tiers, reruns, bisect runs, baseline runs and debts run on GitHub through the same placement as task runs, a bisect starts both halves of a split at once, and `mason landing` shows where each run went with its link.
+- **s735**: Remote-run settings move from `[remote]` to `[remote_runs]` so they no longer clash with the git remote key `remote`.
 <!-- status:end -->
