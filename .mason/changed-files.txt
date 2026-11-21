@@ -1,0 +1,6 @@
+.github/workflows/mason-run.yml
+.mason/run.json
+crates/cli/src/main.rs
+docs/decisions/0735-remote-unknown-subcommand-before-daemon.md
+docs/stages/s742.md
+scripts/exit/s742.sh
