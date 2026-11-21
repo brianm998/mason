@@ -253,6 +253,66 @@ pub fn world_rerun(landing_toml: &str, files: &[(&str, &str)]) -> W {
     W { s, d }
 }
 
+/// What `alpha`'s `rerun` runs in [`world_new_tests`] (#812): one line per test name asked for,
+/// red for a name with `bad` in it.
+const NEWTESTS: &str = r#"#!/bin/sh
+bad=0
+for n in "$@"; do
+  case "$n" in
+    *bad*) echo "test m::$n ... FAILED"; bad=1 ;;
+    *) echo "test m::$n ... ok" ;;
+  esac
+done
+exit $bad
+"#;
+
+/// `world_built_fast` with `alpha` given a `rerun` (`sh newtests.sh {tests}`), the way
+/// `cargo-workspace` has one: the landing batch runs the new tests of skipped tasks by name.
+pub fn world_new_tests(landing_toml: &str) -> W {
+    let s = Scratch::new("true", json!({"steps": {}}));
+    s.write_project("scratch", "true", "");
+    let mut definition = def().replacen(
+        "category = \"developing\"\nnext = \"land\"",
+        "category = \"developing\"\nnext = \"test\"",
+        1,
+    );
+    for n in ["alpha", "beta"] {
+        let header = format!("[suite.{n}]\ncommand = \"sh checks.sh {n}\"\n");
+        assert!(definition.contains(&header), "suite {n} in the definition");
+        definition = definition.replacen(
+            &header,
+            &format!(
+                "[suite.{n}]\nbuild = \"sh build.sh {n}\"\ncommand = \"sh checks.sh {n}\"\n{}",
+                if n == "alpha" {
+                    "rerun = \"sh newtests.sh {tests}\"\n"
+                } else {
+                    ""
+                }
+            ),
+            1,
+        );
+    }
+    definition.push_str(
+        "\n[step.test]\ntype = \"test\"\ncategory = \"testing\"\nsuites = [\"alpha\", \"beta\"]\nuses = { compile = 1 }\nnext = \"land\"\non_red = \"develop\"\nmax_rounds = 3\n\n[resource.compile]\ncount = 1\n",
+    );
+    let all: Vec<(&str, &str)> = vec![
+        (".mason/mason.toml", &definition),
+        (".mason/landing.toml", landing_toml),
+        ("checks.sh", CHECKS),
+        ("build.sh", BUILDS),
+        ("newtests.sh", NEWTESTS),
+        ("shared.txt", "base\n"),
+    ];
+    s.push_files(&all, "project setup");
+    sh(&s.repo, &["fetch", "-q", "origin"]);
+    let d = s.start_with(|c| {
+        c.env_retry = Duration::from_millis(200);
+        c.debt_interval = Duration::ZERO;
+    });
+    mason_daemon::attention::pause(&d, "", "claims", "test", 3600).unwrap();
+    W { s, d }
+}
+
 impl W {
     /// A task already in its landing step, with a branch carrying `files`.
     pub fn task(&self, title: &str, files: &[(&str, &str)]) -> TaskId {
