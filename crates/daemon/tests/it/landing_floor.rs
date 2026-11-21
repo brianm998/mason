@@ -70,13 +70,27 @@ fn a_base_that_does_not_build_holds_the_batch_and_blames_nobody() {
         &[("a/red.build.alpha", "the base does not build")],
     );
     let t = w.task("innocent", &[("x/one.txt", "1")]);
-    wait_for("the batch to be held", 120, || {
+    let held = || {
         w.d.store
             .batches(Some("scratch"), 10)
             .unwrap()
             .iter()
             .any(|b| b.phase == "failed" && b.note.contains("does not build"))
-    });
+    };
+    if let Err(e) = try_wait_for_exact("the batch to be held", 900, 50, held) {
+        // Name the path taken: which row, which note, which alerts.
+        let rows: Vec<String> =
+            w.d.store
+                .batches(Some("scratch"), 10)
+                .unwrap()
+                .iter()
+                .map(|b| format!("phase={:?} note={:?}", b.phase, b.note))
+                .collect();
+        panic!(
+            "{e}\nbatch rows: {rows:#?}\nalerts: {:?}",
+            w.d.landing().attention()
+        );
+    }
     assert!(
         !w.on_main("x/one.txt"),
         "nothing lands on a base that does not build"
