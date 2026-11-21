@@ -1,0 +1,11 @@
+.mason/run.json
+crates/daemon/src/ci_schedule.rs
+crates/daemon/src/introspect.rs
+crates/daemon/src/schedule.rs
+crates/daemon/src/suites.rs
+crates/daemon/tests/it/main.rs
+crates/daemon/tests/it/suites_schedule.rs
+docs/decisions/0799-suites-schedule-full-test.md
+docs/examples/mason-self.project.toml
+docs/stages/s806.md
+scripts/exit/s806.sh
