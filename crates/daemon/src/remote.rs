@@ -486,6 +486,52 @@ pub fn snapshot(
             ],
             None,
         )?;
+        // The runner's checkout is shallow and has no base, so the change's file list is made
+        // here, where the history is (s759): the files that differ from the merge base with the
+        // base branch, the dirty worktree included. Without a merge base there is no list, and
+        // the scripts that read it fall back to git.
+        if let Ok(mb) = g(&["merge-base", base_ref, "HEAD"], None) {
+            let tree = g(&["write-tree"], None)?;
+            let files = g(
+                &[
+                    "diff-tree",
+                    "-r",
+                    "--name-only",
+                    "--no-renames",
+                    "--diff-filter=ACDMRT",
+                    &mb,
+                    &tree,
+                ],
+                None,
+            )?;
+            let mut text = files;
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            let blob = g(&["hash-object", "-w", "--stdin"], Some(text.as_bytes()))?;
+            g(
+                &[
+                    "update-index",
+                    "--add",
+                    "--cacheinfo",
+                    &format!("100644,{blob},.mason/changed-files.txt"),
+                ],
+                None,
+            )?;
+            let base_blob = g(
+                &["hash-object", "-w", "--stdin"],
+                Some(format!("{mb}\n").as_bytes()),
+            )?;
+            g(
+                &[
+                    "update-index",
+                    "--add",
+                    "--cacheinfo",
+                    &format!("100644,{base_blob},.mason/base-sha"),
+                ],
+                None,
+            )?;
+        }
         let tree = g(&["write-tree"], None)?;
         g(&["commit-tree", &tree, "-p", "HEAD", "-m", message], None)
     })();
@@ -2204,6 +2250,12 @@ mod tests {
             ]
         );
         assert_eq!(show(".github/workflows/ci.yml"), "name: ci");
+        // The change's files, made where the history is (s759); the dirty worktree is in it.
+        let changed = show(".mason/changed-files.txt");
+        assert!(changed.lines().any(|l| l == "a.txt"), "{changed}");
+        assert!(changed.lines().any(|l| l == "new.txt"), "{changed}");
+        assert!(changed.lines().any(|l| l == "gone.txt"), "{changed}");
+        assert!(!show(".mason/base-sha").is_empty());
         // The spec is MASON's, not the task's.
         assert_eq!(show(".mason/run.json"), json);
         assert!(!show(".mason/run.json").contains("\"true\""));
@@ -2324,7 +2376,8 @@ mod tests {
     #[test]
     fn a_skip_while_queued_or_running_cancels_the_run_and_deletes_the_ref() {
         token();
-        for polls_before_skip in [3u32, 40] {
+        // The 600 s limit counts from pickup (about 110 s), so 300 s is still running.
+        for skip_after_s in [30u64, 300] {
             let r = repo();
             let t = tempfile::tempdir().unwrap();
             let zip = artifact(t.path(), GREEN, 0, None);
@@ -2335,20 +2388,16 @@ mod tests {
             gh.queued = 10;
             gh.running = 1000;
             let gh = Arc::new(gh);
-            let s = site(&r, gh.clone(), clock(), false);
+            let clk = clock();
+            let s = site(&r, gh.clone(), clk.clone(), false);
             let logs = tempfile::tempdir().unwrap();
-            let n = std::cell::Cell::new(0u32);
+            let start = clk.now_ms();
             let out = execute(&s, &spec("x6"), logs.path(), &|| {
-                n.set(n.get() + 1);
-                (n.get() > polls_before_skip * 40).then_some(StopWhy::Skipped)
+                (clk.now_ms() - start >= skip_after_s * 1000).then_some(StopWhy::Skipped)
             })
             .unwrap();
             assert!(matches!(out, Outcome::Stopped(StopWhy::Skipped)));
-            assert_eq!(
-                gh.cancels.lock().unwrap().len(),
-                1,
-                "after {polls_before_skip}"
-            );
+            assert_eq!(gh.cancels.lock().unwrap().len(), 1, "after {skip_after_s}");
             assert_eq!(refs(&r.bare), "");
             assert!(!record_path(logs.path(), "x6").exists());
         }
@@ -2537,8 +2586,12 @@ mod tests {
             6
         );
         assert_eq!(
-            parse_iso("2026-03-01T00:00:00Z").unwrap() - parse_iso("2026-02-28T00:00:00Z").unwrap(),
+            parse_iso("2028-03-01T00:00:00Z").unwrap() - parse_iso("2028-02-28T00:00:00Z").unwrap(),
             2 * 86400
+        );
+        assert_eq!(
+            parse_iso("2026-03-01T00:00:00Z").unwrap() - parse_iso("2026-02-28T00:00:00Z").unwrap(),
+            86400
         );
         assert_eq!(parse_iso("garbage"), None);
         assert_eq!(
