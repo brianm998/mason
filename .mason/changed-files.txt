@@ -1,0 +1,12 @@
+.mason/run.json
+crates/daemon/src/ci_watch.rs
+crates/daemon/src/config.rs
+crates/daemon/src/suites.rs
+crates/daemon/tests/it/testing.rs
+crates/definition/src/testing_parse.rs
+crates/store/src/lib.rs
+crates/store/src/migrations.rs
+crates/testing/src/model.rs
+docs/decisions/0774-suite-once-per-tip.md
+docs/stages/s781.md
+scripts/exit/s781.sh
