@@ -16,6 +16,8 @@ fi
 line=$(grep '^s237: ' "$log" | tail -1 || true)
 [ -n "$line" ] || { echo "FAIL: no s237 line" >&2; exit 1; }
 echo "$line"
-n=$(echo "$line" | sed -n 's/^s237: \([0-9]*\) RowView.*/\1/p')
-[ -n "$n" ] && [ "$n" -gt 0 ] || { echo "FAIL: no RowView body was evaluated" >&2; exit 1; }
+rows=$(echo "$line" | sed -n 's/.*; \([0-9]*\) rows drawn before.*/\1/p')
+pv=$(echo "$line" | sed -n 's/.*, \([0-9]*\) progress views.*/\1/p')
+[ -n "$rows" ] && [ "$rows" -gt 0 ] || { echo "FAIL: no rows were drawn" >&2; exit 1; }
+[ -n "$pv" ] && [ "$pv" -gt 0 ] || { echo "FAIL: no progress view was drawn" >&2; exit 1; }
 echo "s715 OK"
