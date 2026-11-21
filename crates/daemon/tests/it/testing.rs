@@ -1409,6 +1409,7 @@ impl mason_daemon::ci_watch::Source for FakeCi {
             url: String::new(),
             created_ms: 1,
             conclusion: Some("failure".into()),
+            event: "push".into(),
         }])
     }
     fn jobs(&self, _: u64) -> Result<Vec<mason_adapters::github::ActionsJob>, String> {
