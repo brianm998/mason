@@ -1142,6 +1142,39 @@ pub struct ActionJob {
     pub name: String,
     pub status: String,
     pub started_at: Option<String>,
+    /// The job's steps, in order, as far as GitHub reports them.
+    pub steps: Vec<ActionStep>,
+}
+
+/// A step of a job: what a runner is doing now.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ActionStep {
+    pub name: String,
+    pub status: String,
+    pub started_at: Option<String>,
+}
+
+fn action_jobs(v: &Value) -> Vec<ActionJob> {
+    v["jobs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|j| ActionJob {
+            name: j["name"].as_str().unwrap_or_default().to_string(),
+            status: j["status"].as_str().unwrap_or_default().to_string(),
+            started_at: j["started_at"].as_str().map(String::from),
+            steps: j["steps"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|s| ActionStep {
+                    name: s["name"].as_str().unwrap_or_default().to_string(),
+                    status: s["status"].as_str().unwrap_or_default().to_string(),
+                    started_at: s["started_at"].as_str().map(String::from),
+                })
+                .collect(),
+        })
+        .collect()
 }
 
 impl GitHub {
@@ -1209,16 +1242,36 @@ impl GitHub {
         let v = self.json(Request::get(&self.url(&format!(
             "/actions/runs/{id}/jobs?filter=latest&per_page=100"
         ))))?;
-        Ok(v["jobs"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(|j| ActionJob {
-                name: j["name"].as_str().unwrap_or_default().to_string(),
-                status: j["status"].as_str().unwrap_or_default().to_string(),
-                started_at: j["started_at"].as_str().map(String::from),
-            })
-            .collect())
+        Ok(action_jobs(&v))
+    }
+
+    /// The jobs of a run, with the ETag of the last look: `None` on a 304, which does not count
+    /// against the rate limit.
+    pub fn remote_run_jobs_changed(
+        &self,
+        id: u64,
+        etag: Option<&str>,
+    ) -> Result<Option<(Vec<ActionJob>, Option<String>)>, ApiError> {
+        let mut r = Request::get(&self.url(&format!(
+            "/actions/runs/{id}/jobs?filter=latest&per_page=100"
+        )));
+        if let Some(e) = etag {
+            r = r.with("If-None-Match", e);
+        }
+        let resp = self.send(r)?;
+        if resp.status == 304 {
+            return Ok(None);
+        }
+        let v: Value = serde_json::from_str(&resp.body).map_err(|e| {
+            ApiError::new(
+                ErrorKind::Unavailable,
+                format!("the answer is not JSON: {e}"),
+            )
+        })?;
+        Ok(Some((
+            action_jobs(&v),
+            resp.header("etag").map(String::from),
+        )))
     }
 
     /// Cancel a run MASON started on a `mason/run/**` or `mason/ci/**` ref; any other is
