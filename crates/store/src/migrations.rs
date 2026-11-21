@@ -814,6 +814,20 @@ const STEPS: &[&str] = &[
          at_ms   INTEGER NOT NULL,
          PRIMARY KEY (project, suite, target, key)
      );",
+    // The record of full tests (s782, decision 0775): which base commit each one tested, how it
+    // started, how it ended and where to look. A row with `finished_ms` 0 is running. Additive.
+    "CREATE TABLE full_tests (
+         id          INTEGER PRIMARY KEY AUTOINCREMENT,
+         project     TEXT NOT NULL,
+         schedule    TEXT NOT NULL,
+         commit_sha  TEXT NOT NULL,
+         trigger     TEXT NOT NULL,
+         started_ms  INTEGER NOT NULL,
+         finished_ms INTEGER NOT NULL DEFAULT 0,
+         verdict     TEXT NOT NULL DEFAULT '',
+         link        TEXT NOT NULL DEFAULT ''
+     );
+     CREATE INDEX full_tests_by_schedule ON full_tests(project, schedule, id);",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;
