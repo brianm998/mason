@@ -2312,7 +2312,11 @@ mod tests {
             let s = site(&r, gh.clone(), clock(), false);
             let logs = tempfile::tempdir().unwrap();
             let n = std::cell::Cell::new(0u32);
-            let out = execute(&s, &spec("x6"), logs.path(), &|| {
+            // The skip comes after about 800 simulated seconds; the run's own limit (counted from
+            // the pickup, in simulated time too) must not end it first.
+            let mut sp = spec("x6");
+            sp.limit = Duration::from_secs(100_000);
+            let out = execute(&s, &sp, logs.path(), &|| {
                 n.set(n.get() + 1);
                 (n.get() > polls_before_skip * 40).then_some(StopWhy::Skipped)
             })

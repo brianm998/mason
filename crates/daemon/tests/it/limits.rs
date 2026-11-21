@@ -480,7 +480,10 @@ fn a_hot_die_holds_further_machine_work_but_never_what_runs() {
     // Cooler: it starts.
     t.set_die(80.0);
     assert!(matches!(b.lease_poll(third), LeaseState::Granted { .. }));
-    // Power limiting for 30 s holds the same way, with the die cool.
+    // Power limiting for 30 s holds the same way, with the die cool. The first two leases end
+    // so a free compile slot never depends on how many cores the machine has (a small runner
+    // allows fewer than four): what the fourth waits for is the power limit alone.
+    assert!(b.lease_close(first) && b.lease_close(second));
     t.set_limited_ms(30_000);
     let fourth = b.lease_open("cc4", &compile());
     assert!(matches!(b.lease_poll(fourth), LeaseState::Waiting { .. }));
