@@ -171,6 +171,8 @@ pub struct RunRec {
     pub created_ms: u64,
     /// `None`: not finished.
     pub conclusion: Option<String>,
+    /// A full run (dispatched, s800) rather than a push run: only it has the full-only jobs.
+    pub full: bool,
     pub jobs: Vec<JobRec>,
 }
 
@@ -218,6 +220,10 @@ pub struct JobState {
     /// Finished runs of its workflow, in a row, that had no job of this name. At
     /// `agreement + 2` the job is forgotten (removed or renamed).
     pub absent: u32,
+    /// The kind of run it last appeared in: a full run (true) or a push run. A job is absent
+    /// only from a run of its own kind: a push run lacking the full-only jobs says nothing
+    /// about them, and a full run lacking the fast jobs says nothing about those (s800).
+    pub full: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
@@ -602,7 +608,13 @@ pub fn step(state: &mut State, runs: &[RunRec], ctx: &Ctx) -> Vec<File> {
             for j in &r.jobs {
                 match j.conclusion.as_deref() {
                     Some("success") => {
-                        ws.jobs.insert(j.name.clone(), JobState::default());
+                        ws.jobs.insert(
+                            j.name.clone(),
+                            JobState {
+                                full: r.full,
+                                ..JobState::default()
+                            },
+                        );
                     }
                     Some("failure") => {
                         ws.jobs.insert(
@@ -610,6 +622,7 @@ pub fn step(state: &mut State, runs: &[RunRec], ctx: &Ctx) -> Vec<File> {
                             JobState {
                                 red: true,
                                 known: true,
+                                full: r.full,
                                 red_since: ctx.now_ms,
                                 last_red: job_run_ref(r, j),
                                 signatures: j.signatures.clone(),
@@ -629,11 +642,15 @@ pub fn step(state: &mut State, runs: &[RunRec], ctx: &Ctx) -> Vec<File> {
             for j in &r.jobs {
                 let gate = rules.is_gate(&w, &j.name);
                 let ws = state.workflows.entry(w.clone()).or_default();
+                ws.jobs.entry(j.name.clone()).or_default().full = r.full;
                 match j.conclusion.as_deref() {
                     // A job that now skips (a workflow change, an `if:`) is no longer red.
                     Some("success" | "skipped" | "neutral") => {
                         let js = ws.jobs.entry(j.name.clone()).or_default();
-                        *js = JobState::default();
+                        *js = JobState {
+                            full: r.full,
+                            ..JobState::default()
+                        };
                     }
                     Some("timed_out") => {
                         let js = ws.jobs.entry(j.name.clone()).or_default();
@@ -733,7 +750,7 @@ pub fn step(state: &mut State, runs: &[RunRec], ctx: &Ctx) -> Vec<File> {
                 for (name, js) in ws.jobs.iter_mut() {
                     if r.jobs.iter().any(|j| &j.name == name) {
                         js.absent = 0;
-                    } else {
+                    } else if js.full == r.full {
                         js.absent += 1;
                     }
                 }
@@ -835,6 +852,8 @@ pub struct HeldLine {
     pub shards: Vec<String>,
     /// The ticket landed a change.
     pub landed: bool,
+    /// The job runs only in the full run: it is confirmed by the next one.
+    pub full: bool,
 }
 
 impl HeldLine {
@@ -881,6 +900,7 @@ pub fn held_lines(state: &State, rules: &Rules) -> Vec<HeldLine> {
                         ticket: t,
                         shards: vec![],
                         landed,
+                        full: js.full,
                     });
                     v.len() - 1
                 }
@@ -902,7 +922,10 @@ pub fn unconfirmed_text(lines: &[HeldLine]) -> Option<String> {
     }
     let items: Vec<String> = l
         .iter()
-        .map(|l| format!("{} (#{})", l.name(), l.ticket))
+        .map(|l| {
+            let wait = if l.full { ", next full run" } else { "" };
+            format!("{} (#{}{wait})", l.name(), l.ticket)
+        })
         .collect();
     let n = items.len();
     Some(format!(
@@ -1072,6 +1095,7 @@ mod tests {
             url: format!("https://x/runs/{id}"),
             created_ms: id * 1000,
             conclusion: Some(concl.into()),
+            full: false,
             jobs: jobs
                 .iter()
                 .enumerate()
