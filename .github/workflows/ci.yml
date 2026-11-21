@@ -2,7 +2,7 @@
 name: CI
 
 # The full run has a title MASON's full-test schedule recognises (decision 0793).
-run-name: ${{ github.event_name == 'workflow_dispatch' && 'CI: full' || github.event.pull_request.title || github.event.head_commit.message }}
+run-name: "${{ github.event_name == 'workflow_dispatch' && 'CI: full' || github.event.pull_request.title || github.event.head_commit.message }}"
 
 # Plain pull_request trigger only. No secrets and no private
 # runners, so fork PRs run untrusted code safely.
