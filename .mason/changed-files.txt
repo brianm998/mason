@@ -1,0 +1,12 @@
+.mason/run.json
+crates/cli/src/main.rs
+crates/daemon/src/jobs.rs
+crates/daemon/src/landing.rs
+crates/daemon/src/lib.rs
+crates/daemon/src/newtests.rs
+crates/daemon/tests/it/suite_builds.rs
+crates/daemon/tests/landing_new_tests.rs
+crates/daemon/tests/support/lw.rs
+docs/decisions/0791-fast-track-checks-the-change.md
+docs/stages/s798.md
+scripts/exit/s798.sh
