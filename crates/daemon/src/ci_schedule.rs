@@ -966,7 +966,7 @@ pub fn full_view_of_row(d: &Daemon, row: &ScheduleRow) -> Value {
             pc.schedules()
                 .into_iter()
                 .find(|x| x.name == s)
-                .map(|spec| full_view(d, &pc, &spec))
+                .map(|spec| full_view(d, pc, &spec))
         })
         .unwrap_or(Value::Null)
 }
