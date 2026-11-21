@@ -2306,7 +2306,8 @@ mod tests {
     #[test]
     fn a_skip_while_queued_or_running_cancels_the_run_and_deletes_the_ref() {
         token();
-        for polls_before_skip in [3u32, 40] {
+        // The 600 s limit counts from pickup (about 110 s), so 300 s is still running.
+        for skip_after_s in [30u64, 300] {
             let r = repo();
             let t = tempfile::tempdir().unwrap();
             let zip = artifact(t.path(), GREEN, 0, None);
@@ -2317,20 +2318,16 @@ mod tests {
             gh.queued = 10;
             gh.running = 1000;
             let gh = Arc::new(gh);
-            let s = site(&r, gh.clone(), clock(), false);
+            let clk = clock();
+            let s = site(&r, gh.clone(), clk.clone(), false);
             let logs = tempfile::tempdir().unwrap();
-            let n = std::cell::Cell::new(0u32);
+            let start = clk.now_ms();
             let out = execute(&s, &spec("x6"), logs.path(), &|| {
-                n.set(n.get() + 1);
-                (n.get() > polls_before_skip * 40).then_some(StopWhy::Skipped)
+                (clk.now_ms() - start >= skip_after_s * 1000).then_some(StopWhy::Skipped)
             })
             .unwrap();
             assert!(matches!(out, Outcome::Stopped(StopWhy::Skipped)));
-            assert_eq!(
-                gh.cancels.lock().unwrap().len(),
-                1,
-                "after {polls_before_skip}"
-            );
+            assert_eq!(gh.cancels.lock().unwrap().len(), 1, "after {skip_after_s}");
             assert_eq!(refs(&r.bare), "");
             assert!(!record_path(logs.path(), "x6").exists());
         }
@@ -2517,8 +2514,12 @@ mod tests {
             6
         );
         assert_eq!(
-            parse_iso("2026-03-01T00:00:00Z").unwrap() - parse_iso("2026-02-28T00:00:00Z").unwrap(),
+            parse_iso("2028-03-01T00:00:00Z").unwrap() - parse_iso("2028-02-28T00:00:00Z").unwrap(),
             2 * 86400
+        );
+        assert_eq!(
+            parse_iso("2026-03-01T00:00:00Z").unwrap() - parse_iso("2026-02-28T00:00:00Z").unwrap(),
+            86400
         );
         assert_eq!(parse_iso("garbage"), None);
         assert_eq!(
