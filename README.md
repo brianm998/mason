@@ -608,14 +608,18 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s739**: A landing batch's suite run no longer makes its immediate flaky-rerun while an update is draining, so a draining update stops a red batch after one run, as s705 intended.
 - **s740**: The thermal limits test ran out of compile slots, so it now sets compile_jobs = 8.
 - **s741**: `scripts/test-shard.py` is mapped to `cargo-workspace` in `[impact]`, so `definition::tests::no_tracked_file_but_the_definition_is_unmapped` passes again.
+- **s742**: `mason remote <unknown>` now names the valid remote commands even when no daemon is running.
 - **s743**: A develop agent's `run_check` now asks `place::place_of` for each suite it runs (global switch, the task's choice, the suite's `runs_on`) instead of always running on this Mac, a project-test check with no suite follows the global switch, and each passed suite line says where it ran.
 - **s744**: A remote run's snapshot now carries the base branch's copy of every workflow file, so tests that read `.github/workflows/ci.yml` pass on GitHub, and the run is refused if a base workflow runs on `mason/run/**`.
 - **s745**: A suite's build goes to GitHub in `RunSpec.build`, run as its own `sh -c`, instead of being joined to the command with `&&` (which broke suites whose build and command both start with `cd`).
+- **s746**: Nine tests that were red only in the first remote whole-suite run are fixed or classified (a CLI that asked for a daemon before refusing an unknown `remote` word, a runner-only `.mason/run.json`, a core-count-dependent slot, a timing-sensitive message check); the draining-update test is not reproduced and not fixed.
 - **s747**: A landing batch waits out its window only while another task of the project is still moving toward landing; with none moving it forms at once, and `mason landing` names the tasks it waits for.
 - **s748**: A develop agent's check that runs on GitHub no longer queues for or holds a local `compile` or `test-suite` slot, so it skips the CPU and heat gates too.
+- **s749**: A run on GitHub now shows what it is doing while it goes ("on GitHub: running, 4 min", "3 of 8 shards done") from the jobs API, instead of 0% until the end.
 - **s751**: A narrowed run whose target group has a module filter now puts the filter at the end of the template's own `--` section, so the template's `--config` no longer reaches the test binary.
 - **s752**: Added `CountTextTest` for `countText` in the Compose monitor, as a test of running `compose-clients` on GitHub and judging it from its JUnit XML.
 - **s753**: Edge-case tests for `mason_landing::config::parse_duration` (whitespace, upper-case units, bare number, empty, signed, overflow), and a fix so an overflowing value returns `None` instead of panicking (debug) or wrapping (release).
+- **s754**: Home's Active models says how many agents are working and how many wait on GitHub checks, here or for a slot, and shows the GitHub runner pool in use by checks, test steps, batches and debts.
 - **s755**: The `swift-clients` suite sets `runs_on = "macos-latest"` so a remote run builds the Swift monitor on macOS, with a new `Format.percent` XCTest selecting it.
 - **s759**: Remote snapshots carry `.mason/changed-files.txt` (and `.mason/base-sha`), and the exit-script helpers read it, so `exit-scripts` no longer fails `no-merge-base` on GitHub.
 - **s760**: Runs adopted from before a restart are checked against GitHub: finished ones free their runner units and lose their ref, and checks nobody can collect are cancelled.
@@ -626,5 +630,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s787**: A develop agent's `run_check` that goes to GitHub now has its whole wait (pool unit, runner pickup, run) credited to the step's deadline as it goes, and the timeout note counts from the step's recorded launch, names the daemon restart and shows the GitHub wait apart from the slot queue.
 - **s789**: Lint and build-floor reds are parsed from the full, ANSI-stripped output, and remote runs are told `CARGO_TERM_COLOR=never`, so the tasks touching the named file are parked instead of the batch being split.
 - **s791**: The landing lint tier now runs in the batch's worktree on this Mac by default (`where = "local" | "github"` on the `[[tier]]`), holds no local compile slot while a GitHub run waits, and the batch note says where it ran and how long it took.
+- **s793**: The s748 and s750 exit scripts give their slot holder a fifo on stdin kept open on fd 3, so the hold lasts until the script closes it instead of ending at once on /dev/null.
 - **s794**: Lint and build-floor reds are parsed from the full, ANSI-stripped output and remote runs get `CARGO_TERM_COLOR=never`, so the tasks touching the named file are parked instead of the batch being split (redoes s789, whose code never landed).
+- **s796**: The three landing lint-placement tests were red at a61fedd09e, which predates the #811 fix now on develop; this records it and changes no behaviour.
 <!-- status:end -->
