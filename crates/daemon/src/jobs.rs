@@ -2132,7 +2132,7 @@ impl TestChecks {
                             &suite,
                         );
                         let queue = !crate::hostedcheck::pending(&self.slots.d, &bspec)
-                    && !crate::hostedcheck::goes_remote(&self.slots.d, &bspec);
+                            && !crate::hostedcheck::goes_remote(&self.slots.d, &bspec);
                         self.phase(mason_core::checks::CheckPhase::Waiting);
                         let merges = self.reds.merges();
                         let swapped = self.queued(|| {
@@ -2205,7 +2205,7 @@ impl TestChecks {
                 &suite,
             );
             let queue = !crate::hostedcheck::pending(&self.slots.d, &rspec)
-                    && !crate::hostedcheck::goes_remote(&self.slots.d, &rspec);
+                && !crate::hostedcheck::goes_remote(&self.slots.d, &rspec);
             self.phase(mason_core::checks::CheckPhase::Waiting);
             let merges = self.reds.merges();
             let swapped = self.queued(|| {
@@ -2602,7 +2602,7 @@ impl TestChecks {
         // going (or takes its result) at once: it starts nothing, so it does not
         // queue behind other work for a slot the run it joins already took.
         let queue = !crate::hostedcheck::pending(&self.slots.d, &tspec)
-                    && !crate::hostedcheck::goes_remote(&self.slots.d, &tspec);
+            && !crate::hostedcheck::goes_remote(&self.slots.d, &tspec);
         let swapped = self.queued(|| self.slots.swap_for(queue, &uses, None));
         let Ok(test_lease) = swapped else {
             return over();
