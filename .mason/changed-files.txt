@@ -1,0 +1,12 @@
+.mason/run.json
+crates/daemon/src/hostedcheck.rs
+crates/daemon/src/jobs.rs
+crates/daemon/src/landing.rs
+crates/daemon/src/remote.rs
+crates/daemon/src/suites.rs
+crates/daemon/tests/it/hosted_check.rs
+docs/decisions/0770-one-run-for-a-remote-check.md
+docs/stages/s777.md
+scripts/exit/s777.sh
+scripts/exit/weights.txt
+templates/github/mason-run.yml
