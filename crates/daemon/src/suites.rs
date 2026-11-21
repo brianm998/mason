@@ -549,15 +549,8 @@ fn run_remote(
     // A suite whose build runs as its own step here goes in `RunSpec.build`, which the runner
     // runs as a separate `sh -c` before the command: joined with `&&`, two leading `cd`s break.
     let mut spec = rm::with_build(
-        rm::spec_for(
-        project,
-        id,
-        watch,
-        cmd,
-        limit,
-        env,
-        runs_on,
-        "",
+        rm::spec_for(project, id, watch, cmd, limit, env, runs_on, ""),
+        build,
     );
     // The whole command of a suite that has shards is split across runners (#701); a narrowed
     // run, a run without the known-red tests and the like are not the whole suite and run on one.
