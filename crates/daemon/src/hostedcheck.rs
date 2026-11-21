@@ -514,11 +514,14 @@ fn remote_check(d: &Arc<Daemon>, spec: &CheckSpec, id: &str) -> Option<Shared> {
         .and_then(|(_, s)| s.build.as_deref())
         .filter(|b| !spec.cmd.starts_with(b));
     let site = rm::site_for(d, &project, &spec.cwd)?;
-    let rs = rm::with_build(
-        rm::spec_for(
-            &project, id, None, &spec.cmd, spec.limit, &spec.env, &runs_on, &spec.tree,
+    let rs = rm::with_site_env(
+        rm::with_build(
+            rm::spec_for(
+                &project, id, None, &spec.cmd, spec.limit, &spec.env, &runs_on, &spec.tree,
+            ),
+            build,
         ),
-        build,
+        &site,
     );
     // The units it holds, on record until it ends, for a daemon that restarts (#700).
     let _hold = rm::HoldGuard::new(&d.cfg.hosts_dir(), &rs, id, id, 1, &spec.log_dir);
