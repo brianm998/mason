@@ -14,8 +14,9 @@ use mason_adapters::github::{ActionsJob, GitHub, WorkflowRun};
 use mason_core::ci_schedule::{
     self as rules, Failed, Follow, Group, Kind, Phase, Second, Seen, Step,
 };
+use mason_core::full_test as full;
 use mason_core::*;
-use mason_store::ScheduleRow;
+use mason_store::{FullTestRow, ScheduleRow};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
@@ -205,10 +206,93 @@ pub fn is_due(row: &ScheduleRow, spec: &Spec, now: u64) -> bool {
     if !row.follow.is_empty() {
         return true;
     }
-    match spec.ci.as_ref().and_then(|c| c.at) {
+    let ci = spec.ci.as_ref();
+    match ci.and_then(|c| c.at) {
         Some(at) => rules::due_at(row.last_run, now, at, local_offset_min()),
+        // A schedule with only `when_quiet` has no clock of its own.
+        None if ci.is_some_and(|c| !c.every && c.when_quiet.is_some()) => false,
         None => mason_core::introspect::due(Some(row.last_run), now, row.every_ms),
     }
+}
+
+// ---- the record of full tests ------------------------------------------------------------------
+
+fn tested(rows: &[FullTestRow]) -> Vec<full::Tested> {
+    rows.iter()
+        .map(|r| full::Tested {
+            commit: r.commit.clone(),
+            trigger: r.trigger.clone(),
+            started_ms: r.started_ms,
+            finished_ms: r.finished_ms,
+            verdict: r.verdict.clone(),
+        })
+        .collect()
+}
+
+/// A time as the status writes it: `01:00` today, `2026-11-20 01:00` before.
+pub fn when_text(ms: u64, now: u64) -> String {
+    let off = i64::from(local_offset_min()) * 60_000;
+    let local = ms as i64 + off;
+    let days = local.div_euclid(86_400_000);
+    let mins = local.rem_euclid(86_400_000) / 60_000;
+    let hm = format!("{:02}:{:02}", mins / 60, mins % 60);
+    if days == (now as i64 + off).div_euclid(86_400_000) {
+        return hm;
+    }
+    // Civil date from days since 1970-01-01.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!("{year}-{month:02}-{day:02} {hm}")
+}
+
+fn project_name(d: &Daemon, pid: ProjectId) -> String {
+    d.project(pid).map(|p| p.id.clone()).unwrap_or_default()
+}
+
+/// End the running full test of a schedule, if one is recorded.
+fn finish_full(d: &Daemon, pid: ProjectId, schedule: &str, verdict: &str, link: &str) {
+    let project = project_name(d, pid);
+    let rows = d.store.full_tests(&project, schedule).unwrap_or_default();
+    if let Some(r) = rows.iter().find(|r| r.finished_ms == 0) {
+        let _ = d
+            .store
+            .finish_full_test(r.id, crate::daemon::now_ms(), verdict, link);
+    }
+}
+
+/// The record says a test is running but nothing is followed (it was lost): it was cut off.
+fn cut_off_lost(d: &Daemon, pid: ProjectId, schedule: &str) {
+    finish_full(d, pid, schedule, full::CUT_OFF, "");
+}
+
+/// The tip is fully tested, or a full test of it is running, or the changes since the last one
+/// select no suite; otherwise a full test is worth starting.
+pub fn decide_full(
+    d: &Daemon,
+    pid: ProjectId,
+    schedule: &str,
+    tip: &str,
+    repo: &dyn Repo,
+    now: u64,
+) -> full::Decision {
+    let rows = d
+        .store
+        .full_tests(&project_name(d, pid), schedule)
+        .unwrap_or_default();
+    full::decide(
+        tip,
+        &tested(&rows),
+        &|sha| repo.changed_since(sha),
+        &|files| !crate::affected::reads_none(files),
+        &|ms| when_text(ms, now),
+    )
 }
 
 // ---- running it ----------------------------------------------------------------------------------------------------
@@ -237,7 +321,28 @@ pub fn run(
         return (follow(d, pid, ci, &spec.name, &host, row, now), false);
     }
     let repo = Git { d, p: project, pid };
-    (dispatch(d, pid, ci, &host, &repo, row, now), true)
+    let (trigger, force) = d
+        .intro
+        .triggers
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&crate::schedule::row_name(&project.id, &spec.name))
+        .unwrap_or((full::NIGHTLY.into(), false));
+    let go = Go {
+        schedule: &spec.name,
+        trigger: &trigger,
+        force,
+    };
+    (dispatch_as(d, pid, ci, &host, &repo, row, now, &go), true)
+}
+
+/// Why and how a full test is being asked for.
+pub struct Go<'a> {
+    pub schedule: &'a str,
+    /// `nightly`, `quiet` or `manual`.
+    pub trigger: &'a str,
+    /// Start whatever the record says.
+    pub force: bool,
 }
 
 fn branch_of(d: &Daemon, pid: ProjectId, ci: &CiSpec) -> Result<String, String> {
@@ -260,7 +365,8 @@ fn infos(runs: &[WorkflowRun]) -> Vec<rules::RunInfo> {
         .collect()
 }
 
-/// Decide, and dispatch when it is worth a run. Starts following the new run.
+/// Decide, and dispatch when it is worth a run. Starts following the new run. The schedule's
+/// own timer asked: the trigger is `nightly`.
 pub fn dispatch(
     d: &Arc<Daemon>,
     pid: ProjectId,
@@ -270,10 +376,38 @@ pub fn dispatch(
     row: &mut ScheduleRow,
     now: u64,
 ) -> String {
+    let name = row.name.rsplit('/').next().unwrap_or("").to_string();
+    let go = Go {
+        schedule: &name,
+        trigger: full::NIGHTLY,
+        force: false,
+    };
+    dispatch_as(d, pid, ci, host, repo, row, now, &go)
+}
+
+/// [`dispatch`] with the trigger named. Both triggers and the manual one come through here, so
+/// one rule decides: the record of full tests first, then what the CI host knows.
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_as(
+    d: &Arc<Daemon>,
+    pid: ProjectId,
+    ci: &CiSpec,
+    host: &dyn Host,
+    repo: &dyn Repo,
+    row: &mut ScheduleRow,
+    now: u64,
+    asked: &Go,
+) -> String {
     let mut go = || -> Result<String, String> {
         let branch = branch_of(d, pid, ci)?;
         repo.fetch()?;
         let tip = repo.tip()?;
+        // Nothing is followed (the caller followed first), so a row still running was lost.
+        cut_off_lost(d, pid, asked.schedule);
+        let record = decide_full(d, pid, asked.schedule, &tip, repo, now);
+        if !record.start && !asked.force {
+            return Ok(format!("not dispatched: {}", record.reason));
+        }
         let globs = match (&ci.paths_from, ci.paths.is_empty()) {
             (Some(f), _) => Some(
                 rules::relevant_globs(&repo.file_at_tip(f)?).map_err(|e| format!("{e} in {f}"))?,
@@ -289,10 +423,18 @@ pub fn dispatch(
             globs.as_deref(),
             &|sha| repo.changed_since(sha),
         );
-        if !decision.dispatch {
+        if !decision.dispatch && !asked.force {
             return Ok(format!("not dispatched: {}", decision.reason));
         }
         host.dispatch(&ci.workflow, &branch, &ci.inputs)?;
+        let _ = d.store.add_full_test(&FullTestRow {
+            project: project_name(d, pid),
+            schedule: asked.schedule.to_string(),
+            commit: tip.clone(),
+            trigger: asked.trigger.to_string(),
+            started_ms: now,
+            ..Default::default()
+        });
         row.follow = encode(&Follow {
             run_id: 0,
             phase: Phase::Locate,
@@ -301,8 +443,14 @@ pub fn dispatch(
             failures: vec![],
         });
         Ok(format!(
-            "dispatched {} on {branch}: {}",
-            ci.workflow, decision.reason
+            "dispatched {} on {branch} ({}): {}",
+            ci.workflow,
+            asked.trigger,
+            if decision.dispatch {
+                decision.reason
+            } else {
+                format!("forced; {}", decision.reason)
+            }
         ))
     };
     go().unwrap_or_else(|e| format!("could not dispatch: {e}"))
@@ -360,20 +508,36 @@ pub fn follow(
                 _ => format!("following run {}", f.run_id),
             };
         }
-        (Step::Drop, _) => format!("dropped run {}: it did not finish in time", f.run_id),
-        (Step::ByHand, _) => format!(
-            "run {} was rerun by hand; not classified (its first attempt's failures are gone)",
-            f.run_id
-        ),
+        (Step::Drop, _) => {
+            finish_full(d, pid, name, full::CUT_OFF, "");
+            format!("dropped run {}: it did not finish in time", f.run_id)
+        }
+        (Step::ByHand, _) => {
+            finish_full(d, pid, name, full::CUT_OFF, "");
+            format!(
+                "run {} was rerun by hand; not classified (its first attempt's failures are gone)",
+                f.run_id
+            )
+        }
         (Step::Check, Some(_)) => match check(host, &mut f) {
             Ok(Some(say)) => {
                 row.follow = encode(&f);
                 return say;
             }
-            Ok(None) => format!("run {} is green", f.run_id),
+            Ok(None) => {
+                finish_full(
+                    d,
+                    pid,
+                    name,
+                    full::GREEN,
+                    run.map_or("", |r| r.url.as_str()),
+                );
+                format!("run {} is green", f.run_id)
+            }
             Err(e) => {
                 // Not asked again until it answers; give up when it never does.
                 if now.saturating_sub(f.at) > rules::GIVE_UP_MS {
+                    finish_full(d, pid, name, full::CUT_OFF, "");
                     row.follow.clear();
                     return format!("dropped run {}: {e}", f.run_id);
                 }
@@ -383,9 +547,13 @@ pub fn follow(
         },
         (Step::Classify, Some(r)) => {
             match classify_and_file(d, pid, ci, name, host, &f, r, &branch) {
-                Ok(say) => say,
+                Ok((say, verdict)) => {
+                    finish_full(d, pid, name, verdict, &r.url);
+                    say
+                }
                 Err(e) => {
                     if now.saturating_sub(f.at) > rules::GIVE_UP_MS {
+                        finish_full(d, pid, name, full::CUT_OFF, "");
                         row.follow.clear();
                         return format!("dropped run {}: {e}", f.run_id);
                     }
@@ -520,7 +688,7 @@ fn classify_and_file(
     f: &Follow,
     run: &WorkflowRun,
     base: &str,
-) -> Result<String, String> {
+) -> Result<(String, &'static str), String> {
     let jobs = host.jobs(f.run_id)?;
     let second: Vec<Second> = f
         .failures
@@ -567,6 +735,7 @@ fn classify_and_file(
     let sel = rules::select(grouped.groups.clone(), ci.max_tickets, &|g| {
         keys_of(g).iter().any(|k| named.contains_key(k))
     });
+    let range = range_note(d, pid, name, run);
     let mut filed = vec![];
     let mut failed = vec![];
     for g in &sel.file {
@@ -578,7 +747,7 @@ fn classify_and_file(
             d,
             pid,
             title_of(workflow, g, base),
-            body_of(name, workflow, g, run, base),
+            format!("{}\n\n{range}", body_of(name, workflow, g, run, base)),
             priority,
             false,
         ) {
@@ -633,5 +802,184 @@ fn classify_and_file(
             grouped.infra + grouped.unfinished
         ));
     }
-    Ok(parts.join("; "))
+    let verdict = if grouped.groups.iter().any(|g| g.kind == Kind::Red) {
+        full::RED
+    } else if grouped.groups.is_empty() && grouped.infra + grouped.unfinished > 0 {
+        full::CUT_OFF
+    } else {
+        full::GREEN
+    };
+    Ok((parts.join("; "), verdict))
+}
+
+/// For a red ticket: the commits since the last green full test and the tasks landed in them
+/// whose changes select suites, so the developer starts from a short list. Best effort: a
+/// repository that cannot answer says so instead of failing the filing.
+fn range_note(d: &Daemon, pid: ProjectId, schedule: &str, run: &WorkflowRun) -> String {
+    let Some(p) = d.project(pid) else {
+        return String::new();
+    };
+    let rows = d
+        .store
+        .full_tests(&project_name(d, pid), schedule)
+        .unwrap_or_default();
+    let Some(green) = rows
+        .iter()
+        .find(|r| r.verdict == full::GREEN && r.commit != run.sha)
+    else {
+        return "Since the last green full test: none is on record, so there is no range to name."
+            .into();
+    };
+    let range = format!("{}..{}", green.commit, run.sha);
+    let git = |args: &[&str]| mason_landing::git::run(&p.path, args).map_err(|e| e.to_string());
+    let count = git(&["rev-list", "--count", &range]).map(|s| s.trim().to_string());
+    let merges = git(&["log", "--merges", "--format=%H\t%s", &range]);
+    let (Ok(count), Ok(merges)) = (count, merges) else {
+        return format!(
+            "Since the last green full test {} the range {range} could not be read here.",
+            full::short(&green.commit)
+        );
+    };
+    let mut selecting = vec![];
+    let mut quiet = vec![];
+    for line in merges.lines() {
+        let Some((hash, subject)) = line.split_once('\t') else {
+            continue;
+        };
+        let tasks = full::tasks_in(&[subject.to_string()]);
+        let Some(t) = tasks.first() else { continue };
+        let files = git(&["diff", "--name-only", &format!("{hash}^1"), hash])
+            .map(|o| o.lines().map(String::from).collect::<Vec<_>>())
+            .unwrap_or_default();
+        if crate::affected::reads_none(&files) {
+            quiet.push(*t);
+        } else {
+            selecting.push(*t);
+        }
+    }
+    let list = |v: &[u64]| {
+        v.iter()
+            .take(30)
+            .map(|t| format!("#{t}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!(
+        "Since the last green full test ({} at {}): {count} commit(s), `{range}`.\nTasks landed in it whose changes select suites: {}.\nLanded in it with only docs or other paths no suite reads: {}.",
+        full::short(&green.commit),
+        when_text(green.finished_ms, crate::daemon::now_ms()),
+        if selecting.is_empty() { "none found".into() } else { list(&selecting) },
+        if quiet.is_empty() { "none".into() } else { list(&quiet) },
+    )
+}
+
+// ---- showing the record ----------------------------------------------------------------------
+
+/// What `mason status`, `mason schedule list` and the monitor show for one full-test schedule.
+pub fn full_view(d: &Daemon, project: &ProjectCfg, spec: &Spec) -> Value {
+    let now = crate::daemon::now_ms();
+    let Some(ci) = spec.ci.as_ref() else {
+        return Value::Null;
+    };
+    let rows = d
+        .store
+        .full_tests(&project.id, &spec.name)
+        .unwrap_or_default();
+    let last = rows
+        .iter()
+        .find(|r| r.finished_ms != 0 && (r.verdict == full::GREEN || r.verdict == full::RED));
+    let running = rows.iter().find(|r| r.finished_ms == 0);
+    let git = |args: &[&str]| mason_landing::git::run(&project.path, args).ok();
+    let base = project.base_ref();
+    let (commits, tasks) = match last {
+        Some(l) => {
+            let range = format!("{}..{base}", l.commit);
+            (
+                git(&["rev-list", "--count", &range]).and_then(|s| s.trim().parse::<u64>().ok()),
+                git(&["log", "--format=%s", &range]).map(|o| {
+                    full::tasks_in(&o.lines().map(String::from).collect::<Vec<_>>()).len()
+                }),
+            )
+        }
+        None => (None, None),
+    };
+    let name = crate::schedule::row_name(&project.id, &spec.name);
+    let quiet_min = ci.when_quiet.and_then(|_| {
+        d.intro
+            .quiet
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&name)
+            .and_then(|t| t.quiet_min(now))
+    });
+    let next = full::next_text(ci.at, ci.when_quiet, quiet_min);
+    let mut line = match last {
+        Some(l) => format!(
+            "last full test: {} at {} {} ({}); {} commit(s), {} task(s) landed since",
+            full::short(&l.commit),
+            when_text(l.finished_ms, now),
+            l.verdict,
+            l.trigger,
+            commits.map_or("?".into(), |n| n.to_string()),
+            tasks.map_or("?".into(), |n| n.to_string()),
+        ),
+        None => "last full test: none on record".to_string(),
+    };
+    if let Some(r) = running {
+        line += &format!(
+            "; running now: {} ({}) since {}",
+            full::short(&r.commit),
+            r.trigger,
+            when_text(r.started_ms, now)
+        );
+    }
+    line += &format!("; next: {next}");
+    json!({
+        "project": project.id,
+        "schedule": spec.name,
+        "line": line,
+        "next": next,
+        "last": last.map(|l| json!({
+            "commit": l.commit, "finished_ms": l.finished_ms, "verdict": l.verdict,
+            "trigger": l.trigger, "link": l.link,
+        })),
+        "running": running.map(|r| json!({
+            "commit": r.commit, "started_ms": r.started_ms, "trigger": r.trigger,
+        })),
+        "commits_since": commits,
+        "tasks_since": tasks,
+        "quiet_min": quiet_min,
+    })
+}
+
+/// [`full_view`] for a schedule row (`project/name`); null for anything else.
+pub fn full_view_of_row(d: &Daemon, row: &ScheduleRow) -> Value {
+    if row.kind != "ci" {
+        return Value::Null;
+    }
+    let Some((p, s)) = row.name.split_once('/') else {
+        return Value::Null;
+    };
+    d.project_id_by_name(p)
+        .and_then(|pid| d.project(pid))
+        .and_then(|pc| {
+            pc.schedules()
+                .into_iter()
+                .find(|x| x.name == s)
+                .map(|spec| full_view(d, &pc, &spec))
+        })
+        .unwrap_or(Value::Null)
+}
+
+/// Every full-test schedule's view, for `mason status`.
+pub fn full_views(d: &Daemon) -> Vec<Value> {
+    let mut out = vec![];
+    for p in d.projects().values() {
+        for spec in p.schedules() {
+            if spec.kind == "ci" {
+                out.push(full_view(d, p, &spec));
+            }
+        }
+    }
+    out
 }
