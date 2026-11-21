@@ -24,6 +24,9 @@ pub struct DaemonConfig {
     /// How often open debts are looked at: closed when their suite has been green since, the
     /// rest run when the machine is idle (s393).
     pub debt_interval: Duration,
+    /// After a suite was red on the base for a debt, the idle pass does not run it again for
+    /// debts until a landing touched a module of the red tests or this long has passed (#774).
+    pub debt_red_backoff: Duration,
     /// How long after a step run closes (and its hosts exited) the sweep leaves its host
     /// directories in `h/` before moving them to `t/<task>/hosts/` (default a day;
     /// `MASON_HOST_GRACE_MS` sets it for the exit script).
@@ -507,6 +510,7 @@ impl DaemonConfig {
             disk_every: crate::disk::DEFAULT_EVERY,
             sweep_interval: Duration::from_secs(120),
             debt_interval: Duration::from_secs(3600),
+            debt_red_backoff: Duration::from_secs(24 * 3600),
             host_grace: std::env::var("MASON_HOST_GRACE_MS")
                 .ok()
                 .and_then(|v| v.parse().ok())
