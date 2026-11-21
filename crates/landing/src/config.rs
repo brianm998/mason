@@ -153,6 +153,8 @@ pub struct LandingConfig {
     /// `[ci.local]`: a CI job name and the local suites that cover it. A red confined to
     /// mapped jobs is searched for locally (the culprit), not with more CI runs.
     pub ci_local: std::collections::BTreeMap<String, Vec<String>>,
+    /// `floor_where = "local" | "github"` (#816): where the build floor runs. `None` is local.
+    pub floor_where: Option<String>,
 }
 
 impl Default for LandingConfig {
@@ -173,6 +175,7 @@ impl Default for LandingConfig {
             resolver: None,
             max_fold: 3,
             ci_local: Default::default(),
+            floor_where: None,
         }
     }
 }
@@ -217,8 +220,17 @@ pub fn parse_duration(s: &str) -> Option<Duration> {
 }
 
 const TOP: &[&str] = &[
-    "mode", "base", "window", "max_size", "parallel", "tier", "on_red", "resolver", "max_fold",
+    "mode",
+    "base",
+    "window",
+    "max_size",
+    "parallel",
+    "tier",
+    "on_red",
+    "resolver",
+    "max_fold",
     "ci",
+    "floor_where",
 ];
 
 /// Read a `landing.toml`. `Err` lists every problem, each naming its key.
@@ -258,6 +270,10 @@ pub fn parse(text: &str) -> Result<LandingConfig, Vec<String>> {
             "max_fold" => match v.as_integer() {
                 Some(n) if (1..=20).contains(&n) => c.max_fold = n as u32,
                 _ => p.push("max_fold: must be a whole number from 1 to 20".into()),
+            },
+            "floor_where" => match v.as_str() {
+                Some(w @ ("local" | "github")) => c.floor_where = Some(w.into()),
+                _ => p.push("floor_where: must be \"local\" or \"github\"".into()),
             },
             "resolver" => match v.as_str() {
                 Some(s) if !s.trim().is_empty() => c.resolver = Some(s.into()),

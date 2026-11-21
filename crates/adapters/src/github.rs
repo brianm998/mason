@@ -653,6 +653,8 @@ pub struct ActionsRun {
     pub created_ms: u64,
     /// `None`: not finished.
     pub conclusion: Option<String>,
+    /// `push`, `workflow_dispatch`, ...
+    pub event: String,
 }
 
 /// One run of a named workflow, finished or not, as a scheduled CI run needs it (s175).
@@ -733,6 +735,7 @@ impl GitHub {
                     url: r["html_url"].as_str().unwrap_or_default().to_string(),
                     created_ms: iso_ms(r["created_at"].as_str().unwrap_or_default()),
                     conclusion: r["conclusion"].as_str().map(String::from),
+                    event: r["event"].as_str().unwrap_or_default().to_string(),
                 })
             })
             .collect())
