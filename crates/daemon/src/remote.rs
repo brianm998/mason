@@ -400,6 +400,25 @@ pub fn spawn_other_workflows(d: &Arc<Daemon>) {
 
 // ---- the snapshot -----------------------------------------------------------------------------
 
+/// The Xcode version a command asks for (`DEVELOPER_DIR=/Applications/Xcode_16.4.app`): `16.4`.
+/// The runner prefers it and falls back to the image's default Xcode when it is not installed.
+pub fn xcode_requested(cmd: &str) -> Option<String> {
+    let rest = &cmd[cmd.find("Xcode")? + "Xcode".len()..];
+    let rest = rest.strip_prefix(['_', '-', ' '])?;
+    let v: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    let v = v.trim_end_matches('.').to_string();
+    (!v.is_empty()).then_some(v)
+}
+
+/// How long to wait before the next try after `n` runs in a row failed for the environment:
+/// the base doubled each time, up to 64 times the base.
+pub fn env_backoff(base: Duration, n: u32) -> Duration {
+    base * (1u32 << n.min(6))
+}
+
 /// `.mason/run.json`: what the runner is told, from the pinned definition.
 pub fn run_json(spec: &RunSpec) -> String {
     let env: serde_json::Map<String, serde_json::Value> = spec
@@ -423,6 +442,7 @@ pub fn run_json(spec: &RunSpec) -> String {
         "limit_s": spec.limit.as_secs(),
         "timeout_min": timeout_min,
         "runs_on": spec.runs_on,
+        "xcode": xcode_requested(&spec.command),
         "env": env,
         "shards": spec.shards.max(1),
         "matrix": spec.active(),
@@ -1498,7 +1518,7 @@ fn poll(
         }
         if got.is_empty() {
             return Ok(Step::Fail(format!(
-                "run {} ended ({conclusion}) without a result artifact",
+                "run {} ended ({conclusion}) without a result artifact (the job failed in setup, before the `run` step, so the runner is at fault, not the tests)",
                 run.url
             )));
         }
@@ -1510,7 +1530,7 @@ fn poll(
         // Artifacts can lag the run's end by a moment.
         if *misses >= 3 {
             return Ok(Step::Fail(format!(
-                "run {} ended ({conclusion}) without a result artifact",
+                "run {} ended ({conclusion}) without a result artifact (the job failed in setup, before the `run` step, so the runner is at fault, not the tests)",
                 run.url
             )));
         }
@@ -2547,6 +2567,7 @@ mod tests {
         assert_eq!(v["limit_s"], 600);
         assert_eq!(v["timeout_min"], 10);
         assert_eq!(v["env"]["MASON_TASK"], "7");
+        assert!(v["xcode"].is_null());
         assert!(v["env"].get("SECRET_TOKEN").is_none());
     }
 
@@ -2834,6 +2855,37 @@ mod tests {
             "{e:?}"
         );
         assert_eq!(refs(&r.bare), "");
+    }
+
+    #[test]
+    fn a_setup_failure_is_environmental_and_its_retries_back_off() {
+        token();
+        let r = repo();
+        let t = tempfile::tempdir().unwrap();
+        let zip = artifact(t.path(), GREEN, 0, None);
+        let gh = FakeGh::new(&r, &zip, Mode::NoArtifact);
+        let s = site(&r, gh, clock(), false);
+        let logs = tempfile::tempdir().unwrap();
+        let e = execute(&s, &spec("x9b"), logs.path(), &|| None)
+            .err()
+            .unwrap();
+        assert!(
+            matches!(&e, Fail::Environmental(w) if w.contains("failed in setup")),
+            "{e:?}"
+        );
+        let base = Duration::from_secs(30);
+        assert_eq!(env_backoff(base, 0), base);
+        assert!(env_backoff(base, 3) > env_backoff(base, 2));
+        assert_eq!(env_backoff(base, 40), base * 64);
+    }
+
+    #[test]
+    fn the_run_json_names_the_xcode_the_command_asks_for() {
+        let mut sp = spec("x3x");
+        sp.command =
+            "DEVELOPER_DIR=/Applications/Xcode_16.4.app/Contents/Developer swift test".into();
+        let v: serde_json::Value = serde_json::from_str(&run_json(&sp)).unwrap();
+        assert_eq!(v["xcode"], "16.4");
     }
 
     #[test]
