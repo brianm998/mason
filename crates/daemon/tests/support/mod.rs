@@ -27,8 +27,16 @@ pub fn bin(package: &str, name: &str) -> PathBuf {
     let mut built = BUILT.lock().unwrap();
     if !built.iter().any(|b| b == name) {
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+        // Build into the target directory this test binary came from. The suite passes
+        // `--target-dir` on the command line, which a nested cargo does not inherit, so without
+        // this the binary lands in the worktree's `target/` while we return a path under the
+        // suite's: a narrowed run (`-p mason-daemon --test it`) then finds no `mason` at all,
+        // or a stale one left in a restored cache.
+        let target_root = target.parent().unwrap();
         let ok = std::process::Command::new(cargo)
             .args(["build", "-q", "-p", package, "--bin", name])
+            .arg("--target-dir")
+            .arg(target_root)
             // The suite's runner gives this process RUSTC_BOOTSTRAP=1 for `--report-time`
             // (s634); build scripts rerun when it changes, so a build that kept it would
             // recompile the workspace the suite's build just compiled without it.
