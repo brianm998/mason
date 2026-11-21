@@ -28,7 +28,7 @@ use std::thread::JoinHandle;
 
 pub use codec::{decode as decode_event, encode as encode_event, state_name, CodecError};
 pub use devices::{DeviceRow, PushTarget};
-pub use introspect::{FindingRow, ScheduleRow, TriageRow};
+pub use introspect::{FindingRow, FullTestRow, ScheduleRow, TriageRow};
 pub use notify::{AnnouncementRow, DeliveryRow};
 
 #[derive(Debug)]
