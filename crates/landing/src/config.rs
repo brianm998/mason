@@ -199,13 +199,14 @@ pub fn parse_duration(s: &str) -> Option<Duration> {
         } else {
             let n: u64 = num.parse().ok()?;
             num.clear();
-            total += n * match c {
+            let unit: u64 = match c {
                 'h' => 3600,
                 'm' => 60,
                 's' => 1,
                 'd' => 86400,
                 _ => return None,
             };
+            total = total.checked_add(n.checked_mul(unit)?)?;
             any = true;
         }
     }
@@ -594,5 +595,45 @@ ladder = ["rerun-failed", "blame-by-impact", "bisect", "ask"]
         assert_eq!(parse_duration("0s"), Some(Duration::ZERO));
         assert_eq!(parse_duration("20"), None);
         assert_eq!(parse_duration("m"), None);
+    }
+
+    #[test]
+    fn duration_edge_cases() {
+        // Surrounding whitespace is trimmed; inner whitespace is not allowed.
+        assert_eq!(parse_duration("  20m \n"), Some(Duration::from_secs(1200)));
+        assert_eq!(parse_duration("1h 30m"), None);
+        assert_eq!(parse_duration("1 h"), None);
+        // Units are lower-case only.
+        assert_eq!(parse_duration("20M"), None);
+        assert_eq!(parse_duration("1H"), None);
+        // Bare number, empty, whitespace only.
+        assert_eq!(parse_duration("0"), None);
+        assert_eq!(parse_duration(""), None);
+        assert_eq!(parse_duration("   "), None);
+        // Negative and signed numbers.
+        assert_eq!(parse_duration("-5m"), None);
+        assert_eq!(parse_duration("+5m"), None);
+        // Days, repeated units add up, trailing digits are rejected.
+        assert_eq!(parse_duration("1d"), Some(Duration::from_secs(86400)));
+        assert_eq!(parse_duration("1m1m"), Some(Duration::from_secs(120)));
+        assert_eq!(parse_duration("1h30"), None);
+        assert_eq!(parse_duration("1.5h"), None);
+        // Leading zeros are fine.
+        assert_eq!(parse_duration("007s"), Some(Duration::from_secs(7)));
+    }
+
+    #[test]
+    fn duration_overflow_is_none_not_a_panic() {
+        // Does not fit in u64 at all.
+        assert_eq!(parse_duration("99999999999999999999999s"), None);
+        // Fits in u64 but overflows once multiplied by the unit.
+        assert_eq!(parse_duration("18446744073709551615h"), None);
+        // Each part fits but the sum does not.
+        assert_eq!(parse_duration("18446744073709551615s1s"), None);
+        // The largest representable value still parses.
+        assert_eq!(
+            parse_duration("18446744073709551615s"),
+            Some(Duration::from_secs(u64::MAX))
+        );
     }
 }
