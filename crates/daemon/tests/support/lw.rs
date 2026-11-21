@@ -171,8 +171,13 @@ echo "ok 1 - matrix_events"
 
 /// `world_built`, and when `fast`, `alpha` declares `fast_command = "sh fast.sh"`.
 pub fn world_built_fast(landing_toml: &str, files: &[(&str, &str)], fast: bool) -> W {
+    world_built_extra(landing_toml, "", files, fast)
+}
+
+/// `world_built_fast`, with `extra` appended to the project file (a `[remote_runs]` table).
+pub fn world_built_extra(landing_toml: &str, extra: &str, files: &[(&str, &str)], fast: bool) -> W {
     let s = Scratch::new("true", json!({"steps": {}}));
-    s.write_project("scratch", "true", "");
+    s.write_project("scratch", "true", extra);
     let mut definition = def().replacen(
         "category = \"developing\"\nnext = \"land\"",
         "category = \"developing\"\nnext = \"test\"",

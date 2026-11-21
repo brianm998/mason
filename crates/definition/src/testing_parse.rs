@@ -49,6 +49,7 @@ pub const SUITE_KEYS: &[&str] = &[
     "runs_on",
     "shards",
     "shard_command",
+    "ci_jobs",
 ];
 const ENV_KEYS: &[&str] = &[
     "type",
@@ -295,6 +296,7 @@ pub fn parse(doc: &DocumentMut, out: &mut Vec<Problem>) -> Testing {
                     )),
                 },
                 "shard_command" => s.shard_command = string(v, &path, out),
+                "ci_jobs" => s.ci_jobs = strings(v, &path, out),
                 "runs_on" => {
                     if let Some(r) = string(v, &path, out) {
                         if r.trim().is_empty() {

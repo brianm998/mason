@@ -3156,7 +3156,7 @@ impl Runner {
                     let (d, m) = (d.clone(), members.clone());
                     Arc::new(move || m.forced(&d))
                 }),
-                place: Some((None, Box::new(suite.clone()))),
+                place: Some((None, Box::new(crate::hostedcheck::without_build(suite)))),
                 global: false,
             };
             match crate::hostedcheck::run(d, &spec) {
@@ -3516,7 +3516,9 @@ impl Runner {
                     Arc::new(move || m.forced(&d)) as crate::hostedcheck::StopFn
                 }),
                 place: match (github, self.member_tasks.first()) {
-                    (true, Some(t)) => Some((Some(*t), Box::new(suite.clone()))),
+                    (true, Some(t)) => {
+                        Some((Some(*t), Box::new(crate::hostedcheck::without_build(suite))))
+                    }
                     _ => None,
                 },
                 global: false,
@@ -3719,6 +3721,14 @@ impl Runner {
                     return out;
                 }
             };
+            // #816: the floor builds on this Mac (warm target directory, no runner queue) unless
+            // `floor_where = "github"`, or the suite names a runner of another OS than this
+            // Mac's. Then the suite's own placement (#815) decides, as before.
+            let here = self.cfg.floor_where.as_deref() != Some("github")
+                && suite
+                    .runs_on
+                    .as_deref()
+                    .is_none_or(|r| r.starts_with("macos"));
             let spec = crate::hostedcheck::CheckSpec {
                 id_prefix: format!("{prefix}-floor-{name}"),
                 log_dir: log_dir.to_path_buf(),
@@ -3735,15 +3745,31 @@ impl Runner {
                 }),
                 // #815: the suite's own placement (its `runs_on`, `remote = false`, device rules)
                 // decides; no task owns a batch.
-                place: Some((None, Box::new(suite.clone()))),
+                place: (!here).then(|| (None, Box::new(crate::hostedcheck::without_build(suite)))),
                 global: false,
+            };
+            let ran_on = if !here && crate::hostedcheck::goes_remote(d, &spec) {
+                "on GitHub"
+            } else {
+                "on this Mac"
+            };
+            let began = std::time::Instant::now();
+            let took = || {
+                let s = began.elapsed().as_secs();
+                if s >= 60 {
+                    format!("{}m{:02}s", s / 60, s % 60)
+                } else {
+                    format!("{s}s")
+                }
             };
             match crate::hostedcheck::run(d, &spec) {
                 Ok(o) if o.stopped.is_some() => out.notes.push(format!(
                     "{name}: {what} not built to the end: {}",
                     o.stopped.unwrap_or_default()
                 )),
-                Ok(o) if o.passed => out.notes.push(format!("{name}: {what} builds")),
+                Ok(o) if o.passed => out
+                    .notes
+                    .push(format!("{name}: {what} builds ({ran_on}, {})", took())),
                 Ok(o) => {
                     out.green = false;
                     out.failed.insert(name.clone());
@@ -3751,7 +3777,8 @@ impl Runner {
                     *self.lint_files.lock().unwrap_or_else(|e| e.into_inner()) =
                         lint_files(&o.full);
                     out.notes.push(format!(
-                        "{name}: {what} does not build{}{}\n{}",
+                        "{name}: {what} does not build ({ran_on}, {}){}{}\n{}",
+                        took(),
                         if o.timed_out {
                             " (the build timed out)"
                         } else {
