@@ -1632,6 +1632,13 @@ pub fn spec_for(
     }
 }
 
+/// The suite's build as its own field: the runner runs it in a separate `sh -c` before the
+/// command and before each shard's command, never joined with `&&` (two leading `cd`s break).
+pub fn with_build(mut spec: RunSpec, build: Option<&str>) -> RunSpec {
+    spec.build = build.map(str::to_string);
+    spec
+}
+
 /// A run for a seam: `Ok(Some(outcome))`, `Ok(None)` to take the local path (the run could not
 /// go remote and the project's `fallback` is `local`), or an error. An environmental failure is
 /// an `Err` made by [`env_err`].
@@ -2636,6 +2643,20 @@ mod tests {
         .unwrap();
         assert_eq!(second["matrix"], serde_json::json!([2]));
         assert_eq!(second["shards"], 3);
+    }
+
+    #[test]
+    fn a_build_goes_in_its_own_field_not_joined_to_the_command() {
+        let mut sp = spec("b1");
+        sp.command = "cd sub && true".into();
+        sp.shard_command = Some("cd sub && true {shard}".into());
+        let sp = with_build(sp, Some("cd sub && true"));
+        let v: serde_json::Value = serde_json::from_str(&run_json(&sp)).unwrap();
+        assert_eq!(v["build"], "cd sub && true");
+        assert_eq!(v["command"], "cd sub && true");
+        assert_eq!(v["shard_command"], "cd sub && true {shard}");
+        let none = with_build(spec("b2"), None);
+        assert!(none.build.is_none());
     }
 
     #[test]
