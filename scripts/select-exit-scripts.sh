@@ -27,7 +27,8 @@ while IFS= read -r f; do
   [ -n "$f" ] || continue
   case "$f" in
     docs/*|*.md) continue ;;
-    scripts/exit/*) echo "$f" | grep -Ev -- '-(real|manual)\.sh$' >> "$sel"; continue ;;
+    scripts/exit/*.sh) echo "$f" | grep -Ev -- '-(real|manual)\.sh$' >> "$sel"; continue ;;
+    scripts/exit/*) ;;
   esac
   pick "$f"
   case "$f" in scripts/*) pick "$(basename "$f")" ;; esac
