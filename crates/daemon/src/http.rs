@@ -236,6 +236,10 @@ async fn status(Shared(d): Shared<Arc<Daemon>>) -> Res {
                 );
             }
             let (stalls, worst) = d2.stall_stats();
+            // What each agent is doing, and what is out on GitHub: the home page's own view.
+            let home = crate::views::Ctx::new(&d2, &w).home("");
+            let agent: HashMap<u64, &mason_protocol::ActiveModel> =
+                home.active.iter().map(|a| (a.task, a)).collect();
             let hosts = mason_step_host::registry::Registry::new(d2.cfg.hosts_dir())
                 .scan()
                 .unwrap_or_default();
@@ -251,11 +255,27 @@ async fn status(Shared(d): Shared<Arc<Daemon>>) -> Res {
                 "jobs": d2.job_count(),
                 "max_concurrent": d2.cfg.max_concurrent,
                 "active": w.tasks.values().filter(|t| t.state.is_step()).filter_map(|t| {
-                    crate::launchview::task_use(&d2, &w, t).map(|m| json!({
-                        "task": t.id.0, "step": t.step, "display": m.display,
-                        "model": crate::launchview::json_of(&m),
-                    }))
+                    crate::launchview::task_use(&d2, &w, t).map(|m| {
+                        let a = agent.get(&t.id.0);
+                        json!({
+                            "task": t.id.0, "step": t.step, "display": m.display,
+                            "model": crate::launchview::json_of(&m),
+                            "state": a.map(|a| a.state.clone()),
+                            "where": a.map(|a| a.place.clone()).filter(|p| !p.is_empty()),
+                            "runs_on": a.map(|a| a.runs_on.clone()).filter(|p| !p.is_empty()),
+                            "run_url": a.map(|a| a.run_url.clone()).filter(|p| !p.is_empty()),
+                            "resource": a.map(|a| a.resource.clone()).filter(|p| !p.is_empty()),
+                        })
+                    })
                 }).collect::<Vec<_>>(),
+                "remote": home.remote.as_ref().map(|r| json!({
+                    "pools": r.pools.iter().map(|p| json!({"name": p.name, "used": p.used, "limit": p.limit})).collect::<Vec<_>>(),
+                    "checks": r.checks, "test_steps": r.test_steps, "batches": r.batches, "debts": r.debts,
+                    "runs": r.runs.iter().map(|x| json!({
+                        "kind": x.kind, "task": x.task, "runs_on": x.runs_on, "url": x.url,
+                        "units": x.units, "label": x.label,
+                    })).collect::<Vec<_>>(),
+                })),
                 "places": crate::place::seen(None),
                 "event_loop_stalls": stalls,
                 "pools": {"blocking": d2.pool.stats(), "views": d2.view_pool.stats()},
