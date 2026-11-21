@@ -1859,6 +1859,18 @@ impl Broker {
         }
     }
 
+    /// The (key, record) of each adopted remote run still counted as held.
+    pub fn adopted_remote(&self) -> Vec<(String, std::path::PathBuf)> {
+        lock(&self.st)
+            .meta
+            .values()
+            .filter_map(|m| match m {
+                Meta::Remote { key, record } => Some((key.clone(), record.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// The run `key` asks for its units again after a restart: give back those adopted for it,
     /// so it is not counted twice. Returns whether there were any.
     pub fn take_over_remote(&self, key: &str) -> bool {
