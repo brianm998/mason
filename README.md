@@ -616,4 +616,5 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s753**: Edge-case tests for `mason_landing::config::parse_duration` (whitespace, upper-case units, bare number, empty, signed, overflow), and a fix so an overflowing value returns `None` instead of panicking (debug) or wrapping (release).
 - **s755**: The `swift-clients` suite sets `runs_on = "macos-latest"` so a remote run builds the Swift monitor on macOS, with a new `Format.percent` XCTest selecting it.
 - **s759**: Remote snapshots carry `.mason/changed-files.txt` (and `.mason/base-sha`), and the exit-script helpers read it, so `exit-scripts` no longer fails `no-merge-base` on GitHub.
+- **s762**: Recorded that the Linux exit-scripts failure (`s80`, `s449`) could not be diagnosed because the failed-step log was unreadable here, and named the command that settles it; no fix is claimed.
 <!-- status:end -->
