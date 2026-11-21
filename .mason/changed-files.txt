@@ -1,0 +1,7 @@
+.mason/run.json
+README.md
+crates/daemon/tests/it/landing.rs
+crates/landing/src/config.rs
+docs/decisions/0784-landing-lint-on-this-mac.md
+docs/stages/s791.md
+scripts/exit/s791.sh
