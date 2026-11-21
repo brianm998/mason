@@ -602,5 +602,6 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s732**: A batch abandoned at start-up has its `b<id>-` step hosts stopped, and the sweep stops running batch hosts whose batch is not unfinished.
 - **s733**: With the global switch on, landing batch and lint tiers, reruns, bisect runs, baseline runs and debts run on GitHub through the same placement as task runs, a bisect starts both halves of a split at once, and `mason landing` shows where each run went with its link.
 - **s735**: Remote-run settings move from `[remote]` to `[remote_runs]` so they no longer clash with the git remote key `remote`.
+- **s744**: A remote run's snapshot now carries the base branch's copy of every workflow file, so tests that read `.github/workflows/ci.yml` pass on GitHub, and the run is refused if a base workflow runs on `mason/run/**`.
 - **s745**: A suite's build goes to GitHub in `RunSpec.build`, run as its own `sh -c`, instead of being joined to the command with `&&` (which broke suites whose build and command both start with `cd`).
 <!-- status:end -->
