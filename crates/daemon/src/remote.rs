@@ -1561,13 +1561,21 @@ pub fn pool_needs(
     d: &Daemon,
     project: &str,
     needs: &mason_scheduler::Needs,
+    task: Option<mason_core::TaskId>,
 ) -> Option<mason_scheduler::Needs> {
     const MACHINE: [&str; 3] = ["compile", "test-suite", "test-small"];
     if !needs.exclusive && !MACHINE.iter().any(|m| needs.amounts.contains_key(*m)) {
         return None;
     }
-    let Executor::GitHub { runs_on } = executor_for(d, project, Kind::Suite, None) else {
-        return None;
+    // The task's own choice when it has one, else the global switch (#761): never
+    // `executor_for(.., None)`, which is always local. A step whose suites are split between
+    // here and GitHub by their own rules is not looked into: it follows this choice.
+    let choice = task.and_then(|t| crate::place::task_choice(d, Some(t.0)));
+    let runs_on = match (choice, executor_global(d, project)) {
+        (Some(crate::place::Choice::Local), _) => return None,
+        (_, Executor::GitHub { runs_on }) => runs_on,
+        (Some(crate::place::Choice::GitHub), Executor::Local) => remote_cfg(d, project)?.runs_on,
+        (None, Executor::Local) => return None,
     };
     let mut out = mason_scheduler::Needs {
         exclusive: false,
