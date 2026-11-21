@@ -740,7 +740,7 @@ pub fn step(state: &mut State, runs: &[RunRec], ctx: &Ctx) -> Vec<File> {
                                         urgent: true,
                                         proposed: false,
                                         auto: false,
-                                    auto: false,
+                                        auto: false,
                                         why: Why::Gate,
                                         at,
                                         signatures: vec![],
@@ -1963,7 +1963,12 @@ mod tests {
         let mut s = State::default();
         auto_go(
             &mut s,
-            &[run(1, "CI", "success", &[("a", "success"), ("b", "success")])],
+            &[run(
+                1,
+                "CI",
+                "success",
+                &[("a", "success"), ("b", "success")],
+            )],
             &none(),
             0,
         );
@@ -1983,8 +1988,20 @@ mod tests {
     #[test]
     fn auto_approve_off_leaves_filing_as_it_was() {
         let mut s = seeded();
-        go(&mut s, &[run_sigs(2, &[("a", "failure")])], 5000, &none(), 0);
-        let f = go(&mut s, &[run_sigs(3, &[("a", "failure")])], 5000, &none(), 0);
+        go(
+            &mut s,
+            &[run_sigs(2, &[("a", "failure")])],
+            5000,
+            &none(),
+            0,
+        );
+        let f = go(
+            &mut s,
+            &[run_sigs(3, &[("a", "failure")])],
+            5000,
+            &none(),
+            0,
+        );
         assert!(!f[0].auto && !f[0].proposed);
     }
 
