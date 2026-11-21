@@ -136,6 +136,30 @@ pub fn wants_tests(template: &str) -> bool {
     template.contains(TESTS_FOR_CHANGE)
 }
 
+/// A run's `template` with one target group. The group's cargo arguments go where the
+/// placeholder is; its binary arguments (after its first ` -- `, a module filter) join the end of
+/// the template's own `--` section, or start one at the end. Otherwise a template flag placed
+/// after the placeholder (`--config`) would land after the group's `--`, for the test binary.
+fn run_group(template: &str, g: &str, both: &dyn Fn(&str, &str) -> String) -> String {
+    let Some(i) = g.find(" -- ") else {
+        return both(template, g);
+    };
+    let (cargo, bin) = (&g[..i], g[i + 4..].trim());
+    let filled = both(template, cargo);
+    if bin.is_empty() {
+        return filled;
+    }
+    // Whether the template has a `--` section after its placeholder.
+    let after = template
+        .rfind(TESTS_FOR_CHANGE)
+        .map_or("", |k| &template[k + TESTS_FOR_CHANGE.len()..]);
+    if after.contains(" -- ") {
+        format!("{} {bin}", filled.trim_end())
+    } else {
+        format!("{} -- {bin}", filled.trim_end())
+    }
+}
+
 /// `template` with its `{packages}` or `{tests_for_change}` filled in. Several target groups
 /// become several commands, one after the other: all run, and the whole passes only if each
 /// does (`build`: they are chained, as a build that fails stops the rest).
@@ -161,6 +185,7 @@ pub fn expand(template: &str, n: &Narrow, build: bool) -> String {
     };
     match n {
         Narrow::Packages(p) => both(template, &flags(p)),
+        Narrow::Targets(t) if t.len() == 1 && !build => run_group(template, &t[0], &both),
         Narrow::Targets(t) if t.len() == 1 => both(template, &group(&t[0])),
         Narrow::Targets(t) if build => t
             .iter()
@@ -170,7 +195,7 @@ pub fn expand(template: &str, n: &Narrow, build: bool) -> String {
         Narrow::Targets(t) => {
             let runs: String = t
                 .iter()
-                .map(|g| format!("( {} ) || mason_rc=1; ", both(template, g)))
+                .map(|g| format!("( {} ) || mason_rc=1; ", run_group(template, g, &both)))
                 .collect();
             format!("mason_rc=0; {runs}[ $mason_rc -eq 0 ]")
         }
@@ -422,5 +447,54 @@ mod tests {
         let pk = Narrow::Packages(vec!["a".into(), "b".into()]);
         assert_eq!(expand("x {tests_for_change}", &pk, false), "x -p a -p b");
         assert_eq!(expand("x {packages}", &pk, true), "x -p a -p b");
+    }
+
+    const DEV: &str = r#": {packages}; RUSTDOC="$PWD/scripts/rustdoc-bootstrap.sh" {project_test} {tests_for_change} --config 'target."cfg(unix)".runner=["env","RUSTC_BOOTSTRAP=1"]' -- -Z unstable-options --report-time"#;
+
+    #[test]
+    fn expand_puts_a_filter_after_the_templates_own_dashes() {
+        let n = Narrow::Targets(vec!["-p mason-daemon --test it -- limits:: remote::".into()]);
+        let out = expand(DEV, &n, false);
+        assert_eq!(out.matches(" -- ").count(), 1, "{out}");
+        let (before, after) = out.split_once(" -- ").unwrap();
+        assert!(before.contains("--test it --config"), "{out}");
+        assert_eq!(after, "-Z unstable-options --report-time limits:: remote::");
+    }
+
+    #[test]
+    fn expand_two_groups_one_filtered() {
+        let n = Narrow::Targets(vec![
+            "-p mason-daemon --test it -- limits::".into(),
+            "-p mason-core --lib".into(),
+        ]);
+        let out = expand(DEV, &n, false);
+        assert!(out.starts_with("mason_rc=0; ( "), "{out}");
+        assert!(
+            out.contains("--test it --config") && out.contains("--report-time limits:: ) ||"),
+            "{out}"
+        );
+        assert!(
+            out.contains("-p mason-core --lib --config") && out.contains("--report-time ) ||"),
+            "{out}"
+        );
+        assert_eq!(out.matches(" -- ").count(), 2, "{out}");
+    }
+
+    #[test]
+    fn expand_starts_dashes_when_the_template_has_none() {
+        let n = Narrow::Targets(vec!["-p a --test it -- m::".into()]);
+        assert_eq!(
+            expand("cargo test {tests_for_change} --no-fail-fast", &n, false),
+            "cargo test -p a --test it --no-fail-fast -- m::"
+        );
+    }
+
+    #[test]
+    fn expand_build_still_drops_the_filter() {
+        let n = Narrow::Targets(vec!["-p a --test it -- m::".into()]);
+        assert_eq!(
+            expand("cargo test {tests_for_change} --no-run", &n, true),
+            "cargo test -p a --test it --no-run"
+        );
     }
 }
