@@ -3542,15 +3542,6 @@ impl Runner {
             return Ok(None);
         }
         let d = &self.d;
-        // A batch whose project runs on GitHub waits for runner units, ranked as the batch's
-        // first task, so it goes ahead of checks, test steps and debts (#766).
-        let needs = crate::remote::pool_needs(
-            d,
-            &self.project().id,
-            &needs,
-            self.member_tasks.first().copied(),
-        )
-        .unwrap_or(needs);
         if needs.amounts.keys().any(|n| n.starts_with("device:")) {
             d.targets.declare_all(d);
         }
