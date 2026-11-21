@@ -85,6 +85,8 @@ fn rules() -> Rules {
         red_ticket_after_ms: 3 * 3_600_000,
         max_open_auto: 2,
         freeze_on_gate: true,
+        auto_approve: false,
+        auto_approve_max: 5,
     }
 }
 

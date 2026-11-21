@@ -237,7 +237,7 @@ pub fn encode(s: &Saved) -> String {
         .iter()
         .map(|f| {
             json!({"key": f.key, "task": opt(f.task), "at": f.at, "urgent": f.urgent,
-                   "proposed": f.proposed, "url": f.url})
+                   "proposed": f.proposed, "auto": f.auto, "url": f.url})
         })
         .collect();
     json!({"workflows": wfs, "filed": filed, "error": s.error, "checked_at": s.checked_at})
@@ -316,6 +316,7 @@ pub fn decode(text: &str) -> Saved {
             at: u(&f["at"]),
             urgent: f["urgent"].as_bool().unwrap_or(false),
             proposed: f["proposed"].as_bool().unwrap_or(false),
+            auto: f["auto"].as_bool().unwrap_or(false),
             url: f["url"].as_str().unwrap_or_default().to_string(),
         });
     }
@@ -488,7 +489,7 @@ pub fn pass(
                 .collect();
         }
     }
-    let (named, open_auto) = who_names(d, pid, &saved, &recs);
+    let (named, open_auto, open_approved) = who_names(d, pid, &saved, &recs);
     let (recent, landed) = recent_tasks(d, pid, now);
     let named_sigs = who_names_signatures(d, pid, &saved, &recs);
     let files = rules::step(
@@ -499,12 +500,20 @@ pub fn pass(
             now_ms: now,
             named: &named,
             open_auto,
+            open_approved,
             recent: &recent,
             landed: &landed,
             named_sigs: &named_sigs,
         },
     );
     for f in &files {
+        let mut f = f.clone();
+        if f.auto && names_trust_file(&f, src) {
+            // A trust file stays with the owner, whatever the rule says.
+            f.auto = false;
+            f.proposed = true;
+        }
+        let f = &f;
         let task = file_task(d, pid, &p.base, f, src)?;
         rules::filed(&mut saved.state, f, task, now, &f.at.url);
     }
@@ -574,7 +583,7 @@ fn who_names(
     pid: ProjectId,
     saved: &Saved,
     recs: &[RunRec],
-) -> (BTreeMap<String, Option<u64>>, u32) {
+) -> (BTreeMap<String, Option<u64>>, u32, u32) {
     let mut keys: Vec<String> = vec![];
     for (w, ws) in &saved.state.workflows {
         for j in ws.jobs.keys() {
@@ -592,6 +601,7 @@ fn who_names(
     keys.dedup();
     let named = named_keys(d, pid, &keys);
     let mut open_auto = 0;
+    let mut open_approved = 0;
     if let Ok(w) = d.world() {
         let mine: std::collections::BTreeSet<u64> =
             saved.state.filed.iter().filter_map(|f| f.task).collect();
@@ -601,8 +611,34 @@ fn who_names(
             .filter(|t| t.project == pid && !t.state.is_terminal())
             .filter(|t| mine.contains(&t.id.0))
             .count() as u32;
+        let approved: std::collections::BTreeSet<u64> = saved
+            .state
+            .filed
+            .iter()
+            .filter(|f| f.auto)
+            .filter_map(|f| f.task)
+            .collect();
+        open_approved = w
+            .tasks
+            .values()
+            .filter(|t| t.project == pid && !t.state.is_terminal())
+            .filter(|t| approved.contains(&t.id.0))
+            .count() as u32;
     }
-    (named, open_auto)
+    (named, open_auto, open_approved)
+}
+
+/// Whether a red's ticket names a trust file (`protect::PROTECTED`): a failing script or test
+/// that is one, or a path in the log excerpt the ticket quotes.
+fn names_trust_file(f: &File, src: &dyn Source) -> bool {
+    let (_, text) = failure_text(src, f.at.job);
+    let paths = f.signatures.iter().map(String::as_str).chain(
+        text.split(|c: char| c.is_whitespace() || "`'\"():,;".contains(c))
+            .filter(|w| w.contains('/')),
+    );
+    paths
+        .map(|p| p.trim_start_matches("./"))
+        .any(|p| crate::protect::protected_because(p, &[]).is_some())
 }
 
 /// The open tasks and issues that name a failing script or test of a red job. An open task
@@ -960,7 +996,7 @@ pub fn view(d: &Daemon, pid: ProjectId) -> Value {
         .rev()
         .map(|f| {
             json!({"job": f.key, "task": f.task, "at": f.at, "urgent": f.urgent,
-                   "proposed": f.proposed, "url": f.url})
+                   "proposed": f.proposed, "auto": f.auto, "url": f.url})
         })
         .collect();
     let freeze = d

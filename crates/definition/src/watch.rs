@@ -17,6 +17,8 @@ pub const WATCH_CI_KEYS: &[&str] = &[
     "red_ticket_after",
     "max_open_auto",
     "freeze_on_gate",
+    "auto_approve",
+    "auto_approve_max",
 ];
 
 fn strings(item: &Item, path: &str, out: &mut Vec<Problem>) -> Vec<String> {
@@ -60,6 +62,8 @@ pub fn parse(item: &Item, out: &mut Vec<Problem>) -> Option<Rules> {
         red_ticket_after_ms: 3 * 3600 * 1000,
         max_open_auto: 2,
         freeze_on_gate: true,
+        auto_approve: false,
+        auto_approve_max: 5,
     };
     let mut enabled = false;
     let int = |v: &Item, path: &str, out: &mut Vec<Problem>, min: i64| -> Option<u32> {
@@ -108,6 +112,16 @@ pub fn parse(item: &Item, out: &mut Vec<Problem>) -> Option<Rules> {
                 Some(b) => r.freeze_on_gate = b,
                 None => out.push(Problem::new(&path, "must be true or false")),
             },
+            "auto_approve" => match v.as_str() {
+                Some("confirmed") => r.auto_approve = true,
+                Some("off") => r.auto_approve = false,
+                _ => out.push(Problem::new(&path, "must be \"confirmed\" or \"off\"")),
+            },
+            "auto_approve_max" => {
+                if let Some(n) = int(v, &path, out, 0) {
+                    r.auto_approve_max = n;
+                }
+            }
             other => out.push(unknown_key("watch.ci", other, WATCH_CI_KEYS)),
         }
     }

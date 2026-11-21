@@ -4303,6 +4303,8 @@ fn print_ci_watch(project: &str, w: &Value) {
             if f["urgent"] == true { " (urgent)" } else { "" },
             if f["proposed"] == true {
                 " (proposed)"
+            } else if f["auto"] == true {
+                " (auto-approved: cancel it if it is wrong)"
             } else {
                 ""
             },
