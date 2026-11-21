@@ -126,6 +126,9 @@ pub struct Tier {
     pub ci: Option<String>,
     /// `freeze` on the post-land tier: a red stops landing but for fixes.
     pub on_red: Option<String>,
+    /// `where = "local" | "github"`: where the tier's checks run. `None`: the tier's default
+    /// (the lint tier runs on this Mac, #806).
+    pub place: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -268,6 +271,7 @@ pub fn parse(text: &str) -> Result<LandingConfig, Vec<String>> {
                             suites: vec![],
                             ci: None,
                             on_red: None,
+                            place: None,
                         };
                         for (tk, tv) in t.iter() {
                             match tk {
@@ -285,6 +289,12 @@ pub fn parse(text: &str) -> Result<LandingConfig, Vec<String>> {
                                 },
                                 "ci" => tier.ci = tv.as_str().map(String::from),
                                 "on_red" => tier.on_red = tv.as_str().map(String::from),
+                                "where" => match tv.as_str() {
+                                    Some(w @ ("local" | "github")) => tier.place = Some(w.into()),
+                                    _ => p.push(format!(
+                                        "tier[{i}].where: must be \"local\" or \"github\""
+                                    )),
+                                },
                                 other => p.push(format!("tier[{i}]: unknown key `{other}`")),
                             }
                         }
