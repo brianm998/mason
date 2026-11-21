@@ -79,14 +79,13 @@ fn a_base_that_does_not_build_holds_the_batch_and_blames_nobody() {
     };
     if let Err(e) = try_wait_for("the batch to be held", 120, held) {
         // Name the path taken: which row, which note, which alerts.
-        let rows: Vec<String> = w
-            .d
-            .store
-            .batches(Some("scratch"), 10)
-            .unwrap()
-            .iter()
-            .map(|b| format!("phase={:?} note={:?}", b.phase, b.note))
-            .collect();
+        let rows: Vec<String> =
+            w.d.store
+                .batches(Some("scratch"), 10)
+                .unwrap()
+                .iter()
+                .map(|b| format!("phase={:?} note={:?}", b.phase, b.note))
+                .collect();
         panic!(
             "{e}\nbatch rows: {rows:#?}\nalerts: {:?}",
             w.d.landing().attention()
