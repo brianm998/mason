@@ -307,6 +307,8 @@ async fn status(Shared(d): Shared<Arc<Daemon>>) -> Res {
                         v
                     })
                 }).collect::<Vec<_>>(),
+                // The last full test of each project with a full-test schedule.
+                "full_tests": crate::ci_schedule::full_views(&d2),
                 "definitions": d2.projects().iter().map(|(pid, p)| json!({
                     "project": p.id,
                     "hash": d2.current_def(*pid).hash,
@@ -3238,12 +3240,14 @@ async fn schedule_run(
 ) -> Res {
     let who = who_of(&headers);
     let name = b["name"].as_str().unwrap_or_default().to_string();
+    let force = b["force"].as_bool().unwrap_or(false);
     let d2 = d.clone();
     let said = d
         .pool
         .run(move || {
             owner_only(&d2, &who, "run a recurring job")?;
-            crate::introspect::run_now(&d2, &name).map_err(|e| fail(StatusCode::CONFLICT, e))
+            crate::introspect::run_now_forced(&d2, &name, force)
+                .map_err(|e| fail(StatusCode::CONFLICT, e))
         })
         .await
         .map_err(pool_err)??;
