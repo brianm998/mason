@@ -240,7 +240,7 @@ pub fn fires_on(push: &Push, git_ref: &str) -> bool {
 }
 
 /// What is wrong with the workflows of the base branch for remote runs. `files` are
-/// `(file name, text)`; `workflow` is the file name `[remote] workflow` names.
+/// `(file name, text)`; `workflow` is the file name `[remote_runs] workflow` names.
 pub fn workflow_problems(files: &[(String, String)], workflow: &str) -> Vec<String> {
     let mut out = vec![];
     match files.iter().find(|(n, _)| n == workflow) {

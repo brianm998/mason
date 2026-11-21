@@ -4,7 +4,7 @@
 //!
 //! One decision, [`decide`], from plain facts, so a table test can cover every row. The facts
 //! come from [`facts_for`]: the global switch (`remote.toml`, read live on every call, so a
-//! change needs no restart and no `project reload`), the task's own choice (#699, its `run_on` override), the project's `[remote]`, and the suite's `remote`, `runs_on`, environment and
+//! change needs no restart and no `project reload`), the task's own choice (#699, its `run_on` override), the project's `[remote_runs]`, and the suite's `remote`, `runs_on`, environment and
 //! `uses`. Moving a run changes no gate: the same command is judged by the same parser and
 //! minimum.
 //!
@@ -72,7 +72,7 @@ pub struct Facts {
     /// The task's own choice (#699); `None` for a task that has none and for a run no task owns.
     pub task: Option<Choice>,
     pub global: Global,
-    /// The project's `[remote] runs_on`; `None` when the project has no `[remote]`.
+    /// The project's `[remote_runs] runs_on`; `None` when the project has no `[remote_runs]`.
     pub project_runs_on: Option<String>,
     /// `remote = false` on the suite keeps it here.
     pub suite_remote: bool,
@@ -86,7 +86,7 @@ pub struct Facts {
 }
 
 impl Facts {
-    /// A project with a `[remote]` and a suite with no rules of its own.
+    /// A project with a `[remote_runs]` and a suite with no rules of its own.
     pub fn plain(global: Global) -> Facts {
         Facts {
             task: None,
@@ -130,7 +130,7 @@ impl Place {
 }
 
 /// The one decision. A task's choice comes first, then the global switch; a run that would go to
-/// GitHub stays here when the project has no `[remote]`, the suite says `remote = false`, its
+/// GitHub stays here when the project has no `[remote_runs]`, the suite says `remote = false`, its
 /// environment leases a device, it uses `exclusive`, or the remote setup check failed. The
 /// reason is always given.
 pub fn decide(f: &Facts) -> Place {
@@ -155,7 +155,7 @@ pub fn decide(f: &Facts) -> Place {
         from: Source::Suite,
     };
     let Some(project_runs_on) = &f.project_runs_on else {
-        return stay("the project has no [remote] section".into());
+        return stay("the project has no [remote_runs] section".into());
     };
     if !f.suite_remote {
         return stay("the suite says remote = false".into());
@@ -296,7 +296,7 @@ pub fn task_choice(d: &Daemon, task: Option<u64>) -> Option<Choice> {
 }
 
 /// Do the checks of `task` in `project` go to GitHub (#704)? The task's choice, else the global
-/// switch, and only for a project with a `[remote]` section. Whether a suite then stays here
+/// switch, and only for a project with a `[remote_runs]` section. Whether a suite then stays here
 /// for its own reasons does not matter: the agent is told to use `run_check` either way.
 pub fn task_checks_on_github(d: &Daemon, project: &str, task: u64) -> bool {
     let wants = match task_choice(d, Some(task)) {
@@ -471,7 +471,7 @@ pub fn place_of(
 }
 
 /// Where a run goes that no task owns and no suite describes (a landing check, #702): the global
-/// switch, the project's `[remote]` and the setup check, and nothing of a suite's own.
+/// switch, the project's `[remote_runs]` and the setup check, and nothing of a suite's own.
 pub fn global_place(d: &Daemon, project: &str) -> Place {
     let pid = d.project_id_by_name(project);
     let mut f = Facts::plain(read_global(d).0);
@@ -621,15 +621,15 @@ mod tests {
             ),
         );
         row(
-            "no [remote]",
+            "no [remote_runs]",
             Facts {
                 project_runs_on: None,
                 ..on()
             },
-            local("the project has no [remote] section", Source::Suite),
+            local("the project has no [remote_runs] section", Source::Suite),
         );
         row(
-            "no [remote], global off says the switch",
+            "no [remote_runs], global off says the switch",
             Facts {
                 project_runs_on: None,
                 ..off()

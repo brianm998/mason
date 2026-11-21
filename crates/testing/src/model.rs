@@ -127,7 +127,7 @@ pub struct Suite {
     /// `remote = false` keeps the suite on this machine whatever the global switch says (#698).
     pub remote: bool,
     /// `runs_on = "macos-15"`: the runner kind when the suite runs on GitHub Actions; without
-    /// it the project's `[remote] runs_on`.
+    /// it the project's `[remote_runs] runs_on`.
     pub runs_on: Option<String>,
     /// `shards = 8`: when the suite runs on GitHub Actions, split its whole `command` run across
     /// this many runners, balanced by recorded per-test times (#701). A local run ignores it.

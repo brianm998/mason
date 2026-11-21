@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# s722 exit test: where runs go (#698). A real masond with one project whose `[remote]` points
+# s722 exit test: where runs go (#698). A real masond with one project whose `[remote_runs]` points
 # at a fake GitHub on loopback, and a test step with two suites, one of them `remote = false`.
 #  1. `mason remote on`: the fake's origin got a push to `mason/run/**` for the first suite
 #     only, and `mason task show` names both places with their reasons;
@@ -125,7 +125,7 @@ claude_bin = "$bin/fake-claude"
 [agent_env]
 FAKE_CLAUDE_SCRIPT = "$root/script.json"
 
-[remote]
+[remote_runs]
 kind = "github-actions"
 api = "http://127.0.0.1:$port"
 repo = "o/r"

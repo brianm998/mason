@@ -225,7 +225,7 @@ pub fn run(mut args: Vec<String>, config_dir: &Path) -> i32 {
         Ok(said) => {
             print!("{said}");
             if p.services.remote.is_none() {
-                println!("\nThe project has no [remote] section yet; add one to {}/projects/{project}.toml:\n\n  [remote]\n  kind = \"github-actions\"\n  repo = \"owner/name\"\n  token = \"env:GITHUB_TOKEN\"", config_dir.display());
+                println!("\nThe project has no [remote_runs] section yet; add one to {}/projects/{project}.toml:\n\n  [remote_runs]\n  kind = \"github-actions\"\n  repo = \"owner/name\"\n  token = \"env:GITHUB_TOKEN\"", config_dir.display());
             }
             0
         }
@@ -318,7 +318,7 @@ pub fn setup(
         }
     };
     let mut said = format!(
-        "Wrote .github/workflows/mason-run.yml on the branch {BRANCH} (cut from {start}). Nothing was pushed, and your checked-out branch and files are untouched.\n\nRunner: {} (set `runs_on = \"{}\"` under [remote] if it is not the default).\n",
+        "Wrote .github/workflows/mason-run.yml on the branch {BRANCH} (cut from {start}). Nothing was pushed, and your checked-out branch and files are untouched.\n\nRunner: {} (set `runs_on = \"{}\"` under [remote_runs] if it is not the default).\n",
         plan.runs_on, plan.runs_on
     );
     if !plan.review.is_empty() {

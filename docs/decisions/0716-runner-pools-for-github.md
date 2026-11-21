@@ -14,6 +14,6 @@ would queue in GitHub, invisible to MASON, ahead of star's macOS gate.
 3. The units are held from the lease until the run completes or is cancelled. A hold file written beside the run's record lets a restarted daemon count them until the record says the run ended; the resumed step takes them over.
 4. A wait names the pool and the holders: "waiting for a GitHub macOS runner: 4 of 4 in use (#701, #705)", ranked by the usual rule.
 
-**Not chosen.** Counting the account's other jobs (`[remote] watch_account`) was optional and is left for a later task. Holding the units inside `remote::execute` instead of the step lease would have needed a task and a rank there; the step lease already has both, and its wait text and cancellation.
+**Not chosen.** Counting the account's other jobs (`[remote_runs] watch_account`) was optional and is left for a later task. Holding the units inside `remote::execute` instead of the step lease would have needed a task and a rank there; the step lease already has both, and its wait text and cancellation.
 
 **Risk.** A project whose remote run falls back to local (`fallback = "local"`) runs that command holding pool units and no `compile` slot; landing and debt payments still use the machine's slots until #702.

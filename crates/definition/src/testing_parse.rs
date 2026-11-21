@@ -300,7 +300,7 @@ pub fn parse(doc: &DocumentMut, out: &mut Vec<Problem>) -> Testing {
                         if r.trim().is_empty() {
                             out.push(Problem::new(
                                 &path,
-                                "must name a runner, like \"macos-15\"; leave it out to use the project's [remote] runs_on",
+                                "must name a runner, like \"macos-15\"; leave it out to use the project's [remote_runs] runs_on",
                             ));
                         } else {
                             s.runs_on = Some(r);
