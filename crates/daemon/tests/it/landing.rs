@@ -789,3 +789,83 @@ fn land_now_keeps_the_freeze() {
     assert!(!w.landed(other), "Land now does not pass a freeze");
     assert!(!w.on_main("x/other.txt"));
 }
+
+/// A fake GitHub that never assigns a runner: it accepts connections and says nothing. The
+/// count is how many requests reached it.
+fn silent_github() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", l.local_addr().unwrap());
+    let n = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = n.clone();
+    std::thread::spawn(move || {
+        let mut held = vec![];
+        for c in l.incoming().flatten() {
+            seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            held.push(c);
+        }
+    });
+    (url, n)
+}
+
+fn github_world(
+    tier: &str,
+    files: &[(&str, &str)],
+    script: Option<&str>,
+) -> (W, Arc<std::sync::atomic::AtomicUsize>) {
+    let (url, n) = silent_github();
+    let extra = move |_: &Scratch| {
+        format!(
+            "[remote_runs]\nkind = \"github-actions\"\napi = \"{url}\"\nrepo = \"o/r\"\ntoken = \"env:MASON_T806_TOKEN\"\nruns_on = \"macos-14\"\n"
+        )
+    };
+    std::env::set_var("MASON_T806_TOKEN", "x");
+    let mut all: Vec<(&str, &str)> = files.to_vec();
+    if let Some(s) = script {
+        all.push(("checks.sh", s));
+    }
+    let w = world_with(tier, &extra, &all);
+    mason_daemon::place::set_global(&w.d, mason_daemon::place::Global::GitHub, "test").unwrap();
+    (w, n)
+}
+
+#[test]
+fn the_lint_tier_runs_here_while_the_switch_says_github() {
+    // #806: lint is 1.5 min of work; GitHub's runner queue made it wait up to 20.
+    let (w, github) = github_world(LINT_TIER, &[], None);
+    let t = w.task("clean", &[("x/c.txt", "1")]);
+    wait_for("the batch to land", 90, || w.landed(t));
+    assert!(w.on_main("x/c.txt"));
+    assert_eq!(
+        github.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "the lint reached the fake GitHub"
+    );
+}
+
+#[test]
+fn a_lint_tier_set_to_github_goes_there_and_holds_no_local_compile_slot_while_queued() {
+    let tier = format!("{LINT_TIER}where = \"github\"\n");
+    let (w, github) = github_world(&tier, &[], None);
+    let _t = w.task("clean", &[("x/c.txt", "1")]);
+    wait_for("the lint to reach GitHub", 90, || {
+        github.load(std::sync::atomic::Ordering::SeqCst) > 0
+    });
+    std::thread::sleep(Duration::from_secs(1));
+    assert_eq!(
+        w.d.broker.used("compile"),
+        0,
+        "a lint waiting on GitHub holds a local compile slot"
+    );
+}
+
+#[test]
+fn a_red_lint_run_here_parks_the_task_with_file_and_line() {
+    let probe = tempfile::tempdir().unwrap();
+    let script = lint_checks_script(&probe.path().join("calls"));
+    let (w, github) = github_world(LINT_TIER, &[], Some(&script));
+    let t = w.task("unformatted", &[("x/bad.rs", "fn  main(){}")]);
+    wait_for("the task to be sent back", 90, || w.sent_back(t).is_some());
+    let why = w.sent_back(t).unwrap();
+    assert!(why.contains("x/bad.rs:1"), "{why}");
+    assert_eq!(github.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
