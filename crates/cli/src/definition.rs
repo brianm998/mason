@@ -227,6 +227,7 @@ mod tests {
             "scripts/run-exit-scripts.sh",
             ".cargo/config.toml",
             "scripts/spike/sccache-workspace.sh",
+            "scripts/test-shard.py",
         ] {
             let sel = def.testing.impact.select(&[f.to_string()], &all);
             assert!(

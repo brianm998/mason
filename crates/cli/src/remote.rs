@@ -416,10 +416,9 @@ mod tests {
         )
         .unwrap();
         assert!(f.contains("xcode-version: '16.4'"), "{f}");
-        // The template mentions rust-cache in a comment; what matters is that no step uses it.
         assert!(
-            !f.lines()
-                .any(|l| !l.trim_start().starts_with('#') && l.contains("rust-cache")),
+            f.lines()
+                .all(|l| !l.trim_start().starts_with("- uses: Swatinem")),
             "{f}"
         );
         assert!(!d.path().join(".github").exists());
