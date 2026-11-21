@@ -77,6 +77,10 @@ pub struct DaemonConfig {
     /// How long a suite waits before trying again after an environmental
     /// failure (no device, the stack would not come up). Charged to no task.
     pub env_retry: Duration,
+    /// Wait out the landing window even when no other task is moving toward landing (the
+    /// behaviour before #731). Off in production; tests that file several tasks one after the
+    /// other and expect one batch turn it on.
+    pub landing_window_always: bool,
     /// How often a task waiting because the base is red the same way looks at whether the base
     /// branch has moved (s246).
     pub base_red_poll: Duration,
@@ -532,6 +536,7 @@ impl DaemonConfig {
             speech_timeout: Duration::from_secs(30),
             attention_interval: Duration::from_secs(5),
             env_retry: Duration::from_secs(30),
+            landing_window_always: false,
             base_red_poll: Duration::from_secs(60),
             auto_retry_delays: vec![Duration::from_secs(120), Duration::from_secs(600)],
             auto_retry_window: Duration::from_secs(24 * 3600),

@@ -156,7 +156,7 @@ extension MonitorModel {
             for (i, a) in h.active.enumerated() {
                 out.append(Item(
                     id: "active:\(a.task)",
-                    texts: [a.display.isEmpty ? a.model : a.display, a.project, "#\(a.task)", a.step],
+                    texts: [a.display.isEmpty ? a.model : a.display, a.project, "#\(a.task)", a.step, ActiveSummary.state(a)],
                     order: i
                 ))
             }

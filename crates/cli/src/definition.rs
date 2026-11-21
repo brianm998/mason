@@ -258,6 +258,12 @@ mod tests {
         let Some(files) = tracked_files(&root) else {
             return;
         };
+        // A remote runner's checkout carries `.mason/run.json`, which MASON writes into the
+        // snapshot it pushes; it is never a file of the repository.
+        let files: Vec<String> = files
+            .into_iter()
+            .filter(|f| f != ".mason/run.json")
+            .collect();
         let r = unmapped_report(&real_definition().testing.impact, &files);
         assert!(r.is_empty(), "{r:?}");
     }
