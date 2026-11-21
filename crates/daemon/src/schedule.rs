@@ -12,6 +12,8 @@
 //!   a Low-priority task, and the baseline becomes what failed this time. `mutants` is meant for
 //!   `cargo mutants` (survivors are read from `mutants.out/missed.txt`) and `live` for the
 //!   adapters' live runs; both need what they run, so they are only ever scheduled by the owner.
+//! - `suites`: runs every listed suite whole on the base tip, here or on GitHub, as work below
+//!   every task, and records the verdict like a `ci` full test (`ci_schedule::run_suites`).
 //! - `ci`: dispatches a slow CI workflow on the base branch when it matters, follows the run,
 //!   reruns its failed jobs once and files tasks for the reds and the flakes (`ci_schedule`).
 //!   Off unless configured.
@@ -61,6 +63,9 @@ pub struct CiSpec {
     /// Inline globs, or the workflow file whose `on.pull_request.paths` holds them.
     pub paths: Vec<String>,
     pub paths_from: Option<String>,
+    /// `kind = "suites"` (#783): the suites to run whole; empty means every suite bound to the
+    /// test step and the landing tiers.
+    pub suites: Vec<String>,
     pub group_by: mason_core::ci_schedule::GroupBy,
     pub max_tickets: usize,
 }
@@ -77,13 +82,14 @@ impl Default for CiSpec {
             every: false,
             paths: vec![],
             paths_from: None,
+            suites: vec![],
             group_by: Default::default(),
             max_tickets: 6,
         }
     }
 }
 
-pub const KINDS: [&str; 5] = ["task", "base-health", "mutants", "live", "ci"];
+pub const KINDS: [&str; 6] = ["task", "base-health", "mutants", "live", "ci", "suites"];
 
 pub fn parse(id: &str, doc: &DocumentMut) -> Result<Vec<Spec>, String> {
     let Some(t) = doc.get("schedule").and_then(|v| v.as_table_like()) else {
@@ -205,6 +211,20 @@ pub fn parse(id: &str, doc: &DocumentMut) -> Result<Vec<Spec>, String> {
                         );
                     }
                 }
+                "suites" => {
+                    ci_keys.push(k);
+                    let arr = v
+                        .as_array()
+                        .ok_or_else(|| format!("{at} `suites` must be a list of suite names"))?;
+                    for g in arr.iter() {
+                        ci.suites.push(
+                            g.as_str()
+                                .filter(|g| !g.is_empty())
+                                .ok_or_else(|| format!("{at} `suites` holds only suite names"))?
+                                .to_string(),
+                        );
+                    }
+                }
                 "max_tickets" => {
                     ci_keys.push(k);
                     ci.max_tickets = v
@@ -216,7 +236,31 @@ pub fn parse(id: &str, doc: &DocumentMut) -> Result<Vec<Spec>, String> {
                 other => return Err(format!("{at} has an unknown key `{other}`")),
             }
         }
-        if spec.kind == "ci" {
+        if spec.kind == "suites" {
+            // Runs MASON's own suites: no workflow and no CI host, so only the timing keys.
+            if let Some(k) = ci_keys
+                .iter()
+                .find(|k| !["at", "when_quiet", "suites"].contains(k))
+            {
+                return Err(format!("{at} `{k}` belongs to `kind = \"ci\"`"));
+            }
+            if ci.at.is_some() && spec.every_ms != 0 {
+                return Err(format!("{at} takes `at` or `every`, not both"));
+            }
+            if ci.at.is_none() && spec.every_ms == 0 && ci.when_quiet.is_none() {
+                return Err(format!(
+                    "{at} needs `at = \"01:00\"`, an `every` or a `when_quiet = \"30m\"`"
+                ));
+            }
+            ci.every = spec.every_ms != 0;
+            if ci.at.is_some() || spec.every_ms == 0 {
+                spec.every_ms = 24 * 3_600_000;
+            }
+            spec.ci = Some(ci);
+        } else if spec.kind == "ci" {
+            if !ci.suites.is_empty() {
+                return Err(format!("{at} `suites` belongs to `kind = \"suites\"`"));
+            }
             if ci.workflow.trim().is_empty() {
                 return Err(format!("{at} is a ci schedule and needs a `workflow` (the file, such as \"gherkin.yml\")"));
             }
@@ -306,6 +350,8 @@ pub fn run(d: &Arc<Daemon>, project: &ProjectCfg, spec: &Spec) -> String {
     row.runs += 1;
     let say = if spec.kind == "task" {
         run_task(d, project, spec, &mut row)
+    } else if spec.kind == "suites" {
+        crate::ci_schedule::run_suites(d, project, spec, now)
     } else if spec.kind == "ci" {
         let (say, decided) = crate::ci_schedule::run(d, project, spec, &mut row, now);
         if !decided {
@@ -726,5 +772,38 @@ when_quiet = "45m"
             ),
             vec!["src/a.rs:1: x", "src/b.rs:2: y"]
         );
+    }
+
+    #[test]
+    fn a_suites_schedule_reads_its_suites_and_both_triggers_and_needs_no_workflow() {
+        let doc: DocumentMut = r#"
+[schedule.full]
+kind = "suites"
+at = "01:00"
+when_quiet = "30m"
+suites = ["cargo-workspace", "exit-scripts"]
+[schedule.all]
+kind = "suites"
+when_quiet = "1h"
+"#
+        .parse()
+        .unwrap();
+        let s = parse("mason", &doc).unwrap();
+        let f = s.iter().find(|s| s.name == "full").unwrap();
+        let c = f.ci.as_ref().unwrap();
+        assert_eq!((c.at, c.when_quiet), (Some(60), Some(30 * 60_000)));
+        assert_eq!(c.suites, vec!["cargo-workspace", "exit-scripts"]);
+        assert_eq!(f.every_ms, 24 * 3_600_000);
+        let a = s.iter().find(|s| s.name == "all").unwrap();
+        assert!(a.ci.as_ref().unwrap().suites.is_empty());
+        for bad in [
+            "[schedule.x]\nkind = \"suites\"\n",
+            "[schedule.x]\nkind = \"suites\"\nat = \"01:00\"\nevery = \"daily\"\n",
+            "[schedule.x]\nkind = \"suites\"\nat = \"01:00\"\nworkflow = \"a.yml\"\n",
+            "[schedule.x]\nkind = \"suites\"\nat = \"01:00\"\nsuites = \"a\"\n",
+            "[schedule.x]\nkind = \"ci\"\nworkflow = \"a.yml\"\nat = \"01:00\"\nsuites = [\"a\"]\n",
+        ] {
+            assert!(parse("mason", &bad.parse().unwrap()).is_err(), "{bad}");
+        }
     }
 }

@@ -336,6 +336,126 @@ pub fn run(
     (dispatch_as(d, pid, ci, &host, &repo, row, now, &go), true)
 }
 
+// ---- the `suites` kind: MASON's own full test (#783) --------------------------------------------
+
+/// Run a `suites` schedule: every listed suite whole on the base tip, here or on GitHub. The
+/// same triggers, record and skip rule as the `ci` kind ([`decide_full`]); the run is the debt
+/// payment's per-suite run ([`crate::suites::run_whole`]), judged the same way.
+pub fn run_suites(d: &Arc<Daemon>, project: &ProjectCfg, spec: &Spec, now: u64) -> String {
+    let Some(ci) = spec.ci.as_ref() else {
+        return "not a suites schedule".into();
+    };
+    let Some(pid) = d.project_id_by_name(&project.id) else {
+        return "no such project".into();
+    };
+    let repo = Git { d, p: project, pid };
+    let (trigger, force) = d
+        .intro
+        .triggers
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&crate::schedule::row_name(&project.id, &spec.name))
+        .unwrap_or((full::NIGHTLY.into(), false));
+    let go = Go {
+        schedule: &spec.name,
+        trigger: &trigger,
+        force,
+    };
+    suites_as(d, pid, ci, &repo, now, &go)
+}
+
+/// Decide with the record, run the suites, write the verdict, file what went red or flaked.
+pub fn suites_as(
+    d: &Arc<Daemon>,
+    pid: ProjectId,
+    ci: &CiSpec,
+    repo: &dyn Repo,
+    now: u64,
+    asked: &Go,
+) -> String {
+    use crate::suites::WholeState;
+    let go = || -> Result<String, String> {
+        repo.fetch()?;
+        let tip = repo.tip()?;
+        // Nothing runs from an earlier daemon, so a row still open was cut off by a restart.
+        cut_off_lost(d, pid, asked.schedule);
+        let record = decide_full(d, pid, asked.schedule, &tip, repo, now);
+        if !record.start && !asked.force {
+            return Ok(format!("not run: {}", record.reason));
+        }
+        let project = project_name(d, pid);
+        let _ = d.store.add_full_test(&FullTestRow {
+            project,
+            schedule: asked.schedule.to_string(),
+            commit: tip.clone(),
+            trigger: asked.trigger.to_string(),
+            started_ms: now,
+            ..Default::default()
+        });
+        let whole = match crate::suites::run_whole(d, pid, &ci.suites, &tip, asked.force, &|| {
+            !d.is_shutting_down()
+        }) {
+            Ok(w) => w,
+            Err(e) => {
+                finish_full(d, pid, asked.schedule, full::CUT_OFF, "");
+                return Err(e);
+            }
+        };
+        let verdict = if whole.red() { full::RED } else { full::GREEN };
+        // The range names the last green before this commit, so it is read before the row ends.
+        let range = range_note(d, pid, asked.schedule, &whole.tip);
+        finish_full(d, pid, asked.schedule, verdict, "");
+        let base = d.project(pid).map(|p| p.base.clone()).unwrap_or_default();
+        let mut filed = vec![];
+        for s in &whole.suites {
+            let (what, priority) = match s.state {
+                WholeState::Red => ("red", Priority::Normal),
+                WholeState::Flaky => ("flaky", Priority::Low),
+                _ => continue,
+            };
+            let key = format!("suite `{}` {what} on {base}", s.name);
+            if !named_keys(d, pid, std::slice::from_ref(&key)).is_empty() {
+                filed.push(format!("{} {what} (already named by an open task)", s.name));
+                continue;
+            }
+            let failing = if s.failing.is_empty() {
+                String::new()
+            } else {
+                format!("\n\nFailing: {}.", s.failing.join(", "))
+            };
+            let body = format!(
+                "The scheduled full test `{}` ran suite `{}` whole on `{base}` at {} and it was {what} (a red test is rerun once before it counts; a flake passed on that rerun).{failing}\n\n{}\n\n{range}\n\nFiled by the schedule `{}`.",
+                asked.schedule,
+                s.name,
+                whole.tip,
+                s.note,
+                asked.schedule,
+            );
+            match emit_task(d, pid, key, body, priority, false) {
+                Ok(Some(t)) => filed.push(format!("#{t} ({} {what})", s.name)),
+                _ => filed.push(format!("{} {what} (could not file)", s.name)),
+            }
+        }
+        let counts = |st: WholeState| whole.suites.iter().filter(|s| s.state == st).count();
+        Ok(format!(
+            "ran {} suite(s) on {}: {verdict} ({} green, {} already green, {} flaky, {} excused, {} red){}",
+            whole.suites.len(),
+            full::short(&whole.tip),
+            counts(WholeState::Green),
+            counts(WholeState::AlreadyGreen),
+            counts(WholeState::Flaky),
+            counts(WholeState::Excused),
+            counts(WholeState::Red),
+            if filed.is_empty() {
+                String::new()
+            } else {
+                format!("; filed {}", filed.join(", "))
+            }
+        ))
+    };
+    go().unwrap_or_else(|e| format!("could not run: {e}"))
+}
+
 /// Why and how a full test is being asked for.
 pub struct Go<'a> {
     pub schedule: &'a str,
@@ -735,7 +855,7 @@ fn classify_and_file(
     let sel = rules::select(grouped.groups.clone(), ci.max_tickets, &|g| {
         keys_of(g).iter().any(|k| named.contains_key(k))
     });
-    let range = range_note(d, pid, name, run);
+    let range = range_note(d, pid, name, &run.sha);
     let mut filed = vec![];
     let mut failed = vec![];
     for g in &sel.file {
@@ -815,7 +935,7 @@ fn classify_and_file(
 /// For a red ticket: the commits since the last green full test and the tasks landed in them
 /// whose changes select suites, so the developer starts from a short list. Best effort: a
 /// repository that cannot answer says so instead of failing the filing.
-fn range_note(d: &Daemon, pid: ProjectId, schedule: &str, run: &WorkflowRun) -> String {
+fn range_note(d: &Daemon, pid: ProjectId, schedule: &str, sha: &str) -> String {
     let Some(p) = d.project(pid) else {
         return String::new();
     };
@@ -825,12 +945,12 @@ fn range_note(d: &Daemon, pid: ProjectId, schedule: &str, run: &WorkflowRun) -> 
         .unwrap_or_default();
     let Some(green) = rows
         .iter()
-        .find(|r| r.verdict == full::GREEN && r.commit != run.sha)
+        .find(|r| r.verdict == full::GREEN && r.commit != sha)
     else {
         return "Since the last green full test: none is on record, so there is no range to name."
             .into();
     };
-    let range = format!("{}..{}", green.commit, run.sha);
+    let range = format!("{}..{sha}", green.commit);
     let git = |args: &[&str]| mason_landing::git::run(&p.path, args).map_err(|e| e.to_string());
     let count = git(&["rev-list", "--count", &range]).map(|s| s.trim().to_string());
     let merges = git(&["log", "--merges", "--format=%H\t%s", &range]);
@@ -954,7 +1074,7 @@ pub fn full_view(d: &Daemon, project: &ProjectCfg, spec: &Spec) -> Value {
 
 /// [`full_view`] for a schedule row (`project/name`); null for anything else.
 pub fn full_view_of_row(d: &Daemon, row: &ScheduleRow) -> Value {
-    if row.kind != "ci" {
+    if row.kind != "ci" && row.kind != "suites" {
         return Value::Null;
     }
     let Some((p, s)) = row.name.split_once('/') else {
@@ -976,7 +1096,7 @@ pub fn full_views(d: &Daemon) -> Vec<Value> {
     let mut out = vec![];
     for p in d.projects().values() {
         for spec in p.schedules() {
-            if spec.kind == "ci" {
+            if spec.kind == "ci" || spec.kind == "suites" {
                 out.push(full_view(d, p, &spec));
             }
         }
