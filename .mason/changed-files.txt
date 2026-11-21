@@ -1,0 +1,6 @@
+.github/workflows/mason-run.yml
+.mason/run.json
+crates/daemon/tests/it/crash.rs
+crates/daemon/tests/support/mod.rs
+docs/stages/s765.md
+docs/stages/s767.md
