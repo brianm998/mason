@@ -195,6 +195,8 @@ pub struct CheckOutcome {
     pub timed_out: bool,
     /// The last lines of the output.
     pub output: String,
+    /// All of the output, for parsing files out of it; `output` is the tail kept for notes.
+    pub full: String,
     /// The id of the host that ran it.
     pub id: String,
     /// Why it was stopped before it ended, when [`CheckSpec::stop`] stopped it. Such a run
@@ -544,6 +546,7 @@ fn remote_check(d: &Arc<Daemon>, spec: &CheckSpec, id: &str) -> Option<Shared> {
                 passed: false,
                 timed_out: false,
                 output: String::new(),
+                full: String::new(),
                 id: id.to_string(),
                 stopped: note.lock().unwrap_or_else(|e| e.into_inner()).clone(),
                 phase: None,
@@ -552,6 +555,7 @@ fn remote_check(d: &Arc<Daemon>, spec: &CheckSpec, id: &str) -> Option<Shared> {
                 passed: f.code == 0 && f.signal == 0 && !f.timed_out,
                 timed_out: f.timed_out,
                 output: format!("({})\n{}", f.ran_on, crate::jobs::tail(&f.output, 40)),
+                full: f.output.clone(),
                 id: id.to_string(),
                 stopped: None,
                 phase: f.phase.clone(),
@@ -655,10 +659,12 @@ fn collect(
     let timed_out = stopped.is_none()
         && (fired.load(Ordering::SeqCst)
             || (rec.signal != 0 && rec.ended_ms > 0 && rec.ended_ms + 1500 >= deadline));
+    let full = std::fs::read_to_string(&log).unwrap_or_default();
     Ok(CheckOutcome {
         passed: stopped.is_none() && rec.code == 0 && rec.signal == 0 && !timed_out,
         timed_out,
-        output: crate::jobs::tail(&std::fs::read_to_string(&log).unwrap_or_default(), 40),
+        output: crate::jobs::tail(&full, 40),
+        full,
         id: id.to_string(),
         stopped,
         phase: None,
