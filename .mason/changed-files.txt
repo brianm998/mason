@@ -1,0 +1,5 @@
+.mason/run.json
+docs/decisions/0756-exit-s592-stale-shard-assert.md
+docs/stages/s763.md
+scripts/exit/s592.sh
+scripts/exit/s763.sh
