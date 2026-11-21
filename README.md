@@ -633,7 +633,9 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s787**: A develop agent's `run_check` that goes to GitHub now has its whole wait (pool unit, runner pickup, run) credited to the step's deadline as it goes, and the timeout note counts from the step's recorded launch, names the daemon restart and shows the GitHub wait apart from the slot queue.
 - **s789**: Lint and build-floor reds are parsed from the full, ANSI-stripped output, and remote runs are told `CARGO_TERM_COLOR=never`, so the tasks touching the named file are parked instead of the batch being split.
 - **s791**: The landing lint tier now runs in the batch's worktree on this Mac by default (`where = "local" | "github"` on the `[[tier]]`), holds no local compile slot while a GitHub run waits, and the batch note says where it ran and how long it took.
+- **s792**: The recorded-stream row-redraw test now asserts rows were drawn and progress views ran, instead of a non-zero RowView count that progress pushes never produce.
 - **s793**: The s748 and s750 exit scripts give their slot holder a fifo on stdin kept open on fd 3, so the hold lasts until the script closes it instead of ending at once on /dev/null.
 - **s794**: Lint and build-floor reds are parsed from the full, ANSI-stripped output and remote runs get `CARGO_TERM_COLOR=never`, so the tasks touching the named file are parked instead of the batch being split (redoes s789, whose code never landed).
 - **s796**: The three landing lint-placement tests were red at a61fedd09e, which predates the #811 fix now on develop; this records it and changes no behaviour.
+- **s799**: Landing's build floor, base floor and fast tier now place each suite by its own `runs_on`, `remote = false` and device rules, so a batch touching `clients/swift` builds Swift on macOS instead of failing as "develop does not build".
 <!-- status:end -->
