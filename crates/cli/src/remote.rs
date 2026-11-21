@@ -416,7 +416,11 @@ mod tests {
         )
         .unwrap();
         assert!(f.contains("xcode-version: '16.4'"), "{f}");
-        assert!(!f.contains("rust-cache"));
+        assert!(
+            f.lines()
+                .all(|l| !l.trim_start().starts_with("- uses: Swatinem")),
+            "{f}"
+        );
         assert!(!d.path().join(".github").exists());
     }
 
