@@ -107,7 +107,7 @@ cp "$root/repo/.github/workflows/mason-run.yml" "$root/base-workflow.yml"
 # The scripted agent edits the workflow to report green and adds one of its own: neither may
 # reach the runner.
 cat > "$root/agent.sh" <<SH
-echo hello > hello.txt
+pwd > hello.txt
 mkdir -p .github/workflows .mason
 printf 'name: evil\non: push\n' > .github/workflows/mason-run.yml
 printf 'name: evil2\non: push\n' > .github/workflows/evil.yml
