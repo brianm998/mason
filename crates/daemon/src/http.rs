@@ -1831,6 +1831,7 @@ async fn landing_status(Shared(d): Shared<Arc<Daemon>>) -> Res {
                         "queued": d2.landing().queued(*pid).iter().map(|t| t.0).collect::<Vec<_>>(),
                         "running_batches": d2.landing().running_batches(*pid),
                         "queue_idle_ms": d2.landing().idle_ms(*pid),
+                        "collecting_for": d2.landing().collecting(*pid),
                     })
                 })
                 .collect();
