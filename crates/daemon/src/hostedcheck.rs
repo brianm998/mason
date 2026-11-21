@@ -453,6 +453,27 @@ pub fn stop_unwanted(d: &Arc<Daemon>) -> usize {
     n
 }
 
+/// Where `spec` runs, in words for the agent's result: "on GitHub Actions" or "on this Mac".
+pub fn where_ran(d: &Arc<Daemon>, spec: &CheckSpec) -> String {
+    use crate::remote as rm;
+    let local = || "on this Mac".to_string();
+    if !rm::any_remote(d) {
+        return local();
+    }
+    let Some(project) = rm::project_of(d, &spec.cwd) else {
+        return local();
+    };
+    let exec = match spec.place.as_ref() {
+        Some((t, s)) => rm::executor_for(d, &project, rm::Kind::Check, Some((Some(*t), &**s))),
+        None if spec.global => rm::executor_global(d, &project),
+        None => rm::Executor::Local,
+    };
+    match exec {
+        rm::Executor::GitHub { .. } => "on GitHub Actions".to_string(),
+        _ => local(),
+    }
+}
+
 /// The check on GitHub Actions, when the one function that decides where runs go says so
 /// (#697); `None` for the local path, which is every run until #698. The result is the same
 /// `CheckOutcome`: `passed` is what the command's exit says. A remote run that is lost is run
@@ -473,13 +494,16 @@ fn remote_check(d: &Arc<Daemon>, spec: &CheckSpec, id: &str) -> Option<Shared> {
         return None;
     };
     // The suite's build is the first part of what runs there (it was not run here).
-    let cmd = match place.and_then(|(_, s)| s.build.as_deref()) {
-        Some(b) if !spec.cmd.starts_with(b) => format!("{b} && {}", spec.cmd),
-        _ => spec.cmd.clone(),
-    };
+    // It goes in `RunSpec.build`, a separate process, not joined with `&&` (two `cd`s break).
+    let build = place
+        .and_then(|(_, s)| s.build.as_deref())
+        .filter(|b| !spec.cmd.starts_with(b));
     let site = rm::site_for(d, &project, &spec.cwd)?;
-    let rs = rm::spec_for(
-        &project, id, None, &cmd, spec.limit, &spec.env, &runs_on, &spec.tree,
+    let rs = rm::with_build(
+        rm::spec_for(
+            &project, id, None, &spec.cmd, spec.limit, &spec.env, &runs_on, &spec.tree,
+        ),
+        build,
     );
     // The units it holds, on record until it ends, for a daemon that restarts (#700).
     let _hold = rm::HoldGuard::new(&d.cfg.hosts_dir(), &rs, id, id, 1, &spec.log_dir);
