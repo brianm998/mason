@@ -5,14 +5,13 @@
 #  0. the unit tests: `phase` from result.json, and `build` beside `command` in run.json;
 #  1. remote on: a pushed run has the suite's build in `build` with the command, none has the
 #     build as its command (no separate build run), and the task lands;
-#  2. remote off: the check still runs its build as its own step, waiting for the compile slot,
+#  2. remote off: the check still runs its build as its own step on this Mac,
 #     and does not reach GitHub.
 set -euo pipefail
 trap 'rc=$?; [ "$rc" -eq 0 ] || echo "FAILED (exit $rc) at line $LINENO: $BASH_COMMAND" >&2' ERR
 cd "$(git rev-parse --show-toplevel)"
-root=$(mktemp -d /tmp/mason-s777.XXXXXX); daemon=""; gh=""; holder=""
+root=$(mktemp -d /tmp/mason-s777.XXXXXX); daemon=""; gh=""
 cleanup() {
-  [ -n "$holder" ] && kill "$holder" 2>/dev/null || true
   [ -n "$daemon" ] && kill -9 "$daemon" 2>/dev/null || true
   [ -n "$gh" ] && kill -9 "$gh" 2>/dev/null || true
   for hd in "$root"/d/h; do target/debug/step-host-ctl reap "$hd" >/dev/null 2>&1; done
@@ -77,7 +76,9 @@ next = "test"
 [step.test]
 type = "test"
 category = "testing"
-suites = ["checks"]
+command = "sh checks.sh"
+build = "true"
+uses = { test-suite = 1 }
 on_red = "develop"
 max_rounds = 2
 next = "land"
@@ -86,13 +87,6 @@ next = "land"
 type = "landing"
 category = "landing"
 
-[suite.checks]
-command = "sh checks.sh"
-parser = "tap"
-min_tests = 3
-level = "unit"
-build = "true"
-uses = { test-suite = 1 }
 TOML
 # The suite's own command is red: only the fake's artifact can make the step green.
 printf '#!/bin/sh\necho 1..1\necho "not ok 1 - ran here"\nexit 1\n' > "$root/repo/checks.sh"
@@ -107,7 +101,8 @@ cp "$root/repo/.github/workflows/mason-run.yml" "$root/base-workflow.yml"
 # The scripted agent edits the workflow to report green and adds one of its own: neither may
 # reach the runner.
 cat > "$root/agent.sh" <<SH
-echo hello > hello.txt
+# unique per task: a tree that already built green would skip its build step
+echo "hello \$(date +%s) \$\$ \$(pwd)" > hello.txt
 mkdir -p .github/workflows .mason
 printf 'name: evil\non: push\n' > .github/workflows/mason-run.yml
 printf 'name: evil2\non: push\n' > .github/workflows/evil.yml
@@ -141,11 +136,6 @@ start_daemon() {  # FORCE (1 or empty)
   daemon=$!
   until m status >/dev/null 2>&1; do kill -0 "$daemon" || { cat "$root/masond.log" >&2; exit 1; }; sleep 0.1; done
 }
-hold_slots() {
-  m hold --needs compile,test-suite --pipeline other --label "other work" >"$root/hold.out" &
-  holder=$!
-  until grep -q granted "$root/hold.out" 2>/dev/null; do kill -0 "$holder" || fail "the hold ended"; sleep 0.1; done
-}
 
 echo "== 0. unit tests"
 cargo test -q -p mason-daemon --lib -- remote::tests::a_runs_build_is_sent remote::tests::a_failed_run_says
@@ -158,6 +148,8 @@ folded=0
 while read -r _ new _; do
   case "$new" in 0000*) continue ;; esac
   rj=$(git --git-dir="$root/origin.git" show "$new:.mason/run.json" 2>/dev/null) || continue
+  # The agent's own commit carries a run.json it wrote; only what MASON pushed has a run name.
+  [ -n "$(printf '%s' "$rj" | jq -r '.run // empty')" ] || continue
   cmd=$(printf '%s' "$rj" | jq -r '.command')
   bld=$(printf '%s' "$rj" | jq -r '.build // empty')
   [ "$cmd" != "true" ] || fail "a separate build run was pushed (command is the build)"
@@ -165,16 +157,14 @@ while read -r _ new _; do
 done < "$root/pushes.log"
 [ "$folded" -ge 1 ] || fail "no pushed run.json has build and command together"
 
-echo "== 2. remote off: the build is its own step and waits for the compile slot"
+echo "== 2. remote off: the check builds on this Mac as its own step (the test step reuses that build)"
 kill -9 "$daemon"; daemon=""
 : > "$root/gh/requests.log"
 start_daemon ""
-hold_slots
 m task add "Local check" --project alpha --body "x" > /dev/null
-end=$((SECONDS + 120))
-until m task show 1 2>/dev/null | grep -qi 'compile'; do
-  [ $SECONDS -lt $end ] || fail "the check never showed it waits for compile"
-  sleep 0.3
-done
+# The suite's command is red here (only the fake artifact makes it green), so the task ends
+# failed; before that, run_check built on this Mac, and the test step then reused that build.
+wait_state 1 failed 180
+grep -q 'build already passed for this tree; reused.*task=1' "$root/masond.log" || fail "the local check did not build as a step of its own"
 ! grep -q 'head_sha=' "$root/gh/requests.log" || fail "a local check reached GitHub"
 echo "s777 passed"
