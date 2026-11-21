@@ -3505,7 +3505,7 @@ impl Runner {
                 && suite
                     .runs_on
                     .as_deref()
-                    .map_or(true, |r| r.starts_with("macos"));
+                    .is_none_or(|r| r.starts_with("macos"));
             let spec = crate::hostedcheck::CheckSpec {
                 id_prefix: format!("{prefix}-floor-{name}"),
                 log_dir: log_dir.to_path_buf(),
