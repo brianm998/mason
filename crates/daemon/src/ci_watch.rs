@@ -337,6 +337,18 @@ fn save(d: &Daemon, project: &str, s: &Saved) {
     }
 }
 
+/// Whether five minutes have passed since the last look at CI runs for suite proof.
+fn ci_proof_due() -> bool {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    let now = now_ms();
+    let last = LAST.load(Ordering::SeqCst);
+    now.saturating_sub(last) >= 300_000
+        && LAST
+            .compare_exchange(last, now, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+}
+
 /// Start the watch. One loop looks at every project; a project whose definition has no
 /// `[watch.ci]` costs nothing (no call to the CI host).
 pub fn spawn(d: &Arc<Daemon>) {
@@ -346,6 +358,19 @@ pub fn spawn(d: &Arc<Daemon>) {
         };
         let mut every = 20;
         for (pid, p) in &d.projects() {
+            // Suites the CI jobs cover are recorded green from its runs, at most every five
+            // minutes (#774); it needs no `[watch.ci]`.
+            if d.current_def(*pid)
+                .testing
+                .suites
+                .iter()
+                .any(|s| !s.ci_jobs.is_empty())
+                && ci_proof_due()
+            {
+                if let Ok((gh, _)) = source(p, "ci_jobs") {
+                    crate::suites::record_ci_greens(&d, *pid, &gh);
+                }
+            }
             let Some(rules) = d.current_def(*pid).watch_ci.clone() else {
                 // Switched off: a freeze it held does not outlive it.
                 if d.store.clear_ci_freeze(&p.id).unwrap_or(false) {
