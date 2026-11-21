@@ -33,16 +33,27 @@ fn a_batch_that_does_not_build_is_not_landed_and_the_task_that_broke_it_goes_bac
     wait_for("the one that does not to go back", 60, || {
         w.sent_back(broken).is_some()
     });
+    let report = || {
+        format!(
+            "broken sent back: {:?}\nfine sent back: {:?}\nbatches: {:?}\nfast tier: {}",
+            w.sent_back(broken),
+            w.sent_back(fine),
+            w.d.store.batches(Some("scratch"), 10).unwrap(),
+            w.fast_tier_logs()
+        )
+    };
     let why = w.sent_back(broken).unwrap();
-    assert!(why.contains("alpha"), "{why}");
-    assert!(w.on_main("b/ok.txt"));
+    assert!(why.contains("alpha"), "{why}\n{}", report());
+    assert!(w.on_main("b/ok.txt"), "{}", report());
     assert!(
         !w.on_main("a/red.build.alpha"),
-        "a batch that does not build must not land"
+        "a batch that does not build must not land\n{}",
+        report()
     );
     assert!(
         w.sent_back(fine).is_none(),
-        "the innocent task is not parked"
+        "the innocent task is not parked\n{}",
+        report()
     );
 }
 
