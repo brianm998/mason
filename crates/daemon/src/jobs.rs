@@ -1781,6 +1781,22 @@ impl TestChecks {
         })
     }
 
+    /// `run`, a check that may go to GitHub. When it does, the agent is idle for all of it: the
+    /// wait for a pool unit, for a runner to pick the job up, and the run itself. The whole wait
+    /// is credited to the deadline as it goes (so a restart keeps it), as GitHub time, apart
+    /// from the slot queue (#799). The hard cap (twice the budget plus the credit) is unchanged.
+    fn remote_credited<T>(
+        &self,
+        spec: &crate::hostedcheck::CheckSpec,
+        run: impl FnOnce() -> T,
+    ) -> T {
+        if !crate::hostedcheck::goes_remote(&self.slots.d, spec) {
+            return run();
+        }
+        self.edit_check(|c, _| c.github = true);
+        credit_remote_wait(&self.extra, crate::sched::CREDIT_EVERY, run)
+    }
+
     /// Merge the base into the worktree if a test the last check failed has left the ledger.
     fn sync_fixed(&self) {
         let Some((pid, base)) = &self.base_fold else {
@@ -2233,7 +2249,9 @@ impl TestChecks {
             let usual = self.estimate(&name, "run").unwrap_or(0);
             self.edit_check(|c, _| c.usual_ms = usual);
             let pr = self.check_progress(&format!("check {name}"), Some(suite.clone()));
-            let res = crate::hostedcheck::run_with(&self.slots.d, &rspec, pr.as_ref());
+            let res = self.remote_credited(&rspec, || {
+                crate::hostedcheck::run_with(&self.slots.d, &rspec, pr.as_ref())
+            });
             drop(lease);
             match &res {
                 Ok(o) if o.passed => self.reds.passed(&name),
@@ -2635,7 +2653,9 @@ impl TestChecks {
         };
         self.phase(mason_core::checks::CheckPhase::Running);
         let pr = self.check_progress("check tests", None);
-        let res = crate::hostedcheck::run_with(&self.slots.d, &tspec, pr.as_ref());
+        let res = self.remote_credited(&tspec, || {
+            crate::hostedcheck::run_with(&self.slots.d, &tspec, pr.as_ref())
+        });
         drop(test_lease);
         self.slots.take_agent_slot_back();
         // The build ran inside this run: what it says of the build is recorded for the tree.
@@ -2740,6 +2760,14 @@ fn credit_wait<T>(
     every: Duration,
     wait: impl FnOnce() -> T,
 ) -> T {
+    credit_wait_with(&|d| extra.add(d), every, wait)
+}
+
+fn credit_wait_with<T>(
+    add: &(dyn Fn(Duration) + Sync),
+    every: Duration,
+    wait: impl FnOnce() -> T,
+) -> T {
     let done = std::sync::atomic::AtomicBool::new(false);
     std::thread::scope(|s| {
         let ticker = s.spawn(|| {
@@ -2748,7 +2776,7 @@ fn credit_wait<T>(
             while !done.load(std::sync::atomic::Ordering::SeqCst) {
                 std::thread::sleep(nap);
                 if last.elapsed() >= every {
-                    extra.add(last.elapsed());
+                    add(last.elapsed());
                     last = Instant::now();
                 }
             }
@@ -2757,9 +2785,18 @@ fn credit_wait<T>(
         let out = wait();
         done.store(true, std::sync::atomic::Ordering::SeqCst);
         let last = ticker.join().unwrap_or_else(|_| Instant::now());
-        extra.add(last.elapsed());
+        add(last.elapsed());
         out
     })
+}
+
+/// [`credit_wait`] for time spent on GitHub: added to the deadline's GitHub part too.
+fn credit_remote_wait<T>(
+    extra: &mason_adapter_api::DeadlineExtra,
+    every: Duration,
+    wait: impl FnOnce() -> T,
+) -> T {
+    credit_wait_with(&|d| extra.add_remote(d), every, wait)
 }
 
 struct CheckSlots {
@@ -3689,9 +3726,17 @@ fn agent_job(c: &Ctx) {
         .ok()
         .and_then(|n| n.trim().parse().ok())
         .unwrap_or(0);
+        // From the step's recorded launch, not from this process: a daemon that restarted
+        // during the step started `started` again (#799).
+        let launched =
+            c.d.world()
+                .ok()
+                .and_then(|w| w.step_runs.get(&c.run).map(|r| r.started_at.0));
+        let (elapsed, restarted) = launch_elapsed(launched, now_ms(), c.d.started_ms, started);
         let note = crate::deadline::timeout_note(
             budget,
-            started.elapsed(),
+            elapsed,
+            restarted,
             &spec.deadline_extra,
             seen.silent_for(),
             commits,
@@ -3700,6 +3745,23 @@ fn agent_job(c: &Ctx) {
         return c.fail(note);
     }
     finish_agent(c, report, &dir);
+}
+
+/// The time since the step's launch (`launched_ms`, from its recorded start), and whether the
+/// daemon started after it. Without a record, the time since `started` in this process.
+fn launch_elapsed(
+    launched_ms: Option<u64>,
+    now_ms: u64,
+    daemon_started_ms: u64,
+    started: Instant,
+) -> (Duration, bool) {
+    match launched_ms {
+        Some(l) if l > 0 => (
+            Duration::from_millis(now_ms.saturating_sub(l)),
+            daemon_started_ms > l,
+        ),
+        _ => (started.elapsed(), false),
+    }
 }
 
 /// What the agent has produced: a count of chunks and events, and when the last came.
@@ -5148,6 +5210,48 @@ mod tests {
         });
         assert!(!seen.is_zero());
         assert!(extra.get() >= seen);
+    }
+
+    #[test]
+    fn a_remote_wait_is_credited_as_waiting_on_github() {
+        // #799: the wait for a pool unit, for a runner and for the run goes to the deadline
+        // as it goes, in the queue credit and in its GitHub part.
+        let extra = mason_adapter_api::DeadlineExtra::default();
+        let seen = credit_remote_wait(&extra, Duration::ZERO, || {
+            while extra.waited().is_zero() {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            extra.waited()
+        });
+        assert!(!seen.is_zero());
+        assert!(extra.waited() >= seen);
+        assert_eq!(extra.remote(), extra.waited());
+        // The slot queue's credit is not GitHub time.
+        let before = extra.remote();
+        credit_wait(&extra, Duration::ZERO, || {
+            while extra.waited() <= before {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+        assert_eq!(extra.remote(), before);
+        assert!(extra.waited() > extra.remote());
+    }
+
+    #[test]
+    fn elapsed_time_counts_from_the_launch_not_the_daemon_start() {
+        let (e, restarted) = launch_elapsed(
+            Some(1_000),
+            4 * 3_600_000 + 1_000,
+            3_000_000,
+            Instant::now(),
+        );
+        assert_eq!(e, Duration::from_secs(4 * 3600));
+        assert!(restarted);
+        let (e, restarted) = launch_elapsed(Some(1_000), 61_000, 500, Instant::now());
+        assert_eq!(e, Duration::from_secs(60));
+        assert!(!restarted);
+        let (_, restarted) = launch_elapsed(None, 61_000, 500, Instant::now());
+        assert!(!restarted);
     }
 
     fn def_with(extra: &str) -> Definition {
