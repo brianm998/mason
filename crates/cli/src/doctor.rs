@@ -290,13 +290,15 @@ fn check_remote_run(p: &ProjectCfg, out: &mut Vec<Finding>) {
         });
         GitHub::new(http, &r.api, &r.repo, t)
     });
-    let (repo, actions) = match live {
+    let (repo, actions, cache) = match live {
         Ok(gh) => (
             gh.repository().map_err(|e| e.detail),
             gh.actions_readable().map_err(|e| e.detail),
+            gh.cache_usage_bytes().map_err(|e| e.detail),
         ),
-        Err(e) => (Err(e.clone()), Err(e)),
+        Err(e) => (Err(e.clone()), Err(e.clone()), Err(e)),
     };
+    out.extend(cache_usage_finding(&p.id, &r.repo, cache));
     out.extend(remote_run_findings(
         &p.id,
         &p.base_ref(),
@@ -306,6 +308,26 @@ fn check_remote_run(p: &ProjectCfg, out: &mut Vec<Finding>) {
         repo,
         actions,
     ));
+}
+
+/// GitHub's Actions cache limit per repository.
+const CACHE_LIMIT_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+
+/// Warn when the repository's Actions caches near GitHub's 10 GB limit: past it GitHub evicts
+/// the oldest, which are the ones the base branch's CI and the warm cache rely on. An unread
+/// usage says nothing (the token may not see it).
+fn cache_usage_finding(name: &str, repo_slug: &str, usage: Result<u64, String>) -> Option<Finding> {
+    let bytes = usage.ok()?;
+    let gb = bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+    if bytes >= CACHE_LIMIT_BYTES / 10 * 8 {
+        Some(warn(format!(
+            "project {name}: the Actions caches of {repo_slug} use {gb:.1} GB of GitHub's 10 GB limit; past it GitHub evicts the oldest, so the warm build cache and CI caches are lost. Delete the caches of old `mason/run/**` refs at https://github.com/{repo_slug}/actions/caches"
+        )))
+    } else {
+        Some(ok(format!(
+            "project {name}: the Actions caches of {repo_slug} use {gb:.1} GB of 10 GB"
+        )))
+    }
 }
 
 /// The findings for remote runs, from what was read. Pure, so it is tested on fake answers.
@@ -780,6 +802,16 @@ mod tests {
             Ok(repo),
             actions,
         )
+    }
+
+    #[test]
+    fn the_cache_usage_warns_near_the_limit() {
+        let gb = 1024u64 * 1024 * 1024;
+        let f = cache_usage_finding("p", "o/r", Ok(10 * gb + gb / 2)).unwrap();
+        assert!(matches!(f.level, Level::Warn) && f.text.contains("10.5 GB"));
+        let f = cache_usage_finding("p", "o/r", Ok(2 * gb)).unwrap();
+        assert!(matches!(f.level, Level::Ok));
+        assert!(cache_usage_finding("p", "o/r", Err("no".into())).is_none());
     }
 
     #[test]
