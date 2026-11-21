@@ -161,6 +161,11 @@ pub struct Runtime {
     running: Mutex<BTreeSet<String>>,
     /// The last cycle's summary, for the Health page.
     last: Mutex<Option<Value>>,
+    /// The quiet timer of each full-test schedule, by row name (s782). Kept in memory: a
+    /// restart starts the wait again, which only delays a run the tip check would allow anyway.
+    pub(crate) quiet: Mutex<BTreeMap<String, mason_core::full_test::QuietTimer>>,
+    /// How the next run of a schedule was triggered, and whether it is forced.
+    pub(crate) triggers: Mutex<BTreeMap<String, (String, bool)>>,
 }
 
 // ---- the tick ----------------------------------------------------------------------------
@@ -246,7 +251,19 @@ pub fn tick(d: &Arc<Daemon>) {
             } else {
                 due(Some(row.last_run), now, row.every_ms)
             };
-            if is_due {
+            let quiet_fires = spec
+                .ci
+                .as_ref()
+                .and_then(|c| c.when_quiet)
+                .is_some_and(|dur| look_quiet(d, &p.id, &name, dur, now));
+            if quiet_fires && !is_due {
+                d.intro
+                    .triggers
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(name.clone(), (mason_core::full_test::QUIET.into(), false));
+            }
+            if is_due || quiet_fires {
                 jobs.push((name, Job::Schedule(p.id.clone(), spec.name.clone())));
             }
         }
@@ -278,6 +295,33 @@ pub fn tick(d: &Arc<Daemon>) {
             tracing::warn!("could not start a recurring job");
         }
     }
+}
+
+/// Does the project have work in the pipeline? Tasks waiting for the owner do not count.
+pub fn project_busy(d: &Daemon, project: &str) -> bool {
+    let Some(pid) = d.project_id_by_name(project) else {
+        return true;
+    };
+    match d.world() {
+        Ok(w) => w
+            .tasks
+            .values()
+            .any(|t| t.project == pid && mason_core::full_test::busy_state(t.state)),
+        // Not knowing is not quiet.
+        Err(_) => true,
+    }
+}
+
+/// One look at a project for a quiet trigger. True once per quiet spell, when it has lasted `dur`.
+fn look_quiet(d: &Daemon, project: &str, name: &str, dur_ms: u64, now: u64) -> bool {
+    let busy = project_busy(d, project);
+    d.intro
+        .quiet
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(name.to_string())
+        .or_default()
+        .look(busy, now, dur_ms)
 }
 
 enum Job {
@@ -336,6 +380,11 @@ fn run_job(d: &Arc<Daemon>, name: &str, job: &Job) -> String {
 
 /// Run the job called `name` now (`introspect`, `analyst:<project>` or `<project>/<schedule>`).
 pub fn run_now(d: &Arc<Daemon>, name: &str) -> Result<String, String> {
+    run_now_forced(d, name, false)
+}
+
+/// As [`run_now`]; `force` makes a full-test schedule start whatever the record says.
+pub fn run_now_forced(d: &Arc<Daemon>, name: &str, force: bool) -> Result<String, String> {
     let job = if name == "introspect" {
         Job::Cycle
     } else if let Some(p) = name.strip_prefix("analyst:") {
@@ -357,6 +406,14 @@ pub fn run_now(d: &Arc<Daemon>, name: &str) -> Result<String, String> {
     if !claim(d, name) {
         return Err(format!("{name} is already running"));
     }
+    d.intro
+        .triggers
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(
+            name.to_string(),
+            (mason_core::full_test::MANUAL.into(), force),
+        );
     let said = run_job(d, name, &job);
     d.intro
         .running
@@ -1416,6 +1473,7 @@ pub fn health(d: &Daemon) -> Value {
                 "last_task": r.last_task, "last_status": r.last_status,
                 "baseline": r.baseline.as_ref().map(|b| b.len()),
                 "follow": crate::ci_schedule::follow_view(r),
+                "full": crate::ci_schedule::full_view_of_row(d, r),
             })
         })
         .collect();
