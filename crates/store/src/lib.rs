@@ -3984,6 +3984,64 @@ impl Store {
         })
     }
 
+    /// A run of the suite on the base branch's tip was red: where, which tests, when. Replaces
+    /// the suite's earlier record.
+    pub fn put_suite_red(
+        &self,
+        project: &str,
+        suite: &str,
+        base: &str,
+        tests: &[String],
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        let (p, s, b) = (project.to_string(), suite.to_string(), base.to_string());
+        let tests = tests.join("\n");
+        self.write(move |c| {
+            c.execute(
+                "INSERT OR REPLACE INTO suite_red(project, suite, base, tests, at_ms) VALUES (?1,?2,?3,?4,?5)",
+                params![p, s, b, tests, now_ms as i64],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// The suite's last red run on the base branch: (base, failing tests, when), if it has not
+    /// since been cleared by a green.
+    pub fn suite_red(
+        &self,
+        project: &str,
+        suite: &str,
+    ) -> Result<Option<(String, Vec<String>, u64)>, StoreError> {
+        let (p, s) = (project.to_string(), suite.to_string());
+        self.read(move |c| {
+            c.query_row(
+                "SELECT base, tests, at_ms FROM suite_red WHERE project = ?1 AND suite = ?2",
+                params![p, s],
+                |r| {
+                    let tests: String = r.get(1)?;
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        tests.lines().map(str::to_string).collect(),
+                        r.get::<_, i64>(2)? as u64,
+                    ))
+                },
+            )
+            .optional()
+        })
+    }
+
+    /// A green run ends the suite's red record.
+    pub fn clear_suite_red(&self, project: &str, suite: &str) -> Result<(), StoreError> {
+        let (p, s) = (project.to_string(), suite.to_string());
+        self.write(move |c| {
+            c.execute(
+                "DELETE FROM suite_red WHERE project = ?1 AND suite = ?2",
+                params![p, s],
+            )
+            .map(|_| ())
+        })
+    }
+
     /// Every base a suite was recorded green at, newest first.
     pub fn suite_green_bases(
         &self,
