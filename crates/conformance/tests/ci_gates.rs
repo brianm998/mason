@@ -66,9 +66,9 @@ fn ci_cancels_superseded_runs() {
         block.contains("cancel-in-progress: ${{ github.ref != 'refs/heads/develop' }}"),
         "{block}"
     );
-    // The nightly run must not share a group with pushes.
+    // The full run must not share a group with pushes.
     assert!(
-        block.contains("github.event_name == 'schedule' && 'nightly' || 'push'"),
+        block.contains("github.event_name == 'workflow_dispatch' && 'full' || 'push'"),
         "{block}"
     );
 }
@@ -116,4 +116,42 @@ fn the_test_step_has_a_fast_fmt_suite_that_holds_no_slot() {
     assert!(suite.contains("level = \"unit\"") && suite.contains("uses = {}"));
     assert!(!suite.contains("build ="), "no build step");
     assert!(text.contains("\"crates/**\" = [\"cargo-workspace\", \"fmt\"]"));
+}
+
+/// s800: a push to develop runs only the fast jobs; the full matrix is `workflow_dispatch`
+/// (and pull requests), started by MASON's full-test schedule; there is no GitHub cron.
+#[test]
+fn push_runs_only_the_fast_jobs_and_the_full_matrix_is_dispatched() {
+    let t = ci();
+    assert!(!t.contains("\n  schedule:"), "no GitHub cron");
+    assert!(!t.contains("cron:"), "no GitHub cron");
+    let on = &t[t.find("\non:").expect("on:")..t.find("\nconcurrency:").unwrap()];
+    assert!(on.contains("\n  workflow_dispatch:"), "{on}");
+    assert!(on.contains("\n      macos:"), "an input for the macOS legs");
+    assert!(t.contains("run-name:") && t.contains("'CI: full'"));
+    for name in ["lint", "windows", "dco"] {
+        assert!(
+            !job(&t, name).contains("event_name != 'push'"),
+            "{name} is a fast job"
+        );
+    }
+    for name in [
+        "test",
+        "exit-scripts",
+        "monitor-swift",
+        "monitor-compose",
+        "device-sample-ios",
+        "device-sample-android",
+    ] {
+        assert!(
+            job(&t, name).contains("if: github.event_name != 'push'"),
+            "{name} must not run on push"
+        );
+    }
+    for name in ["exit-scripts-macos", "monitor-compose-macos"] {
+        assert!(
+            job(&t, name).contains("if: github.event_name == 'workflow_dispatch' && inputs.macos"),
+            "{name} runs only on a full run with macOS"
+        );
+    }
 }

@@ -1264,3 +1264,213 @@ fn a_develop_run_of_only_the_failing_tests_that_fails_the_same_test_excuses_it()
     let ledger = d.store.ledger().unwrap();
     assert!(ledger.iter().any(|e| e.test == "legacy"), "{ledger:?}");
 }
+
+// ---- #774: the idle debt pass runs each suite once per tip and settles from CI ----
+
+/// A world whose suite appends a line to a log each time it runs, then behaves as CHECKS does.
+fn counting_world(
+    suite_extra: &str,
+    log: &std::path::Path,
+) -> (Scratch, Arc<mason_daemon::Daemon>) {
+    let body = CHECKS.replacen(
+        "#!/bin/sh\n",
+        &format!("#!/bin/sh\necho run >> {}\n", log.display()),
+        1,
+    );
+    let definition = def(suite_extra, "", "").replace("sh checks.sh", "sh counted.sh");
+    let s = world(
+        vec![commit(HELLO, "add hello")],
+        &[("counted.sh", &body)],
+        &definition,
+    );
+    // The hourly pass is off: the test runs the pass itself.
+    let d = s.start_with(|c| {
+        c.env_retry = Duration::from_millis(200);
+        c.debt_interval = Duration::ZERO;
+    });
+    (s, d)
+}
+
+fn runs_of(log: &std::path::Path) -> usize {
+    std::fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .count()
+}
+
+fn base_tip(d: &Arc<mason_daemon::Daemon>) -> String {
+    let pid = d.project_id_by_name("scratch").unwrap();
+    let p = d.project(pid).unwrap().clone();
+    mason_landing::git::run(&p.path, &["rev-parse", &p.base_ref()])
+        .unwrap()
+        .trim()
+        .to_string()
+}
+
+/// The task landed; its debts are put back as owed with no green on record.
+fn owe(d: &Arc<mason_daemon::Daemon>, t: TaskId, scopes: &[&str]) {
+    for sc in scopes {
+        d.store
+            .add_debt(t.0, "scratch", sc, "owner skipped", "brian", false, 0)
+            .unwrap();
+    }
+    d.store
+        .write(|c| {
+            c.execute("DELETE FROM suite_green", [])?;
+            c.execute("DELETE FROM suite_skip_green", []).map(|_| ())
+        })
+        .unwrap();
+}
+
+fn open_debts(d: &Arc<mason_daemon::Daemon>, t: TaskId) -> usize {
+    d.store
+        .debts(Some(t.0), true)
+        .unwrap()
+        .iter()
+        .filter(|x| x.status == "open")
+        .count()
+}
+
+fn now_wall_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+}
+
+#[test]
+fn three_debts_of_different_scopes_on_one_tip_run_the_suite_once_and_one_green_settles_all() {
+    let runs = tempfile::tempdir().unwrap();
+    let log = runs.path().join("ran");
+    let (_s, d) = counting_world("", &log);
+    let t = file_it(&d, "Add hello");
+    wait_state(&d, t, State::Landed, 120);
+    owe(&d, t, &["suite:checks", "step:test", "tests:all"]);
+    let before = runs_of(&log);
+    mason_daemon::suites::run_idle_debts(&d);
+    assert_eq!(
+        runs_of(&log) - before,
+        1,
+        "the suite ran once for three debts"
+    );
+    assert_eq!(open_debts(&d, t), 0);
+    mason_daemon::suites::run_idle_debts(&d);
+    assert_eq!(runs_of(&log) - before, 1, "nothing more to run");
+}
+
+#[test]
+fn after_a_red_a_new_tip_runs_the_suite_only_when_it_touched_a_red_module() {
+    let runs = tempfile::tempdir().unwrap();
+    let log = runs.path().join("ran");
+    let (s, d) = counting_world("", &log);
+    let t = file_it(&d, "Add hello");
+    wait_state(&d, t, State::Landed, 120);
+    owe(&d, t, &["suite:checks"]);
+    let pid = d.project_id_by_name("scratch").unwrap();
+    d.store
+        .put_suite_red(
+            "scratch",
+            "checks",
+            &base_tip(&d),
+            &["probe::resolver::resolves".to_string()],
+            now_wall_ms(),
+        )
+        .unwrap();
+    let before = runs_of(&log);
+    // The same tip: nothing runs.
+    mason_daemon::suites::run_idle_debts(&d);
+    assert_eq!(runs_of(&log), before);
+    // A new tip that touched no red module: nothing runs.
+    s.push_files(&[("docs/note.txt", "x\n")], "unrelated");
+    d.fetch_remote(pid).unwrap();
+    mason_daemon::suites::run_idle_debts(&d);
+    assert_eq!(runs_of(&log), before);
+    assert_eq!(open_debts(&d, t), 1);
+    // A later one that touched the `resolver` module: the suite runs again, and is green.
+    s.push_files(&[("src/resolver/mod.txt", "x\n")], "touch the module");
+    d.fetch_remote(pid).unwrap();
+    mason_daemon::suites::run_idle_debts(&d);
+    assert_eq!(runs_of(&log) - before, 1);
+    assert_eq!(open_debts(&d, t), 0);
+    assert!(d.store.suite_red("scratch", "checks").unwrap().is_none());
+}
+
+struct FakeCi {
+    sha: String,
+    jobs: Vec<(&'static str, &'static str)>,
+}
+
+impl mason_daemon::ci_watch::Source for FakeCi {
+    fn runs(&self, _: &str) -> Result<Vec<mason_adapters::github::ActionsRun>, String> {
+        Ok(vec![mason_adapters::github::ActionsRun {
+            id: 7,
+            workflow: "ci".into(),
+            sha: self.sha.clone(),
+            url: String::new(),
+            created_ms: 1,
+            conclusion: Some("failure".into()),
+            event: "push".into(),
+        }])
+    }
+    fn jobs(&self, _: u64) -> Result<Vec<mason_adapters::github::ActionsJob>, String> {
+        Ok(self
+            .jobs
+            .iter()
+            .enumerate()
+            .map(|(i, (n, c))| mason_adapters::github::ActionsJob {
+                id: i as u64,
+                name: n.to_string(),
+                conclusion: Some(c.to_string()),
+                status: "completed".into(),
+            })
+            .collect())
+    }
+    fn log_tail(&self, _: u64) -> Option<String> {
+        None
+    }
+}
+
+#[test]
+fn a_ci_run_with_every_mapped_job_green_records_the_suite_and_settles_a_debt_one_red_job_does_not()
+{
+    let runs = tempfile::tempdir().unwrap();
+    let log = runs.path().join("ran");
+    let (_s, d) = counting_world("ci_jobs = [\"test (ubuntu-latest, *)\", \"lint\"]", &log);
+    let pid = d.project_id_by_name("scratch").unwrap();
+    let t = file_it(&d, "Add hello");
+    wait_state(&d, t, State::Landed, 120);
+    owe(&d, t, &["suite:checks"]);
+    let before = runs_of(&log);
+    // One mapped job red (the run's conclusion is failure either way): nothing is recorded.
+    let red = FakeCi {
+        sha: base_tip(&d),
+        jobs: vec![
+            ("test (ubuntu-latest, 1)", "success"),
+            ("test (ubuntu-latest, 2)", "failure"),
+            ("lint", "success"),
+        ],
+    };
+    assert_eq!(mason_daemon::suites::record_ci_greens(&d, pid, &red), 0);
+    assert_eq!(open_debts(&d, t), 1);
+    // A mapped pattern with no job in the run is not covered either.
+    let missing = FakeCi {
+        sha: base_tip(&d),
+        jobs: vec![("test (ubuntu-latest, 1)", "success")],
+    };
+    assert_eq!(mason_daemon::suites::record_ci_greens(&d, pid, &missing), 0);
+    // Every mapped job green, an unmapped one red: the suite is green at the run's commit.
+    let green = FakeCi {
+        sha: base_tip(&d),
+        jobs: vec![
+            ("test (ubuntu-latest, 1)", "success"),
+            ("test (ubuntu-latest, 2)", "success"),
+            ("lint", "success"),
+            ("swift", "failure"),
+        ],
+    };
+    assert_eq!(mason_daemon::suites::record_ci_greens(&d, pid, &green), 1);
+    assert_eq!(open_debts(&d, t), 0);
+    let how = d.store.debts(Some(t.0), false).unwrap()[0].how.clone();
+    assert!(how.contains("checks green on"), "{how}");
+    assert_eq!(runs_of(&log), before, "the suite was not run");
+}

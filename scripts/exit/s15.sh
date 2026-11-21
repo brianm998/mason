@@ -52,7 +52,11 @@ echo "-- a mode whose service is missing is refused, naming it"
 m a_ci_mode_without_a_remote_or_ci_section_is_refused_naming_what_is_missing
 
 echo "== 2. kill -9 during CI and during a pull request"
-t mason-daemon it landing_crash::killing_the_daemon_during_ci_or_a_pull_request_leaves_nothing_behind_and_lands_once
+if [ -z "${MASON_TESTS_ALREADY_RAN:-}" ]; then
+  # One test per (mode, point) since #779: run the whole module and require all 13 to pass.
+  cargo test -q -p mason-daemon --test it landing_crash::ci_at:: 2>&1 | tail -3 | grep -q 'test result: ok. 13 passed' \
+    || { echo "FAILED: landing_crash::ci_at" >&2; exit 1; }
+fi
 echo "   direct-ci: ci_pushed ci_finished batch_red before/after promote; pr-batch: pr_pushed pr_opened pr_checked ...; host-queue: pr_opened ...: each recovered, nothing left on the host"
 
 echo "== 3. the adapters on recorded responses"
