@@ -78,9 +78,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          xcode=/Applications/Xcode_16.4.app
-          test -d "$xcode" || { echo "$xcode is not on this runner image" >&2; exit 1; }
-          sudo xcode-select -s "$xcode/Contents/Developer"
+          # Prefer the version the run asks for (run.json's `xcode`, else 16.4); the runner image
+          # may not have it (macos-26 does not), and then its default Xcode is used.
+          want="$(jq -r '.xcode // empty' .mason/run.json)"
+          want="${want:-16.4}"
+          xcode="/Applications/Xcode_${want}.app"
+          if [ -d "$xcode" ]; then
+            sudo xcode-select -s "$xcode/Contents/Developer"
+          else
+            echo "Xcode $want is not on this runner image; using the image's default Xcode instead" >&2
+            xcode-select -p >/dev/null 2>&1 || { echo "no Xcode is installed on this runner" >&2; exit 1; }
+          fi
           xcodebuild -version
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: "21" }
