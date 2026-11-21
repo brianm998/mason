@@ -1,0 +1,11 @@
+.mason/run.json
+crates/adapters/src/github.rs
+crates/conformance/tests/ci_gates.rs
+crates/core/src/ci_watch.rs
+crates/daemon/src/ci_watch.rs
+crates/daemon/tests/it/ci_watch.rs
+crates/daemon/tests/it/red_base.rs
+docs/decisions/0793-fast-ci-on-push-full-ci-dispatched.md
+docs/examples/mason-self.project.toml
+docs/stages/s800.md
+scripts/exit/s800.sh
