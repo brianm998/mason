@@ -617,6 +617,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s751**: A narrowed run whose target group has a module filter now puts the filter at the end of the template's own `--` section, so the template's `--config` no longer reaches the test binary.
 - **s752**: Added `CountTextTest` for `countText` in the Compose monitor, as a test of running `compose-clients` on GitHub and judging it from its JUnit XML.
 - **s753**: Edge-case tests for `mason_landing::config::parse_duration` (whitespace, upper-case units, bare number, empty, signed, overflow), and a fix so an overflowing value returns `None` instead of panicking (debug) or wrapping (release).
+- **s754**: Home's Active models says how many agents are working and how many wait on GitHub checks, here or for a slot, and shows the GitHub runner pool in use by checks, test steps, batches and debts.
 - **s755**: The `swift-clients` suite sets `runs_on = "macos-latest"` so a remote run builds the Swift monitor on macOS, with a new `Format.percent` XCTest selecting it.
 - **s759**: Remote snapshots carry `.mason/changed-files.txt` (and `.mason/base-sha`), and the exit-script helpers read it, so `exit-scripts` no longer fails `no-merge-base` on GitHub.
 - **s760**: Runs adopted from before a restart are checked against GitHub: finished ones free their runner units and lose their ref, and checks nobody can collect are cancelled.
