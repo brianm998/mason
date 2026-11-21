@@ -1879,6 +1879,7 @@ pub struct HoldGuard {
 }
 
 impl HoldGuard {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         hosts: &Path,
         spec: &RunSpec,
