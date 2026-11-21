@@ -1,0 +1,7 @@
+.mason/run.json
+crates/adapters/src/github.rs
+crates/daemon/src/progress.rs
+crates/daemon/src/remote.rs
+docs/decisions/0742-live-phase-from-jobs-api.md
+docs/stages/s749.md
+scripts/exit/s749.sh
