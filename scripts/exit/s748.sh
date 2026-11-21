@@ -11,6 +11,7 @@ trap 'rc=$?; [ "$rc" -eq 0 ] || echo "FAILED (exit $rc) at line $LINENO: $BASH_C
 cd "$(git rev-parse --show-toplevel)"
 root=$(mktemp -d /tmp/mason-s748.XXXXXX); daemon=""; gh=""; holder=""
 cleanup() {
+  exec 3>&- 2>/dev/null || true
   [ -n "$holder" ] && kill "$holder" 2>/dev/null || true
   [ -n "$daemon" ] && kill -9 "$daemon" 2>/dev/null || true
   [ -n "$gh" ] && kill -9 "$gh" 2>/dev/null || true
@@ -141,8 +142,11 @@ start_daemon() {  # FORCE (1 or empty)
   until m status >/dev/null 2>&1; do kill -0 "$daemon" || { cat "$root/masond.log" >&2; exit 1; }; sleep 0.1; done
 }
 hold_slots() {
-  m hold --needs compile,test-suite --pipeline other --label "other work" >"$root/hold.out" &
+  # stdin is a fifo kept open on fd 3 (a background job's own stdin is /dev/null, which ends the hold at once)
+  rm -f "$root/hold.in" "$root/hold.out"; mkfifo "$root/hold.in"
+  m hold --needs compile,test-suite --pipeline other --label "other work" <"$root/hold.in" >"$root/hold.out" &
   holder=$!
+  exec 3>"$root/hold.in"
   until grep -q granted "$root/hold.out" 2>/dev/null; do kill -0 "$holder" || fail "the hold ended"; sleep 0.1; done
 }
 
@@ -157,7 +161,7 @@ until grep -q 'head_sha=' "$root/gh/requests.log" 2>/dev/null; do
 done
 kill -0 "$holder" || fail "the held slots were released"
 wait_state 0 landed 180
-kill "$holder" 2>/dev/null || true; holder=""
+exec 3>&-; kill "$holder" 2>/dev/null || true; holder=""
 
 echo "== 2. remote off: the same check waits for the compile slot"
 kill -9 "$daemon"; daemon=""
