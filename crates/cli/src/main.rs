@@ -2808,13 +2808,35 @@ fn main() {
                     println!("other pipeline: {l}");
                 }
             }
+            if let Some(l) = agents_line(&s) {
+                println!("agents: {l}");
+            }
             for a in s["active"].as_array().into_iter().flatten() {
                 println!(
-                    "active: #{} {} on {}",
+                    "active: #{} {} on {}{}",
                     a["task"],
                     a["step"].as_str().unwrap_or("?"),
-                    a["display"].as_str().unwrap_or("?")
+                    a["display"].as_str().unwrap_or("?"),
+                    match a["state"].as_str() {
+                        Some("working") => " (working)".to_string(),
+                        Some("waiting_check") => format!(
+                            " (waiting on a check {})",
+                            if a["where"] == "github" {
+                                "on GitHub"
+                            } else {
+                                "here"
+                            }
+                        ),
+                        Some("waiting_slot") => format!(
+                            " (waiting for {})",
+                            a["resource"].as_str().unwrap_or("a slot")
+                        ),
+                        _ => String::new(),
+                    }
                 );
+            }
+            if let Some(l) = github_line(&s["remote"]) {
+                println!("on GitHub: {l}");
             }
             println!(
                 "projects: {}",
@@ -4344,6 +4366,88 @@ mod open_session_tests {
     }
 }
 
+/// "7 agents: 2 working, 5 waiting on GitHub checks" from `mason status --json`; `None` when no
+/// agent has a state.
+fn agents_line(s: &Value) -> Option<String> {
+    let states: Vec<(&str, &str)> = s["active"]
+        .as_array()?
+        .iter()
+        .filter_map(|a| Some((a["state"].as_str()?, a["where"].as_str().unwrap_or(""))))
+        .collect();
+    if states.is_empty() {
+        return None;
+    }
+    let n = |f: &dyn Fn(&(&str, &str)) -> bool| states.iter().filter(|x| f(x)).count();
+    let mut parts = vec![];
+    for (c, w) in [
+        (n(&|x| x.0 == "working"), "working".to_string()),
+        (
+            n(&|x| x.0 == "waiting_check" && x.1 == "github"),
+            "waiting on GitHub checks".to_string(),
+        ),
+        (
+            n(&|x| x.0 == "waiting_check" && x.1 != "github"),
+            "waiting on checks here".to_string(),
+        ),
+        (
+            n(&|x| x.0 == "waiting_slot"),
+            "waiting for a slot".to_string(),
+        ),
+    ] {
+        if c > 0 {
+            parts.push(format!("{c} {w}"));
+        }
+    }
+    let total = states.len();
+    Some(format!(
+        "{total} agent{}: {}",
+        if total == 1 { "" } else { "s" },
+        parts.join(", ")
+    ))
+}
+
+/// "13 of 16 runners: 7 checks, 4 test steps, 2 debts" from the `remote` of `mason status
+/// --json`; `None` when nothing is out.
+fn github_line(r: &Value) -> Option<String> {
+    if r.is_null() {
+        return None;
+    }
+    let pool = |name: &str| {
+        r["pools"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|p| p["name"] == name)
+            .map(|p| {
+                (
+                    p["used"].as_u64().unwrap_or(0),
+                    p["limit"].as_u64().unwrap_or(0),
+                )
+            })
+    };
+    let mut parts = vec![];
+    for (k, one, many) in [
+        ("checks", "check", "checks"),
+        ("test_steps", "test step", "test steps"),
+        ("batches", "batch", "batches"),
+        ("debts", "debt", "debts"),
+    ] {
+        let n = r[k].as_u64().unwrap_or(0);
+        if n > 0 {
+            parts.push(format!("{n} {}", if n == 1 { one } else { many }));
+        }
+    }
+    let head = match pool("gha") {
+        Some((u, l)) => format!("{u} of {l} runners"),
+        None => "runners".to_string(),
+    };
+    let mac = pool("gha-macos")
+        .filter(|(u, _)| *u > 0)
+        .map(|(u, l)| format!("; macOS {u} of {l}"))
+        .unwrap_or_default();
+    Some(format!("{head}: {}{mac}", parts.join(", ")))
+}
+
 #[cfg(test)]
 mod answer_tests {
     use super::answer_text;
@@ -4358,5 +4462,27 @@ mod answer_tests {
         assert_eq!(super::task_id(&mut a), 12);
         assert_eq!(a.opt("--as").as_deref(), Some("me"));
         assert_eq!(answer_text(&a.rest), "1,3");
+    }
+
+    #[test]
+    fn agents_and_github_lines() {
+        let a = |state: &str, place: &str| serde_json::json!({"state": state, "where": place});
+        let mut active = vec![a("working", ""), a("working", "")];
+        active.extend((0..5).map(|_| a("waiting_check", "github")));
+        let s = serde_json::json!({"active": active});
+        assert_eq!(
+            super::agents_line(&s).as_deref(),
+            Some("7 agents: 2 working, 5 waiting on GitHub checks")
+        );
+        assert_eq!(super::agents_line(&serde_json::json!({"active": []})), None);
+        let r = serde_json::json!({
+            "pools": [{"name": "gha", "used": 13, "limit": 16}, {"name": "gha-macos", "used": 2, "limit": 4}],
+            "checks": 7, "test_steps": 4, "batches": 0, "debts": 2,
+        });
+        assert_eq!(
+            super::github_line(&r).as_deref(),
+            Some("13 of 16 runners: 7 checks, 4 test steps, 2 debts; macOS 2 of 4")
+        );
+        assert_eq!(super::github_line(&serde_json::Value::Null), None);
     }
 }

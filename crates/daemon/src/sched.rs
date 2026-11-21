@@ -4318,6 +4318,7 @@ mod tests {
             label: "#5".into(),
             units: BTreeMap::from([("gha".to_string(), 1), ("gha-macos".to_string(), 1)]),
             record: record.clone(),
+            ..Default::default()
         }]);
         // The only macOS unit is held, so the next macOS run waits.
         let next = queue_task(&b, 6, &macos_run());
@@ -4335,6 +4336,7 @@ mod tests {
             label: "#8".into(),
             units: macos_run(),
             record: record.clone(),
+            ..Default::default()
         }]);
         assert!(!held(&b2, queue_task(&b2, 9, &macos_run())));
         mason_step_host::registry::write_kv(
