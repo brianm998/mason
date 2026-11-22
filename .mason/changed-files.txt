@@ -1,0 +1,10 @@
+.mason/run.json
+crates/daemon/src/config.rs
+crates/daemon/src/hostedcheck.rs
+crates/daemon/src/place.rs
+crates/daemon/src/remote.rs
+crates/daemon/src/suites.rs
+crates/daemon/tests/it/definitions.rs
+docs/decisions/0860-favor-remote-spills-when-github-is-overloaded.md
+docs/stages/s867.md
+scripts/exit/s867.sh
