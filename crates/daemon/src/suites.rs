@@ -4246,14 +4246,15 @@ fn debt_wait_goes_on(d: &Daemon, debt: u64) -> bool {
 }
 
 /// Hold what the definition's test step `uses` (`compile` and `test-suite` for MASON) while a
-/// debt runs, ranked behind the task's own work, so a payment queues like any test step and
-/// never runs beside a full set of them. Nothing to hold gives `Ok(None)`.
+/// debt runs, ranked in the debts band (behind all task work), so a payment queues like a
+/// test step and never runs beside a full set of them, nor ahead of any task (#835). Nothing to hold gives `Ok(None)`.
 fn hold_for_debt(
     d: &Arc<Daemon>,
     def: &Definition,
     project: &str,
     task: TaskId,
     debt: u64,
+    at: u64,
 ) -> Result<Option<crate::sched::Lease>, String> {
     let Some(step) = def
         .steps
@@ -4277,16 +4278,13 @@ fn hold_for_debt(
                 .declare(name, def.resources.get(name).copied().unwrap_or(1));
         }
     }
-    let rank = match d.world().ok().and_then(|w| w.tasks.get(&task).cloned()) {
-        Some(t) => d.rank_for(&t, def, &step.name),
-        // A task the world no longer holds: behind everything, at low priority.
-        None => mason_scheduler::Rank::new(false, 100, 3, now_ms(), task.0, false),
-    };
+    // The debts band: behind all task work, the landing band and every step, oldest first.
+    let rank = mason_scheduler::Rank::new(false, 0, 0, at, debt, false).debt();
     // Beside: the task may still hold a step's own request (a debt paid by hand).
     d.broker
         .acquire_beside(
             task,
-            &format!("debt #{debt}"),
+            &format!("debt #{debt} (behind task work)"),
             rank,
             needs,
             &|| debt_wait_goes_on(d, debt),
@@ -4687,7 +4685,7 @@ fn pay_with(d: &Arc<Daemon>, debt: u64, only: Option<&str>) -> Result<String, St
     {
         return Ok("already paid".into());
     }
-    let _lease = hold_for_debt(d, &def, &row.project, TaskId(row.task), debt)?;
+    let _lease = hold_for_debt(d, &def, &row.project, TaskId(row.task), debt, row.at)?;
     if p.remote.is_some() {
         let _ = d.fetch_remote(pid);
     }
