@@ -182,4 +182,3 @@ jobs:
             exit 1
           fi
           echo "verdict: code $(jq -r .code "$f"), phase $(jq -r '.phase // "?"' "$f"), run $(jq -r '.run_s // 0' "$f")s" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
-          exit 0
