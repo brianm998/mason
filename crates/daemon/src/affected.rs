@@ -860,7 +860,7 @@ pub fn render(groups: &BTreeMap<String, Group>) -> Vec<String> {
     for (name, g) in groups {
         let lib_whole = g.lib || !g.unit_lib;
         let bins_whole = g.bins || !g.unit_bins;
-        if !g.whole && !g.unit_modules.is_empty() && !(lib_whole && bins_whole) {
+        if !(g.whole || g.unit_modules.is_empty() || lib_whole && bins_whole) {
             let mut s = format!("-p {name}");
             if g.unit_lib {
                 s.push_str(" --lib");
