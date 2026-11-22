@@ -1,0 +1,9 @@
+.mason/run.json
+crates/core/src/task.rs
+crates/daemon/src/hostedcheck.rs
+crates/daemon/src/landing.rs
+crates/daemon/src/remote.rs
+docs/decisions/0790-retry-github-outages.md
+docs/stages/s797.md
+scripts/exit/s797.sh
+scripts/exit/weights.txt
