@@ -307,6 +307,16 @@ pub fn read_config(d: &Daemon, pid: ProjectId) -> Result<LandingConfig, ConfigEr
             problems.join("; ")
         )));
     }
+    // `narrow = true` is only safe with a scheduled full test to catch what narrowing misses (s804).
+    let problems =
+        config::narrow_problems(&c, crate::schedule::has_full_test_trigger(&p.schedules()));
+    if !problems.is_empty() {
+        return Err(ConfigError::Refused(format!(
+            "{}: {}",
+            p.id,
+            problems.join("; ")
+        )));
+    }
     if let Some(b) = &c.base {
         if *b != p.base {
             return Err(ConfigError::Refused(format!(
@@ -316,6 +326,47 @@ pub fn read_config(d: &Daemon, pid: ProjectId) -> Result<LandingConfig, ConfigEr
         }
     }
     Ok(c)
+}
+
+/// What the `batch` tier runs now (s804): `None` when it does not narrow; `Some(Narrow)` when the
+/// scheduled full test stands behind it; `Some(Whole(why))` when the last full test is red, too
+/// old with untested commits since, or missing, so batches run the whole suite.
+pub fn batch_gate(
+    d: &Daemon,
+    p: &crate::config::ProjectCfg,
+    cfg: &LandingConfig,
+) -> Option<mason_core::full_test::Gate> {
+    use mason_core::full_test as full;
+    if !cfg.narrows() {
+        return None;
+    }
+    let mut rows: Vec<full::Tested> = vec![];
+    for spec in p.schedules().iter().filter(|s| s.ci.is_some()) {
+        rows.extend(crate::ci_schedule::tested(
+            &d.store.full_tests(&p.id, &spec.name).unwrap_or_default(),
+        ));
+    }
+    rows.sort_by(|a, b| {
+        b.finished_ms
+            .max(b.started_ms)
+            .cmp(&a.finished_ms.max(a.started_ms))
+    });
+    let now = now_ms();
+    let max_age = cfg
+        .full_test_max_age
+        .map_or(full::DEFAULT_MAX_AGE_MS, |m| m.as_millis() as u64);
+    let base = p.base_ref();
+    Some(full::narrow_gate(
+        &rows,
+        now,
+        max_age,
+        &|sha| {
+            git::run(&p.path, &["rev-list", "--count", &format!("{sha}..{base}")])
+                .ok()
+                .and_then(|o| o.trim().parse().ok())
+        },
+        &|ms| crate::ci_schedule::when_text(ms, now),
+    ))
 }
 
 // ---- the landing job's side ------------------------------------------------------
@@ -1762,9 +1813,10 @@ impl Runner {
                 &format!("b{batch_id}-r{rounds}"),
                 &run_key,
                 &format!(
-                    "full|{}|fast={}",
+                    "full|{}|fast={}|narrow={}",
                     suites.join(","),
-                    self.fast_tier.load(std::sync::atomic::Ordering::SeqCst)
+                    self.fast_tier.load(std::sync::atomic::Ordering::SeqCst),
+                    self.narrow_tag()
                 ),
             );
             if let Some(e) = self.take_service_error() {
@@ -2790,7 +2842,11 @@ impl Runner {
             .cloned()
             .collect();
         let (local, stopped) = self.without_stopped(def, local);
-        let notes = stopped;
+        let mut notes = stopped;
+        // The batch tier's narrowed selection, when `narrow = true` and the full test stands behind it.
+        let narrowed = self.narrowed_def(def, &local, wt, base, &mut notes);
+        let reuse = narrowed.is_none();
+        let def = narrowed.as_ref().unwrap_or(def);
         if local.is_empty() {
             let mut g = green();
             g.notes = notes;
@@ -2825,7 +2881,7 @@ impl Runner {
                     self.sink(),
                     true,
                     &self.members(def),
-                    true,
+                    reuse,
                 );
                 stop.store(true, std::sync::atomic::Ordering::SeqCst);
                 r
@@ -2833,6 +2889,57 @@ impl Runner {
             r.notes.splice(0..0, notes);
             r
         }
+    }
+
+    /// `narrow` or `whole`, for the keys that keep a red result: the two prove different things.
+    fn narrow_tag(&self) -> &'static str {
+        match crate::landing::batch_gate(&self.d, self.project(), &self.cfg) {
+            Some(mason_core::full_test::Gate::Narrow) => "narrow",
+            _ => "whole",
+        }
+    }
+
+    /// The definition with the batch tier's suites narrowed to the union diff of `wt` against
+    /// `base` (s804), or `None` to run them whole: the tier does not narrow, the gate says whole
+    /// (a note says why), or no suite of `local` narrows. A suite whose pick is everything stays
+    /// whole, with the reason in a note. Every rung of the red ladder runs through here, so a
+    /// bisect step narrows to the union of its own subset.
+    fn narrowed_def(
+        &self,
+        def: &mason_definition::Definition,
+        local: &[String],
+        wt: &Path,
+        base: &str,
+        notes: &mut Vec<String>,
+    ) -> Option<mason_definition::Definition> {
+        let tier = self.cfg.batch_suites()?;
+        match crate::landing::batch_gate(&self.d, self.project(), &self.cfg)? {
+            mason_core::full_test::Gate::Narrow => {}
+            mason_core::full_test::Gate::Whole(why) => {
+                if local.iter().any(|s| tier.contains(s)) {
+                    notes.push(format!("the batch runs the whole suite: {why}"));
+                }
+                return None;
+            }
+        }
+        let mut out = def.clone();
+        let mut any = false;
+        for name in local.iter().filter(|s| tier.contains(s)) {
+            let Some(suite) = def.testing.suite(name) else {
+                continue;
+            };
+            match crate::suites::narrow_for_batch(def, suite, wt, base) {
+                Ok((s, note)) => {
+                    if let Some(slot) = out.testing.suites.iter_mut().find(|x| x.name == *name) {
+                        *slot = s;
+                        any = true;
+                        notes.push(note);
+                    }
+                }
+                Err(why) => notes.push(format!("{name}: the batch runs it whole because {why}")),
+            }
+        }
+        any.then_some(out)
     }
 
     /// Split off the suites the owner has already stopped for the whole batch (every member
@@ -4527,10 +4634,11 @@ impl Runner {
                     .collect::<Vec<_>>(),
             );
             let run_filter = format!(
-                "split|alone={:?}|mapped={:?}|failed={}",
+                "split|alone={:?}|mapped={:?}|failed={}|narrow={}",
                 alone,
                 mapped,
-                failed.join(",")
+                failed.join(","),
+                self.narrow_tag()
             );
             if let Some(r) = self.cached_run(&a.base_tip, &run_key, &run_filter, true) {
                 self.say(&format!(
