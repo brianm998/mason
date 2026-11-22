@@ -688,7 +688,16 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s867**: `favor-remote` now places a run here, under local slots, when GitHub is overloaded (the pool is full with waiters, the account queue is over `remote_queue_max`, or recent pickups are slower than `spill_after`) and this machine has room; a run unpicked on GitHub for `spill_after` is cancelled and runs here instead of waiting out `pickup_timeout`. Decision 0860.
 - **s875**: The cargo-workspace force-skip count (18 of 81) comes from owner and Land-now skips, not suite failures, so the suite is unchanged and the detector's counting is filed as a proposal.
 - **s877**: An analyst task ends when its develop step's result file has been read (no test, review or land, no commits kept), ingests once per task, gets no stage or decision numbers, and the digest's flaky map is per project.
+- **s882**: The three idle-debt tests failed because `owe` left the task's evidence and gave its debts no landed commit, so the idle pass skipped them; origin/develop already carries the same fix in `owe`, and this note records the cause.
 - **s883**: The active-models scheduling test failure recorded at b9d4aa3ef5 was fixed by 0831 (lease opened first); this records it and pins the fix with an exit script.
 - **s885**: The floor-on-GitHub test world now carries `.github/workflows/mason-run.yml` on its base, as the real repo does, so `a_floor_set_to_github_goes_there` reaches the fake GitHub.
 - **s886**: The test other_workflows_jobs_and_the_ceiling_limit_what_mason_can_take now queues four MASON jobs under gha_ceiling 4 and asserts the fifth waits, instead of expecting five to be held.
+- **s901**: s09's step list now reads only the `steps` array (fixing s452 on Linux), and s748/s750 capture the hold's stderr and exit status and print them with the process state when the hold dies early.
+- **s902**: A develop agent's wait on a check (slot queue or GitHub) is credited to the step deadline every second instead of every 30 s, so the step no longer ends while a run is held queued.
+- **s903**: The `mason-run` workflow ends green when result.json holds a verdict, red or not, and fails only when no result.json exists, so red checks stop sending failure emails while MASON still reads the code from the artifact.
+- **s906**: The fake host materialises a PR head with git read-tree and checkout-index instead of git archive piped to tar, so its checks run on Windows.
+- **s911**: on 2026-11-22 the local queue froze for about three hours. A landing batch holds this
+- **s912**: The red CI/monitor-compose run 45005421555 names no failing step in the supplied log tail (only post-job Gradle cache cleanup and the cache-save skip), so no code changed and decision 0905 records how to classify it from the full log.
+- **s917**: Recorded that the cause of s616, s664, s757 and s787 failing on ubuntu-latest shard 1 could not be determined because the per-script failure lines of run 45005421555 were not available to this session, so no fix was made.
+- **s924**: see decision 0917. With `fallback = "local"`, 16 runs came back from GitHub at once into a
 <!-- status:end -->
