@@ -127,7 +127,7 @@ final class NotificationLevelTests: XCTestCase {
             banner("ci_watch", "info", "mason: 2 red CI jobs being fixed: #935, #836"),
             banner("landing_frozen", "warning", "Landing is frozen for mason"),
         ]
-        var u = UpdateInfo()
+        var u = Mason_V1_UpdateInfo()
         u.daemonText = "Updating masond: building 4259e0bc…"
         u.daemonLevel = "info"
         h.update = u
