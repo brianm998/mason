@@ -1,0 +1,15 @@
+.mason/run.json
+clients/compose/app/src/main/kotlin/mason/monitor/ui/Pages.kt
+clients/compose/app/src/test/kotlin/mason/monitor/ui/RemotePlacementTest.kt
+clients/compose/core/src/main/kotlin/mason/monitor/Model.kt
+clients/compose/core/src/main/kotlin/mason/monitor/SettingsModel.kt
+clients/compose/core/src/test/kotlin/mason/monitor/SettingsModelTest.kt
+clients/features.toml
+clients/swift/Sources/MonitorCore/Model.swift
+clients/swift/Sources/MonitorCore/SettingsModel.swift
+clients/swift/Sources/MonitorUI/SettingsPage.swift
+clients/swift/Tests/MonitorCoreTests/SettingsModelTests.swift
+clients/swift/Tests/MonitorUITests/RemotePlacementTests.swift
+docs/decisions/0869-settings-placement-section.md
+docs/stages/s876.md
+scripts/exit/s876.sh
