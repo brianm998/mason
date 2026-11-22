@@ -60,7 +60,21 @@ pub fn failing_tests(log: &str) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     for l in &lines {
         let t = l.trim_start();
-        if let Some(rest) = t
+        if let Some(rest) = t.strip_prefix("FAILED: scripts/exit/") {
+            if let Some(n) = rest
+                .split_whitespace()
+                .next()
+                .and_then(|r| r.strip_suffix(".sh"))
+            {
+                out.insert(n.to_string(), String::new());
+            }
+        } else if let Some(n) = t
+            .strip_prefix("FAIL s")
+            .and_then(|r| r.split_whitespace().next())
+            .filter(|r| !r.is_empty() && r.bytes().all(|b| b.is_ascii_digit()))
+        {
+            out.insert(format!("s{n}"), String::new());
+        } else if let Some(rest) = t
             .strip_prefix("FAILED ")
             .or_else(|| t.strip_prefix("ERROR "))
         {
@@ -210,6 +224,23 @@ mod tests {
             Verdict::Blame
         );
         assert_eq!(judge(&[]), Verdict::Blame);
+    }
+
+    #[test]
+    fn exit_script_failures_are_named_and_excused_by_the_base() {
+        let log = "FAILED: scripts/exit/s07.sh\nFAILED: scripts/exit/s18.sh (exit 1)\nFAIL s09\n";
+        let t = failing_tests(log);
+        assert_eq!(
+            t.keys().cloned().collect::<Vec<_>>(),
+            vec!["s07", "s09", "s18"]
+        );
+        let base = "FAILED: scripts/exit/s07.sh\nFAILED: scripts/exit/s18.sh\nFAIL s09";
+        assert!(matches!(
+            judge(&[job(log, Base::Red(Some(base.into())))]),
+            Verdict::RedOnBase(_)
+        ));
+        assert_eq!(judge(&[job(log, Base::Green)]), Verdict::Blame);
+        assert_eq!(judge(&[job(log, Base::Unknown)]), Verdict::Blame);
     }
 
     #[test]

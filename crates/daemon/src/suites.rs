@@ -938,6 +938,14 @@ fn expected_total(d: &Arc<Daemon>, project: &str, suite: &Suite, base: &str) -> 
     }
 }
 
+/// A narrowed (or not-run) suite does not run the whole suite, so the whole suite's expected
+/// size is no denominator for it: the line reads "N tests" until a run reports its own total.
+fn forget_whole_total(s: &mut SubProgress) {
+    if s.total.source != Source::Reported {
+        s.total = Figure::default();
+    }
+}
+
 fn quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
@@ -3479,12 +3487,15 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
                 // Said in the closing note too: a narrowed green is not the whole suite's.
                 details.push(note.clone());
                 notes.push(note);
+                // The stored total is the whole suite's size: wrong for a narrowed pick.
+                d.progress_sub(c.run, &name, None, forget_whole_total);
                 (*narrowed, groups)
             }
             StepNarrow::NotRun(note) => {
                 // It runs whole at landing: the step has nothing to prove, and says so.
                 details.push(note.clone());
                 notes.push(note);
+                d.progress_sub(c.run, &name, None, forget_whole_total);
                 outcomes.push((name, SuiteOutcome::NotSelected));
                 continue;
             }
@@ -6602,6 +6613,26 @@ mod narrow_batch_tests {
         let mut s = suite();
         s.dev_command = None;
         assert!(narrow_for_batch(&Definition::empty(), &s, d.path(), &b).is_err());
+    }
+
+    #[test]
+    fn narrowed_suite_drops_the_whole_suites_total() {
+        let mut s = SubProgress {
+            total: Figure::expected(2356),
+            ..SubProgress::default()
+        };
+        forget_whole_total(&mut s);
+        assert_eq!(s.total, Figure::default());
+    }
+
+    #[test]
+    fn narrowed_suite_keeps_a_reported_total() {
+        let mut s = SubProgress {
+            total: Figure::reported(337),
+            ..SubProgress::default()
+        };
+        forget_whole_total(&mut s);
+        assert_eq!(s.total, Figure::reported(337));
     }
 }
 

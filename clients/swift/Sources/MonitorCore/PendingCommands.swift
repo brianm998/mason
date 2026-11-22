@@ -118,7 +118,7 @@ extension MonitorModel {
 
     /// The sidebar's row for a task, so its page can be drawn before masond sends the task view.
     public func sidebarRow(_ task: UInt64) -> TaskRow? {
-        for s in sidebar?.sections ?? [] {
+        for s in liveSidebar?.sections ?? [] {
             if let r = s.rows.first(where: { $0.id == task }) { return r }
         }
         return nil
