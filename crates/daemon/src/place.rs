@@ -1152,7 +1152,12 @@ mod tests {
         }
     }
 
-    fn gh(free: u32, waiting: u32, queued: Option<u32>, pickup: Option<u64>) -> RemoteLoad {
+    fn remote_load(
+        free: u32,
+        waiting: u32,
+        queued: Option<u32>,
+        pickup: Option<u64>,
+    ) -> RemoteLoad {
         RemoteLoad {
             pool_free: free,
             pool_waiting: waiting,
@@ -1169,55 +1174,55 @@ mod tests {
             (
                 "GitHub room",
                 load(None, 2, 0, 0),
-                gh(3, 0, Some(1), Some(10)),
+                remote_load(3, 0, Some(1), Some(10)),
                 false,
             ),
             (
                 "pool full, waiters, local room",
                 load(None, 2, 0, 0),
-                gh(0, 2, None, None),
+                remote_load(0, 2, None, None),
                 true,
             ),
             (
                 "pool full, no waiters",
                 load(None, 2, 0, 0),
-                gh(0, 0, None, None),
+                remote_load(0, 0, None, None),
                 false,
             ),
             (
                 "pool full, local hold",
                 load(heat, 2, 0, 0),
-                gh(0, 2, None, None),
+                remote_load(0, 2, None, None),
                 false,
             ),
             (
                 "pool full, local slot taken",
                 load(None, 0, 0, 0),
-                gh(0, 2, None, None),
+                remote_load(0, 2, None, None),
                 false,
             ),
             (
                 "account queue over max, local room",
                 load(None, 1, 0, 0),
-                gh(2, 0, Some(5), None),
+                remote_load(2, 0, Some(5), None),
                 true,
             ),
             (
                 "account queue at max",
                 load(None, 1, 0, 0),
-                gh(2, 0, Some(4), None),
+                remote_load(2, 0, Some(4), None),
                 false,
             ),
             (
                 "slow pickups, local room",
                 load(None, 1, 0, 0),
-                gh(2, 0, None, Some(300)),
+                remote_load(2, 0, None, Some(300)),
                 true,
             ),
             (
                 "slow pickups, local hold",
                 load(heat, 1, 0, 0),
-                gh(2, 0, None, Some(300)),
+                remote_load(2, 0, None, Some(300)),
                 false,
             ),
         ];
@@ -1229,16 +1234,28 @@ mod tests {
 
     #[test]
     fn a_favor_remote_placement_says_why() {
-        let t = decide(&favor_remote(load(None, 1, 0, 0), gh(0, 19, None, None))).text();
+        let t = decide(&favor_remote(
+            load(None, 1, 0, 0),
+            remote_load(0, 19, None, None),
+        ))
+        .text();
         assert!(
             t.contains(
                 "favor-remote, the runner pool is full with 19 waiting; this machine had room"
             ),
             "{t}"
         );
-        let t = decide(&favor_remote(load(None, 1, 0, 0), gh(2, 0, Some(19), None))).text();
+        let t = decide(&favor_remote(
+            load(None, 1, 0, 0),
+            remote_load(2, 0, Some(19), None),
+        ))
+        .text();
         assert!(t.contains("GitHub had 19 queued"), "{t}");
-        let t = decide(&favor_remote(load(None, 1, 0, 0), gh(2, 0, None, None))).text();
+        let t = decide(&favor_remote(
+            load(None, 1, 0, 0),
+            remote_load(2, 0, None, None),
+        ))
+        .text();
         assert!(t.contains("favor-remote, GitHub had room"), "{t}");
     }
 
