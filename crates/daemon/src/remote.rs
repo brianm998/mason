@@ -4356,6 +4356,7 @@ mod tests {
     }
 
     fn source(api: &Arc<FakeActions>, repo: &str, own: &[&str]) -> (AccountRepo, GitHub) {
+        token();
         (
             AccountRepo {
                 api: "https://api.github.com".into(),
