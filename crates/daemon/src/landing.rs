@@ -4063,8 +4063,18 @@ impl Runner {
             .find(|n| n.contains("does not build"))
             .and_then(|n| n.lines().next())
             .unwrap_or("it does not build");
+        // The first line only says which suite; the compiler's own first error says why, and
+        // without it nine identical failures cannot be told from one cause.
+        let cause = r
+            .notes
+            .iter()
+            .filter(|n| n.contains("does not build"))
+            .flat_map(|n| n.lines().skip(1))
+            .find(|l| l.contains("error"))
+            .map(|l| format!(": {}", l.trim()))
+            .unwrap_or_default();
         Ok(Some(format!(
-            "{branch} does not build ({first}), so the red is not this batch's: nobody is blamed and nothing lands until it does"
+            "{branch} does not build ({first}{cause}), so the red is not this batch's: nobody is blamed and nothing lands until it does"
         )))
     }
 
