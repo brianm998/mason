@@ -1347,7 +1347,10 @@ fn three_debts_of_different_scopes_on_one_tip_run_the_suite_once_and_one_green_s
     wait_state(&d, t, State::Landed, 120);
     owe(&d, t, &["suite:checks", "step:test", "tests:all"]);
     let before = runs_of(&log);
+    let c = d.broker.compilation();
+    eprintln!("PROBE pending={:?} used={} limit={} gha={} idle={}", c.pending.len(), c.used, c.limit, d.broker.gha_waiting(), 0);
     mason_daemon::suites::run_idle_debts(&d);
+    eprintln!("PROBE debts={:?}", d.store.debts(Some(t.0), false).unwrap().iter().map(|x| (x.scope.clone(), x.status.clone(), x.how.clone())).collect::<Vec<_>>());
     assert_eq!(
         runs_of(&log) - before,
         1,
@@ -1474,4 +1477,3 @@ fn a_ci_run_with_every_mapped_job_green_records_the_suite_and_settles_a_debt_one
     assert!(how.contains("checks green on"), "{how}");
     assert_eq!(runs_of(&log), before, "the suite was not run");
 }
-// probe
