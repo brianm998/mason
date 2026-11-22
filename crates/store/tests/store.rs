@@ -1306,6 +1306,45 @@ fn a_batch_run_is_found_again_only_for_the_same_base_and_task_heads() {
 }
 
 #[test]
+fn forgetting_a_tasks_red_runs_keeps_greens_and_other_tasks() {
+    use mason_store::batch_run_key as key;
+    let (_d, p) = db();
+    let s = Store::open(&p).unwrap();
+    let alone = key(&[(841, "a".into())]);
+    let two = key(&[(841, "b".into()), (846, "c".into())]);
+    let other_head = key(&[(841, "z".into())]);
+    let t84 = key(&[(84, "d".into())]);
+    let t8410 = key(&[(8410, "e".into())]);
+    let ends_in = key(&[(100, "f".into()), (1841, "g".into())]);
+    for (project, base, k, green) in [
+        ("p", "b1", &alone, false),
+        ("p", "b1", &two, false),
+        ("p", "b2", &other_head, false),
+        ("p", "b1", &t84, false),
+        ("p", "b1", &t8410, false),
+        ("p", "b1", &ends_in, false),
+        ("q", "b1", &alone, false),
+    ] {
+        s.put_batch_run(project, base, k, "f", green, "{}", 1)
+            .unwrap();
+    }
+    s.put_batch_run("p", "b3", &alone, "f", true, "{}", 1)
+        .unwrap();
+    assert_eq!(s.forget_red_batch_runs("p", 841).unwrap(), 3);
+    let found = |project: &str, base: &str, k: &str| s.batch_run(project, base, k, "f").unwrap();
+    assert_eq!(found("p", "b1", &alone), None);
+    assert_eq!(found("p", "b1", &two), None);
+    assert_eq!(found("p", "b2", &other_head), None);
+    // A green, #84, #8410, #1841 and another project's #841 stay.
+    assert!(found("p", "b3", &alone).is_some_and(|(g, _)| g));
+    assert!(found("p", "b1", &t84).is_some());
+    assert!(found("p", "b1", &t8410).is_some());
+    assert!(found("p", "b1", &ends_in).is_some());
+    assert!(found("q", "b1", &alone).is_some());
+    assert_eq!(s.forget_red_batch_runs("p", 841).unwrap(), 0);
+}
+
+#[test]
 fn full_test_rows_survive_a_restart_and_come_back_newest_first() {
     let (_d, p) = db();
     let row = |commit: &str, trigger: &str| mason_store::FullTestRow {
