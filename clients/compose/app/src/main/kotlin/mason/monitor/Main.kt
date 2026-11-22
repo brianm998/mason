@@ -31,7 +31,7 @@ fun main(args: Array<String>) = application {
     }
     remember {
         UiWatchdog({ job -> javax.swing.SwingUtilities.invokeLater(Runnable { job() }) })
-            .also { it.start(); UiLateness.recent = it::recent }
+            .also { it.start(); UiLateness.recent = it::recent; UiLateness.recentBackground = it::recentBackground }
         0
     }
     LaunchedEffect(Unit) {
@@ -74,6 +74,16 @@ fun main(args: Array<String>) = application {
         state = state,
         onPreviewKeyEvent = { e -> shortcut(model, e) },
     ) {
+        remember {
+            UiLateness.appState = {
+                when {
+                    !window.isShowing || state.isMinimized -> mason.monitor.AppVisibility.HIDDEN
+                    window.isFocused -> mason.monitor.AppVisibility.FRONTMOST
+                    else -> mason.monitor.AppVisibility.VISIBLE
+                }
+            }
+            0
+        }
         RootView(model)
     }
 }

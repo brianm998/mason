@@ -4,7 +4,7 @@
 //! see that its output parses, and keep what that run showed (how many tests, how long) as a
 //! baseline. A suite that is red or finds nothing is reported, never quietly kept green.
 
-use super::questions::SuiteSpec;
+use crate::questions::SuiteSpec;
 use mason_testing::parse::parse as read;
 use mason_testing::results::Results;
 use mason_testing::verdict::{judge, Verdict};
@@ -121,7 +121,7 @@ fn shell_quote(s: &str) -> String {
 /// targets are skipped: they drive the real app on the screen, which an unattended run cannot
 /// count on. None for an iOS project, which needs a simulator (the device-mobile workflow).
 fn xcodebuild_command(root: &Path) -> Option<String> {
-    let proj = super::detect::xcode_project(root)?;
+    let proj = crate::detect::xcode_project(root)?;
     let pbx = std::fs::read_to_string(root.join(&proj).join("project.pbxproj")).ok()?;
     if !pbx.contains("SDKROOT = macosx;") || pbx.contains("SDKROOT = iphoneos;") {
         return None;
@@ -327,7 +327,7 @@ mod tests {
     #[test]
     fn a_macos_xcode_app_one_folder_down_gets_an_xcodebuild_suite() {
         let d = xcode_repo("macosx");
-        let langs = super::super::detect::languages(d.path());
+        let langs = crate::detect::languages(d.path());
         assert_eq!(langs, ["swift"]);
         let p = propose(d.path(), &langs);
         assert_eq!(p.len(), 1, "{p:?}");
