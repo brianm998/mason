@@ -48,7 +48,7 @@ count = 2
 type = "test"
 category = "testing"
 uses = { compile = 1, test-suite = 1 }
-suites = ["cargo-workspace", "swift-clients", "compose-clients", "exit-scripts", "fmt"]
+suites = ["cargo-workspace", "swift-clients", "compose-clients", "exit-scripts", "fmt", "clippy"]
 max_rounds = 3
 on_red = "develop"
 next = "land"
@@ -145,6 +145,22 @@ min_tests = 1
 level = "unit"
 uses = {}
 
+# Clippy in the test step (s778, #773): 12 lint send-backs in a week were clippy lints in a task's own
+# code that nothing ran before the landing `lint` tier. The `dev_command` takes the changed packages
+# and their dependents (`narrow_packages`, the same `{packages}` as the cargo suite); `command` is
+# the whole workspace, for an unnarrowed pick. One pass/fail line like `fmt`, with the first
+# warnings printed before it. The landing `lint` tier still runs clippy over the batch.
+[suite.clippy]
+command = '''bash scripts/clippy-suite.sh --workspace'''
+dev_command = '''bash scripts/clippy-suite.sh {packages}'''
+narrow_packages = true
+parser = "regex"
+pass_regex = '^test (.+) \.\.\. ok$'
+fail_regex = '^test (.+) \.\.\. FAILED$'
+min_tests = 1
+level = "unit"
+uses = { compile = 1 }
+
 # Run by the landing `lint` tier (.mason/landing.toml) over every batch, not by the test step: six
 # lint errors and five unformatted files landed in two days because neither the batch's tests nor
 # the rebuild of a skipped batch ran them (s521).
@@ -175,7 +191,7 @@ when = ["development", "test_step"]
 # select the cargo suite, which then runs only the smoke set per task (decisions 0173, 0539); the
 # landing batch runs it whole.
 [impact]
-"crates/**" = ["cargo-workspace", "fmt"]
+"crates/**" = ["cargo-workspace", "fmt", "clippy"]
 "Cargo.*" = ["cargo-workspace"]
 "rust-toolchain.toml" = ["cargo-workspace"]
 "scripts/exit/**" = ["cargo-workspace", "exit-scripts"]
