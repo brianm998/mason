@@ -5,6 +5,7 @@ import MasonProtocol
 @testable import MonitorCore
 
 /// #834: the placement control builds the right command for each level.
+@MainActor
 final class PlacementTests: XCTestCase {
     func model(owner: Bool = true) -> (MonitorModel, () -> [Mason_V1_Command]) {
         let m = MonitorModel()
