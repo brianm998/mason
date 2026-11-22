@@ -24,13 +24,13 @@ parallel = 1
 [[tier]]
 name   = "batch"
 suites = ["cargo-workspace"]
-# Off until the owner approves it (s804, decision 0797). `narrow = true` runs the suite's
+# On since 2026-11-21, approved by the owner (s804, decision 0797). `narrow = true` runs the suite's
 # `dev_command` over the batch's union plus the smoke set, and the whole suite only when the pick is
 # all (`Cargo.lock`, `Cargo.toml`, `build.rs`, ...). It is refused unless the project file has a
 # full-test schedule (`kind = "ci"` with `at` or `when_quiet`, s782), and batches go back to the whole
 # suite while the last full test is red or older than `full_test_max_age` (default 36h) with untested
-# commits since. This project's registration has no such schedule yet.
-# narrow = true
+# commits since. The registration has `[schedule.full-ci]` (01:00, or after 30 quiet minutes).
+narrow = true
 
 # The exit scripts the batch can have broken, once on the merged tree (s669).
 [[tier]]
