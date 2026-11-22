@@ -2125,6 +2125,7 @@ impl TestChecks {
                     match narrow(scope, crate::scope::wants_tests(&dc)) {
                         Ok(n) => {
                             suite.command = crate::scope::expand(&dc, &n, false);
+                            suite.dev_shard_command = crate::suites::dev_shard_for(&suite, &n);
                             if let Some(db) = &suite.dev_build {
                                 suite.build = Some(crate::scope::expand(db, &n, true));
                             }
