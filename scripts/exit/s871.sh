@@ -32,15 +32,15 @@ narrow_tests = "pipeline/tests/*.py"
 narrow_root = "pipeline/"
 narrow_each = "$2"
 
-[binding.py]
+[binding.unit]
 when = ["test_step"]
 TOML
 }
 mk plain.toml '{}'
 mk file.toml '{file}'
-out=$(cargo run -q -p mason-pipeline --bin mason -- definition check "$dir/.mason/plain.toml")
+out=$(cargo run -q -p mason-pipeline --bin mason -- definition check "$dir/.mason/plain.toml" 2>&1) || { echo "$out"; exit 1; }
 echo "$out" | grep -q "pytest takes paths" || { echo "no warning for {}"; echo "$out"; exit 1; }
-out=$(cargo run -q -p mason-pipeline --bin mason -- definition check "$dir/.mason/file.toml")
+out=$(cargo run -q -p mason-pipeline --bin mason -- definition check "$dir/.mason/file.toml" 2>&1) || { echo "$out"; exit 1; }
 if echo "$out" | grep -q "pytest takes paths"; then echo "warned for {file}"; exit 1; fi
 echo "$out" | grep -q "^ok" || { echo "$out"; exit 1; }
 echo "s871 passed"
