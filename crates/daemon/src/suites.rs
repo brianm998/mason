@@ -447,6 +447,8 @@ fn run_hosted_resuming(
     // batch, a base run and a debt stay here until #702. A remote run is returned as the same
     // `Ran`, so it is judged by the code below this call, not by it. A suite whose build runs
     // as its own step here has none when it goes remote: the build comes first in the command.
+    // Held until this function returns, so for the whole local run.
+    let mut fallback: Option<crate::sched::Lease> = None;
     if let crate::remote::Executor::GitHub { runs_on } =
         crate::remote::executor_for(d, project, crate::remote::Kind::Suite, place)
     {
@@ -456,7 +458,34 @@ fn run_hosted_resuming(
         )? {
             return Ok(ran);
         }
+        // `fallback = "local"` sent it here. Its step holds runner pool units, not this
+        // machine's slots (#761), so it takes what the definition's test step `uses` before it
+        // starts, under the same limits and CPU and thermal holds as a local test step.
+        if !d.cfg.hosts_dir().join(id).join("host.kv").exists() {
+            let uses = d
+                .project_id_by_name(project)
+                .map(|p| d.current_def(p))
+                .and_then(|def| {
+                    def.steps
+                        .iter()
+                        .find(|s| s.kind == mason_definition::StepType::Test)
+                        .map(|s| s.uses.clone())
+                })
+                .unwrap_or_default();
+            let task = place.and_then(|(t, _)| t);
+            fallback = crate::remote::fallback_lease(
+                d,
+                project,
+                task,
+                &uses,
+                &format!(
+                    "{} {id} (no GitHub runner, run here)",
+                    task.map_or_else(|| "suite".to_string(), |t| format!("#{}", t.0))
+                ),
+            )?;
+        }
     }
+    let _fallback = fallback;
     let hosts = d.cfg.hosts_dir();
     let again_id = hl::rerun_id(id);
     let mut first = None;
