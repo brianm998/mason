@@ -635,10 +635,13 @@ public final class MonitorModel {
 
     public func toggle(_ s: SidebarSection) { setExpanded(s.state, !isExpanded(s)) }
 
-    /// Clicking a tile expands its section and scrolls to it.
+    /// Clicking a tile expands its sections (proposed: its imports too) and scrolls to the first
+    /// that has tasks.
     public func reveal(state: String) {
+        let secs = tileSections(state)
+        for s in secs where s.state != state { setExpanded(s.state, true) }
         setExpanded(state, true)
-        scrollTarget = state
+        scrollTarget = secs.first { !$0.rows.isEmpty }?.state ?? state
     }
 
     /// What a tile click does. Every click reveals at once (never waits to tell
@@ -653,7 +656,7 @@ public final class MonitorModel {
     /// (for a state that has one). Nothing while disconnected.
     public func tileDoubleClicked(state: String) {
         guard connected else { return }
-        let n = sidebar?.sections.first(where: { $0.state == state })?.rows.count ?? 0
+        let n = sectionRows(state).count
         if n == 1 { revealAndOpenIfOne(state: state) }
         else if let p = Page.sectionPage(state) { go(p) }
     }
@@ -664,15 +667,16 @@ public final class MonitorModel {
     public func revealAndOpenIfOne(state: String) {
         guard connected else { return }
         reveal(state: state)
-        guard let sec = sidebar?.sections.first(where: { $0.state == state }), sec.rows.count == 1 else { return }
-        go(.task(sec.rows[0].id))
+        let rows = sectionRows(state)
+        guard rows.count == 1 else { return }
+        go(.task(rows[0].id))
     }
 
     /// Whether the main view shows one of the tasks behind this tile: the page is a task page and
     /// its id is a row of the sidebar section with the tile's state.
     public func tileShowsCurrentTask(_ c: StateCount) -> Bool {
         guard case .task(let id) = page else { return false }
-        return sidebar?.sections.first { $0.state == c.state }?.rows.contains { $0.id == id } ?? false
+        return sectionRows(c.state).contains { $0.id == id }
     }
 
     /// The tile's tooltip; a count of exactly one says a double-click opens it.
