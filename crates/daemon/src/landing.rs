@@ -3891,7 +3891,11 @@ impl Runner {
             // #962: no GitHub runner took the floor build within the outage limit, three times
             // over. A build is the same anywhere, so it is built on this Mac rather than failing
             // the batch for GitHub's queue.
-            if !here && result.as_ref().is_err_and(|e| crate::hostedcheck::is_outage(e)) {
+            if !here
+                && result
+                    .as_ref()
+                    .is_err_and(|e| crate::hostedcheck::is_outage(e))
+            {
                 out.notes.push(format!(
                     "{name}: no GitHub runner took the build of {what}; building it on this Mac"
                 ));
