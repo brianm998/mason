@@ -168,7 +168,47 @@ pub fn render(steps: &str) -> String {
 }
 
 /// Every `mason remote` subcommand, for the unknown-subcommand errors.
-pub const COMMANDS: &str = "the remote commands are `setup`, `mode`, `on`, `off` and `status`";
+pub const COMMANDS: &str =
+    "the remote commands are `setup`, `mode`, `on`, `off`, `status` and `runs`";
+
+/// The runs on GitHub, one line each, as the monitor's GitHub section lists them (#767).
+pub fn print_runs(r: &serde_json::Value) {
+    if r["enabled"].as_bool() != Some(true) {
+        println!("No project runs on GitHub.");
+        return;
+    }
+    let runs = r["runs"].as_array().cloned().unwrap_or_default();
+    println!(
+        "MASON {} of {} runners, {} waiting",
+        r["poolUsed"].as_u64().unwrap_or(0),
+        r["poolLimit"].as_u64().unwrap_or(0),
+        r["waiting"].as_u64().unwrap_or(0)
+    );
+    if runs.is_empty() {
+        println!("Nothing on GitHub.");
+    }
+    for x in runs {
+        let s = |k: &str| x[k].as_str().unwrap_or("");
+        println!(
+            "{:<10} {:<14} {:<9} {:<14} {}{}{}",
+            s("owner"),
+            s("taskState"),
+            s("state"),
+            s("kind"),
+            s("suite"),
+            if s("progress").is_empty() {
+                String::new()
+            } else {
+                format!("  {}", s("progress"))
+            },
+            if s("url").is_empty() {
+                String::new()
+            } else {
+                format!("  {}", s("url"))
+            }
+        );
+    }
+}
 
 fn fail(msg: &str) -> i32 {
     eprintln!("error: {msg}");
@@ -178,7 +218,7 @@ fn fail(msg: &str) -> i32 {
 pub fn run(mut args: Vec<String>, config_dir: &Path) -> i32 {
     if args.first().map(String::as_str) != Some("setup") {
         return fail(&format!(
-            "{COMMANDS}: `mason remote setup --project P [--runs-on L]`, `mason remote on|off|status [--json]`"
+            "{COMMANDS}: `mason remote setup --project P [--runs-on L]`, `mason remote on|off|status|runs [--json]`"
         ));
     }
     args.remove(0);

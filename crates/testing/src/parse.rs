@@ -21,8 +21,36 @@ pub fn parse(kind: ParserKind, text: &str, suite: &Suite) -> Result<Results, Str
         ParserKind::Gradle => gradle(text),
         ParserKind::Playwright => playwright(text)?,
         ParserKind::Cucumber => cucumber(text)?,
-        ParserKind::Regex => regex_lines(text, suite)?,
+        ParserKind::Regex => subtract_world_waits(regex_lines(text, suite)?, text),
     }))
+}
+
+/// A test that waited for a scratch-world slot prints `mason-world-wait <ms> <test name>` to
+/// stderr (#778). Its reported time includes that wait, so the recorded time is the reported
+/// time minus the wait, for that test only. A wait longer than the time leaves 0.
+fn subtract_world_waits(mut cases: Vec<Case>, text: &str) -> Vec<Case> {
+    let mut waits: std::collections::BTreeMap<&str, u64> = Default::default();
+    for l in text.lines() {
+        let Some(rest) = l.trim().strip_prefix("mason-world-wait ") else {
+            continue;
+        };
+        let Some((ms, name)) = rest.split_once(' ') else {
+            continue;
+        };
+        if let Ok(ms) = ms.parse::<u64>() {
+            *waits.entry(name.trim()).or_default() += ms;
+        }
+    }
+    if waits.is_empty() {
+        return cases;
+    }
+    for c in &mut cases {
+        // libtest names a test `module::name`; the thread name is the same string.
+        if let (Some(ms), Some(w)) = (c.ms, waits.get(c.name.as_str())) {
+            c.ms = Some(ms.saturating_sub(*w));
+        }
+    }
+    cases
 }
 
 /// The cases a results-parser plugin answered with: `{"tests": [{"name", "passed"?, "status"?,
@@ -591,5 +619,14 @@ mod report_time {
         assert!(matches!(r[1].status, Status::Fail(_)));
         assert_eq!(r[2].status, Status::Pass);
         assert!(matches!(r[3].status, Status::Fail(_)));
+    }
+
+    #[test]
+    fn a_world_wait_line_is_subtracted_from_that_tests_time_only() {
+        let log = "mason-world-wait 600000 a::b\ntest a::b ... ok <600.500s>\n\
+                   test a::c ... ok <1.000s>\nmason-world-wait 5 a::zzz\n";
+        let r = parse(ParserKind::Regex, log, &suite()).unwrap();
+        let got: Vec<_> = r.cases.iter().map(|c| (c.name.as_str(), c.ms)).collect();
+        assert_eq!(got, [("a::b", Some(500)), ("a::c", Some(1000))]);
     }
 }
