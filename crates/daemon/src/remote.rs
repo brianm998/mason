@@ -1717,6 +1717,25 @@ pub fn pool_needs(
     Some(out)
 }
 
+/// The rank of a fallback run: its task's own when the task is in a step, else the debts band
+/// (a landed, failed or canceled task, or none: owed work, never the landing band, #835).
+pub fn fallback_rank(
+    d: &Daemon,
+    task: Option<mason_core::TaskId>,
+    owner: Option<&mason_core::Task>,
+    def: Option<&mason_definition::Definition>,
+) -> mason_scheduler::Rank {
+    match (owner, def) {
+        (Some(t), Some(def)) if t.state.is_step() => d.rank_for(t, def, &t.step),
+        (Some(t), _) => {
+            mason_scheduler::Rank::new(false, 0, 0, t.enqueued_at.0, t.id.0, false).debt()
+        }
+        _ => {
+            mason_scheduler::Rank::new(false, 0, 0, now_ms(), task.map_or(0, |t| t.0), false).debt()
+        }
+    }
+}
+
 /// The machine slots a run takes when it was meant for GitHub but `fallback = "local"` sends it
 /// here (no runner picked it up, or GitHub was down). A run bound for GitHub skips this
 /// machine's queue (#759, #761), so without this it would start here at once, beside everything
@@ -1746,10 +1765,7 @@ pub fn fallback_lease(
         }
     }
     let owner = task.and_then(|t| d.world().ok().and_then(|w| w.tasks.get(&t).cloned()));
-    let rank = match (&owner, &def) {
-        (Some(t), Some(def)) => d.rank_for(t, def, &t.step),
-        _ => mason_scheduler::Rank::new(false, 100, 3, now_ms(), task.map_or(0, |t| t.0), false),
-    };
+    let rank = fallback_rank(d, task, owner.as_ref(), def.as_deref());
     let who = task.unwrap_or(mason_core::TaskId(0));
     let alive = || match task {
         Some(t) => d
