@@ -60,3 +60,55 @@ fn nothing_to_hold_takes_nothing() {
     assert!(none.is_none());
     assert_eq!(w.d.broker.used("compile"), 0);
 }
+
+/// #835: a fallback run with no task in a step (a debt payment's) is ranked in the debts band,
+/// behind a live task's request at any progress and priority, never in the landing band.
+#[test]
+fn a_debts_fallback_run_goes_after_a_live_tasks_request() {
+    use mason_daemon::sched::{LeaseState, Standing};
+    let w = world("window = \"20m\"\n", &[]);
+    let d = w.d.clone();
+    d.broker.set_limit("compile", 1).unwrap();
+    let held = mason_daemon::remote::fallback_lease(&d, "scratch", None, &compile(), "held")
+        .unwrap()
+        .expect("a lease");
+
+    // The debt queues first, so only its rank can put it behind.
+    let got = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let h = {
+        let (d, got) = (d.clone(), got.clone());
+        std::thread::spawn(move || {
+            let l = mason_daemon::remote::fallback_lease(&d, "scratch", None, &compile(), "debt")
+                .unwrap()
+                .expect("a lease");
+            got.store(true, std::sync::atomic::Ordering::SeqCst);
+            l
+        })
+    };
+    wait_for("the debt's run to queue", 60, || {
+        d.broker.snapshot().to_string().contains("debt")
+    });
+    // A live task's check, far from landing and at the lowest priority.
+    let check = d.broker.lease_open_as(
+        "check",
+        &compile(),
+        Some(Standing {
+            steps_remaining: 40,
+            span: 1,
+            priority: 9,
+        }),
+    );
+    drop(held);
+    wait_for("the check to be granted", 60, || {
+        matches!(d.broker.lease_poll(check), LeaseState::Granted { .. })
+    });
+    assert!(
+        !got.load(std::sync::atomic::Ordering::SeqCst),
+        "the debt waits while the check holds the slot"
+    );
+    d.broker.lease_close(check);
+    wait_for("the debt to get the slot", 60, || {
+        got.load(std::sync::atomic::Ordering::SeqCst)
+    });
+    drop(h.join().unwrap());
+}

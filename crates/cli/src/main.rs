@@ -146,7 +146,9 @@ mason: command-line client for the MASON pipeline
                                       compile_settle_s, compile_jobs, compile_idle_kill_s, syspolicyd_max_pct, thermal_min_pct, thermal_max_c, stall_ms,
                                       memory.floor_mb, disk.floor_gb)
   mason resources gate <name> --reset   go back to resources.toml, or the default
-  mason remote on|off|status [--json]  send every compile and test that can go to GitHub Actions there, or bring them back
+  mason remote mode <mode> [--project P]  placement mode: local, remote, favor-local or favor-remote, for all of MASON
+                                      or one project; a task's own is `mason task run-on <id> <mode>|default`
+  mason remote on|off|status [--json]  aliases for mode remote / local, and the mode per project and where it came from. Send every compile and test that can go to GitHub Actions there, or bring them back
                                       (suites with remote = false, a device or exclusive always stay here)
   mason hook bash [--needs compile]   optional Claude Code PreToolUse hook: builds go through the queue
   mason definition check [FILE] [--project P]
@@ -532,7 +534,7 @@ fn main() {
         // Validate the subcommand before the daemon lookup, so a typo gets the
         // command list even when no daemon is running.
         match a.rest.first().map(String::as_str) {
-            None | Some("on" | "off" | "status") => {}
+            None | Some("on" | "off" | "status" | "mode") => {}
             Some(other) => die(&format!(
                 "unknown remote command {other:?}: {}\n\n{HELP}",
                 remote::COMMANDS
@@ -594,7 +596,7 @@ fn main() {
     // A word that is no remote command is the typist's error, whether or not masond runs.
     if cmd == "remote" {
         if let Some(other) = a.rest.first().filter(|w| !w.starts_with('-')) {
-            if !matches!(other.as_str(), "on" | "off" | "status") {
+            if !matches!(other.as_str(), "on" | "off" | "status" | "mode") {
                 die(&format!(
                     "unknown remote command {other:?}: {}\n\n{HELP}",
                     remote::COMMANDS
@@ -695,43 +697,61 @@ fn main() {
     }
     if cmd == "remote" {
         let sub = a.pos().unwrap_or_else(|| "status".into());
+        let mut project: Option<String> = None;
         let to = match sub.as_str() {
-            "on" => Some("github"),
-            "off" => Some("local"),
+            "on" => Some("remote".to_string()),
+            "off" => Some("local".to_string()),
             "status" => None,
+            "mode" => {
+                let m = a.pos().unwrap_or_else(|| {
+                    die("which mode? local, remote, favor-local or favor-remote")
+                });
+                if !matches!(
+                    m.as_str(),
+                    "local" | "remote" | "favor-local" | "favor-remote"
+                ) {
+                    die("which mode? local, remote, favor-local or favor-remote");
+                }
+                project = a.opt("--project");
+                Some(m)
+            }
             other => die(&format!(
                 "unknown remote command {other:?}: {}\n\n{HELP}",
                 remote::COMMANDS
             )),
         };
         finish(&a);
-        if let Some(to) = to {
+        if let Some(to) = &to {
             // Changing where runs go is the owner's act: say who.
             if std::env::var("MASON_AS").is_err() {
                 if let Ok(u) = std::env::var("USER") {
                     std::env::set_var("MASON_AS", u);
                 }
             }
-            let r = or_die(d.call("POST", "/remote", Some(&json!({"default": to}))));
+            let r = or_die(d.call(
+                "POST",
+                "/remote",
+                Some(&json!({"mode": to, "project": project})),
+            ));
             if json_out {
                 return println!("{r:#}");
             }
-            println!(
-                "{}",
-                if to == "github" {
-                    "remote is on: suites and checks that can run on GitHub Actions now do (the next run, no restart). `mason remote off` brings them back."
-                } else {
-                    "remote is off: every suite and check runs on this Mac again."
-                }
-            );
+            match &project {
+                Some(p) => println!(
+                    "{p}: mode {to} (written to its registration file and re-read; the next run uses it)"
+                ),
+                None => println!(
+                    "mode {to} for every project that follows the global mode (the next run, no restart)"
+                ),
+            }
         }
         let r = or_die(d.call("GET", "/remote", None));
         if json_out && to.is_none() {
             return println!("{r:#}");
         }
         println!(
-            "default {}{}",
-            r["default"].as_str().unwrap_or("?"),
+            "mode {}{}",
+            r["mode"].as_str().unwrap_or("?"),
             match (r["changed_by"].as_str(), r["changed_at"].as_i64()) {
                 (Some(who), Some(at)) => format!(" (changed by {who} at {at} ms since the epoch)"),
                 _ => String::new(),
@@ -745,8 +765,12 @@ fn main() {
                 "  {:<16} {}",
                 p["project"].as_str().unwrap_or("?"),
                 match p["runs_on"].as_str() {
-                    Some(r) => format!("can run on GitHub ({r})"),
-                    None => "no [remote_runs]: always runs here".to_string(),
+                    Some(r) => format!(
+                        "{} (from {}; GitHub runner {r})",
+                        p["mode"].as_str().unwrap_or("?"),
+                        p["source"].as_str().unwrap_or("?")
+                    ),
+                    None => "local (no [remote_runs]: always runs here)".to_string(),
                 }
             );
         }
@@ -2993,8 +3017,11 @@ fn main() {
                         .unwrap_or_default();
                     let run_on = a.opt("--run-on");
                     if let Some(r) = &run_on {
-                        if !matches!(r.as_str(), "github" | "local") {
-                            die("--run-on takes github or local (leave it out to follow the global switch)");
+                        if !matches!(
+                            r.as_str(),
+                            "github" | "local" | "remote" | "favor-local" | "favor-remote"
+                        ) {
+                            die("--run-on takes local, remote, favor-local or favor-remote (leave it out to follow the project or global mode)");
                         }
                     }
                     let title = a.pos().unwrap_or_else(|| {
@@ -3710,12 +3737,15 @@ fn main() {
                 }
                 "run-on" => {
                     let id = task_id(&mut a);
-                    let to = a
-                        .pos()
-                        .unwrap_or_else(|| die("where? github, local or default"));
+                    let to = a.pos().unwrap_or_else(|| {
+                        die("where? local, remote, favor-local, favor-remote or default")
+                    });
                     finish(&a);
-                    if !matches!(to.as_str(), "github" | "local" | "default") {
-                        die("where? github, local or default");
+                    if !matches!(
+                        to.as_str(),
+                        "github" | "local" | "remote" | "favor-local" | "favor-remote" | "default"
+                    ) {
+                        die("where? local, remote, favor-local, favor-remote or default");
                     }
                     // Owner only, as `priority` is.
                     if std::env::var("MASON_AS").is_err() {
