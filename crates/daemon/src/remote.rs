@@ -3744,7 +3744,7 @@ mod tests {
             s.local_room = Some(Arc::new(move || room));
             let logs = tempfile::tempdir().unwrap();
             let start = clk.now_ms();
-            let out = run_or_fallback(&s, &spec("x9"), logs.path(), &|| None);
+            let out = run_or_fallback(&s, &spec("x9"), logs.path(), &|| None, &Grant::test());
             assert_eq!(matches!(out, Ok(None)), local, "{fallback} {room}");
             let waited = clk.now_ms() - start;
             assert_eq!(waited < 1_200_000, early, "{fallback} {room}: {waited}");
