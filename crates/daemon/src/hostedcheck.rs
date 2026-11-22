@@ -703,11 +703,19 @@ fn remote_check(d: &Arc<Daemon>, spec: &CheckSpec, id: &str) -> Option<Shared> {
                 stopped: None,
             }),
             Err(e) => Err(match rm::environmental(&e) {
-                Some(why) => format!("the check could not run on GitHub: {why}; run it again"),
+                Some(why) => format!("{OUTAGE_PREFIX}{why}; run it again"),
                 None => e,
             }),
         },
     )
+}
+
+/// What an error from [`run`] starts with when GitHub, not the code, kept the check from running.
+pub const OUTAGE_PREFIX: &str = "the check could not run on GitHub: ";
+
+/// Whether an error from [`run`] is that outage (#772).
+pub fn is_outage(e: &str) -> bool {
+    e.starts_with(OUTAGE_PREFIX)
 }
 
 fn collect(
