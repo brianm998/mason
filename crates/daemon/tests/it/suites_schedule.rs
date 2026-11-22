@@ -172,6 +172,9 @@ fn a_due_schedule_with_remote_off_runs_each_listed_suite_once_on_the_tip_and_a_g
     d.store
         .write(|c| {
             c.execute("DELETE FROM suite_green", [])?;
+            // Skipped tests leave no evidence for the tree either: identical code that was
+            // tested is never run again, which would leave this schedule nothing to run.
+            c.execute("DELETE FROM evidence", [])?;
             c.execute("DELETE FROM suite_skip_green", []).map(|_| ())
         })
         .unwrap();
