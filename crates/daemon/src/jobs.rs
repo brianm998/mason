@@ -2125,6 +2125,7 @@ impl TestChecks {
                     match narrow(scope, crate::scope::wants_tests(&dc)) {
                         Ok(n) => {
                             suite.command = crate::scope::expand(&dc, &n, false);
+                            suite.dev_shard_command = crate::suites::dev_shard_for(&suite, &n);
                             if let Some(db) = &suite.dev_build {
                                 suite.build = Some(crate::scope::expand(db, &n, true));
                             }
@@ -3756,6 +3757,17 @@ fn agent_job(c: &Ctx) {
     // twice the budget (s401); it ends with the step.
     let seen = Arc::new(Seen::default());
     let started = Instant::now();
+    // What the step had already run when this process began watching it: the extender counts
+    // from the launch, as the host's limit does, not from this daemon's start (#800).
+    let already = {
+        let launched =
+            c.d.world()
+                .ok()
+                .and_then(|w| w.step_runs.get(&c.run).map(|r| r.started_at.0));
+        launch_elapsed(launched, now_ms(), c.d.started_ms, started)
+            .0
+            .saturating_sub(started.elapsed())
+    };
     let _extender = Some(()).map(|()| {
         let stop = Arc::new(AtomicBool::new(false));
         let (stop2, seen2, extra, wt) = (
@@ -3779,7 +3791,7 @@ fn agent_job(c: &Ctx) {
             while !stop2.load(Ordering::SeqCst) {
                 std::thread::sleep(Duration::from_secs(1));
                 if let Some(e) = ext.as_mut() {
-                    e.tick(started.elapsed(), &extra, &head, seen2.count());
+                    e.tick(already + started.elapsed(), &extra, &head, seen2.count());
                 }
                 last = crate::deadline::save(&extra, &extra_file, last);
             }
