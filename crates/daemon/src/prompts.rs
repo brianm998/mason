@@ -229,6 +229,7 @@ mod tests {
             clarity_classifier: None,
             priority_jump: false,
             hold_back_secs: 7200,
+            park_extra: None,
             small_run_s: 180,
             reuse_green: false,
             reuse_full_hours: 24,
