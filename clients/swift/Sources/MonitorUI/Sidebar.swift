@@ -99,7 +99,15 @@ struct SidebarPane: View {
         .accessibilityIdentifier("sidebar:home")
     }
 
-    func pageLink(_ title: String, icon: String, page: Page) -> some View {
+    #if DEBUG
+    /// Page-link titles whose body has run, for the offscreen scroll test.
+    nonisolated(unsafe) static var realisedLinks = Set<String>()
+    #endif
+
+    @ViewBuilder func pageLink(_ title: String, icon: String, page: Page) -> some View {
+        #if DEBUG
+        let _ = { Self.realisedLinks.insert(title) }()
+        #endif
         Button { model.go(page) } label: {
             Label(title, systemImage: icon)
                 .font(theme.body())
