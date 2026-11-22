@@ -416,9 +416,10 @@ fn run_hosted(
     th: Thresholds,
     env: Vec<(String, String)>,
     place: Option<(Option<TaskId>, &Suite)>,
+    covered: bool,
 ) -> Result<Ran, String> {
     run_hosted_resuming(
-        d, project, id, cmd, cwd, limit, log_dir, check, run, watch, th, env, None, place,
+        d, project, id, cmd, cwd, limit, log_dir, check, run, watch, th, env, None, place, covered,
     )
 }
 
@@ -441,6 +442,7 @@ fn run_hosted_resuming(
     env: Vec<(String, String)>,
     resume: Option<&str>,
     place: Option<(Option<TaskId>, &Suite)>,
+    covered: bool,
 ) -> Result<Ran, String> {
     use crate::hostloss as hl;
     // Where the run goes (#697, #698). Only a task's test step asks (`place`); a landing
@@ -473,7 +475,9 @@ fn run_hosted_resuming(
                 })
                 .unwrap_or_default();
             let task = place.and_then(|(t, _)| t);
-            fallback = crate::remote::fallback_lease(
+            // `covered`: a landing batch holds this machine's slots for this very run, so it does
+            // not ask again (s911, decision 0904).
+            fallback = crate::remote::fallback_lease_unless_covered(
                 d,
                 project,
                 task,
@@ -482,6 +486,7 @@ fn run_hosted_resuming(
                     "{} {id} (no GitHub runner, run here)",
                     task.map_or_else(|| "suite".to_string(), |t| format!("#{}", t.0))
                 ),
+                covered,
             )?;
         }
     }
@@ -1004,6 +1009,10 @@ struct Who {
     /// The reuse plan of the suite now running (s707): what it ran is recorded as green or red
     /// against its input keys.
     reuse: Option<Arc<crate::reuse::Plan>>,
+    /// The caller already holds this machine's slots for these runs (a landing batch's lease,
+    /// `Landing::hold`), so a run sent back here from GitHub runs under that hold and does not
+    /// ask the broker for them again (s911, decision 0904).
+    covered: bool,
 }
 
 /// The tasks of a landing batch, and the name of the definition's Test step. A batch's
@@ -1727,6 +1736,7 @@ fn run_on_base(
             who.thresholds(),
             who.env.clone(),
             None,
+            who.covered,
         )
         .ok()?;
         if ran.stop != Stop::No {
@@ -1961,6 +1971,7 @@ fn run_suite(
             who.env.clone(),
             resume.as_deref(),
             who.place(suite),
+            who.covered,
         ) {
             Ok(r) => r,
             Err(e) if crate::remote::environmental(&e).is_some() => {
@@ -2540,6 +2551,7 @@ fn run_tests_alone(
         who.thresholds(),
         who.env.clone(),
         who.place(suite),
+        who.covered,
     )
     .ok()?;
     if ran.stop != Stop::No {
@@ -2587,6 +2599,7 @@ pub fn run_alone(
     sink: Option<StepRunId>,
     build: bool,
     serial: bool,
+    covered: bool,
 ) -> OverRun {
     let who = Who {
         d: d.clone(),
@@ -2600,6 +2613,7 @@ pub fn run_alone(
         trust_base: true,
         members: Members::default(),
         reuse: None,
+        covered,
     };
     let _ = std::fs::create_dir_all(log_dir);
     let project_test = d
@@ -3144,6 +3158,7 @@ fn run_build(who: &Who, suite: &Suite, build: &str, n: usize, cwd: &Path) -> Bui
         who.thresholds(),
         who.env.clone(),
         None,
+        who.covered,
     ) {
         Ok(r) => r,
         Err(e) => return Built::Red(format!("Building `{}` could not run: {e}", suite.name)),
@@ -3225,6 +3240,7 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
         trust_base: true,
         members: Members::default(),
         reuse: None,
+        covered: false,
     };
     let head = |rev: &str| git::run(&c.wt, &["rev-parse", rev]).map(|s| s.trim().to_string());
     let (Ok(tree_hash), Ok(head_sha)) = (head("HEAD^{tree}"), head("HEAD")) else {
@@ -3898,6 +3914,7 @@ fn run_new_tests_at_base(
             who.thresholds(),
             who.env.clone(),
             None,
+            who.covered,
         )
         .ok()?;
         Some(judge_ran_with(suite, &ran, &wt, who.plugin_parser(suite).as_deref()).results)
@@ -4737,6 +4754,7 @@ fn pay_with(d: &Arc<Daemon>, debt: u64, only: Option<&str>) -> Result<String, St
         trust_base: true,
         members: Members::default(),
         reuse: None,
+        covered: false,
     };
     let tree_hash = git::run(&wt, &["rev-parse", "HEAD^{tree}"])
         .map(|s| s.trim().to_string())
@@ -5047,6 +5065,7 @@ pub fn run_whole(
         trust_base: false,
         members: Members::default(),
         reuse: None,
+        covered: false,
     };
     let tree_hash = git::run(&wt, &["rev-parse", "HEAD^{tree}"])
         .map(|s| s.trim().to_string())
@@ -5339,6 +5358,7 @@ pub fn ledger_run(d: &Arc<Daemon>, task: TaskId) -> Result<String, String> {
         trust_base: true,
         members: Members::default(),
         reuse: None,
+        covered: false,
     };
     let tree = Tree {
         tree: git::run(&wt, &["rev-parse", "HEAD^{tree}"])
@@ -5583,6 +5603,8 @@ fn batch_reuse(
 /// batch started (baselines are taken there). A suite whose only reds are excused (also red
 /// at `base`, or known red) is green for the batch, with a note naming them; `base_excuses`
 /// false (post-land, where `base` is the tree itself) lets only known-red tests excuse.
+/// `covered`: the caller holds this machine's slots for the run, so a suite that falls back from
+/// GitHub runs under that hold (s911).
 #[allow(clippy::too_many_arguments)]
 pub fn run_over(
     d: &Arc<Daemon>,
@@ -5597,6 +5619,7 @@ pub fn run_over(
     base_excuses: bool,
     members: &Members,
     reuse: bool,
+    covered: bool,
 ) -> OverRun {
     let lock = d.repo_lock(d.project_id_by_name(&p.id).unwrap_or(ProjectId(0)));
     let tree_hash = git::run(wt, &["rev-parse", "HEAD^{tree}"])
@@ -5618,6 +5641,7 @@ pub fn run_over(
         trust_base: base_excuses,
         members: members.clone(),
         reuse: None,
+        covered,
     };
     let _ = std::fs::create_dir_all(log_dir);
     let mut out = OverRun {

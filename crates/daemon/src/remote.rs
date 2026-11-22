@@ -2061,6 +2061,26 @@ pub fn fallback_lease(
         .map_err(|_| format!("{label}: the wait for this machine's slots was ended"))
 }
 
+/// [`fallback_lease`], unless `covered`: the caller (a landing batch) already holds this
+/// machine's slots for this very run, so the run goes on under that hold. Asking the broker
+/// again would queue it behind everything, an exclusive request included, and that request waits
+/// for the machine to drain, that is for the caller's own hold: a cycle that froze the local
+/// queue on 2026-11-22 (s911, decision 0904).
+pub fn fallback_lease_unless_covered(
+    d: &Arc<Daemon>,
+    project: &str,
+    task: Option<mason_core::TaskId>,
+    uses: &std::collections::BTreeMap<String, u32>,
+    label: &str,
+    covered: bool,
+) -> Result<Option<crate::sched::Lease>, String> {
+    if covered {
+        tracing::info!(project, %label, "no GitHub runner: running here under the caller's hold of this machine's slots (fallback = local)");
+        return Ok(None);
+    }
+    fallback_lease(d, project, task, uses, label)
+}
+
 /// What a remote run holds, written when it starts and removed when it ends, so a daemon that
 /// restarts counts the units of runs still out.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
