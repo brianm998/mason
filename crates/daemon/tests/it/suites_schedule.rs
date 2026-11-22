@@ -345,7 +345,7 @@ fn with_remote_on_the_run_goes_to_github_and_holds_no_local_compile_slot() {
         "[remote_runs]\nkind = \"github-actions\"\napi = \"{url}\"\nrepo = \"o/r\"\ntoken = \"env:MASON_T783_TOKEN\"\nruns_on = \"macos-14\"\n"
     );
     let (_s, d, _t) = world(&extra, &log);
-    mason_daemon::place::set_global(&d, mason_daemon::place::Global::GitHub, "test").unwrap();
+    mason_daemon::place::set_global(&d, mason_daemon::place::Mode::Remote, "test").unwrap();
     let before = runs_of(&log);
     let d2 = d.clone();
     // The fake GitHub never assigns a runner, so the run stays queued there.
