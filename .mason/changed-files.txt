@@ -1,0 +1,4 @@
+.mason/run.json
+crates/daemon/src/affected.rs
+scripts/exit/s669.sh
+scripts/exit/s914.sh
