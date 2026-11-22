@@ -74,6 +74,7 @@ pub mod release;
 pub mod remote;
 pub mod remote_runs;
 pub mod report;
+pub mod redwatch;
 pub mod rerun;
 pub mod resume;
 pub mod reuse;

@@ -1836,9 +1836,24 @@ impl TestChecks {
         }
     }
 
+    /// How many times develop was merged into this worktree while checks ran: by the session's
+    /// own sync (s525) and by the red-develop watch (#1023). A check that sees it change while
+    /// it waited has a different tree from the one it started with.
+    fn merges(&self) -> u64 {
+        self.reds.merges() + self.slots.d.store.red_folds(self.task).unwrap_or(0)
+    }
+
     /// Remember which known-red tests the run `id` of `scope` failed, from its whole log.
     fn remember_red(&self, scope: &str, id: &str) {
         let text = read_whole_log(&self.log_dir.join(format!("{id}.log"))).unwrap_or_default();
+        // The tests that are not known red: if several tasks fail one, develop may be red
+        // (#1023), and if it is fixed these tasks are told.
+        if self.base_fold.is_some() {
+            let store = &self.slots.d.store;
+            let known = crate::knownred::known_for(store, scope);
+            let (_, new) = crate::knownred::split(&crate::rerun::failing_names(&text), &known);
+            let _ = store.put_red_sightings(self.task, scope, &new, crate::daemon::now_ms());
+        }
         let known: Vec<String> = crate::knownred::known_for(&self.slots.d.store, scope)
             .into_iter()
             .map(|k| k.test)
@@ -2207,7 +2222,7 @@ impl TestChecks {
                         let queue = !crate::hostedcheck::pending(&self.slots.d, &bspec)
                             && !crate::hostedcheck::goes_remote(&self.slots.d, &bspec);
                         self.phase(mason_core::checks::CheckPhase::Waiting);
-                        let merges = self.reds.merges();
+                        let merges = self.merges();
                         let swapped = self.queued(|| {
                             self.slots
                                 .swap_for(queue, &build_uses(), self.estimate(&name, "build"))
@@ -2215,7 +2230,7 @@ impl TestChecks {
                         let Ok(lease) = swapped else {
                             return over();
                         };
-                        let bspec = if self.reds.merges() == merges {
+                        let bspec = if self.merges() == merges {
                             bspec
                         } else {
                             placed(
@@ -2289,7 +2304,7 @@ impl TestChecks {
             let queue = !crate::hostedcheck::pending(&self.slots.d, &rspec)
                 && !crate::hostedcheck::goes_remote(&self.slots.d, &rspec);
             self.phase(mason_core::checks::CheckPhase::Waiting);
-            let merges = self.reds.merges();
+            let merges = self.merges();
             let swapped = self.queued(|| {
                 self.slots
                     .swap_for(queue, &uses, self.estimate(&name, "run"))
@@ -2297,7 +2312,7 @@ impl TestChecks {
             let Ok(lease) = swapped else {
                 return over();
             };
-            let rspec = if self.reds.merges() == merges {
+            let rspec = if self.merges() == merges {
                 rspec
             } else {
                 placed(
@@ -2319,7 +2334,14 @@ impl TestChecks {
             });
             drop(lease);
             match &res {
-                Ok(o) if o.passed => self.reds.passed(&name),
+                Ok(o) if o.passed => {
+                    self.reds.passed(&name);
+                    let _ = self
+                        .slots
+                        .d
+                        .store
+                        .clear_red_sightings(self.task, &name, None);
+                }
                 Ok(o) => self.remember_red(&name, &o.id),
                 Err(_) => {}
             }
@@ -2498,6 +2520,14 @@ impl CheckHandler for TestChecks {
         // What was merged while the check waited, told on its result (s525).
         let mut notes: Vec<String> = note.into_iter().collect();
         notes.extend(self.reds.take_notes());
+        // What the red-develop watch found while the check waited or ran (#1023).
+        notes.extend(
+            self.slots
+                .d
+                .store
+                .take_red_notes(self.task)
+                .unwrap_or_default(),
+        );
         if let (false, CheckRun::Done { passed, summary }) = (notes.is_empty(), &r) {
             r = CheckRun::Done {
                 passed: *passed,
@@ -2671,7 +2701,7 @@ impl TestChecks {
                 global: true,
             }
         };
-        let merges = self.reds.merges();
+        let merges = self.merges();
         // On GitHub the build is part of the same run as the tests (#771): a second runner
         // starts from nothing and would compile everything again.
         let mut folded: Option<String> = None;
@@ -2703,7 +2733,7 @@ impl TestChecks {
                 let Ok(lease) = swapped else {
                     return over();
                 };
-                let bspec = if self.reds.merges() == merges {
+                let bspec = if self.merges() == merges {
                     bspec
                 } else {
                     ctree = crate::cmdreuse::content_tree(&self.wt);
@@ -2773,7 +2803,7 @@ impl TestChecks {
         let Ok(test_lease) = swapped else {
             return over();
         };
-        let tspec = if self.reds.merges() == merges {
+        let tspec = if self.merges() == merges {
             tspec
         } else {
             ctree = crate::cmdreuse::content_tree(&self.wt);
