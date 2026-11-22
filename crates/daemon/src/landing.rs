@@ -2866,7 +2866,9 @@ impl Runner {
             g.notes = notes;
             g
         } else {
-            let _lease = match self.hold(def, suites_needs(def, &local), true) {
+            // Only the suites that run on this machine take its slots; one bound for GitHub takes
+            // them if it comes back here (s943).
+            let (_lease, cover) = match self.hold_suites(def, &local, true) {
                 Ok(l) => l,
                 Err(e) => {
                     self.fail_service(e.clone());
@@ -2896,9 +2898,9 @@ impl Runner {
                     true,
                     &self.members(def),
                     reuse,
-                    // The batch's lease holds this machine's slots for the whole run, so a suite
-                    // that falls back from GitHub runs under it (s911).
-                    _lease.is_some(),
+                    // What the batch's lease holds: a suite it holds slots for that falls back
+                    // from GitHub runs under it (s911); any other takes its own (s943).
+                    &cover,
                 );
                 stop.store(true, std::sync::atomic::Ordering::SeqCst);
                 r
@@ -3008,7 +3010,7 @@ impl Runner {
                 ..Default::default()
             };
         }
-        let _lease = match self.hold(def, suites_needs(def, &names), true) {
+        let (_lease, cover) = match self.hold_suites(def, &names, true) {
             Ok(l) => l,
             Err(e) => {
                 self.fail_service(e.clone());
@@ -3036,7 +3038,7 @@ impl Runner {
                 self.sink(),
                 build,
                 serial,
-                _lease.is_some(),
+                &cover,
             );
             stop.store(true, std::sync::atomic::Ordering::SeqCst);
             r
@@ -4069,6 +4071,35 @@ impl Runner {
                     .declare(name, def.resources.get(name).copied().unwrap_or(1));
             }
         }
+        let owner = match self.owner(def, watch) {
+            Ok(Some(o)) => o,
+            Ok(None) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let alive = || owner.alive(d);
+        d.broker
+            .acquire(
+                owner.task,
+                &format!(
+                    "batch #{}",
+                    self.batch_id.load(std::sync::atomic::Ordering::SeqCst)
+                ),
+                owner.rank,
+                needs,
+                &alive,
+                &mut |_| {},
+            )
+            .map(Some)
+            .map_err(|_| "every task of the batch left the landing step while it waited".into())
+    }
+
+    /// The batch as the owner of its broker requests, ranked as its first task (`None`: no
+    /// member). `watch`: a wait ends if all the batch's tasks have left the landing step.
+    fn owner(
+        &self,
+        def: &mason_definition::Definition,
+        watch: bool,
+    ) -> Result<Option<crate::remote::BatchOwner>, String> {
         let Some(first) = self.member_tasks.first().copied() else {
             return Ok(None);
         };
@@ -4077,35 +4108,64 @@ impl Runner {
             .iter()
             .find(|s| s.kind == mason_definition::StepType::Landing)
             .map_or_else(String::new, |s| s.name.clone());
-        let rank = match d.world().ok().and_then(|w| w.tasks.get(&first).cloned()) {
-            Some(t) => d.rank_for(&t, def, &step),
+        let rank = match self
+            .d
+            .world()
+            .ok()
+            .and_then(|w| w.tasks.get(&first).cloned())
+        {
+            Some(t) => self.d.rank_for(&t, def, &step),
             None => return Err("the batch's first task is gone".into()),
         };
-        let alive = || {
-            if !watch || self.member_runs.is_empty() {
-                return true;
+        Ok(Some(crate::remote::BatchOwner {
+            task: first,
+            rank,
+            tasks: self.member_tasks.clone(),
+            runs: self.member_runs.clone(),
+            watch,
+        }))
+    }
+
+    /// Of `names`, the suites that run on this machine and the ones bound for GitHub, decided
+    /// as a suite's run decides where it goes (`remote::suite_goes_remote`, s943). A suite bound
+    /// for GitHub holds nothing here while it is out; if it comes back, or runs a baseline or a
+    /// build here, it takes its slots then, as the batch.
+    fn by_placement(
+        &self,
+        def: &mason_definition::Definition,
+        names: &[String],
+    ) -> (Vec<String>, Vec<String>) {
+        let mut here = vec![];
+        let mut there = vec![];
+        for n in names {
+            let remote = def.testing.suite(n).is_some_and(|s| {
+                crate::remote::suite_goes_remote(&self.d, &self.project().id, None, s)
+            });
+            if remote {
+                there.push(n.clone());
+            } else {
+                here.push(n.clone());
             }
-            d.world().map_or(true, |w| {
-                self.member_tasks.iter().any(|t| {
-                    w.open_run(*t)
-                        .is_some_and(|r| self.member_runs.contains(&r))
-                })
-            })
+        }
+        (here, there)
+    }
+
+    /// Hold the slots of the suites of `names` that run on this machine, and say what the lease
+    /// holds, for `suites::run_over`/`run_alone` (s943).
+    fn hold_suites(
+        &self,
+        def: &mason_definition::Definition,
+        names: &[String],
+        watch: bool,
+    ) -> Result<(Option<crate::sched::Lease>, crate::suites::BatchCover), String> {
+        let (here, _) = self.by_placement(def, names);
+        let needs = suites_needs(def, &here);
+        let lease = self.hold(def, needs.clone(), watch)?;
+        let cover = crate::suites::BatchCover {
+            owner: self.owner(def, watch)?.map(Arc::new),
+            held: lease.as_ref().map(|_| needs),
         };
-        d.broker
-            .acquire(
-                first,
-                &format!(
-                    "batch #{}",
-                    self.batch_id.load(std::sync::atomic::Ordering::SeqCst)
-                ),
-                rank,
-                needs,
-                &alive,
-                &mut |_| {},
-            )
-            .map(Some)
-            .map_err(|_| "every task of the batch left the landing step while it waited".into())
+        Ok((lease, cover))
     }
 
     /// An update is waiting to take over: a batch between runs stops at the next boundary
@@ -5212,7 +5272,7 @@ impl Runner {
         }
         // Held like any suite run; the batch's tasks have left landing by now, so
         // there is nothing to stop waiting for.
-        let _lease = match self.hold(def, suites_needs(def, &tier.suites), false) {
+        let (_lease, cover) = match self.hold_suites(def, &tier.suites, false) {
             Ok(l) => l,
             Err(_) => {
                 let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -5234,7 +5294,7 @@ impl Runner {
             false,
             &crate::suites::Members::default(),
             false,
-            _lease.is_some(),
+            &cover,
         );
         {
             let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -5285,7 +5345,10 @@ impl Runner {
 
 /// What running these suites holds: each suite's `uses` and its environment's,
 /// the largest of each, as the test step's own acquisition computes it.
-fn suites_needs(def: &mason_definition::Definition, names: &[String]) -> mason_scheduler::Needs {
+pub(crate) fn suites_needs(
+    def: &mason_definition::Definition,
+    names: &[String],
+) -> mason_scheduler::Needs {
     let mut n = mason_scheduler::Needs::default();
     for s in names.iter().filter_map(|s| def.testing.suite(s)) {
         let mut uses = s.uses.clone();
