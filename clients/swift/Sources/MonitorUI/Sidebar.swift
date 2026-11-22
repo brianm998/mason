@@ -227,6 +227,10 @@ struct RowView: View, Equatable {
                     }
                     Text("\(row.project), \(activity)")
                         .font(theme.small()).foregroundStyle(theme.muted).lineLimit(2)
+                    if let mark = MonitorModel.runOnMarker(row) {
+                        Text(mark).font(theme.small()).foregroundStyle(theme.muted)
+                            .accessibilityIdentifier("row:\(row.id):run-on")
+                    }
                     if !row.proposal.isEmpty {
                         Text(row.proposal).font(theme.small()).foregroundStyle(theme.muted)
                             .accessibilityIdentifier("row:\(row.id):proposal")

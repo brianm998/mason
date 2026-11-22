@@ -3086,6 +3086,17 @@ async fn remote_set(
 ) -> Res {
     let who = who_of(&headers);
     owner_only(&d, &who, "change where runs go")?;
+    let project = b["project"].as_str().map(str::to_string);
+    // `default` for a project clears its own mode, so it follows MASON's.
+    if let (Some(p), Some("default")) = (&project, b["mode"].as_str()) {
+        let (d2, p) = (d.clone(), p.clone());
+        let r = d
+            .pool
+            .run(move || crate::place::clear_project_mode(&d2, &p))
+            .await
+            .map_err(pool_err)?;
+        return r.map(Json).map_err(|(c, m)| fail(code(c), m));
+    }
     let to = b["mode"]
         .as_str()
         .or_else(|| b["default"].as_str())
@@ -3096,7 +3107,6 @@ async fn remote_set(
                 "`mode` must be local, remote, favor-local or favor-remote",
             )
         })?;
-    let project = b["project"].as_str().map(str::to_string);
     let d2 = d.clone();
     let r = d
         .pool

@@ -124,6 +124,10 @@ struct HomePage: View {
                     }
                 }
 
+                VStack(alignment: .leading, spacing: theme.spacingSmall) {
+                    PlacementControl(model: model, scope: .global)
+                    if let p = model.home?.project, !p.isEmpty { PlacementControl(model: model, scope: .project(p)) }
+                }
                 let pair = compact
                     ? AnyLayout(VStackLayout(alignment: .leading, spacing: theme.spacingLarge))
                     : AnyLayout(HStackLayout(alignment: .top, spacing: theme.spacingLarge * 2))
@@ -485,6 +489,7 @@ struct TaskDetailPage: View {
                 }
                 Text(Format.cpuTaskLine(permille: d.cpuPermille)).font(theme.body()).foregroundStyle(theme.muted)
                     .accessibilityIdentifier("cpu")
+                PlacementControl(model: model, scope: .task(r.id))
                 if r.testImmune {
                     Text("Immune to testing: no tests run for it through landing (lint and the build still do). The full run is owed.")
                         .font(theme.small()).foregroundStyle(theme.slow)
@@ -983,6 +988,58 @@ struct LandingItems: View {
 /// The running batches that offer Land now.
 func landNowBatches(_ batches: [Mason_V1_BatchLine]) -> [Mason_V1_BatchLine] {
     batches.filter { $0.running && $0.allowedActions.contains("land_now") }
+}
+
+/// "Runs on" for one level (#834): the mode in force and where it came from, the four modes, and
+/// "Follow MASON" / "Follow project" to clear the level's own choice. Owner devices that can act
+/// only; a one-line confirm, then the pending label until the next view arrives.
+struct PlacementControl: View {
+    let model: MonitorModel
+    let scope: PlacementScope
+    @Environment(\.theme) private var theme
+
+    private var id: String {
+        switch scope {
+        case .global: return "global"
+        case .project(let p): return "project:\(p)"
+        case .task(let n): return "task:\(n)"
+        }
+    }
+
+    var body: some View {
+        if let p = model.placement(scope) {
+            let pending = model.placementPendingLabel(scope)
+            let asking = Binding(
+                get: { model.placementAsk?.scope == scope },
+                set: { if !$0 { model.cancelPlacement() } })
+            HStack(spacing: theme.spacing) {
+                Text("Runs on").font(theme.body(.semibold))
+                Text(MonitorModel.placementText(p)).font(theme.body()).foregroundStyle(theme.muted)
+                    .accessibilityIdentifier("placement:\(id):text")
+                if model.canSetPlacement(scope) {
+                    if let pending {
+                        Text(pending).font(theme.small()).foregroundStyle(theme.muted)
+                            .accessibilityIdentifier("placement:\(id):pending")
+                    } else {
+                        Menu("Change") {
+                            ForEach(placementModes, id: \.self) { m in
+                                Button(m) { model.askPlacement(scope, mode: m) }
+                            }
+                            if let follow = scope.followLabel, model.canFollow(scope) {
+                                Divider()
+                                Button(follow) { model.askPlacement(scope, mode: "default") }
+                            }
+                        }
+                        .accessibilityIdentifier("placement:\(id)")
+                    }
+                }
+            }
+            .alert(model.placementAsk?.confirmText ?? "", isPresented: asking) {
+                Button("Change") { model.confirmPlacement() }
+                Button("Cancel", role: .cancel) { model.cancelPlacement() }
+            }
+        }
+    }
 }
 
 /// The Land now button of the landing queue: owner devices only (`shown`), one-line confirm,

@@ -207,6 +207,8 @@ fun HomePage(model: MonitorModel) {
                 }
             }
         }
+        PlacementControl(model, PlacementScope.Global)
+        h?.project?.takeIf { it.isNotEmpty() }?.let { PlacementControl(model, PlacementScope.Project(it)) }
         Row(horizontalArrangement = Arrangement.spacedBy(theme.spacingLarge * 2)) {
             Section("Active models", open = { model.go(Page.Section("active_models")) }) {
                 val active = h?.active.orEmpty()
@@ -432,6 +434,7 @@ private fun TaskDetail(model: MonitorModel, d: TaskDetailView, loading: Boolean 
         }
         if (r.issue != 0L || d.ci_links.isNotEmpty()) CiLinksLine(d.ci_links, r.issue, r.issue_url)
         Text(cpuTaskLine(d.cpu_permille), style = theme.body(color = theme.muted), modifier = Modifier.testTag("cpu"))
+        PlacementControl(model, PlacementScope.Task(r.id))
         Row(horizontalArrangement = Arrangement.spacedBy(theme.spacingLarge)) {
             CopyButton(r.key, r.key)
             CopyTarget.detail(d.branch, d.worktree).forEach { t ->
@@ -796,6 +799,54 @@ internal fun LandingItems(model: MonitorModel, items: List<mason.v1.TaskLanding>
                 LandNowButton(model, LandNowTarget.Task(i.task), model.canLandNow(i))
             }
         }
+    }
+}
+
+/**
+ * "Runs on" for one level (#834): the mode in force and where it came from, the four modes, and
+ * "Follow MASON" / "Follow project" to clear the level's own choice. Owner devices that can act
+ * only; a one-line confirm, then the pending label until the next view arrives.
+ */
+@Composable
+internal fun PlacementControl(model: MonitorModel, scope: PlacementScope) {
+    val theme = LocalTheme.current
+    val p = model.placement(scope) ?: return
+    val key = when (scope) {
+        PlacementScope.Global -> "global"
+        is PlacementScope.Project -> "project:${scope.name}"
+        is PlacementScope.Task -> "task:${scope.id}"
+    }
+    val pending = model.placementPendingLabel(scope)
+    Column(verticalArrangement = Arrangement.spacedBy(theme.spacingSmall)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), verticalAlignment = Alignment.CenterVertically) {
+            Text("Runs on", style = theme.body(FontWeight.SemiBold))
+            Text(placementText(p), style = theme.body(color = theme.muted), modifier = Modifier.testTag("placement:$key:text"))
+            if (pending != null) Text(pending, style = theme.small(color = theme.muted), modifier = Modifier.testTag("placement:$key:pending"))
+        }
+        if (model.canSetPlacement(scope) && pending == null) {
+            Row(horizontalArrangement = Arrangement.spacedBy(theme.spacingSmall)) {
+                placementModes.forEach { m ->
+                    Pill(m, prominent = m == p.mode, modifier = Modifier.testTag("placement:$key:$m")) { model.askPlacement(scope, m) }
+                }
+                val follow = scope.followLabel
+                if (follow != null && model.canFollow(scope)) {
+                    Pill(follow, modifier = Modifier.testTag("placement:$key:default")) { model.askPlacement(scope, "default") }
+                }
+            }
+        }
+    }
+    val ask = model.placementAsk
+    if (ask != null && ask.scope == scope) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { model.cancelPlacement() },
+            text = { Text(ask.confirmText) },
+            confirmButton = {
+                androidx.compose.material3.Button(onClick = { model.confirmPlacement() }, modifier = Modifier.testTag("placement-confirm")) { Text("Change") }
+            },
+            dismissButton = {
+                androidx.compose.material3.Button(onClick = { model.cancelPlacement() }) { Text("Cancel") }
+            },
+        )
     }
 }
 

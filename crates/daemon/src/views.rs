@@ -103,6 +103,8 @@ pub struct Ctx<'a> {
     wait_view: std::sync::Arc<crate::waitview::WaitsView>,
     /// Tasks the owner made immune to testing (an open `tests:all` debt), read once per build.
     immune: std::collections::HashSet<u64>,
+    /// Tasks with their own placement mode (`run_on`), read once per build (#834).
+    run_on: std::collections::HashMap<u64, String>,
 }
 
 type LogCache = std::collections::HashMap<u64, (Vec<crate::http::LogStamp>, String)>;
@@ -210,6 +212,15 @@ impl<'a> Ctx<'a> {
             waits: d.broker.waits_snapshot(),
             row_bodies: true,
             wait_view: d.broker.wait_view(),
+            run_on: d
+                .store
+                .task_overrides_for_key(mason_definition::layers::RUN_ON)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|(t, v)| {
+                    crate::place::Mode::parse(&v).map(|m| (t, m.name().to_string()))
+                })
+                .collect(),
             immune: d
                 .store
                 .debts(None, true)
@@ -512,6 +523,7 @@ impl<'a> Ctx<'a> {
             // Whole minutes, so a sidebar that changed in nothing else hashes the same.
             in_state_ms: in_state / 60_000 * 60_000,
             state_since_ms: since,
+            run_on_override: self.run_on.get(&t.id.0).cloned().unwrap_or_default(),
             model,
             display: model_use
                 .as_ref()
@@ -710,6 +722,15 @@ impl<'a> Ctx<'a> {
         }
         HeaderView {
             project: project.to_string(),
+            project_placements: self
+                .d
+                .projects()
+                .values()
+                .map(|p| ProjectPlacement {
+                    project: p.id.clone(),
+                    placement: Some(crate::place::project_placement(self.d, &p.id)),
+                })
+                .collect(),
             attention,
             counts: ORDER
                 .iter()
@@ -1042,6 +1063,9 @@ impl<'a> Ctx<'a> {
             crate::remote::running_holds(&crate::remote::holds_dir(&self.d.cfg.hosts_dir()));
         HomeView {
             project: project.to_string(),
+            placement: Some(crate::place::global_placement(self.d)),
+            project_placement: (!project.is_empty())
+                .then(|| crate::place::project_placement(self.d, project)),
             status: self.header(project).status,
             attention: attention
                 .iter()
@@ -1141,6 +1165,11 @@ impl<'a> Ctx<'a> {
         let plan_view = (!plan.is_empty()).then(|| crate::plan_view::parse_plan(&plan));
         let removes = crate::landing::removals_view(&self.d.cfg.task_dir(id));
         Some(TaskDetailView {
+            placement: Some(crate::place::task_placement(
+                self.d,
+                &self.project_name(t),
+                id,
+            )),
             step_tokens: crate::usage::step_tokens(self.d, id, self.now / 1000),
             ci_links: crate::landing::ci_links_of(&self.d.cfg.task_dir(id))
                 .into_iter()
