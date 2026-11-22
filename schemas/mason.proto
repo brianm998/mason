@@ -725,6 +725,11 @@ message Banner {
   string mode = 4;
   // For kind "health": the owner session the banner's Open session button opens (s432).
   uint64 session = 5;
+  // Who the banner is for (s929): "action" (the owner must do or decide something), "warning"
+  // (something is wrong that the pipeline is not handling) or "info" (progress, or something
+  // already being handled). A client draws action and warning as bar rows and info in the top
+  // bar's status line. Empty (an older daemon) reads as "warning". Additive.
+  string level = 6;
 }
 
 message HeaderView {
@@ -787,6 +792,9 @@ message UpdateInfo {
   // Asked before the button acts, written by the daemon so both monitors say the same
   // words; empty when no confirmation is needed (additive).
   string daemon_confirm = 7;
+  // "action" when the daemon text needs the owner (a button, or a failed update), "info" while
+  // an update is only progressing (s929). Empty when daemon_text is empty. Additive.
+  string daemon_level = 8;
 }
 
 message MonitorBuild {

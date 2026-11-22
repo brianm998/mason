@@ -71,6 +71,7 @@ fun TopBar(model: MonitorModel) {
                     )
                 }
             }
+            InfoStatus(model)
             ProjectFilter(model)
         }
 
@@ -192,7 +193,7 @@ fun BannersView(model: MonitorModel) {
         if (model.announcer.daemonDown) banner("Daemon down: MASON has lost its daemon. Check that masond is running.", "daemon-down", theme, "daemon_down")
         if (!model.connected) banner(if (model.reconnecting) "Daemon restarting, reconnecting…" else "Connection lost. Reconnecting…", "connection", theme, "connection_lost")
         model.readOnlyReason?.let { banner("Read-only: $it", "read-only", theme, "read_only") }
-        if (model.daemonUpdateText.isNotEmpty()) {
+        if (model.daemonUpdateText.isNotEmpty() && !model.daemonUpdateIsInfo) {
             updateRow(model.daemonUpdateText, if (model.canUpdateDaemon) (if (model.downloadUrl.isEmpty()) model.daemonUpdateButton else "Download") else null, "daemon-update", theme) { if (model.downloadUrl.isEmpty()) model.pressUpdateDaemon() else model.openDownloadPage() }
         }
         if (model.confirmingDaemonUpdate) {
@@ -211,6 +212,8 @@ fun BannersView(model: MonitorModel) {
             updateRow(monitorText, if (model.updateAvailable && model.updating == null) "Update monitor" else null, "monitor-update", theme, "update") { model.updateMonitor() }
         }
         model.header?.banners?.forEachIndexed { i, b ->
+            // Info is progress or already being handled: the top bar's status line, not a row.
+            if (b.level == "info") return@forEachIndexed
             if (b.kind == "push_auth") {
                 // A refused push holds landing; the owner picks the key that fixes it.
                 val project = MonitorModel.pushAuthProject(b)
@@ -554,4 +557,22 @@ internal fun OwnerSessionDialog(model: MonitorModel) {
             }
         },
     )
+}
+
+/** What the notification bar leaves out, as one short line; a click lists it. */
+@Composable
+private fun InfoStatus(model: MonitorModel) {
+    val theme = LocalTheme.current
+    val summary = model.infoSummary
+    if (summary.isEmpty()) return
+    var open by remember { mutableStateOf(false) }
+    Box {
+        Text(
+            summary, style = theme.small(color = theme.muted), maxLines = 1, softWrap = false,
+            modifier = Modifier.clickable { open = true }.testTag("info-status"),
+        )
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            model.infoNotices.forEach { DropdownMenuItem(text = { Text(it) }, onClick = { open = false }) }
+        }
+    }
 }

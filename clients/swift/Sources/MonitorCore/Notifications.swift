@@ -41,6 +41,39 @@ extension MonitorModel {
         s.replacingOccurrences(of: "\n", with: " ")
     }
 
+    /// An older daemon sends no level: its banners read as warnings, so they stay rows.
+    static func isInfo(_ b: Mason_V1_Banner) -> Bool { b.level == "info" }
+
+    /// The masond update is only progressing (fetching, building, testing, restarting).
+    public var daemonUpdateIsInfo: Bool { updateInfo?.daemonLevel == "info" }
+
+    /// Everything the bar leaves out, one line each, newest first as the daemon sent them.
+    public var infoNotices: [String] {
+        var out: [String] = []
+        if !daemonUpdateText.isEmpty && daemonUpdateIsInfo { out.append(daemonUpdateText) }
+        for b in header?.banners ?? [] where Self.isInfo(b) { out.append(b.text) }
+        return out
+    }
+
+    /// The top bar's status line: "masond updating · 2 CI jobs being fixed". Empty when there
+    /// is nothing quiet to say.
+    public var infoSummary: String {
+        var parts: [String] = []
+        if !daemonUpdateText.isEmpty && daemonUpdateIsInfo { parts.append("masond updating") }
+        var jobs = 0
+        var other = 0
+        for b in header?.banners ?? [] where Self.isInfo(b) {
+            if let r = b.text.range(of: #"(\d+) red CI jobs? being fixed"#, options: .regularExpression) {
+                jobs += Int(b.text[r].prefix { $0.isNumber }) ?? 0
+            } else {
+                other += 1
+            }
+        }
+        if jobs > 0 { parts.append("\(jobs) CI job\(jobs == 1 ? "" : "s") being fixed") }
+        if other > 0 { parts.append(other == 1 ? "1 notice" : "\(other) notices") }
+        return parts.joined(separator: " · ")
+    }
+
     public var monitorUpdateText: String? {
         if let doing = updating { return doing }
         guard updateAvailable else { return updateError }
@@ -59,7 +92,7 @@ extension MonitorModel {
         }
         if daemonDown { client("daemon-down", "Daemon down: MASON has lost its daemon. Check that masond is running.", icon: "daemon_down") }
         if let why = readOnlyReason { client("read-only", "Read-only: \(why)", icon: "read_only") }
-        if !daemonUpdateText.isEmpty {
+        if !daemonUpdateText.isEmpty && !daemonUpdateIsInfo {
             client("daemon-update", daemonUpdateText,
                    button: canUpdateDaemon ? (downloadURL.isEmpty ? daemonUpdateButton : "Download") : nil)
         }
@@ -70,6 +103,8 @@ extension MonitorModel {
         let banners = header?.banners ?? []
         let firstPause = banners.firstIndex { $0.kind == "paused" }
         for (i, b) in banners.enumerated() {
+            // Info is progress or already being handled: the top bar's status line, not a row.
+            if Self.isInfo(b) { continue }
             let icon: String? = nil
             let key = Self.bannerKey(b)
             switch b.kind {

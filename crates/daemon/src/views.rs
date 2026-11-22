@@ -720,6 +720,11 @@ impl<'a> Ctx<'a> {
                 ..Default::default()
             });
         }
+        for b in &mut banners {
+            if b.level.is_empty() {
+                b.level = banner_level(&b.kind).into();
+            }
+        }
         HeaderView {
             project: project.to_string(),
             project_placements: self
@@ -1737,6 +1742,23 @@ impl<'a> Ctx<'a> {
     }
 }
 
+/// Who a banner is for (s929): `action` needs the owner, `warning` is wrong and nobody is
+/// handling it, `info` is progress or already being handled. A kind not listed is a warning,
+/// so a new producer shows in the bar until it is classified.
+pub fn banner_level(kind: &str) -> &'static str {
+    match kind {
+        "push_auth" | "health" | "definition" | "credentials" | "provider_budget"
+        | "provider_hold" => "action",
+        "provider_limit"
+        | "provider_outage"
+        | "provider_overage"
+        | "provider_extra_billing"
+        | "provider_warning"
+        | "ci_watch_quiet" => "info",
+        _ => "warning",
+    }
+}
+
 /// The last 40 log lines of a task, kept with the logs' signature (each
 /// journal's size and modified time) so an event that changed nothing in the
 /// logs does not read every journal again.
@@ -1765,10 +1787,33 @@ fn ci_watch_banners(project: &str, v: &serde_json::Value) -> Vec<Banner> {
             ),
         ));
     }
-    for h in v["held_back"].as_array().into_iter().flatten() {
-        if let Some(t) = h["text"].as_str() {
-            banners.push(banner("ci_watch", format!("{project}: {t}")));
-        }
+    // Jobs an open ticket is fixing are handled: one info entry per project.
+    let held: Vec<&serde_json::Value> = v["held_back"].as_array().into_iter().flatten().collect();
+    if !held.is_empty() {
+        let tickets: Vec<String> = held
+            .iter()
+            .filter_map(|h| h["task"].as_u64())
+            .collect::<std::collections::BTreeSet<u64>>()
+            .into_iter()
+            .map(|t| format!("#{t}"))
+            .collect();
+        let n = held.len();
+        let text = if tickets.is_empty() {
+            format!(
+                "{project}: {n} red CI job{} being fixed",
+                if n == 1 { "" } else { "s" }
+            )
+        } else {
+            format!(
+                "{project}: {n} red CI job{} being fixed: {}",
+                if n == 1 { "" } else { "s" },
+                tickets.join(", ")
+            )
+        };
+        banners.push(Banner {
+            level: "info".into(),
+            ..banner("ci_watch", text)
+        });
     }
     if let Some(t) = v["unconfirmed_text"].as_str() {
         banners.push(banner("ci_watch_quiet", format!("{project}: {t}")));
@@ -2467,5 +2512,56 @@ mod batch_state_tests {
         let d = phase_durations(&rows, &finished, 4, "verifying");
         assert_eq!(typical_from(&d), Some(200));
         assert_eq!(typical_from(&d[..2]), None);
+    }
+}
+
+#[cfg(test)]
+mod banner_level_tests {
+    use super::*;
+
+    #[test]
+    fn every_banner_kind_gets_its_level() {
+        let table = [
+            ("push_auth", "action"),
+            ("health", "action"),
+            ("definition", "action"),
+            ("credentials", "action"),
+            ("provider_budget", "action"),
+            ("provider_hold", "action"),
+            ("landing_frozen", "warning"),
+            ("paused", "warning"),
+            ("ci_watch", "warning"),
+            ("ci_watch_quiet", "info"),
+            ("provider_limit", "info"),
+            ("provider_outage", "info"),
+            ("provider_overage", "info"),
+            ("provider_extra_billing", "info"),
+            ("provider_warning", "info"),
+            ("something_new", "warning"),
+        ];
+        for (kind, level) in table {
+            assert_eq!(banner_level(kind), level, "{kind}");
+        }
+    }
+
+    #[test]
+    fn held_back_jobs_of_one_project_are_one_info_banner() {
+        let v = serde_json::json!({
+            "held_back": [
+                {"job": "a", "task": 935, "text": "a red; #935 is fixing it"},
+                {"job": "b", "task": 836, "text": "b red; #836 is fixing it"},
+                {"job": "c", "task": 935, "text": "c red; #935 is fixing it"},
+            ],
+            "pending": [{"job": "d"}],
+            "error": "gh failed",
+        });
+        let b = ci_watch_banners("mason", &v);
+        let held: Vec<_> = b.iter().filter(|b| b.level == "info").collect();
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].text, "mason: 3 red CI jobs being fixed: #836, #935");
+        // Waiting for a second red run and "cannot look" are not handled: they keep the default.
+        let rest: Vec<_> = b.iter().filter(|b| b.level != "info").collect();
+        assert_eq!(rest.len(), 2);
+        assert!(rest.iter().all(|b| banner_level(&b.kind) == "warning"));
     }
 }

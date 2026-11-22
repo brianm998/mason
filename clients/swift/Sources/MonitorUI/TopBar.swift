@@ -14,6 +14,7 @@ struct TopBar: View {
     @State private var adding = false
     @State private var improving = false
     @State private var voices = false
+    @State private var notices = false
 
     #if DEBUG
     /// Body evaluations, for the offscreen test that counts them.
@@ -57,6 +58,24 @@ struct TopBar: View {
                     .buttonStyle(.plain)
                     .touchTarget().hint("Open the first task that needs you")
                     .accessibilityIdentifier("attention")
+                }
+
+                // What the notification bar leaves out: progress and what is being handled.
+                if !model.infoSummary.isEmpty {
+                    Button { notices = true } label: {
+                        Text(model.infoSummary).font(theme.small()).foregroundStyle(theme.muted).lineLimit(1)
+                    }
+                    .buttonStyle(.plain)
+                    .touchTarget().hint("Progress and what MASON is already handling")
+                    .accessibilityIdentifier("info-status")
+                    .popover(isPresented: $notices) {
+                        VStack(alignment: .leading, spacing: theme.spacingSmall) {
+                            ForEach(Array(model.infoNotices.enumerated()), id: \.offset) { _, t in
+                                Text(t).font(theme.body()).textSelection(.enabled)
+                            }
+                        }
+                        .padding(theme.spacing).frame(maxWidth: 420)
+                    }
                 }
 
                 Picker("", selection: $model.project) {
