@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 name: CI
 
+# The full run has a title MASON's full-test schedule recognises (decision 0793).
+run-name: "${{ github.event_name == 'workflow_dispatch' && 'CI: full' || github.event.pull_request.title || github.event.head_commit.message }}"
+
 # Plain pull_request trigger only. No secrets and no private
 # runners, so fork PRs run untrusted code safely.
 on:
@@ -10,19 +13,26 @@ on:
     # cancel the run of the batch it follows (decision 0447).
     paths-ignore: ["README.md"]
   pull_request:
-  # The macOS legs of exit-scripts and monitor-compose run here, not on every push
-  # (decision 0204): GitHub caps an account's concurrent macOS jobs.
-  schedule:
-    - cron: "17 3 * * *"
+  # The full matrix runs only from here (decision 0793): MASON's full-test schedule
+  # (`[schedule.full-ci]`, kind "ci") dispatches it at 01:00 and after quiet minutes, and only
+  # when develop changed. A push to develop runs the fast jobs (lint, windows) and nothing
+  # else. There is no GitHub cron. The macOS legs of exit-scripts and monitor-compose run
+  # only when `macos` is true (decision 0204: GitHub caps an account's concurrent macOS jobs).
+  workflow_dispatch:
+    inputs:
+      macos:
+        description: "Include the macOS legs"
+        type: boolean
+        default: true
 
 # A newer push to the same ref cancels the older run, except on develop. The
-# nightly run has its own group, so a landing never cancels it (decision 0447).
+# full run has its own group, so a landing never cancels it (decision 0447).
 # develop is not cancelled (2026-11-17): landings push about every 20 minutes and
 # a run takes about 50, so cancelling left almost no finished run for the
 # base-branch CI watch to read. Without cancelling, the group still holds one
 # running and at most one pending run; a newer push replaces the pending one.
 concurrency:
-  group: ci-${{ github.ref }}-${{ github.event_name == 'schedule' && 'nightly' || 'push' }}
+  group: ci-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && 'full' || 'push' }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/develop' }}
 
 permissions:
@@ -72,6 +82,7 @@ jobs:
       - run: bash scripts/check-dco.sh "origin/${{ github.base_ref }}..HEAD"
 
   test:
+    if: github.event_name != 'push'
     strategy:
       fail-fast: false
       matrix:
@@ -104,9 +115,10 @@ jobs:
 
   # The exit scripts, in six shards per system, assigned by weight (scripts/exit/weights.txt).
   # On push the repetition scripts run MASON_EXIT_REPEAT=2 times instead of 10-20 (the
-  # nightly run keeps their own counts), and every script has a 900 s limit so a slow one
+  # full run keeps their own counts), and every script has a 900 s limit so a slow one
   # fails by name instead of the shard being cancelled at 60 minutes (decision 0661).
   exit-scripts:
+    if: github.event_name != 'push'
     strategy:
       fail-fast: false
       matrix:
@@ -125,13 +137,14 @@ jobs:
           # The monitors have jobs of their own (below); these are the Rust jobs.
           MASON_SKIP_SWIFT: "1"
           MASON_SKIP_COMPOSE: "1"
-          # Repeat counts: small on push, the scripts' own defaults in the nightly run.
-          MASON_EXIT_REPEAT: "${{ github.event_name == 'schedule' && '' || '2' }}"
-          MASON_EXIT_SCRIPT_LIMIT_S: "${{ github.event_name == 'schedule' && '3600' || '900' }}"
+          # Repeat counts: small on a pull request, the scripts' own defaults in the full run.
+          MASON_EXIT_REPEAT: "${{ github.event_name == 'workflow_dispatch' && '' || '2' }}"
+          MASON_EXIT_SCRIPT_LIMIT_S: "${{ github.event_name == 'workflow_dispatch' && '3600' || '900' }}"
 
   # The macOS monitor: builds, its tests, and the conformance run against
   # `masond --demo` (no window is opened on the runner).
   monitor-swift:
+    if: github.event_name != 'push'
     runs-on: macos-latest
     timeout-minutes: 25
     steps:
@@ -141,6 +154,7 @@ jobs:
   # The Compose monitor: builds, its tests, and conformance against `masond --demo`
   # (no window is opened on the runner). Desktop clients run on every system CI has.
   monitor-compose:
+    if: github.event_name != 'push'
     strategy:
       fail-fast: false
       matrix:
@@ -155,9 +169,9 @@ jobs:
         with: { gradle-version: "8.12" }
       - run: MASON_NO_GUI=1 bash scripts/exit/s13.sh
 
-  # The macOS legs of the two jobs above, nightly only (decision 0204).
+  # The macOS legs of the two jobs above, full run only (decision 0204).
   exit-scripts-macos:
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'workflow_dispatch' && inputs.macos
     strategy:
       fail-fast: false
       matrix:
@@ -173,12 +187,12 @@ jobs:
           MASON_TESTS_ALREADY_RAN: "1"
           MASON_SKIP_SWIFT: "1"
           MASON_SKIP_COMPOSE: "1"
-          # Repeat counts: small on push, the scripts' own defaults in the nightly run.
-          MASON_EXIT_REPEAT: "${{ github.event_name == 'schedule' && '' || '2' }}"
-          MASON_EXIT_SCRIPT_LIMIT_S: "${{ github.event_name == 'schedule' && '3600' || '900' }}"
+          # Repeat counts: small on a pull request, the scripts' own defaults in the full run.
+          MASON_EXIT_REPEAT: "${{ github.event_name == 'workflow_dispatch' && '' || '2' }}"
+          MASON_EXIT_SCRIPT_LIMIT_S: "${{ github.event_name == 'workflow_dispatch' && '3600' || '900' }}"
 
   monitor-compose-macos:
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'workflow_dispatch' && inputs.macos
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
@@ -193,6 +207,7 @@ jobs:
   # version number gone stale; running it needs a simulator, an emulator or a phone, which are
   # in docs/real-checks.md.
   device-sample-ios:
+    if: github.event_name != 'push'
     runs-on: macos-latest
     timeout-minutes: 20
     steps:
@@ -200,6 +215,7 @@ jobs:
       - run: swift build --package-path docs/examples/device-sample/ios
 
   device-sample-android:
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
