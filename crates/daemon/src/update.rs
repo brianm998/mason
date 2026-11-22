@@ -83,6 +83,9 @@ pub struct UpdateCfg {
     pub monitor_swift_build: Option<String>,
     /// The same for the Compose monitor.
     pub monitor_compose_build: Option<String>,
+    /// How long an automatic self-update's build waits for `compile` at the lowest rank before
+    /// it moves ahead of task work (`update_wait_max_s`, default 30 min; s868).
+    pub update_wait_max_s: u64,
     /// How long a takeover waits for running landing batches, in seconds; then it goes anyway.
     pub takeover_wait_s: u64,
     /// The code-signing identity installed binaries are signed with (macOS): a certificate's
@@ -95,6 +98,9 @@ pub struct UpdateCfg {
     /// The page that offers the installers; what a packaged monitor's button opens.
     pub download_page: String,
 }
+
+/// Half an hour (s868).
+pub const DEFAULT_UPDATE_WAIT_MAX_S: u64 = 1800;
 
 /// An hour: longer than a batch's verify and CI usually take.
 pub const DEFAULT_TAKEOVER_WAIT_S: u64 = 3600;
@@ -146,6 +152,10 @@ impl UpdateCfg {
                 .map_or(DEFAULT_MIN_GAP_S, |n| n.max(0) as u64),
             monitor_swift_build: s("monitor_swift_build"),
             monitor_compose_build: s("monitor_compose_build"),
+            update_wait_max_s: doc
+                .get("update_wait_max_s")
+                .and_then(|v| v.as_integer())
+                .map_or(DEFAULT_UPDATE_WAIT_MAX_S, |n| n.max(0) as u64),
             takeover_wait_s: doc
                 .get("takeover_wait_s")
                 .and_then(|v| v.as_integer())
@@ -621,36 +631,73 @@ pub fn build(cfg: &UpdateCfg, rt: &Runtimes, sha: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// [`build`] under a `compile` lease ranked below all task work (s473): the release build is
-/// the heaviest thing a self-update does, and it used to run outside the broker, so the CPU
-/// gate and the queue never saw it. A build that is already complete asks for nothing.
-pub fn build_leased(d: &Daemon, cfg: &UpdateCfg, rt: &Runtimes, sha: &str) -> Result<(), String> {
+/// [`build`] under a `compile` lease. An update the owner started goes ahead of all task work
+/// and past the heat hold (s868); an automatic one is ranked below all task work (s473) until
+/// it has waited `update_wait_max_s`. A build that is already complete asks for nothing.
+pub fn build_leased(
+    d: &Daemon,
+    cfg: &UpdateCfg,
+    rt: &Runtimes,
+    sha: &str,
+    owner: bool,
+) -> Result<(), String> {
     if rt.is_ready(sha) {
         return Ok(());
     }
-    with_compile_lease(&d.broker, "self-update build", || build(cfg, rt, sha))
+    let started = Instant::now();
+    with_compile_lease(
+        &d.broker,
+        "self-update build",
+        owner,
+        Duration::from_secs(cfg.update_wait_max_s),
+        &|| started.elapsed(),
+        &|| {
+            if let Ok(mut s) = d.update_status.lock() {
+                s.log.push(crate::sched::OWNER_UPDATE_NOTE.to_string());
+            }
+        },
+        || build(cfg, rt, sha),
+    )
 }
 
-/// Wait for a `compile` slot as the lowest pipeline work (the most steps remaining, the
-/// lowest priority, and this request's own arrival), run `f`, give the slot back.
+/// Does the update's `compile` request go ahead of task work and past the heat hold? The
+/// owner's does at once; an automatic one after `wait_max` (s868). Pure.
+pub fn update_promoted(owner: bool, waited: Duration, wait_max: Duration) -> bool {
+    owner || waited >= wait_max
+}
+
+/// Wait for a `compile` slot, run `f`, give the slot back. The request starts at the rank
+/// [`update_promoted`] gives it and is reopened ahead of task work once an automatic one has
+/// waited long enough. `elapsed` is the clock; `on_promoted` is told when the rank rises.
 pub fn with_compile_lease<T>(
     broker: &crate::sched::Broker,
     label: &str,
+    owner: bool,
+    wait_max: Duration,
+    elapsed: &dyn Fn() -> Duration,
+    on_promoted: &dyn Fn(),
     f: impl FnOnce() -> T,
 ) -> T {
-    let uses = std::collections::BTreeMap::from([("compile".to_string(), 1u32)]);
-    let rank = crate::outside::Outside {
-        pipeline: "mason".into(),
-        steps: crate::outside::MAX_PROGRESS,
-        priority: 3,
-    };
-    let lease = broker.lease_open_outside(label, &uses, &rank);
+    let mut promoted = update_promoted(owner, elapsed(), wait_max);
+    let mut lease = broker.lease_open_update(label, promoted);
+    if promoted {
+        on_promoted();
+    }
     loop {
         match broker.lease_poll(lease) {
             crate::sched::LeaseState::Granted { .. } => break,
             // Closed under us (a daemon shutting down): build anyway rather than hang.
             crate::sched::LeaseState::Gone => break,
-            _ => std::thread::sleep(Duration::from_millis(500)),
+            _ => {
+                if !promoted && update_promoted(owner, elapsed(), wait_max) {
+                    promoted = true;
+                    broker.lease_close(lease);
+                    lease = broker.lease_open_update(label, true);
+                    on_promoted();
+                    continue;
+                }
+                std::thread::sleep(Duration::from_millis(500))
+            }
         }
     }
     let r = f();
@@ -1049,7 +1096,7 @@ pub fn run(d: &Arc<Daemon>, req: &Request) -> Result<String, String> {
                 "building",
                 &format!("building {target} into runtimes/{target}/"),
             );
-            build_leased(d, &cfg, &rt, &target)?;
+            build_leased(d, &cfg, &rt, &target, !req.auto)?;
             (target, running)
         };
         // Prove it on a copy of the real database, in a sandbox, before it is allowed near the real one.
@@ -2837,7 +2884,15 @@ mod tests {
     fn the_build_asks_the_broker_for_compile() {
         let dir = tempfile::tempdir().unwrap();
         let b = crate::sched::broker_with_waiting(dir.path(), 0);
-        let seen = with_compile_lease(&b, "self-update build", || b.compile_holders());
+        let seen = with_compile_lease(
+            &b,
+            "self-update build",
+            false,
+            Duration::from_secs(1800),
+            &|| Duration::ZERO,
+            &|| {},
+            || b.compile_holders(),
+        );
         assert_eq!(seen.len(), 1, "{seen:?}");
         assert!(seen[0].label.contains("self-update build"), "{seen:?}");
         assert!(
@@ -2845,6 +2900,25 @@ mod tests {
             "it ranks as pipeline work, not a person's"
         );
         assert!(b.compile_holders().is_empty(), "the slot is given back");
+    }
+
+    #[test]
+    fn an_update_goes_ahead_at_once_for_the_owner_and_after_the_wait_for_an_automatic_one() {
+        let max = Duration::from_secs(1800);
+        assert!(update_promoted(true, Duration::ZERO, max));
+        // A fake clock: fixed readings.
+        assert!(!update_promoted(false, Duration::ZERO, max));
+        assert!(!update_promoted(false, Duration::from_secs(1799), max));
+        assert!(update_promoted(false, Duration::from_secs(1800), max));
+    }
+
+    #[test]
+    fn update_wait_max_defaults_to_half_an_hour_and_reads_from_update_toml() {
+        let base = "repo = \"/x\"\n";
+        let c = UpdateCfg::parse(base).unwrap();
+        assert_eq!(c.update_wait_max_s, 1800);
+        let c = UpdateCfg::parse(&format!("{base}update_wait_max_s = 60\n")).unwrap();
+        assert_eq!(c.update_wait_max_s, 60);
     }
 
     #[test]
