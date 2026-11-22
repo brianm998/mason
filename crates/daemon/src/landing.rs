@@ -4270,8 +4270,10 @@ impl Runner {
     }
 
     /// What an earlier run found over exactly this base, these task heads and this filter.
-    /// A red is always reused; a green only when `reuse_green` (a split's subsets, whose
-    /// answer only blames, never lets anything land).
+    /// A red is reused until the owner retries a task in it or presses Land now on one
+    /// (`http::forget_red_runs`, decision 0962), so a truly red task does not run again by
+    /// itself; a green only when `reuse_green` (a split's subsets, whose answer only blames,
+    /// never lets anything land).
     fn cached_run(
         &self,
         base: &str,
