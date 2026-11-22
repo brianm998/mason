@@ -2854,7 +2854,7 @@ impl Runner {
             g.notes = notes;
             g
         } else {
-            let _lease = match self.hold(def, suites_needs(def, &local), true) {
+            let _lease = match self.hold_suites(def, &local, true) {
                 Ok(l) => l,
                 Err(e) => {
                     self.fail_service(e.clone());
@@ -2993,7 +2993,7 @@ impl Runner {
                 ..Default::default()
             };
         }
-        let _lease = match self.hold(def, suites_needs(def, &names), true) {
+        let _lease = match self.hold_suites(def, &names, true) {
             Ok(l) => l,
             Err(e) => {
                 self.fail_service(e.clone());
@@ -3466,7 +3466,11 @@ impl Runner {
                 place: None,
                 global: true,
             };
-            match crate::hostedcheck::run(d, &spec) {
+            match crate::hostedcheck::run(
+                d,
+                &spec,
+                &crate::remote::Grant::unplumbed("landing re-test: the batch hold"),
+            ) {
                 Ok(o) if o.stopped.is_some() => out.notes.push(format!(
                     "{name}: the new tests were not run to the end: {}",
                     o.stopped.unwrap_or_default()
@@ -3981,7 +3985,11 @@ impl Runner {
                         phase: None,
                     });
                 }
-                crate::hostedcheck::run(d, spec)
+                crate::hostedcheck::run(
+                    d,
+                    spec,
+                    &crate::remote::Grant::unplumbed("landing check: the batch hold"),
+                )
             },
             |waited, why| {
                 self.d.landing.raise(
@@ -4026,6 +4034,41 @@ impl Runner {
                     crate::sched::needs_of(&s.uses, None)
                 }
             })
+    }
+
+    /// [`Runner::hold`] for running `names`, decided per suite (#818): a suite that goes to
+    /// GitHub takes its runner units (one `gha` per job it starts, and `gha-macos` on a macOS
+    /// runner) and no slot of this machine; a suite that runs here takes the local slots it
+    /// uses. One hold covers both, at the batch's landing rank.
+    fn hold_suites(
+        &self,
+        def: &mason_definition::Definition,
+        names: &[String],
+        watch: bool,
+    ) -> Result<Option<crate::sched::Lease>, String> {
+        let project = self.project().id.clone();
+        let places: Vec<(String, crate::remote::RunPlace)> = names
+            .iter()
+            .map(|n| {
+                let place = def
+                    .testing
+                    .suite(n)
+                    .map_or(crate::remote::RunPlace::Local, |s| {
+                        crate::remote::run_place(
+                            &self.d,
+                            &project,
+                            None,
+                            Some(s),
+                            &s.command,
+                            crate::remote::Kind::Suite,
+                        )
+                    });
+                (n.clone(), place)
+            })
+            .collect();
+        let (local, units) = partition_places(places);
+        let needs = hold_needs(suites_needs(def, &local), units);
+        self.hold(def, needs, watch)
     }
 
     /// Take `needs` from the broker for a verification, ranked as the batch's first
@@ -5173,7 +5216,7 @@ impl Runner {
         }
         // Held like any suite run; the batch's tasks have left landing by now, so
         // there is nothing to stop waiting for.
-        let _lease = match self.hold(def, suites_needs(def, &tier.suites), false) {
+        let _lease = match self.hold_suites(def, &tier.suites, false) {
             Ok(l) => l,
             Err(_) => {
                 let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -5241,6 +5284,40 @@ impl Runner {
         d.landing.wake();
         d.poke();
     }
+}
+
+/// Split suites by where they run: the names that run here, and the runner units of those that
+/// go to GitHub (the most any one of them needs of each pool, as `suites_needs` does for slots).
+fn partition_places(
+    places: Vec<(String, crate::remote::RunPlace)>,
+) -> (Vec<String>, std::collections::BTreeMap<String, u32>) {
+    let mut local = vec![];
+    let mut units: std::collections::BTreeMap<String, u32> = Default::default();
+    for (name, place) in places {
+        match place {
+            crate::remote::RunPlace::GitHub { units: u, .. } => {
+                for (k, v) in u {
+                    let have = units.entry(k).or_insert(0);
+                    *have = (*have).max(v);
+                }
+            }
+            crate::remote::RunPlace::Local => local.push(name),
+        }
+    }
+    (local, units)
+}
+
+/// A hold for suites that run here (`local`) and on GitHub (`units`): the local slots plus the
+/// runner units, and nothing of this machine for a suite that runs on GitHub.
+fn hold_needs(
+    mut local: mason_scheduler::Needs,
+    units: std::collections::BTreeMap<String, u32>,
+) -> mason_scheduler::Needs {
+    for (k, v) in units {
+        let have = local.amounts.entry(k).or_insert(0);
+        *have = (*have).max(v);
+    }
+    local
 }
 
 /// What running these suites holds: each suite's `uses` and its environment's,
@@ -5601,5 +5678,31 @@ mod tests {
             plan::form_batch(&[cand(0)], clock, window, 0, 1),
             Formation::Wait(_)
         ));
+    }
+
+    #[test]
+    fn a_hold_takes_runner_units_for_a_github_suite_and_local_slots_for_the_rest() {
+        use crate::remote::{units_for, RunPlace};
+        use std::collections::BTreeMap;
+        // The cargo workspace goes to GitHub sharded 3 ways; lint runs here.
+        let places = vec![
+            (
+                "cargo-workspace".to_string(),
+                RunPlace::GitHub {
+                    runs_on: "ubuntu-latest".into(),
+                    units: units_for("ubuntu-latest", 3),
+                },
+            ),
+            ("lint".to_string(), RunPlace::Local),
+        ];
+        let (local, units) = partition_places(places);
+        assert_eq!(local, vec!["lint".to_string()]);
+        let lint = crate::sched::needs_of(&BTreeMap::from([("compile".to_string(), 1)]), None);
+        let needs = hold_needs(lint, units);
+        assert_eq!(
+            needs.amounts,
+            BTreeMap::from([("compile".to_string(), 1), ("gha".to_string(), 3)])
+        );
+        assert!(!needs.amounts.contains_key("test-suite"));
     }
 }

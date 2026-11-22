@@ -473,6 +473,16 @@ pub fn show(d: &Daemon, json_out: bool) -> Result<(), String> {
             if let Some(l) = gha_line(&v["gha"]) {
                 println!("      {l}");
             }
+            for l in gha_waiter_lines(&v["gha"], now) {
+                println!("      {l}");
+            }
+        } else if r["name"].as_str() == Some("gha-macos") {
+            for l in gha_waiter_lines(&v["gha"], now)
+                .into_iter()
+                .filter(|l| l.contains("gha-macos"))
+            {
+                println!("      {l}");
+            }
         }
         for (i, s) in r["slots"].as_array().into_iter().flatten().enumerate() {
             if let Some(by) = s["held_by"].as_str() {
@@ -529,6 +539,35 @@ pub fn gha_line(g: &Value) -> Option<String> {
         "MASON {mason}, other workflows {other}{label}, ceiling {}",
         g["ceiling"].as_u64().unwrap_or(0)
     ))
+}
+
+/// The requests waiting for runner units, in line order (#818): `1. landing batch #7: 3 gha,
+/// waited 4m`. The same list backs `gha-macos`, where only those that ask for it are shown.
+pub fn gha_waiter_lines(g: &Value, now: u64) -> Vec<String> {
+    g["waiters"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|w| {
+            let uses: Vec<String> = w["uses"]
+                .as_object()
+                .into_iter()
+                .flatten()
+                .map(|(k, n)| format!("{n} {k}"))
+                .collect();
+            format!(
+                "{}. {} {}: {}, waited {}",
+                w["position"],
+                w["kind"].as_str().unwrap_or("?"),
+                w["label"].as_str().unwrap_or("?"),
+                uses.join(" + "),
+                ago(
+                    now,
+                    now.saturating_sub(w["waited_ms"].as_u64().unwrap_or(0))
+                )
+            )
+        })
+        .collect()
 }
 
 /// One waiter of `mason resources`: an outside pipeline's reads

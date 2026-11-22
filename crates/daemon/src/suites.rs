@@ -586,10 +586,7 @@ fn run_remote(
     );
     // The whole command of a suite that has shards is split across runners (#701); a narrowed
     // run, a run without the known-red tests and the like are not the whole suite and run on one.
-    let sharded = watch.and_then(|s| {
-        let sc = s.shard_command.as_deref()?;
-        (s.shards > 1 && !s.narrowed && cmd == s.command).then_some((s, sc))
-    });
+    let sharded = watch.and_then(|s| Some((s, rm::shard_command(s, cmd)?)));
     if let Some((s, sc)) = sharded {
         spec.shards = s.shards;
         spec.shard_command = Some(sc.to_string());
@@ -620,25 +617,33 @@ fn run_remote(
         },
         task.map_or(0, |t| t.0),
     );
-    Ok(match rm::run_or_fallback(&site, &spec, log_dir, &stop)? {
-        None => None,
-        Some(rm::Outcome::Stopped(why)) => Some(Ran {
-            code: -1,
-            signal: 9,
-            output: String::new(),
-            stop: match why {
-                rm::StopWhy::Skipped => Stop::Skipped,
-                rm::StopWhy::Gone => Stop::Gone,
-            },
-            timed_out: false,
-            stalled: None,
-            ran_ms: None,
-            narrowed: false,
-            resumed: None,
-            ran_on: None,
-        }),
-        Some(rm::Outcome::Done(f)) => Some(remote_ran(f, watch)),
-    })
+    Ok(
+        match rm::run_or_fallback(
+            &site,
+            &spec,
+            log_dir,
+            &stop,
+            &rm::Grant::unplumbed("run_remote: the enclosing step, debt or batch hold"),
+        )? {
+            None => None,
+            Some(rm::Outcome::Stopped(why)) => Some(Ran {
+                code: -1,
+                signal: 9,
+                output: String::new(),
+                stop: match why {
+                    rm::StopWhy::Skipped => Stop::Skipped,
+                    rm::StopWhy::Gone => Stop::Gone,
+                },
+                timed_out: false,
+                stalled: None,
+                ran_ms: None,
+                narrowed: false,
+                resumed: None,
+                ran_on: None,
+            }),
+            Some(rm::Outcome::Done(f)) => Some(remote_ran(f, watch)),
+        },
+    )
 }
 
 /// Which tests go to which shard, from the times and names this daemon has recorded for the
@@ -2690,6 +2695,7 @@ fn lease_suite(
     check: &Check,
     expected_ms: Option<u64>,
     label: Option<&str>,
+    suite: &Suite,
 ) -> Leased {
     match check() {
         Stop::Skipped => return Leased::Skipped,
@@ -2700,7 +2706,15 @@ fn lease_suite(
         return Leased::Got;
     }
     let wanted = || check() == Stop::No;
-    match crate::jobs::acquire_needs_labeled(c, needs, &wanted, false, expected_ms, label) {
+    match crate::jobs::acquire_needs_labeled(
+        c,
+        needs,
+        &wanted,
+        false,
+        expected_ms,
+        label,
+        Some(suite),
+    ) {
         Ok(l) => {
             *c.lease.lock().unwrap_or_else(|e| e.into_inner()) = Some(l);
             Leased::Got
@@ -3077,7 +3091,12 @@ fn run_side_by_side(
                             let wanted = || check() == Stop::No;
                             let expected = estimate(&who, &suite.name, "run");
                             match crate::jobs::acquire_needs_expecting(
-                                c, needs, &wanted, true, expected,
+                                c,
+                                needs,
+                                &wanted,
+                                true,
+                                expected,
+                                Some(suite),
                             ) {
                                 Ok(l) => Some(l),
                                 Err(_) if check() == Stop::Skipped => None,
@@ -3410,6 +3429,7 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
                     &who.check(&name),
                     estimate(&who, &name, "build"),
                     None,
+                    &suite,
                 ) {
                     Leased::Gone => return,
                     // Nothing is built; the suite's run below reports the skip.
@@ -3502,6 +3522,7 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
                     &who.check(&name),
                     estimate(&who, &name, "run"),
                     label.as_deref(),
+                    &suite,
                 ) {
                     return;
                 }

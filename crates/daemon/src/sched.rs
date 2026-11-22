@@ -627,11 +627,22 @@ pub struct Lease {
     id: u64,
     task: Option<TaskId>,
     held: Option<Held>,
+    /// What the lease was asked for, so a remote run can name the units it holds (#818).
+    amounts: BTreeMap<String, u32>,
 }
 
 impl Lease {
     pub fn id(&self) -> u64 {
         self.id
+    }
+
+    /// The runner units (`gha`, `gha-macos`) this lease holds.
+    pub fn units(&self) -> BTreeMap<String, u32> {
+        self.amounts
+            .iter()
+            .filter(|(k, n)| **n > 0 && mason_scheduler::is_gha_pool(k))
+            .map(|(k, n)| (k.clone(), *n))
+            .collect()
     }
 }
 
@@ -1043,11 +1054,34 @@ impl Broker {
             .filter(|h| !matches!(st.meta.get(&h.id), Some(Meta::Other)))
             .filter_map(|h| h.needs.amounts.get(GHA))
             .sum();
+        let now = crate::daemon::now_ms();
+        let waiters: Vec<_> = snap
+            .waiting
+            .iter()
+            .filter(|r| {
+                r.needs
+                    .amounts
+                    .keys()
+                    .any(|k| mason_scheduler::is_gha_pool(k))
+            })
+            .enumerate()
+            .map(|(i, r)| {
+                let (label, _) = mason_scheduler::label_parts(&r.label);
+                serde_json::json!({
+                    "position": i + 1,
+                    "label": label,
+                    "kind": gha_kind(&r.label),
+                    "waited_ms": now.saturating_sub(r.since),
+                    "uses": r.needs.amounts,
+                })
+            })
+            .collect();
         serde_json::json!({
             "mason": used,
             "other": st.other_jobs,
             "other_label": st.other_label,
             "ceiling": st.gha_ceiling,
+            "waiters": waiters,
         })
     }
 
@@ -1900,6 +1934,25 @@ impl Broker {
         !ids.is_empty()
     }
 
+    /// [`Broker::take_over_remote`] for every adopted run whose key `matches`: a check's key is
+    /// its run id, which the caller knows only by its prefix (#818).
+    pub fn take_over_remote_where(&self, matches: &dyn Fn(&str) -> bool) -> bool {
+        let mut st = lock(&self.st);
+        let ids: Vec<u64> = st
+            .meta
+            .iter()
+            .filter_map(|(id, m)| match m {
+                Meta::Remote { key: k, .. } if matches(k) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        for id in &ids {
+            st.ledger.release(*id);
+            st.meta.remove(id);
+        }
+        !ids.is_empty()
+    }
+
     /// Give back the units of an adopted remote run that has ended.
     fn release_ended_remote(st: &mut State) -> bool {
         let ended: Vec<u64> = st
@@ -2028,6 +2081,7 @@ impl Broker {
         beside: bool,
         expected_ms: Option<u64>,
     ) -> Result<Lease, Cancelled> {
+        let granted = needs.amounts.clone();
         let id = {
             let mut st = lock(&self.st);
             let rank = order(&st, rank);
@@ -2170,6 +2224,7 @@ impl Broker {
             id,
             task: Some(task),
             held: Some(held),
+            amounts: granted,
         })
     }
 
@@ -3142,6 +3197,20 @@ impl Broker {
             },
             "now_ms": now,
         })
+    }
+}
+
+/// What kind of work a request for runner units is, from its label (#818): a landing batch, an
+/// agent's check, a debt payment, else a test step.
+pub fn gha_kind(label: &str) -> &'static str {
+    if label.starts_with("batch") {
+        "landing"
+    } else if label.starts_with("debt") {
+        "debt"
+    } else if label.contains(" check") {
+        "check"
+    } else {
+        "test step"
     }
 }
 
@@ -4577,5 +4646,120 @@ mod tests {
             .collect();
         assert!(rest.iter().all(|id| held(&b, *id)), "MASON can take all 4");
         assert!(!held(&b, queue_ranked(&b, 6, false, &gha(1))));
+    }
+
+    #[test]
+    fn a_check_bound_for_github_waits_in_the_broker_until_a_unit_is_free() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let b = runner_broker(dir.path(), 2, 1, 0);
+        // Two test-step runs hold both units.
+        let one = queue_task(&b, 1, &gha(1));
+        let two = queue_task(&b, 2, &gha(1));
+        assert!(held(&b, one) && held(&b, two));
+        let pushed = AtomicBool::new(false);
+        std::thread::scope(|sc| {
+            let check = sc.spawn(|| {
+                let rank = Rank::new(false, 3, 0, 3, 3, false);
+                let lease = b
+                    .acquire(
+                        TaskId(3),
+                        "#3 check",
+                        rank,
+                        needs_of(&gha(1), None),
+                        &|| true,
+                        &mut |_| {},
+                    )
+                    .unwrap();
+                // The fake GitHub records a push only here, after the grant.
+                pushed.store(true, Ordering::SeqCst);
+                crate::remote::Grant::of(lease).units()
+            });
+            while b.gha_waiting() == 0 {
+                std::thread::yield_now();
+            }
+            assert!(
+                !pushed.load(Ordering::SeqCst),
+                "nothing is pushed while it waits"
+            );
+            let view = Broker::gha_view(&lock(&b.st));
+            assert_eq!(view["waiters"][0]["kind"], "check");
+            assert_eq!(view["waiters"][0]["position"], 1);
+            // One of the runs ends: the check is granted, then pushed.
+            b.release(one, Some(TaskId(1)));
+            let units = check.join().unwrap();
+            assert!(pushed.load(Ordering::SeqCst));
+            assert_eq!(units, gha(1));
+        });
+    }
+
+    #[test]
+    fn a_run_that_falls_back_gives_its_runner_units_back_before_taking_local_slots() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = runner_broker(dir.path(), 1, 1, 0);
+        let rank = Rank::new(false, 3, 0, 1, 1, false);
+        let lease = b
+            .acquire(
+                TaskId(1),
+                "#1 check",
+                rank,
+                needs_of(&gha(1), None),
+                &|| true,
+                &mut |_| {},
+            )
+            .unwrap();
+        let grant = crate::remote::Grant::of(lease);
+        assert_eq!(grant.units(), gha(1));
+        let next = queue_task(&b, 2, &gha(1));
+        assert!(!held(&b, next), "the only unit is held");
+        // fallback = "local": the units go back, so the next run gets them.
+        assert!(grant.give_back());
+        drop(b.pass(lock(&b.st)));
+        assert!(held(&b, next));
+        assert!(grant.units().is_empty());
+        // Local slots are then asked of the broker like any local run's.
+        let local = BTreeMap::from([("compile".to_string(), 1)]);
+        assert!(held(&b, queue_task(&b, 3, &local)));
+    }
+
+    #[test]
+    fn a_check_asking_again_after_a_restart_takes_over_its_adopted_hold_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = runner_broker(dir.path(), 1, 1, 0);
+        let record = dir.path().join("c.remote");
+        mason_step_host::registry::write_kv(
+            &record,
+            &[("sha", "abc".to_string()), ("collected", "0".to_string())],
+        )
+        .unwrap();
+        // A check's hold is keyed by its run id.
+        b.adopt_remote(&[crate::remote::RemoteHold {
+            key: "t5r7-check-cargo-workspace0".into(),
+            label: "t5r7-check-cargo-workspace0".into(),
+            units: gha(1),
+            record,
+            ..Default::default()
+        }]);
+        let next = queue_task(&b, 6, &gha(1));
+        assert!(!held(&b, next), "the adopted units are counted");
+        // Another task's check does not match; this check's prefix does.
+        assert!(!b.take_over_remote_where(&|k| crate::jobs::run_of_prefix(
+            k,
+            "t5r8-check-cargo-workspace"
+        )));
+        assert!(!b.take_over_remote_where(&|k| crate::jobs::run_of_prefix(k, "t5r7-check-cargo")));
+        assert!(b.take_over_remote_where(&|k| crate::jobs::run_of_prefix(
+            k,
+            "t5r7-check-cargo-workspace"
+        )));
+        drop(b.pass(lock(&b.st)));
+        assert!(
+            held(&b, next),
+            "its lease replaces the adopted hold: counted once"
+        );
+        assert!(!b.take_over_remote_where(&|k| crate::jobs::run_of_prefix(
+            k,
+            "t5r7-check-cargo-workspace"
+        )));
     }
 }
