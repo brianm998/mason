@@ -921,9 +921,9 @@ final class MonitorCoreTests: XCTestCase {
         m.cancel(3)
         XCTAssertEqual(sent, 1)
         XCTAssertNil(m.readOnlyReason)
-        m.apply(welcome(minProtocol: 2))
+        m.apply(welcome(minProtocol: 3))
         XCTAssertNotNil(m.readOnlyReason)
-        XCTAssertTrue(m.readOnlyReason!.contains("protocol 1") && m.readOnlyReason!.contains("2 or newer"))
+        XCTAssertTrue(m.readOnlyReason!.contains("protocol 2") && m.readOnlyReason!.contains("3 or newer"))
         m.cancel(3)
         m.answer(task: 1, "yes", cardHash: "x")
         XCTAssertEqual(sent, 1, "nothing is sent while read-only")
@@ -1607,6 +1607,35 @@ final class MonitorCoreTests: XCTestCase {
         XCTAssertGreaterThan(liveSub.count, 0)
         sub.cancel()
         liveSub.cancel()
+    }
+
+    /// Decision 0851: replaces the UI-level "progress views were drawn" count. A push for one task
+    /// fires only that task's observable entry; no other entry and not the sidebar.
+    func testAProgressPushFiresOnlyItsTasksProgressEntry() {
+        let m = model()
+        var c = cell(done: 1, total: 4, totalSrc: .sourceReported)
+        c.step = "develop"
+        m.sidebar?.sections[0].rows[0].progress = [c]
+        m.sidebar?.sections[0].rows[1].progress = [c]
+        let e1 = m.progress.entry(1)
+        let e2 = m.progress.entry(2)
+        let one = ChangeCounter { _ = e1.cells }
+        let two = ChangeCounter { _ = e2.cells }
+        let side = ChangeCounter { _ = m.sidebar }
+        var p = Mason_V1_StepProgress()
+        p.task = 1
+        var n = c
+        n.done = 3
+        p.progress = n
+        p.nowMs = 5_000_000
+        m.apply(progress: p)
+        XCTAssertEqual(one.count, 1)
+        XCTAssertEqual(two.count, 0)
+        XCTAssertEqual(side.count, 0)
+        XCTAssertEqual(e1.cells?.first?.done, 3)
+        one.cancel()
+        two.cancel()
+        side.cancel()
     }
 
     func testASidebarViewAfterProgressShowsTheViewsCellsNotStaleOnes() {

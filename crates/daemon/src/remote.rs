@@ -178,6 +178,9 @@ pub struct Finished {
     pub stop: Option<StopWhy>,
     /// Build plus run time on the runner, in ms.
     pub ran_ms: Option<u64>,
+    /// Which part of a run with a build ended it when it did not pass: "build" or "run" (from
+    /// `result.json`; `None` when the runner did not say, and for sharded runs).
+    pub phase: Option<String>,
     /// "ran on GitHub (ubuntu-latest), run <url>, picked up after 6 s".
     pub ran_on: String,
     /// A sharded run's shards (#701), in shard order; `output` and `code` are their merge.
@@ -717,6 +720,8 @@ struct State {
     signal: i32,
     timed_out: bool,
     ran_ms: Option<u64>,
+    /// Where the run ended ("build" or "run"), empty when not said.
+    phase: String,
     /// The shards of the run, 1-based; empty for a run that is not sharded.
     shards: Vec<u32>,
     /// What each collected shard sent besides its output (`<id>.shard-<k>.log`), so a daemon
@@ -748,6 +753,7 @@ impl State {
                 ("signal", self.signal.to_string()),
                 ("timed_out", (self.timed_out as u8).to_string()),
                 ("ran_ms", opt(self.ran_ms)),
+                ("phase", self.phase.clone()),
                 (
                     "parts",
                     self.parts
@@ -796,6 +802,7 @@ impl State {
             signal: s("signal").parse().unwrap_or(0),
             timed_out: flag("timed_out"),
             ran_ms: n("ran_ms"),
+            phase: s("phase"),
             shards: s("shards")
                 .split(',')
                 .filter_map(|v| v.parse().ok())
@@ -1078,6 +1085,8 @@ struct Artifact {
     signal: i32,
     build_s: u64,
     run_s: u64,
+    /// `"build"` or `"run"`: where the run ended; absent from older runners.
+    phase: Option<String>,
     /// The results file(s) the suite names, as paths relative to the worktree.
     results: Vec<(PathBuf, Vec<u8>)>,
 }
@@ -1146,6 +1155,10 @@ fn read_artifact(zip: &Path, into: &Path) -> Result<Artifact, String> {
         signal: v["signal"].as_i64().unwrap_or(0) as i32,
         build_s: v["build_s"].as_u64().unwrap_or(0),
         run_s: v["run_s"].as_u64().unwrap_or(0),
+        phase: v["phase"]
+            .as_str()
+            .filter(|p| matches!(*p, "build" | "run"))
+            .map(str::to_string),
         results: regular_files(&into.join("results")),
     })
 }
@@ -1171,6 +1184,7 @@ fn finished_from(st: &State, log: &Path) -> Finished {
         timed_out: st.timed_out,
         stop: None,
         ran_ms: st.ran_ms,
+        phase: Some(st.phase.clone()).filter(|p| !p.is_empty()),
         ran_on: st.where_text(),
         parts,
         missing: vec![],
@@ -1387,6 +1401,7 @@ pub fn execute(
                         timed_out: false,
                         stop: None,
                         ran_ms,
+                        phase: None,
                         ran_on,
                         parts,
                         missing,
@@ -1428,6 +1443,7 @@ pub fn execute(
                 st.code = a.code;
                 st.signal = a.signal;
                 st.ran_ms = Some((a.build_s + a.run_s) * 1000);
+                st.phase = a.phase.clone().unwrap_or_default();
                 st.collected = true;
                 st.save(&rec);
                 delete_ref(site, &mut st, &rec);
@@ -1487,7 +1503,45 @@ fn dispatch(site: &Site, spec: &RunSpec, st: &mut State, rec: &Path) -> Result<(
     Ok(())
 }
 
-fn push(site: &Site, st: &State) -> Result<(), String> {
+/// Waits before the second, third and fourth tries of a push (ms).
+const PUSH_BACKOFF_MS: [u64; 3] = [10_000, 30_000, 90_000];
+
+/// Whether a push error is the credential being refused: waiting will not change that.
+fn push_refused(e: &str) -> bool {
+    let l = e.to_ascii_lowercase();
+    [
+        "authentication failed",
+        "permission denied",
+        "could not read username",
+        "invalid username or password",
+        "bad credentials",
+        "error: 401",
+        "error: 403",
+        "protected branch",
+    ]
+    .iter()
+    .any(|m| l.contains(m))
+}
+
+/// Whether a push error came from GitHub's side (a rejection, a 5xx, a dropped connection):
+/// the next try may well work (#772).
+fn push_transient(e: &str) -> bool {
+    if push_refused(e) {
+        return false;
+    }
+    let l = e.to_ascii_lowercase();
+    l.contains("remote rejected")
+        || l.contains("connection reset")
+        || l.contains("rpc failed")
+        || l.contains("early eof")
+        || l.contains("the remote end hung up")
+        || l.contains("timed out")
+        || ["500", "502", "503", "504"]
+            .iter()
+            .any(|c| l.contains(&format!("error: {c}")))
+}
+
+fn push_once(site: &Site, st: &State) -> Result<(), String> {
     git::run(
         &site.cwd,
         &[
@@ -1499,6 +1553,23 @@ fn push(site: &Site, st: &State) -> Result<(), String> {
     )
     .map(|_| ())
     .map_err(|e| e.to_string())
+}
+
+/// Push the snapshot, trying again (about 10 s, 30 s, 90 s apart) when the rejection is
+/// GitHub's and not a refused credential.
+fn push(site: &Site, st: &State) -> Result<(), String> {
+    let mut tries = 0;
+    loop {
+        match push_once(site, st) {
+            Ok(()) => return Ok(()),
+            Err(e) if tries < PUSH_BACKOFF_MS.len() && push_transient(&e) => {
+                tracing::warn!(ref_name = %st.ref_name, "push failed, trying again: {e}");
+                site.clock.sleep(PUSH_BACKOFF_MS[tries]);
+                tries += 1;
+            }
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 enum Step {
@@ -2876,6 +2947,72 @@ mod tests {
 
     const GREEN: &str = "running 2 tests\ntest a ... ok\ntest b ... ok\n\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n";
 
+    /// A hook on the bare remote that records every push and rejects the first `n`.
+    fn reject_first(bare: &Path, n: u32) {
+        let hook = bare.join("hooks/pre-receive");
+        std::fs::create_dir_all(bare.join("hooks")).unwrap();
+        std::fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\necho x >> \"{d}/pushes\"\n[ $(wc -l < \"{d}/pushes\") -le {n} ] && exit 1\nexit 0\n",
+                d = bare.display()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    fn pushes(bare: &Path) -> usize {
+        std::fs::read_to_string(bare.join("pushes"))
+            .map(|s| s.lines().count())
+            .unwrap_or(0)
+    }
+
+    fn retry_state(r: &Repo) -> State {
+        State {
+            ref_name: "mason/run/p/retry".into(),
+            sha: git_ok(&r.wt, &["rev-parse", "HEAD"]),
+            ..State::default()
+        }
+    }
+
+    #[test]
+    fn a_push_rejected_twice_then_accepted_goes_on() {
+        let r = repo();
+        reject_first(&r.bare, 2);
+        let gh = FakeGh::new(&r, &r.wt.join("none.zip"), Mode::Normal);
+        let s = site(&r, gh, clock(), false);
+        push(&s, &retry_state(&r)).unwrap();
+        assert_eq!(pushes(&r.bare), 3);
+    }
+
+    #[test]
+    fn a_push_rejected_every_time_gives_up_after_four_tries() {
+        let r = repo();
+        reject_first(&r.bare, 99);
+        let gh = FakeGh::new(&r, &r.wt.join("none.zip"), Mode::Normal);
+        let s = site(&r, gh, clock(), false);
+        assert!(push(&s, &retry_state(&r)).is_err());
+        assert_eq!(pushes(&r.bare), 4);
+    }
+
+    #[test]
+    fn a_refused_credential_is_not_retried() {
+        let auth = "fatal: Authentication failed for 'https://github.com/o/r'";
+        assert!(push_refused(auth));
+        assert!(!push_transient(auth));
+        assert!(!push_transient(
+            "! [remote rejected] x (protected branch hook declined)"
+        ));
+        assert!(push_transient(" ! [remote rejected] x -> y (failed)"));
+        assert!(push_transient(
+            "error: RPC failed; HTTP 502 The requested URL returned error: 502"
+        ));
+        assert!(push_transient("fatal: Connection reset by peer"));
+        assert!(!push_transient("fatal: not a git repository"));
+    }
+
     #[test]
     fn the_snapshot_holds_the_dirty_worktree_and_the_trusted_overlay() {
         let r = repo();
@@ -2986,6 +3123,54 @@ mod tests {
         assert_eq!(v["env"]["MASON_TASK"], "7");
         assert!(v["xcode"].is_null());
         assert!(v["env"].get("SECRET_TOKEN").is_none());
+    }
+
+    #[test]
+    fn a_runs_build_is_sent_beside_its_command_in_one_run_json() {
+        let sp = with_build(spec("x3b"), Some("cargo test --no-run"));
+        let v: serde_json::Value = serde_json::from_str(&run_json(&sp)).unwrap();
+        assert_eq!(v["build"], "cargo test --no-run");
+        assert_eq!(v["command"], "cargo test --workspace");
+    }
+
+    #[test]
+    fn a_failed_run_says_which_part_ended_it() {
+        token();
+        for (said, want) in [
+            (Some("build"), Some("build")),
+            (Some("run"), Some("run")),
+            (Some("other"), None),
+            (None, None),
+        ] {
+            let r = repo();
+            let t = tempfile::tempdir().unwrap();
+            let _ = artifact(t.path(), "boom\n", 1, None);
+            let meta = match said {
+                Some(p) => format!(
+                    "{{\"code\":1,\"signal\":0,\"build_s\":3,\"run_s\":0,\"phase\":\"{p}\"}}"
+                ),
+                None => "{\"code\":1,\"signal\":0,\"build_s\":3,\"run_s\":0}".to_string(),
+            };
+            let src = t.path().join("art-src");
+            std::fs::write(src.join("result.json"), meta).unwrap();
+            let zip = t.path().join("artifact2.zip");
+            let o = Command::new("zip")
+                .arg("-qr")
+                .arg(&zip)
+                .args(["output.log", "result.json"])
+                .current_dir(&src)
+                .output()
+                .unwrap();
+            assert!(o.status.success());
+            let gh = FakeGh::new(&r, &zip, Mode::Normal);
+            let s = site(&r, gh, clock(), false);
+            let logs = tempfile::tempdir().unwrap();
+            let Outcome::Done(f) = execute(&s, &spec("x3c"), logs.path(), &|| None).unwrap() else {
+                panic!("not done")
+            };
+            assert_eq!(f.code, 1);
+            assert_eq!(f.phase.as_deref(), want, "said {said:?}");
+        }
     }
 
     #[test]

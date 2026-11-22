@@ -120,6 +120,8 @@ message Command {
     // Land now for a whole running batch: every member lands past its remaining testing,
     // and what was skipped runs on the base after the merge.
     BatchRef land_now_batch = 22;
+    // Where runs go (protocol 2): for all of MASON, one project or one task. Owner only.
+    SetPlacement set_placement = 23;
     Raw raw = 30;
   }
   // Who is acting and, optionally, why (recorded with overrides).
@@ -129,6 +131,32 @@ message Command {
 
 message TaskRef {
   uint64 task = 1;
+}
+
+// Set the placement mode (#834). `scope` is "global", "project" (with `project`) or "task" (with
+// `task`). `mode` is local, remote, favor-local or favor-remote; for a project or a task also
+// "default", which clears the choice so the level above applies.
+message SetPlacement {
+  string scope = 1;
+  string project = 2;
+  uint64 task = 3;
+  string mode = 4;
+}
+
+// The mode in force and the level that set it: "task", "project" or "global". Additive (#834).
+message Placement {
+  string mode = 1;
+  string source = 2;
+  // True when this level sets its own mode (a project with its own `[remote_runs] mode`; a task
+  // with a `run_on` choice). A control offers "Follow MASON" / "Follow project" only then.
+  bool own = 3;
+  // False for a project with no `[remote_runs]`: it always runs here and cannot be set.
+  bool settable = 4;
+}
+
+message ProjectPlacement {
+  string project = 1;
+  Placement placement = 2;
 }
 
 message BatchRef {
@@ -553,6 +581,8 @@ message TaskRow {
   // time in state from it and their clock offset; `in_state_ms` is rounded to whole
   // minutes for older clients. Additive (s561).
   uint64 state_since_ms = 31;
+  // The task's own placement mode when it overrides its project's ("" when it follows). Additive (#834).
+  string run_on_override = 32;
 
 }
 
@@ -719,6 +749,8 @@ message HeaderView {
   // Every open owner session the owner is part of, for the sidebar's "Active sessions (N)"
   // panel (s432). Additive.
   repeated ActiveSession active_sessions = 11;
+  // The placement mode of every project (protocol 2, #834). Additive.
+  repeated ProjectPlacement project_placements = 12;
 }
 
 // One open owner session in the sidebar's Active sessions panel.
@@ -918,6 +950,10 @@ message HomeView {
   RemoteSummary remote = 12;
   // The runs MASON has on GitHub (#767). Unset from an older daemon.
   GithubRunList github = 13;
+  // The global placement mode (protocol 2, #834). Additive.
+  Placement placement = 14;
+  // For a home view of one project: that project's mode. Additive.
+  Placement project_placement = 15;
 }
 
 // One job of a remote run, from the Actions jobs API.
@@ -1175,6 +1211,8 @@ message TaskDetailView {
   // Where CI can be read for this task's landing: the batch's pull request and each failed
   // check. Only http(s) URLs are sent. Additive; an older daemon sends none.
   repeated CiLink ci_links = 23;
+  // Where this task's runs go and who decided it (#834). Additive.
+  Placement placement = 24;
 }
 
 // A page on the git host a client opens in the browser. `label` is exactly the text the
@@ -1268,6 +1306,27 @@ message BatchLine {
   optional BatchCi ci = 9;
   // What the owner may do to the batch: "land_now" while it has not started promoting.
   repeated string allowed_actions = 10;
+  // s788: the batch as one thing. The state in words ("running suites", "red in lint, splitting
+  // (round 1, 5 tasks left)", "red in lint, blamed #782"); never "running suites" for a red.
+  string state_text = 11;
+  // "ok" | "warn" | "stuck". Colour is never the only signal: `severity_reason` says why.
+  string severity = 12;
+  string severity_reason = 13;
+  // Milliseconds in the current phase, and the median for that phase over the project's
+  // recent batches; `typical_ms` is 0 (absent) with fewer than three samples.
+  uint64 phase_ms = 14;
+  uint64 typical_ms = 15;
+  // The verification round, and the tasks neither landed nor parked yet.
+  uint32 split_round = 16;
+  uint32 remaining = 17;
+  // Every task of the batch with its own standing in it.
+  repeated BatchMember members = 18;
+}
+
+// A task's standing within its batch: "verifying", "parked by blame", "landed", ...
+message BatchMember {
+  uint64 task = 1;
+  string standing = 2;
 }
 
 // One workflow's job counts in a CI run.
@@ -1342,6 +1401,8 @@ message TaskLanding {
   string ci_state = 13;
   // "land_now" while the task is queued or in a batch that has not started promoting.
   repeated string allowed_actions = 14;
+  // s788: the task's own standing in its batch ("verifying", "integrating", ...).
+  string standing = 15;
 }
 
 message ProviderStatus {

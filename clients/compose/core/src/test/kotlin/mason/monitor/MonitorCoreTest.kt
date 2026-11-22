@@ -496,6 +496,18 @@ class MonitorCoreTest {
         assertEquals(13, m.lastSeq, "an older number never moves it back")
     }
 
+    @Test fun onlyViewsMoveTheViewSequence() {
+        val m = MonitorModel()
+        val v = View(header_ = HeaderView(status = "All quiet"))
+        m.apply(ServerMessage(events = Events(events = listOf(EventRecord(seq = 12)))))
+        assertEquals(12, m.lastSeq)
+        assertEquals(0, m.lastViewSeq)
+        m.apply(ServerMessage(view = ViewUpdate(seq = 10, view = v)))
+        assertEquals(10, m.lastViewSeq)
+        m.apply(ServerMessage(view = ViewUpdate(seq = 4, view = v)))
+        assertEquals(10, m.lastViewSeq, "a stale view never moves it back")
+    }
+
     @Test fun theLandingViewCarriesOneTrackerLinePerProject() {
         val m = MonitorModel()
         val lines = listOf(
@@ -799,8 +811,8 @@ class MonitorCoreTest {
         m.cancel(3)
         assertEquals(1, sent)
         assertNull(m.readOnlyReason)
-        m.apply(welcome(minProtocol = 2))
-        assertTrue(m.readOnlyReason!!.contains("protocol 1") && m.readOnlyReason!!.contains("2 or newer"))
+        m.apply(welcome(minProtocol = 3))
+        assertTrue(m.readOnlyReason!!.contains("protocol 2") && m.readOnlyReason!!.contains("3 or newer"))
         m.cancel(3)
         m.answer(1, "yes", "x")
         assertEquals(1, sent)

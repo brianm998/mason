@@ -113,12 +113,13 @@ jobs:
             command="$(jq -r '.shard_command // .command' .mason/run.json)"
           fi
           results="$(jq -r '.results_file // empty' .mason/run.json)"
-          code=0; build_s=0; run_s=0
+          code=0; build_s=0; run_s=0; phase=run
           if [ -n "$build" ]; then
             t0=$(date +%s)
             sh -c "$build" 2>&1 | tee -a "$out/output.log"
             code=${PIPESTATUS[0]}
             build_s=$(( $(date +%s) - t0 ))
+            if [ "$code" -ne 0 ]; then phase=build; fi
           fi
           if [ "$code" -eq 0 ]; then
             t0=$(date +%s)
@@ -134,8 +135,8 @@ jobs:
           signal=0
           if [ "$code" -gt 128 ]; then signal=$(( code - 128 )); fi
           jq -n --argjson code "$code" --argjson signal "$signal" \
-             --argjson build_s "$build_s" --argjson run_s "$run_s" \
-             '{code: $code, signal: $signal, build_s: $build_s, run_s: $run_s}' > "$out/result.json"
+             --argjson build_s "$build_s" --argjson run_s "$run_s" --arg phase "$phase" \
+             '{code: $code, signal: $signal, build_s: $build_s, run_s: $run_s, phase: $phase}' > "$out/result.json"
 
       - name: upload
         if: always()
