@@ -246,7 +246,7 @@ pub fn tick(d: &Arc<Daemon>) {
         for spec in p.schedules() {
             let name = crate::schedule::row_name(&p.id, &spec.name);
             let row = ensure_row(d, &name, &p.id, &spec.kind, spec.every_ms, now);
-            let is_due = if spec.kind == "ci" {
+            let is_due = if spec.kind == "ci" || spec.kind == "suites" {
                 crate::ci_schedule::is_due(&row, &spec, now)
             } else {
                 due(Some(row.last_run), now, row.every_ms)
