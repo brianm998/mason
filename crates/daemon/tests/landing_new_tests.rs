@@ -58,3 +58,34 @@ fn a_skipped_task_whose_new_test_passes_lands() {
     wait_for("it to land", 180, || w.landed(t));
     assert!(w.on_main("x/fine.rs"));
 }
+
+fn land_now_running(w: &W, t: TaskId) {
+    fast_track(w, t);
+    w.d.store
+        .set_landing_flag(t.0, mason_daemon::suites::LAND_NOW_RUNNING, "brian", 0)
+        .unwrap();
+}
+
+/// s943: Land now stops the testing, the new tests of the skipped tasks included. Before, the
+/// new-tests check still ran after the floor (and on 2026-11-22 went to GitHub, was not picked up,
+/// and failed the whole batch). The task whose new test is red lands, and the suite the check
+/// would have run is owed after the merge, as a suite Land now stopped is.
+#[test]
+fn land_now_does_not_run_the_new_tests_check_and_owes_it_after_the_merge() {
+    let w = world_new_tests("window = \"20m\"\nmax_size = 1\n");
+    let t = w.task_with(
+        "bad but land now",
+        &[("x/bad.rs", "#[test]\nfn adds_bad() {}\n")],
+        land_now_running,
+    );
+    wait_for("it to land past its red new test", 180, || w.landed(t));
+    assert!(w.on_main("x/bad.rs"));
+    assert!(w.sent_back(t).is_none(), "{:?}", w.sent_back(t));
+    wait_for("the new tests to be owed", 60, || {
+        w.d.store
+            .debts(Some(t.0), true)
+            .unwrap()
+            .iter()
+            .any(|x| x.scope == "suite:alpha" && x.deferred)
+    });
+}
