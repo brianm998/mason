@@ -740,7 +740,6 @@ pub fn step(state: &mut State, runs: &[RunRec], ctx: &Ctx) -> Vec<File> {
                                         urgent: true,
                                         proposed: false,
                                         auto: false,
-                                        auto: false,
                                         why: Why::Gate,
                                         at,
                                         signatures: vec![],
