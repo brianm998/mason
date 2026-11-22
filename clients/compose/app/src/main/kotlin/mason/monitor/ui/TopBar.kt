@@ -173,7 +173,8 @@ private fun ProjectFilter(model: MonitorModel) {
 }
 
 @Composable
-private fun updateRow(text: String, button: String?, id: String, theme: Theme, icon: String? = null, action: () -> Unit) {
+private fun updateRow(text: String, button: String?, id: String, theme: Theme, icon: String? = null, sep: @Composable () -> Unit = {}, action: () -> Unit) {
+    sep()
     Row(
         modifier = Modifier.fillMaxWidth().background(theme.slow.copy(alpha = 0.18f))
             .padding(horizontal = theme.spacingLarge, vertical = theme.spacing).testTag("$id-banner"),
@@ -188,12 +189,19 @@ private fun updateRow(text: String, button: String?, id: String, theme: Theme, i
 @Composable
 fun BannersView(model: MonitorModel) {
     val theme = LocalTheme.current
+    // A 1 dp line between neighbouring rows (none above the first or below the last): the first
+    // row to draw takes no line, each later one draws its own before itself.
+    var drawn = 0
+    val sep: @Composable () -> Unit = {
+        val n = drawn++
+        if (n > 0) Box(Modifier.fillMaxWidth().height(1.dp).background(theme.border).testTag("row-divider:$n"))
+    }
     Column {
-        if (model.announcer.daemonDown) banner("Daemon down: MASON has lost its daemon. Check that masond is running.", "daemon-down", theme, "daemon_down")
-        if (!model.connected) banner(if (model.reconnecting) "Daemon restarting, reconnecting…" else "Connection lost. Reconnecting…", "connection", theme, "connection_lost")
-        model.readOnlyReason?.let { banner("Read-only: $it", "read-only", theme, "read_only") }
+        if (model.announcer.daemonDown) banner("Daemon down: MASON has lost its daemon. Check that masond is running.", "daemon-down", theme, "daemon_down", sep = sep)
+        if (!model.connected) banner(if (model.reconnecting) "Daemon restarting, reconnecting…" else "Connection lost. Reconnecting…", "connection", theme, "connection_lost", sep = sep)
+        model.readOnlyReason?.let { banner("Read-only: $it", "read-only", theme, "read_only", sep = sep) }
         if (model.daemonUpdateText.isNotEmpty()) {
-            updateRow(model.daemonUpdateText, if (model.canUpdateDaemon) (if (model.downloadUrl.isEmpty()) model.daemonUpdateButton else "Download") else null, "daemon-update", theme) { if (model.downloadUrl.isEmpty()) model.pressUpdateDaemon() else model.openDownloadPage() }
+            updateRow(model.daemonUpdateText, if (model.canUpdateDaemon) (if (model.downloadUrl.isEmpty()) model.daemonUpdateButton else "Download") else null, "daemon-update", theme, sep = sep) { if (model.downloadUrl.isEmpty()) model.pressUpdateDaemon() else model.openDownloadPage() }
         }
         if (model.confirmingDaemonUpdate) {
             AlertDialog(
@@ -208,31 +216,32 @@ fun BannersView(model: MonitorModel) {
             ?: model.updateError
             ?: if (model.updateAvailable) "A newer monitor is available (${model.latestMonitor.take(8)})." else null
         if (monitorText != null) {
-            updateRow(monitorText, if (model.updateAvailable && model.updating == null) "Update monitor" else null, "monitor-update", theme, "update") { model.updateMonitor() }
+            updateRow(monitorText, if (model.updateAvailable && model.updating == null) "Update monitor" else null, "monitor-update", theme, "update", sep = sep) { model.updateMonitor() }
         }
         model.header?.banners?.forEachIndexed { i, b ->
             if (b.kind == "push_auth") {
                 // A refused push holds landing; the owner picks the key that fixes it.
                 val project = MonitorModel.pushAuthProject(b)
-                updateRow(b.text, if (model.canAct) "Choose SSH key…" else null, "push-auth:$project", theme, BannerIcons.forDaemonKind(b.kind)) {
+                updateRow(b.text, if (model.canAct) "Choose SSH key…" else null, "push-auth:$project", theme, BannerIcons.forDaemonKind(b.kind), sep = sep) {
                     model.chooseSshKey(project)
                 }
             } else if (b.kind == "health") {
                 // The pipeline's health session needs the owner: the button opens its dialog.
-                updateRow(b.text, "Open session", "health-session:${b.session}", theme, BannerIcons.forDaemonKind(b.kind)) {
+                updateRow(b.text, "Open session", "health-session:${b.session}", theme, BannerIcons.forDaemonKind(b.kind), sep = sep) {
                     model.openOwnerSession(b.session)
                 }
             } else if (b.kind == "paused") {
                 // The whole pause group is drawn once, where the first pause is.
-                if (i == model.header?.banners?.indexOfFirst { it.kind == "paused" }) PauseGroup(model, theme)
+                if (i == model.header?.banners?.indexOfFirst { it.kind == "paused" }) PauseGroup(model, theme, sep)
             } else {
-                banner(b.text, "banner:$i", theme, BannerIcons.forDaemonKind(b.kind))
+                banner(b.text, "banner:$i", theme, BannerIcons.forDaemonKind(b.kind), sep = sep)
             }
         }
         if (model.sshKeyProject != null) SshKeyDialog(model)
         if (model.ownerSessionDialog != null) OwnerSessionDialog(model)
         model.header?.pending_issues?.forEach { p ->
             val uri = androidx.compose.ui.platform.LocalUriHandler.current
+            sep()
             Row(
                 horizontalArrangement = Arrangement.spacedBy(theme.spacing),
                 modifier = Modifier.fillMaxWidth().background(theme.slow.copy(alpha = 0.12f))
@@ -275,9 +284,10 @@ private fun PendingTile(count: Int) {
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun PauseGroup(model: MonitorModel, theme: Theme) {
+private fun PauseGroup(model: MonitorModel, theme: Theme, sep: @Composable () -> Unit = {}) {
     val banners = model.header?.banners ?: return
     model.pauseRows().forEach { row ->
+        sep()
         Row(
             modifier = Modifier.fillMaxWidth().background(theme.slow.copy(alpha = 0.18f))
                 .padding(horizontal = theme.spacingLarge, vertical = theme.spacing)
@@ -331,7 +341,8 @@ private fun BannerImage(id: String?, theme: Theme) {
 }
 
 @Composable
-private fun banner(text: String, tag: String, theme: Theme, icon: String? = null) {
+private fun banner(text: String, tag: String, theme: Theme, icon: String? = null, sep: @Composable () -> Unit = {}) {
+    sep()
     Row(
         modifier = Modifier.fillMaxWidth().background(theme.slow.copy(alpha = 0.18f))
             .padding(horizontal = theme.spacingLarge, vertical = theme.spacing).testTag(tag),

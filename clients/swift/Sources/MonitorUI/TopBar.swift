@@ -230,6 +230,12 @@ struct BannersView: View {
     private func stack(_ rows: [NotificationRow], hidden: Int) -> some View {
         VStack(spacing: 0) {
             ForEach(Array(rows.enumerated()), id: \.element.key) { i, row in
+                // A 1 pt line between neighbouring rows, none above the first or below the last.
+                if i > 0 {
+                    Rectangle().fill(theme.border).frame(height: 1)
+                        .accessibilityHidden(true)
+                        .probe("divider:\(i)")
+                }
                 rowView(row, inset: i == 0 && hidden > 0 ? buttonWidth : 0)
                     .background(GeometryReader { Color.clear.preference(key: RowHeights.self, value: [row.key: $0.size.height]) })
             }
