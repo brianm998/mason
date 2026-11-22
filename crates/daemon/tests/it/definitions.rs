@@ -1028,16 +1028,16 @@ fn favor_local_spills_to_github_only_while_this_machine_is_full() {
 
     // The slot is free: here, and it says why.
     assert_eq!(at(&d), Executor::Local);
-    let why = |d: &std::sync::Arc<mason_daemon::Daemon>| {
+    let why = || {
         mason_daemon::place::seen(Some(t.0))
             .last()
             .map(|v| v["why"].as_str().unwrap_or("").to_string())
             .unwrap_or_default()
     };
     assert!(
-        why(&d).contains("favor-local, 1 compile slot free"),
+        why().contains("favor-local, 1 compile slot free"),
         "{}",
-        why(&d)
+        why()
     );
     mason_daemon::place::forget("scratch", Some(t.0), "unit", "check");
 
@@ -1053,9 +1053,9 @@ fn favor_local_spills_to_github_only_while_this_machine_is_full() {
     ));
     assert!(matches!(at(&d), Executor::GitHub { .. }));
     assert!(
-        why(&d).contains("favor-local, no compile slot free and 1 waiting"),
+        why().contains("favor-local, no compile slot free and 1 waiting"),
         "{}",
-        why(&d)
+        why()
     );
 
     // Released, and the run over: the next one runs here.
