@@ -665,6 +665,9 @@ pub struct ProjectCfg {
     /// Seconds a queued task is held back for an in-flight task that changes the same files
     /// (`hold_back_secs`, default 7200; 0 turns the hold off) (s398).
     pub hold_back_secs: u64,
+    /// How many tasks beyond the LLM limit may be in agent steps at once while their agents are
+    /// parked on checks (`park_extra`; default: the limit) (#765, decision 0749).
+    pub park_extra: Option<u32>,
     /// A narrowed test-step suite whose selected targets' recorded run times sum to less than
     /// this many seconds takes the `test-small` lane (`small_run_s`, default 180; 0 turns it
     /// off) (s649).
@@ -897,6 +900,9 @@ pub struct RemoteCfg {
     pub runs_on: String,
     /// Seconds a run may wait for a runner before it counts as an outage.
     pub pickup_timeout_s: u64,
+    /// `favor-local` (#832): a run whose wait for this machine's slots passes this many seconds
+    /// may start on GitHub instead.
+    pub spill_after_s: u64,
     /// With `fallback = "local"` a run that cannot go remote runs here instead.
     pub fallback_local: bool,
     /// The project's placement mode (#831): `[remote_runs] mode`, else the old `fallback` (`local`
@@ -1227,6 +1233,7 @@ fn parse_services(id: &str, doc: &DocumentMut) -> Result<ServicesCfg, String> {
             workflow: get(t, "workflow").unwrap_or_else(|| "mason-run.yml".into()),
             runs_on: get(t, "runs_on").unwrap_or_else(|| "ubuntu-latest".into()),
             pickup_timeout_s: int(t, "pickup_timeout", 1200),
+            spill_after_s: int(t, "spill_after", 120),
             fallback_local,
             mode,
             test_env: match t.get("test_env") {
@@ -1487,6 +1494,10 @@ pub fn parse_project(id: &str, text: &str) -> Result<ProjectCfg, String> {
             .get("hold_back_secs")
             .and_then(|v| v.as_integer())
             .map_or(7200, |n| n.max(0) as u64),
+        park_extra: doc
+            .get("park_extra")
+            .and_then(|v| v.as_integer())
+            .map(|n| n.clamp(0, u32::MAX as i64) as u32),
         hold_back_ignore: doc
             .get("hold_back_ignore")
             .and_then(|v| v.as_array())
@@ -1836,7 +1847,7 @@ mod tests {
             ),
             ("a/b", "file:/t", "w.yml", "macos-latest")
         );
-        assert!(r.fallback_local && r.pickup_timeout_s == 60);
+        assert!(r.fallback_local && r.pickup_timeout_s == 60 && r.spill_after_s == 120);
         assert_eq!(
             r.test_env,
             vec![("MASON_TEST_MIN_WAIT_S".to_string(), "180".to_string())]

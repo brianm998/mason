@@ -501,3 +501,107 @@ fn only_a_name_filtered_check_takes_the_small_lane() {
         "{dev}"
     );
 }
+
+/// #812: a fast-tracked task (`tests:all` debt) still has its change built and the tests it adds
+/// run, by name; the rest of the suite does not run.
+fn fast_track_definition(build: &str, rerun: &str) -> String {
+    format!(
+        r#"{HEAD}
+[step.test]
+type = "test"
+category = "testing"
+uses = {{ compile = 1, test-suite = 1 }}
+suites = ["only"]
+on_red = "develop"
+max_rounds = 2
+next = "land"
+
+[suite.only]
+build = "{build}"
+command = "echo RAN-FULL"
+rerun = "{rerun}"
+parser = "tap"
+min_tests = 1
+level = "unit"
+
+[binding.unit]
+when = ["development", "test_step"]
+
+[impact]
+"src/**" = ["only"]
+"#
+    )
+}
+
+/// Run one fast-tracked task whose agent commits `src/a.rs` with `body`, asks for a check and
+/// submits. Returns the task's logs once the check's answer is in them.
+fn fast_track_check(build: &str, rerun: &str, body: &str) -> String {
+    let gate = tempfile::tempdir().unwrap();
+    let go = gate.path().join("go");
+    let turns = json!([
+        {"sh": format!("until [ -f {} ]; do sleep 0.2; done", go.display())},
+        {"sh": format!("mkdir -p src && printf '{body}' > src/a.rs && git add -A && git -c user.name=t -c user.email=t@t commit -qm change")},
+        {"call": {"tool": "run_check", "args": {"name": "tests"}}},
+        {"call": {"tool": "submit_change", "args": {"summary": "change", "head": "$HEAD"}}}
+    ]);
+    let (_s, d) = start(vec![turns], &fast_track_definition(build, rerun));
+    let t = file_task_as(&d, "Fast", "Do it.", true, TrustSource::Owner, false);
+    d.store
+        .add_debt(
+            t.0,
+            "scratch",
+            mason_daemon::suites::ALL_TESTS,
+            "owner skipped",
+            "brian",
+            false,
+            0,
+        )
+        .unwrap();
+    std::fs::write(&go, "go").unwrap();
+    let mut logs = String::new();
+    for _ in 0..600 {
+        logs = render_logs(&d, t.0);
+        if logs.contains("Not run: the owner skipped testing") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    logs
+}
+
+#[test]
+fn a_fast_tracked_check_is_red_naming_the_failing_test_the_change_adds() {
+    let logs = fast_track_check(
+        "true",
+        "for n in {tests}; do echo \\\"test m::$n ... FAILED\\\"; done; exit 1",
+        "#[test]\\nfn adds_one() {}\\n",
+    );
+    assert!(logs.contains("RED"), "{logs}");
+    assert!(logs.contains("adds_one"), "{logs}");
+    assert!(!logs.contains("RAN-FULL"), "{logs}");
+}
+
+#[test]
+fn a_fast_tracked_check_is_red_when_the_change_does_not_build() {
+    let logs = fast_track_check(
+        "echo BUILD-BROKEN; exit 1",
+        "echo RAN {tests}",
+        "fn x() {}\\n",
+    );
+    assert!(logs.contains("RED"), "{logs}");
+    assert!(logs.contains("BUILD-BROKEN"), "{logs}");
+}
+
+#[test]
+fn a_fast_tracked_green_check_says_it_built_and_ran_only_the_new_test() {
+    let logs = fast_track_check(
+        "echo BUILD-RAN",
+        "echo RAN-ONLY {tests}",
+        "#[test]\\nfn adds_one() {}\\n",
+    );
+    assert!(logs.contains("build of only"), "{logs}");
+    assert!(logs.contains("test adds_one"), "{logs}");
+    assert!(logs.contains("RAN-ONLY 'adds_one'"), "{logs}");
+    assert!(!logs.contains("RAN-FULL"), "{logs}");
+    assert!(!logs.contains("RED"), "{logs}");
+}

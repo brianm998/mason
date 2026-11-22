@@ -9,7 +9,7 @@ cd "$(dirname "$0")/../.."
 root=$(mktemp -d /tmp/mason-s102.XXXXXX); pids=()
 cleanup() { for p in "${pids[@]:-}"; do [ -n "$p" ] && kill -9 "$p" 2>/dev/null || true; done; rm -rf "$root"; }
 trap cleanup EXIT
-cargo build -q -p mason-daemon --bins -p mason-step-host --bins -p mason-mcp -p mason-pipeline --bins 2>/dev/null || cargo build -q --workspace --bins
+cargo build -q -p mason-daemon --bins -p mason-step-host --bins -p mason-adapters -p mason-pipeline --bins 2>/dev/null || cargo build -q --workspace --bins
 bin=$PWD/target/debug
 d=$root/d; c=$root/c; mkdir -p "$c" "$d"
 echo 3 > "$root/disk"

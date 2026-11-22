@@ -191,7 +191,7 @@ public final class MonitorConnection {
 
     private func hello(_ t: MonitorSocket) async throws {
         var h = Mason_V1_Hello()
-        h.protocol = 1
+        h.protocol = 2
         h.lastSeq = model.lastSeq
         h.client = "mason-monitor-swiftui"
         h.clientVersion = model.ownVersion
