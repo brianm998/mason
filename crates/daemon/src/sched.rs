@@ -4545,7 +4545,10 @@ mod tests {
         // Past `update_wait_max` the build is reopened ahead of task work.
         lock(&b.st).ledger.release(waiter);
         let next = queue_task(&b, 3, &one);
-        assert!(held(&b, next), "a task still goes before the low-ranked build");
+        assert!(
+            held(&b, next),
+            "a task still goes before the low-ranked build"
+        );
         b.lease_close(low);
         let _late = queue_task(&b, 4, &one);
         let high = b.lease_open_update("self-update build", true);
