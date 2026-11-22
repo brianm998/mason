@@ -9,6 +9,8 @@
 //! Real git, real suites, the real coordinator, as in `landing.rs`; no timing is asserted.
 
 use crate::support;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use support::lw::*;
 use support::*;
 
@@ -23,26 +25,70 @@ fn conflicted() -> String {
     )
 }
 
+/// The tail of every file under `dir` whose path has `part` in it (a build floor's logs and
+/// its step hosts' records), so a timed-out wait can say what the floor was doing.
+fn logs_named(dir: &std::path::Path, part: &str) -> String {
+    fn walk(dir: &std::path::Path, part: &str, out: &mut String) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, part, out);
+            } else if p.to_string_lossy().contains(part) {
+                let text =
+                    String::from_utf8_lossy(&std::fs::read(&p).unwrap_or_default()).into_owned();
+                let tail: Vec<&str> = text.lines().rev().take(20).collect();
+                let tail: Vec<&str> = tail.into_iter().rev().collect();
+                out.push_str(&format!("--- {}\n{}\n", p.display(), tail.join("\n")));
+            }
+        }
+    }
+    let mut out = String::new();
+    walk(dir, part, &mut out);
+    out
+}
+
 #[test]
 fn a_batch_that_does_not_build_is_not_landed_and_the_task_that_broke_it_goes_back() {
     // No batch tier: the floor is the only thing that builds the union.
     let w = world_built("window = \"2s\"\nmax_size = 5\n", &[]);
     let fine = w.task("beta only", &[("b/ok.txt", "1")]);
     let broken = w.task("alpha does not build", &[("a/red.build.alpha", "x")]);
-    wait_for("the task that builds to land", 120, || w.landed(fine));
-    wait_for("the one that does not to go back", 60, || {
+    // The red runs seen on GitHub were timeouts of these waits (no verdict in 900 s, s774), so
+    // a timeout says where the batch stood: its rows, both tasks, and the floor's build logs.
+    let report = || {
+        format!(
+            "broken sent back: {:?}\nfine sent back: {:?}\nbatches: {:?}\nfloor and fast-tier logs:\n{}{}",
+            w.sent_back(broken),
+            w.sent_back(fine),
+            w.d.store.batches(Some("scratch"), 10).unwrap(),
+            logs_named(&w.s.data_dir, "-floor-"),
+            w.fast_tier_logs()
+        )
+    };
+    let wait = |what: &str, f: &dyn Fn() -> bool| {
+        if let Err(e) = try_wait_for_exact(what, 900, 50, f) {
+            panic!("{e}\n{}", report());
+        }
+    };
+    wait("the task that builds to land", &|| w.landed(fine));
+    wait("the one that does not to go back", &|| {
         w.sent_back(broken).is_some()
     });
     let why = w.sent_back(broken).unwrap();
-    assert!(why.contains("alpha"), "{why}");
-    assert!(w.on_main("b/ok.txt"));
+    assert!(why.contains("alpha"), "{why}\n{}", report());
+    assert!(w.on_main("b/ok.txt"), "{}", report());
     assert!(
         !w.on_main("a/red.build.alpha"),
-        "a batch that does not build must not land"
+        "a batch that does not build must not land\n{}",
+        report()
     );
     assert!(
         w.sent_back(fine).is_none(),
-        "the innocent task is not parked"
+        "the innocent task is not parked\n{}",
+        report()
     );
 }
 
@@ -160,4 +206,43 @@ fn a_branch_that_adds_conflict_markers_goes_back_before_it_joins_a_batch() {
         rows.iter().all(|b| !b.tasks.split(',').any(|t| t == never)),
         "{rows:?}"
     );
+}
+
+// ---- #816: the floor builds on this Mac while the switch says GitHub --------------------------
+
+fn floor_github_world(landing: &str, files: &[(&str, &str)]) -> (W, Arc<AtomicUsize>) {
+    let (url, n) = crate::landing::silent_github();
+    std::env::set_var("MASON_T816_TOKEN", "x");
+    let extra = format!(
+        "[remote_runs]\nkind = \"github-actions\"\napi = \"{url}\"\nrepo = \"o/r\"\ntoken = \"env:MASON_T816_TOKEN\"\nruns_on = \"ubuntu-latest\"\n"
+    );
+    let w = world_built_extra(landing, &extra, files, false);
+    mason_daemon::place::set_global(&w.d, mason_daemon::place::Mode::Remote, "test").unwrap();
+    (w, n)
+}
+
+#[test]
+fn the_floor_builds_here_while_the_switch_says_github_and_lands() {
+    let (w, github) = floor_github_world("window = \"1s\"\n", &[]);
+    let t = w.task("alpha", &[("a/ok.txt", "1")]);
+    wait_for("the batch to land", 90, || w.landed(t));
+    assert_eq!(github.load(Ordering::SeqCst), 0, "the floor reached GitHub");
+}
+
+#[test]
+fn a_floor_set_to_github_goes_there() {
+    let (w, github) = floor_github_world("floor_where = \"github\"\nwindow = \"1s\"\n", &[]);
+    let _t = w.task("alpha", &[("a/ok.txt", "1")]);
+    wait_for("the floor to reach GitHub", 90, || {
+        github.load(Ordering::SeqCst) > 0
+    });
+}
+
+#[test]
+fn a_floor_red_built_here_parks_the_task() {
+    let (w, github) = floor_github_world("window = \"1s\"\n", &[]);
+    let t = w.task("alpha does not build", &[("a/red.build.alpha", "x")]);
+    wait_for("the task to be sent back", 90, || w.sent_back(t).is_some());
+    assert!(!w.on_main("a/red.build.alpha"));
+    assert_eq!(github.load(Ordering::SeqCst), 0);
 }

@@ -792,7 +792,7 @@ fn land_now_keeps_the_freeze() {
 
 /// A fake GitHub that never assigns a runner: it accepts connections and says nothing. The
 /// count is how many requests reached it.
-fn silent_github() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+pub(crate) fn silent_github() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
     let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", l.local_addr().unwrap());
     let n = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -824,7 +824,7 @@ fn github_world(
         all.push(("checks.sh", s));
     }
     let w = world_with(tier, &extra, &all);
-    mason_daemon::place::set_global(&w.d, mason_daemon::place::Global::GitHub, "test").unwrap();
+    mason_daemon::place::set_global(&w.d, mason_daemon::place::Mode::Remote, "test").unwrap();
     (w, n)
 }
 
