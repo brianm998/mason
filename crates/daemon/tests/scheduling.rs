@@ -840,10 +840,45 @@ fn llm_sessions_are_adjustable_live_and_lowering_kills_nothing() {
     assert_eq!(d2.broker.limit("llm:claude"), Some(1));
 }
 
-fn home_active(d: &Arc<Daemon>) -> (Vec<u64>, u32) {
+fn home_rows(d: &Arc<Daemon>) -> (Vec<(u64, String, String)>, u32) {
     let world = d.world().unwrap();
     let h = mason_daemon::views::Ctx::new(d, &world).home("");
-    (h.active.iter().map(|a| a.task).collect(), h.sessions_used)
+    let mut rows: Vec<_> = h
+        .active
+        .iter()
+        .map(|a| (a.task, a.state.to_string(), a.resource.to_string()))
+        .collect();
+    rows.sort();
+    (rows, h.sessions_used)
+}
+
+/// Poll (one generous deadline, no timing assertion) until the active list is exactly
+/// `want` (task, state), each on `llm:claude` when waiting for a slot; returns sessions_used.
+fn wait_active(d: &Arc<Daemon>, want: &[(u64, &str)]) -> u32 {
+    let mut exp: Vec<(u64, String, String)> = want
+        .iter()
+        .map(|(t, st)| {
+            let res = if *st == "waiting_slot" {
+                "llm:claude"
+            } else {
+                ""
+            };
+            (*t, st.to_string(), res.to_string())
+        })
+        .collect();
+    exp.sort();
+    let end = std::time::Instant::now() + Duration::from_secs(90);
+    loop {
+        let (rows, used) = home_rows(d);
+        if rows == exp {
+            return used;
+        }
+        assert!(
+            std::time::Instant::now() < end,
+            "active list never became {exp:?}; last {rows:?}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 #[test]
@@ -851,7 +886,7 @@ fn active_models_lists_only_tasks_that_hold_a_session() {
     let s = Scratch::new("test -f hello.txt", unique_script());
     let d = s.start_with(|c| c.max_concurrent = 1);
     // Nothing running: empty, and it matches the counter.
-    assert_eq!(home_active(&d), (vec![], 0));
+    assert_eq!(wait_active(&d, &[]), 0);
     // No session is free, so nothing is admitted; admit one task by hand, as
     // if its session had been taken from under it. Its agent step now waits.
     d.broker.set_limit("llm:claude", 0).unwrap();
@@ -865,8 +900,8 @@ fn active_models_lists_only_tasks_that_hold_a_session() {
     .unwrap();
     wait_explained(&d, t);
     assert!(state_of(&d, t).is_step());
-    assert_eq!(home_active(&d), (vec![], 0));
-    // A second task in a step state changes nothing either.
+    assert_eq!(wait_active(&d, &[(t.0, "waiting_slot")]), 0);
+    // A second waiting task is listed too, and still holds no session.
     let t2 = file_task(&d, "Also waits");
     let entry = d.entry_for(&task_of(&d, t2));
     d.emit(EventKind::Admitted {
@@ -875,19 +910,19 @@ fn active_models_lists_only_tasks_that_hold_a_session() {
     })
     .unwrap();
     wait_explained(&d, t2);
-    assert_eq!(home_active(&d), (vec![], 0));
-    // A session held by someone else counts, but is not a task's. Under 0747 the
-    // list also holds started steps waiting for a check or a session, so the
-    // hold is opened first: a person's request ranks ahead of pipeline work and
+    let both = [(t.0, "waiting_slot"), (t2.0, "waiting_slot")];
+    assert_eq!(wait_active(&d, &both), 0);
+    // A session held by someone else counts but is not listed; the waiting tasks are
+    // (0747). The hold is opened first: a person's request ranks ahead of pipeline work and
     // gets the one session, so no task starts during the assertions.
     let map = std::iter::once(("llm:claude".to_string(), 1)).collect();
     let id = d.broker.lease_open("other session", &map);
     d.broker.set_limit("llm:claude", 1).unwrap();
     let (id, held) = take_when_granted(&d, id, "other session");
-    assert_eq!(home_active(&d), (vec![], 1));
+    assert_eq!(wait_active(&d, &both), 1);
     // Lowering the limit below what is held changes nothing about who is listed.
     d.broker.set_limit("llm:claude", 0).unwrap();
-    assert_eq!(home_active(&d), (vec![], 1));
+    assert_eq!(wait_active(&d, &both), 1);
     drop(held);
     d.broker.lease_close(id);
 }
