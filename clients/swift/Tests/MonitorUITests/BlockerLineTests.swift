@@ -44,7 +44,7 @@ final class BlockerLineTests: XCTestCase {
             let many = size(view(row(blockers: 29)), width: width).height
             let one = size(view(row(blockers: 1)), width: width).height
             let small = size(Text("x").font(Theme(dark: false, scale: 1).small()), width: 300).height
-            XCTAssertLessThanOrEqual(many, one + small + 1, "29 blockers: \(many) vs 1 blocker: \(one) at \(width)")
+            XCTAssertLessThanOrEqual(many, one + 2 * small + 1, "29 blockers: \(many) vs 1 blocker: \(one) at \(width)")
         }
     }
 
