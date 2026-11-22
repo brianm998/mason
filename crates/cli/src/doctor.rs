@@ -354,6 +354,7 @@ fn cache_usage_finding(name: &str, repo_slug: &str, usage: Result<u64, String>) 
 }
 
 /// The findings for remote runs, from what was read. Pure, so it is tested on fake answers.
+#[allow(clippy::too_many_arguments)]
 fn remote_run_findings(
     name: &str,
     base: &str,
