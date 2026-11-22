@@ -687,5 +687,6 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s859**: The fake git host now runs its archive and checks commands through `shell_command` and `to_shell_path` so they work on Windows, and a check run that could not happen is no longer cached as red.
 - **s867**: `favor-remote` now places a run here, under local slots, when GitHub is overloaded (the pool is full with waiters, the account queue is over `remote_queue_max`, or recent pickups are slower than `spill_after`) and this machine has room; a run unpicked on GitHub for `spill_after` is cancelled and runs here instead of waiting out `pickup_timeout`. Decision 0860.
 - **s875**: The cargo-workspace force-skip count (18 of 81) comes from owner and Land-now skips, not suite failures, so the suite is unchanged and the detector's counting is filed as a proposal.
+- **s883**: The active-models scheduling test failure recorded at b9d4aa3ef5 was fixed by 0831 (lease opened first); this records it and pins the fix with an exit script.
 - **s885**: The floor-on-GitHub test world now carries `.github/workflows/mason-run.yml` on its base, as the real repo does, so `a_floor_set_to_github_goes_there` reaches the fake GitHub.
 <!-- status:end -->
