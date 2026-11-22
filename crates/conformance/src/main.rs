@@ -66,27 +66,81 @@ fn default_actor() -> String {
         .unwrap_or_else(|_| "owner".into())
 }
 
-fn all_views(c: &mut Client) -> Vec<View> {
-    c.subscribe(
-        &[ViewKind::Header, ViewKind::Sidebar, ViewKind::Home],
-        "",
-        0,
-    )
-    .unwrap_or_else(|e| die(&e));
-    // The three views for the current state: wait until all have arrived.
-    let mut got: Vec<View> = vec![];
-    let end = std::time::Instant::now() + Duration::from_secs(10);
-    while got.len() < 3 && std::time::Instant::now() < end {
-        if let Ok(Some(ServerMessage {
-            body: Some(server_message::Body::View(u)),
-        })) = c.recv(Duration::from_millis(200))
-        {
-            if let Some(v) = u.view {
-                got.push(v);
+/// The screen a client shows: the newest view of each kind, never replaced by an older one.
+/// This is what the Compose client keeps (decision 0763).
+#[derive(Default)]
+struct Screen {
+    views: Vec<(Option<std::mem::Discriminant<view::Body>>, u64, View)>,
+    seq: u64,
+}
+
+impl Screen {
+    fn absorb(&mut self, m: ServerMessage) {
+        if let Some(server_message::Body::View(u)) = m.body {
+            let Some(v) = u.view else { return };
+            let key = v.body.as_ref().map(std::mem::discriminant);
+            self.seq = self.seq.max(u.seq);
+            match self.views.iter_mut().find(|e| e.0 == key) {
+                Some(e) if e.1 > u.seq => {}
+                Some(e) => *e = (key, u.seq, v),
+                None => self.views.push((key, u.seq, v)),
             }
         }
     }
-    got
+
+    fn views(&self) -> Vec<View> {
+        self.views.iter().map(|e| e.2.clone()).collect()
+    }
+}
+
+/// Send a raw command, keeping every view message that arrives meanwhile.
+fn run(c: &mut Client, screen: &mut Screen, method: &str, path: &str) -> CommandResult {
+    let (r, other) = c
+        .command(
+            Command {
+                id: String::new(),
+                body: Some(command::Body::Raw(Raw {
+                    method: method.into(),
+                    path: path.into(),
+                    json: String::new(),
+                })),
+                actor: String::new(),
+                reason: String::new(),
+            },
+            Duration::from_secs(10),
+        )
+        .unwrap_or_else(|e| die(&e));
+    for m in other {
+        screen.absorb(m);
+    }
+    r
+}
+
+/// Wait until the screen has reached the daemon's current seq, or 1.5 s pass with nothing new.
+fn settle(c: &mut Client, screen: &mut Screen) {
+    let hard = std::time::Instant::now() + Duration::from_secs(60);
+    let r = run(c, screen, "GET", "/status");
+    let v: serde_json::Value = serde_json::from_str(&r.json).unwrap_or_default();
+    let target = v["seq"]
+        .as_u64()
+        .or_else(|| v["seq"].as_str().and_then(|s| s.parse().ok()))
+        .unwrap_or(0);
+    let mut quiet = std::time::Instant::now();
+    let mut last = screen.seq;
+    while screen.seq < target || screen.views.len() < 3 {
+        if std::time::Instant::now() > hard {
+            die("the screen did not reach the daemon's seq within 60 s");
+        }
+        if screen.seq > last {
+            last = screen.seq;
+            quiet = std::time::Instant::now();
+        } else if quiet.elapsed() > Duration::from_millis(1500) && screen.views.len() >= 3 {
+            break;
+        }
+        if let Ok(Some(m)) = c.recv(Duration::from_millis(50)) {
+            screen.absorb(m);
+        }
+    }
 }
 
 fn main() {
@@ -208,9 +262,16 @@ fn main() {
             let owner = c.hello(0, false).unwrap_or_else(|e| die(&e)).owner;
             // Checkpoint 0 is the state before the script; then one per step.
             let mut k = 0;
+            let mut screen = Screen::default();
+            c.subscribe(
+                &[ViewKind::Header, ViewKind::Sidebar, ViewKind::Home],
+                "",
+                0,
+            )
+            .unwrap_or_else(|e| die(&e));
             loop {
-                let views = all_views(&mut c);
-                let items: Vec<serde_json::Value> = conformance::visible(&views, owner)
+                settle(&mut c, &mut screen);
+                let items: Vec<serde_json::Value> = conformance::visible(&screen.views(), owner)
                     .iter()
                     .map(|i| i.to_json())
                     .collect();
@@ -224,21 +285,7 @@ fn main() {
                 if now_only {
                     break;
                 }
-                let (r, _) = c
-                    .command(
-                        Command {
-                            id: String::new(),
-                            body: Some(command::Body::Raw(Raw {
-                                method: "POST".into(),
-                                path: "/demo/next".into(),
-                                json: String::new(),
-                            })),
-                            actor: String::new(),
-                            reason: String::new(),
-                        },
-                        Duration::from_secs(10),
-                    )
-                    .unwrap_or_else(|e| die(&e));
+                let r = run(&mut c, &mut screen, "POST", "/demo/next");
                 let v: serde_json::Value = serde_json::from_str(&r.json).unwrap_or_default();
                 if v["advanced"] != serde_json::json!(true) {
                     break;

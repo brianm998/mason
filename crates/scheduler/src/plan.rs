@@ -69,6 +69,9 @@ pub struct Request {
     /// freezes `compile` like an exclusive request freezes the machine, with the same bound
     /// (`exclusive_max_wait`) and backfill, scoped to `compile`.
     pub drains_compile: bool,
+    /// The owner's self-update build (s868): the CPU, stall, syspolicyd, thermal and pacing
+    /// holds do not apply to it, except the hard heat ceiling ([`World::heat_ceiling`]).
+    pub hold_exempt: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -115,6 +118,8 @@ pub struct World<'a> {
     /// freeze (s552): ordinary work may start again as long as it is done before the machine
     /// has drained. `None`: the freeze has no bound.
     pub exclusive_max_wait: Option<u64>,
+    /// The die is over the hard ceiling (`thermal_max_c + 2`): even a hold-exempt request waits.
+    pub heat_ceiling: bool,
 }
 
 /// The build disk has stopped answering promptly. A stall shows up as *less* CPU
@@ -551,21 +556,34 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
         // A landing is not held by the CPU or the pacing either: its verification
         // unblocks every task in the batch. The disk, memory and the count still hold it.
         let gated = compiles && !r.rank.is_landing();
+        let exempt = r.hold_exempt;
         let hot = match world.cpu {
-            Some(g) if gated && compile_running && g.busy_pct >= g.max_pct => Some(g),
+            Some(g) if !exempt && gated && compile_running && g.busy_pct >= g.max_pct => Some(g),
             _ => None,
         };
         let stalled = match world.stall {
-            Some(g) if compiles && compile_running && g.slow_ms >= g.max_ms => Some(g),
+            Some(g) if !exempt && compiles && compile_running && g.slow_ms >= g.max_ms => Some(g),
             _ => None,
         };
         let checking = match world.policy {
-            Some(g) if compiles && compile_running && g.max_pct > 0 && g.busy_pct >= g.max_pct => {
+            Some(g)
+                if !exempt
+                    && compiles
+                    && compile_running
+                    && g.max_pct > 0
+                    && g.busy_pct >= g.max_pct =>
+            {
                 Some(g)
             }
             _ => None,
         };
         let throttled = match world.thermal {
+            _ if exempt => world.heat_ceiling.then(|| {
+                world.thermal.unwrap_or(ThermalGate {
+                    speed_pct: 0,
+                    min_pct: 1,
+                })
+            }),
             Some(g)
                 if g.min_pct > 0
                     && g.speed_pct < g.min_pct
@@ -580,7 +598,7 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
         // there is nothing to wait for.
         let settling = world
             .compile_pace
-            .filter(|_| gated && compile_running)
+            .filter(|_| gated && compile_running && !exempt)
             .and_then(|p| Some(last_compile_start? + p.gap_ms))
             .filter(|until| world.now < *until);
         let low_disk = match world.disk {

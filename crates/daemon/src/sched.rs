@@ -499,6 +499,11 @@ struct State {
     /// The latest die temperature in °C and whether power limiting has lasted long enough.
     thermal_die: Option<f32>,
     thermal_limited_ms: Option<u64>,
+    /// Set while the die is over the hard ceiling (`thermal_max_c + 2`): what an exempt
+    /// self-update build says it waits for (s868).
+    ceiling_why: Option<String>,
+    /// Self-update build leases: whether each is ahead of task work and exempt from the holds.
+    update_leases: HashMap<u64, bool>,
     /// When the last scheduling pass ran. A waiter skips its own pass while this is
     /// younger than the broker's tick (see `acquire`).
     last_pass: Option<Instant>,
@@ -864,6 +869,8 @@ impl Broker {
                 thermal_why: None,
                 thermal_die: None,
                 thermal_limited_ms: None,
+                ceiling_why: None,
+                update_leases: HashMap::new(),
                 last_pass: None,
                 pass_running: false,
                 passes: 0,
@@ -1349,6 +1356,18 @@ impl Broker {
                 _ => mason_scheduler::ThermalGate { speed_pct, min_pct },
             });
         st.ledger.set_thermal(thermal);
+        // The hard ceiling the owner's update build never ignores: 2 °C over the hold.
+        let ceiling = readings
+            .and_then(|r| r.1)
+            .filter(|c| max_c > 0 && *c > (max_c + 2) as f32);
+        st.ledger.set_heat_ceiling(ceiling.is_some());
+        st.ceiling_why = ceiling.map(|c| {
+            format!(
+                "update waits: die {} °C over the {} °C ceiling",
+                c.round() as u32,
+                max_c + 2
+            )
+        });
         st.thermal_read = thermal.map(|t| (t.speed_pct, t.min_pct));
         st.thermal_why = hot.map(|h| h.why());
         match policy {
@@ -2621,6 +2640,40 @@ impl Broker {
         )
     }
 
+    /// Queue the self-update build's `compile` slot (s868). With `promoted` (the owner started
+    /// the update, or an automatic one has waited `update_wait_max`) it is ranked ahead of all
+    /// task work and the CPU, stall, syspolicyd, thermal and pacing holds do not apply to it,
+    /// except the hard heat ceiling. Without, it is the lowest pipeline work (s473).
+    pub fn lease_open_update(&self, label: &str, promoted: bool) -> u64 {
+        let uses = BTreeMap::from([(COMPILE.to_string(), 1u32)]);
+        let id = if promoted {
+            self.open_lease(
+                label,
+                &uses,
+                Some("mason".into()),
+                None,
+                false,
+                |st, now| Rank::new(true, 0, 0, now, st.rank_seq, false),
+            )
+        } else {
+            let o = crate::outside::Outside {
+                pipeline: "mason".into(),
+                steps: crate::outside::MAX_PROGRESS,
+                priority: 3,
+            };
+            self.lease_open_outside(label, &uses, &o)
+        };
+        let mut st = lock(&self.st);
+        st.update_leases.insert(id, promoted);
+        if promoted {
+            st.ledger.set_hold_exempt(id, true);
+        }
+        st = self.pass(st);
+        drop(st);
+        self.cv.notify_all();
+        id
+    }
+
     fn open_lease(
         &self,
         label: &str,
@@ -2777,6 +2830,8 @@ impl Broker {
                 ..
             })
         );
+        let update = st.update_leases.get(&id).copied();
+        let ceiling_why = st.ceiling_why.clone();
         let snap = st.ledger.snapshot();
         LeaseState::Waiting {
             explain: waits
@@ -2789,6 +2844,10 @@ impl Broker {
                         .find(|r| r.id == id)
                         .and_then(|r| r.needs.amounts.keys().next());
                     match (outside, first) {
+                        _ if update == Some(true) => match &ceiling_why {
+                            Some(t) => t.clone(),
+                            None => OWNER_UPDATE_NOTE.to_string(),
+                        },
                         (true, Some(r)) => crate::outside::outside_explain(r, w.position - 1),
                         _ => explain(w, now),
                     }
@@ -2802,6 +2861,7 @@ impl Broker {
         let had = st.ledger.release(id);
         st.meta.remove(&id);
         st.lease_tasks.remove(&id);
+        st.update_leases.remove(&id);
         st = self.pass(st);
         drop(st);
         self.cv.notify_all();
@@ -3348,6 +3408,10 @@ fn pipeline_of(st: &State, id: u64) -> Option<String> {
 }
 
 /// A person's `mason run` lease: external, and not another pipeline's.
+/// What `mason resources` says of a self-update build that is ahead of task work (s868).
+pub const OWNER_UPDATE_NOTE: &str =
+    "owner's update: next for compile, the heat hold does not apply to it";
+
 fn is_person(st: &State, id: u64) -> bool {
     matches!(
         st.meta.get(&id),
@@ -4519,6 +4583,81 @@ mod tests {
             "the local compile waits for the CPU and the heat"
         );
         assert!(held(&b, remote), "the remote run uses none of this machine");
+    }
+
+    #[test]
+    fn an_owners_update_build_is_granted_before_a_waiting_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = compile_broker(dir.path(), 1);
+        let one = BTreeMap::from([("compile".to_string(), 1)]);
+        let holder = queue_task(&b, 1, &one);
+        let waiter = queue_task(&b, 2, &one);
+        let update = b.lease_open_update("self-update build", true);
+        assert!(held(&b, holder) && !held(&b, waiter) && !held(&b, update));
+        lock(&b.st).ledger.release(holder);
+        drop(b.pass(lock(&b.st)));
+        assert!(held(&b, update), "the owner's update takes the freed slot");
+        assert!(!held(&b, waiter));
+    }
+
+    #[test]
+    fn an_automatic_update_build_waits_behind_task_work_until_it_is_promoted() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = compile_broker(dir.path(), 1);
+        let one = BTreeMap::from([("compile".to_string(), 1)]);
+        let holder = queue_task(&b, 1, &one);
+        let waiter = queue_task(&b, 2, &one);
+        let low = b.lease_open_update("self-update build", false);
+        lock(&b.st).ledger.release(holder);
+        drop(b.pass(lock(&b.st)));
+        assert!(held(&b, waiter) && !held(&b, low), "ranked last");
+        // Past `update_wait_max` the build is reopened ahead of task work.
+        lock(&b.st).ledger.release(waiter);
+        let next = queue_task(&b, 3, &one);
+        assert!(
+            held(&b, next),
+            "a task still goes before the low-ranked build"
+        );
+        b.lease_close(low);
+        let _late = queue_task(&b, 4, &one);
+        let high = b.lease_open_update("self-update build", true);
+        lock(&b.st).ledger.release(next);
+        drop(b.pass(lock(&b.st)));
+        assert!(held(&b, high), "ahead of the task that was waiting");
+        assert!(!held(&b, _late));
+    }
+
+    #[test]
+    fn an_owners_update_build_passes_the_heat_hold_but_not_the_hard_ceiling() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = compile_broker(dir.path(), 3);
+        let one = BTreeMap::from([("compile".to_string(), 1)]);
+        let thermal = crate::thermal::FakeThermal::new(100);
+        b.set_thermal(thermal.clone(), 0);
+        lock(&b.st).thermal_max = 97;
+        let running = queue_task(&b, 1, &one);
+        assert!(held(&b, running));
+        // Die 98 °C, max 97: a task waits, the owner's update goes.
+        thermal.set_die(98.0);
+        let task = queue_task(&b, 2, &one);
+        assert!(!held(&b, task), "the heat holds task work");
+        let update = b.lease_open_update("self-update build", true);
+        assert!(held(&b, update), "the owner's update passes the hold");
+        b.lease_close(update);
+        // Die 100 °C is over the 99 °C ceiling: it waits and says why.
+        thermal.set_die(100.0);
+        let update = b.lease_open_update("self-update build", true);
+        assert!(!held(&b, update));
+        match b.lease_poll(update) {
+            LeaseState::Waiting { explain, .. } => {
+                assert_eq!(explain, "update waits: die 100 °C over the 99 °C ceiling")
+            }
+            _ => panic!("it should be waiting"),
+        }
+        // Cooler again: it goes.
+        thermal.set_die(98.0);
+        drop(b.pass(lock(&b.st)));
+        assert!(held(&b, update));
     }
 
     #[test]
