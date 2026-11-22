@@ -1,0 +1,8 @@
+.mason/run.json
+crates/cli/src/resources.rs
+crates/daemon/src/http.rs
+crates/daemon/src/jobs.rs
+crates/daemon/src/remote.rs
+docs/decisions/0863-cancel-unwanted-github-runs-at-once.md
+docs/stages/s870.md
+scripts/exit/s870.sh
