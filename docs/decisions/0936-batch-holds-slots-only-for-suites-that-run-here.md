@@ -41,3 +41,23 @@ Left alone: the checks of a landing batch (rebuild, re-test, fast tier, new test
 batch's hold; their holds stay as they were. The lint and floor holds are unchanged. The wait for
 a lease taken as the batch in the mixed case can still queue behind an exclusive request for the
 part the lease does not hold; the part it does hold is never asked for twice.
+
+## Part 2: Land now stops the fast tier and the new-tests check
+
+Land now on a running batch is documented to stop all remaining testing except the freeze, the
+merge and the build floor. In the path that runs the floor (`Runner::verify`: no batch tier, or
+Land now) the fast tier and `merge_new_tests` still ran after a green floor. On 2026-11-22 batch
+#613 (Land now at 07:24) passed its floor, its new-tests check went to GitHub, no runner took it
+within `pickup_timeout`, `fail_service` fired and all eight tasks failed (class outside) instead
+of landing.
+
+Decision: with Land now in effect (`Runner::land_now()`, read live) the floor still runs and
+nothing else does. Both the fast tier and the new-tests check are tests, not the build floor, so
+both are stopped (the fast tier is a unit-test run of the suites' `fast_command`s). What they
+would have run is recorded in the `stopped` set as `suite:NAME` (`Runner::owe_stopped_tiers`:
+each selected suite with a `fast_command`, the suite `new_tests` counts the new tests under, and
+the exit-scripts suite for new exit scripts), and a note says so. `defer_stopped` turns it into a
+deferred debt of each landed member, run on the base after the merge, like a suite Land now
+stopped in `run_over`. The candidate-ref branch (`ci_skipped`) had the same call after its floor
+and is changed the same way, only for Land now: a skipped CI by a skip debt keeps running the new
+tests of the skipped tasks. Without Land now nothing changes.

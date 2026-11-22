@@ -11,4 +11,9 @@ cargo test -q -p mason-daemon --test it -- --exact \
   batch_remote_hold::an_exclusive_request_is_granted_while_a_batch_is_out_on_github \
   batch_remote_hold::a_batch_with_a_local_and_a_remote_suite_holds_only_the_local_suites_slots \
   fallback_lease::a_batch_suite_falling_back_here_takes_its_slots_ranked_as_the_batch
+# Part 2: Land now stops the fast tier and the new-tests check (they are owed after the merge);
+# without Land now the new-tests check still runs.
+cargo test -q -p mason-daemon --test landing_new_tests -- --exact \
+  land_now_does_not_run_the_new_tests_check_and_owes_it_after_the_merge \
+  a_skipped_task_whose_new_test_fails_is_parked_and_the_others_land
 echo "s943: all checks passed"
