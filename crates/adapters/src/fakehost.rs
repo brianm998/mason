@@ -130,32 +130,29 @@ impl FakeHost {
         let work = self.dir.join("work").join(sha);
         let _ = std::fs::remove_dir_all(&work);
         let _ = std::fs::create_dir_all(&work);
-        let tar = Command::new("sh")
-            .args([
-                "-c",
-                &format!(
-                    "git --git-dir='{}' archive {sha} | tar -x -C '{}'",
-                    self.remote.display(),
-                    work.display()
-                ),
-            ])
-            .status();
-        let out = if tar.is_ok_and(|s| s.success()) {
-            Command::new("sh")
-                .args(["-c", cmd])
-                .current_dir(&work)
-                .output()
+        use mason_platform::shell::{shell_command, to_shell_path};
+        let archive = format!(
+            "git --git-dir='{}' archive {sha} | tar -x -C '{}'",
+            to_shell_path(&self.remote),
+            to_shell_path(&work)
+        );
+        let archived = shell_command(&archive)
+            .and_then(|mut c| c.status().map_err(|e| e.to_string()))
+            .is_ok_and(|s| s.success());
+        let out = if archived {
+            shell_command(cmd)
                 .ok()
+                .and_then(|mut c| c.current_dir(&work).output().ok())
         } else {
             None
         };
-        let (ok, text) = match out {
-            Some(o) => (
-                o.status.success(),
-                String::from_utf8_lossy(&o.stdout).to_string(),
-            ),
-            None => (false, String::new()),
+        // A run that could not happen is not a red result: do not remember it.
+        let Some(o) = out else {
+            let _ = std::fs::remove_dir_all(&work);
+            return (Checks::Red, vec![]);
         };
+        let ok = o.status.success();
+        let text = String::from_utf8_lossy(&o.stdout).to_string();
         let failed: Vec<String> = text
             .lines()
             .filter_map(|l| l.strip_prefix("FAILED: ").map(|s| s.trim().to_string()))
