@@ -578,16 +578,20 @@ fn main() {
         finish(&a);
         // With --project, the step types the project's approved extensions provide are
         // known too, so a plugin step validates offline.
-        let plugins = match &project {
-            Some(id) => {
-                let p =
-                    mason_daemon::config::load_project(&config_dir, id).unwrap_or_else(|e| die(&e));
-                mason_daemon::plugins::approved_types(&p)
-            }
+        let loaded = project.as_ref().map(|id| {
+            mason_daemon::config::load_project(&config_dir, id).unwrap_or_else(|e| die(&e))
+        });
+        let plugins = match &loaded {
+            Some(p) => mason_daemon::plugins::approved_types(p),
             None => vec![],
         };
+        // Whether the project has a full-test schedule with a trigger, for `narrow = true`.
+        let full_test = loaded
+            .as_ref()
+            .map(|p| mason_daemon::schedule::has_full_test_trigger(&p.schedules()));
         exit(if sub == "check" {
-            definition::check(&file, &plugins)
+            let c = definition::check(&file, &plugins);
+            c.max(definition::check_narrow(&file, full_test))
         } else {
             definition::dry(&file, scenarios.as_deref())
         });
