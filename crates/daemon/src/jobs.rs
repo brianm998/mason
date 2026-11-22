@@ -1763,6 +1763,11 @@ fn both_commands(rerun: &str, dev: &str) -> String {
     )
 }
 
+/// How often a check's wait is credited to the step's deadline. Not `sched::CREDIT_EVERY`
+/// (30 s): the develop watchdog kills the agent at the deadline plus the credit, so a wait
+/// credited only every 30 s is killed at the budget with nothing credited yet (#813).
+const CHECK_CREDIT_EVERY: Duration = Duration::from_secs(1);
+
 impl TestChecks {
     /// `wait`, a check queueing for its slots, with its time credited to the deadline (see
     /// [`credit_wait`]). While it waits the agent is idle, so when a known-red test the last
@@ -1782,7 +1787,7 @@ impl TestChecks {
                     }
                 }
             });
-            let out = credit_wait(&self.extra, crate::sched::CREDIT_EVERY, wait);
+            let out = credit_wait(&self.extra, CHECK_CREDIT_EVERY, wait);
             done.store(true, std::sync::atomic::Ordering::SeqCst);
             let _ = poll.join();
             out
@@ -1802,7 +1807,7 @@ impl TestChecks {
             return run();
         }
         self.edit_check(|c, _| c.github = true);
-        credit_remote_wait(&self.extra, crate::sched::CREDIT_EVERY, run)
+        credit_remote_wait(&self.extra, CHECK_CREDIT_EVERY, run)
     }
 
     /// Merge the base into the worktree if a test the last check failed has left the ledger.
@@ -4233,9 +4238,49 @@ fn finish_agent(c: &Ctx, report: StepReport, dir: &Path) {
         StepEnd::Asked { question } => Some(question.clone()),
         _ => None,
     };
-    finish_agent_inner(c, report, dir);
-    // The analyst's findings (Part 14), read from the file it wrote in its worktree.
-    crate::introspect::ingest_analyst(&c.d, c.task, &c.project.id, &c.wt, dir);
+    // The analyst's findings (Part 14), read from the file it wrote in its worktree. Its
+    // result is the findings: a readable file ends the task here, with no test, review or
+    // land (its branch is never merged, so any commit it made is dropped); a missing or
+    // unreadable one sends it back to develop.
+    let analyst_done = c.state == State::Developing
+        && matches!(&report.end, StepEnd::Accepted { tool, .. } if tool != "submit_close")
+        && match crate::introspect::ingest_analyst(&c.d, c.task, &c.project.id, &c.wt, dir) {
+            crate::introspect::Ingest::Done => true,
+            crate::introspect::Ingest::NotAnalyst => false,
+            crate::introspect::Ingest::Missing => {
+                c.conclude(
+                    Outcome::Red,
+                    "no analyst result".into(),
+                    Some(format!(
+                        "There is no {} in the root of your worktree. Write it as the task says.",
+                        crate::introspect::ANALYST_FILE
+                    )),
+                );
+                c.release_lease();
+                return;
+            }
+            crate::introspect::Ingest::Unreadable(e) => {
+                c.conclude(
+                    Outcome::Red,
+                    "analyst result unreadable".into(),
+                    Some(format!(
+                        "{} could not be read: {e}. Write it again as the task says.",
+                        crate::introspect::ANALYST_FILE
+                    )),
+                );
+                c.release_lease();
+                return;
+            }
+        };
+    if analyst_done {
+        let _ = std::fs::remove_file(dir.join("feedback.txt"));
+        c.emit(EventKind::ClosedNoChange {
+            task: c.task,
+            reason: "analyst result ingested; the findings are filed".into(),
+        });
+    } else {
+        finish_agent_inner(c, report, dir);
+    }
     // Triage (off unless the project turns it on) only records what it would do; the
     // question is the owner's either way.
     if let Some(q) = asked {
@@ -5426,6 +5471,23 @@ mod tests {
     }
 
     #[test]
+    fn a_check_wait_is_credited_before_it_ends() {
+        // #813: credit reaches the deadline while the wait is still going. The wait blocks
+        // until the credit has been added; a regressed cadence fails the guard, not hangs.
+        let extra = mason_adapter_api::DeadlineExtra::default();
+        let seen = credit_remote_wait(&extra, CHECK_CREDIT_EVERY, || {
+            for _ in 0..6000 {
+                if !extra.waited().is_zero() {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            false
+        });
+        assert!(seen, "no credit reached the deadline while the wait ran");
+    }
+
+    #[test]
     fn elapsed_time_counts_from_the_launch_not_the_daemon_start() {
         let (e, restarted) = launch_elapsed(
             Some(1_000),
@@ -5561,7 +5623,9 @@ mod tests {
         sh(&dir, &["add", "-A"]);
         sh(&dir, &["commit", "-qm", "tests and docs only"]);
         let head = git::rev_parse(&dir, "HEAD").unwrap();
-        let note = dir.join("source-free.txt");
+        // Outside the repository, as in production (the task dir): a note written into the
+        // worktree is an untracked file, and the next submit refuses the dirty tree.
+        let note = tempfile::tempdir().unwrap().keep().join("source-free.txt");
         let v = change_validator(
             dir.clone(),
             "main".into(),
