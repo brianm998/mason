@@ -69,6 +69,7 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
   <key>CFBundleIconFile</key><string>MASON</string>
   <key>CFBundleExecutable</key><string>MasonMonitor</string>
   <key>CFBundlePackageType</key><string>APPL</string>
+  <key>NSAppSleepDisabled</key><true/>
   <key>CFBundleShortVersionString</key><string>@VERSION@</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSHighResolutionCapable</key><true/>
