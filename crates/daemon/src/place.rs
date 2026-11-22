@@ -194,6 +194,26 @@ impl LocalLoad {
         self.held.is_none() && (self.free.is_empty() || self.free.values().any(|n| *n > 0))
     }
 
+    /// Why a run that would hold the slots in `free` cannot start here now, or `None` when it
+    /// can: a hold is active, or one of those slots has no free unit. `covered`: the caller
+    /// already holds those slots for this very run (a landing batch, s911), so their use is not
+    /// counted against it; a hold still is, since new work is not welcome while it lasts. Pure.
+    pub fn no_room(&self, covered: bool) -> Option<String> {
+        if let Some(h) = &self.held {
+            return Some(format!("this machine {h}"));
+        }
+        if covered {
+            return None;
+        }
+        let full: Vec<&str> = self
+            .free
+            .iter()
+            .filter(|(_, n)| **n == 0)
+            .map(|(k, _)| k.as_str())
+            .collect();
+        (!full.is_empty()).then(|| format!("no {} slot free here", full.join("/")))
+    }
+
     /// "2 compile slots free" for the local reason.
     pub fn room_text(&self) -> String {
         let free: Vec<String> = self
@@ -250,6 +270,24 @@ pub struct RemoteSpill {
     pub remote: RemoteLoad,
     pub queue_max: u32,
     pub spill_after_s: u64,
+}
+
+/// Why a run bound for GitHub cannot be taken back by this machine now, or `None` when it can
+/// (a room check for `remote::fallback_lease`): no CPU or thermal hold is active, and each slot
+/// the fallback would hold for `uses` has a free unit. The same slots that lease asks for, so
+/// "room" here means the lease would be granted at once. `covered`: see
+/// [`LocalLoad::no_room`]. `exclusive` is not looked at. Pure.
+pub fn no_room_for(
+    r: &crate::sched::LoadReading,
+    uses: &BTreeMap<String, u32>,
+    covered: bool,
+) -> Option<String> {
+    let needs: Vec<String> = uses
+        .iter()
+        .filter(|(k, n)| **n > 0 && k.as_str() != "exclusive")
+        .map(|(k, _)| k.clone())
+        .collect();
+    LocalLoad::from_reading(r, &needs).no_room(covered)
 }
 
 /// The slots a local run of a suite needs: compile and what the suite `uses`.
@@ -1645,5 +1683,45 @@ mod tests {
         let t = doc.to_string();
         assert!(t.contains("# my note") && t.contains("extra = 1 # keep"));
         assert_eq!(parse_default(&t), Ok(Mode::Remote));
+    }
+
+    /// A run that would hold slots here has room only with no hold active and a free unit of each
+    /// slot; a covered run (its caller holds the slots) is not counted against its own use.
+    #[test]
+    fn room_needs_no_hold_and_a_free_unit_of_each_slot() {
+        use crate::sched::LoadReading;
+        let uses = BTreeMap::from([("compile".to_string(), 1u32), ("test-suite".to_string(), 1)]);
+        let reading = |held: Option<&str>, compile: u32, suite: u32| LoadReading {
+            used: BTreeMap::from([
+                ("compile".to_string(), compile),
+                ("test-suite".to_string(), suite),
+            ]),
+            limits: BTreeMap::from([("compile".to_string(), 2), ("test-suite".to_string(), 1)]),
+            waiting: vec![],
+            held: held.map(String::from),
+        };
+        // Free and no hold: room.
+        assert_eq!(no_room_for(&reading(None, 1, 0), &uses, false), None);
+        // A heat hold: no room, and the reason names it.
+        let why = no_room_for(
+            &reading(Some("held for heat (die 94 C)"), 0, 0),
+            &uses,
+            false,
+        )
+        .expect("no room");
+        assert!(why.contains("held for heat"), "{why}");
+        // One of the slots full (the other free): no room, naming it.
+        let why = no_room_for(&reading(None, 0, 1), &uses, false).expect("no room");
+        assert!(why.contains("test-suite"), "{why}");
+        // A slot the run does not need being full does not matter.
+        let only = BTreeMap::from([("compile".to_string(), 1u32)]);
+        assert_eq!(no_room_for(&reading(None, 1, 1), &only, false), None);
+        // Nothing to hold: only a hold can say no.
+        let none = BTreeMap::new();
+        assert_eq!(no_room_for(&reading(None, 2, 1), &none, false), None);
+        assert!(no_room_for(&reading(Some("held for CPU"), 0, 0), &none, false).is_some());
+        // Covered: the batch's own full slot is not counted, a hold still is.
+        assert_eq!(no_room_for(&reading(None, 1, 1), &uses, true), None);
+        assert!(no_room_for(&reading(Some("held for heat"), 1, 1), &uses, true).is_some());
     }
 }

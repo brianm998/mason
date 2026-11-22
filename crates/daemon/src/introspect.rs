@@ -1063,7 +1063,7 @@ pub fn file_analyst_task(d: &Arc<Daemon>, pid: ProjectId) -> Result<TaskId, Stri
         "You are the analyst. Read the digest below and the event history (`mason digest`, `mason metrics`) and find what the daily rules cannot: a pattern in how this pipeline spends its time, fails, or makes the owner step in.\n\n\
          Write your findings as JSON in a file called `{ANALYST_FILE}` in the root of your worktree, and do not commit it:\n\n\
          ```json\n{{\"findings\": [{{\"title\": \"...\", \"body\": \"what is wrong and why it matters\", \"evidence\": \"a file and line or recorded output that shows it, e.g. crates/daemon/src/sched.rs:120\", \"metric\": \"one of: {}\", \"severity\": \"low or high\", \"cost\": \"small or large\"}}]}}\n```\n\n\
-         `severity` is how much the finding matters and `cost` how big the fix looks; leave them out and it counts as high and large. A finding with no evidence naming a file, or naming a metric that is not in that list, is refused. Do not change any code. Then finish with a summary.\n\n## Digest (last 7 days, computed from recorded data)\n```json\n{digest_text}\n```",
+         `severity` is how much the finding matters and `cost` how big the fix looks; leave them out and it counts as high and large. A finding with no evidence naming a file, or naming a metric that is not in that list, is refused. Do not change any code. Commit nothing. Then finish with a summary.\n\n## Digest (last 7 days, computed from recorded data)\n```json\n{digest_text}\n```",
         METRICS.join(", ")
     );
     let t = crate::schedule::file_low(d, p, ANALYST_TITLE, &body)?;
@@ -1073,24 +1073,52 @@ pub fn file_analyst_task(d: &Arc<Daemon>, pid: ProjectId) -> Result<TaskId, Stri
     Ok(t)
 }
 
-/// After an agent step of an analyst task: read the file it wrote, check every finding, and
-/// file the good ones. Refusals are written beside the step's logs.
-pub fn ingest_analyst(d: &Arc<Daemon>, task: TaskId, project: &str, wt: &Path, dir: &Path) {
-    // The analyst's task is known by the schedule row that recorded it, not by its title.
-    let is_analyst = d
-        .store
+/// What reading an analyst task's result came to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Ingest {
+    /// Not the analyst's task: nothing was read.
+    NotAnalyst,
+    /// The result was read and its findings filed, now or by an earlier step of this task.
+    Done,
+    /// No result file in the worktree.
+    Missing,
+    /// The file is there but cannot be read; the text says why.
+    Unreadable(String),
+}
+
+/// Whether `task` is the analyst's task of `project`, known by the schedule row that recorded
+/// it, not by its title.
+pub fn is_analyst_task(d: &Daemon, task: TaskId, project: &str) -> bool {
+    d.store
         .schedule(&format!("analyst:{project}"))
         .ok()
         .flatten()
-        .is_some_and(|r| r.last_task == Some(task.0));
-    if !is_analyst {
-        return;
+        .is_some_and(|r| r.last_task == Some(task.0))
+}
+
+/// After the develop step of an analyst task: read the file it wrote, check every finding, and
+/// file the good ones, once per task. The consumed file is kept in `dir` (the task's log
+/// directory), not in the worktree. Refusals are written beside it.
+pub fn ingest_analyst(
+    d: &Arc<Daemon>,
+    task: TaskId,
+    project: &str,
+    wt: &Path,
+    dir: &Path,
+) -> Ingest {
+    if !is_analyst_task(d, task, project) {
+        return Ingest::NotAnalyst;
+    }
+    let done = dir.join("analyst-ingested");
+    if done.exists() {
+        // A later step finds the file again (a rewrite, a rename): it files nothing more.
+        let _ = std::fs::remove_file(wt.join(ANALYST_FILE));
+        return Ingest::Done;
     }
     let file = wt.join(ANALYST_FILE);
     let Ok(text) = std::fs::read_to_string(&file) else {
-        return;
+        return Ingest::Missing;
     };
-    let _ = std::fs::rename(&file, wt.join(format!("{ANALYST_FILE}.read")));
     let drafts = match parse_drafts(&text) {
         Ok(x) => x,
         Err(e) => {
@@ -1103,9 +1131,12 @@ pub fn ingest_analyst(d: &Arc<Daemon>, task: TaskId, project: &str, wt: &Path, d
                 project,
                 format!("task #{}: result unreadable: {e}", task.0),
             );
-            return;
+            return Ingest::Unreadable(e);
         }
     };
+    let _ = std::fs::write(dir.join(ANALYST_FILE), &text);
+    let _ = std::fs::remove_file(&file);
+    let _ = std::fs::write(&done, "");
     let (ok, refused) = accept_drafts(project, &drafts);
     let cfg = d
         .project_id_by_name(project)
@@ -1137,6 +1168,7 @@ pub fn ingest_analyst(d: &Arc<Daemon>, task: TaskId, project: &str, wt: &Path, d
         project,
         format!("task #{}: {filed} filed, {refused_n} refused", task.0),
     );
+    Ingest::Done
 }
 
 fn note_analyst(d: &Daemon, project: &str, say: String) {
@@ -1305,8 +1337,9 @@ pub fn digest(d: &Daemon, project: Option<&str>, from: u64, to: u64) -> Value {
         .map(|x| json!({"id": x.id, "task": x.task, "scope": x.scope, "reason": x.reason}))
         .collect();
     let mut flaky: BTreeMap<String, u64> = BTreeMap::new();
-    for (suite, test, at) in d.store.flaky_since(from).unwrap_or_default() {
-        if at < to {
+    for (suite, test, at, task) in d.store.flaky_since_by_task(from).unwrap_or_default() {
+        let mine = project.is_none() || d.task_project_name(TaskId(task)).is_some_and(|p| in_p(&p));
+        if at < to && mine {
             *flaky.entry(format!("{suite}::{test}")).or_default() += 1;
         }
     }
