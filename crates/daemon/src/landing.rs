@@ -2593,7 +2593,7 @@ impl Runner {
                         break Err(format!(
                             "the base moved more than {} times while landing",
                             self.cfg.max_fold
-                        ))
+                        ));
                     }
                     Ok(PrEnd::ChangesRequested) | Ok(PrEnd::Closed(_)) => {
                         let why = match end_reason(&end) {
@@ -2634,7 +2634,7 @@ impl Runner {
                     break Err(format!(
                         "the base moved more than {} times while landing",
                         self.cfg.max_fold
-                    ))
+                    ));
                 }
                 Ok(Ok(Finish::LocalBaseCheckedOut(path))) => {
                     break Err(format!(
