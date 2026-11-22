@@ -1745,6 +1745,54 @@ pub fn pool_needs(
     Some(out)
 }
 
+/// The machine slots a run takes when it was meant for GitHub but `fallback = "local"` sends it
+/// here (no runner picked it up, or GitHub was down). A run bound for GitHub skips this
+/// machine's queue (#759, #761), so without this it would start here at once, beside everything
+/// else, past the slot limits and the CPU and thermal holds. `uses` is what the same run holds
+/// when it is placed here; it is asked of the broker like any local run's, so those limits and
+/// holds apply. Ranked as `task`'s own work, or behind everything when no task owns the run.
+/// Beside: the task's step may still hold its own request. Nothing to take gives `Ok(None)`.
+pub fn fallback_lease(
+    d: &Arc<Daemon>,
+    project: &str,
+    task: Option<mason_core::TaskId>,
+    uses: &std::collections::BTreeMap<String, u32>,
+    label: &str,
+) -> Result<Option<crate::sched::Lease>, String> {
+    let needs = crate::sched::needs_of(uses, None);
+    if !needs.exclusive && needs.amounts.is_empty() {
+        return Ok(None);
+    }
+    let def = d.project_id_by_name(project).map(|p| d.current_def(p));
+    for name in needs.amounts.keys() {
+        if !name.starts_with("llm:") && !name.starts_with("device:") {
+            let units = def
+                .as_ref()
+                .and_then(|def| def.resources.get(name).copied())
+                .unwrap_or(1);
+            d.broker.declare(name, units);
+        }
+    }
+    let owner = task.and_then(|t| d.world().ok().and_then(|w| w.tasks.get(&t).cloned()));
+    let rank = match (&owner, &def) {
+        (Some(t), Some(def)) => d.rank_for(t, def, &t.step),
+        _ => mason_scheduler::Rank::new(false, 100, 3, now_ms(), task.map_or(0, |t| t.0), false),
+    };
+    let who = task.unwrap_or(mason_core::TaskId(0));
+    let alive = || match task {
+        Some(t) => d
+            .world()
+            .map(|w| w.tasks.get(&t).is_some_and(|x| x.state.is_step()))
+            .unwrap_or(true),
+        None => true,
+    };
+    tracing::info!(project, %label, ?uses, "no GitHub runner: queueing for this machine's slots (fallback = local)");
+    d.broker
+        .acquire_beside(who, label, rank, needs, &alive, &mut |_| {})
+        .map(Some)
+        .map_err(|_| format!("{label}: the wait for this machine's slots was ended"))
+}
+
 /// What a remote run holds, written when it starts and removed when it ends, so a daemon that
 /// restarts counts the units of runs still out.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
