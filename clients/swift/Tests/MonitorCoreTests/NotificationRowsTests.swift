@@ -106,3 +106,44 @@ final class NotificationRowsTests: XCTestCase {
         XCTAssertEqual(clamp(100, 30, 300, 20), 30)
     }
 }
+
+/// s929: info banners make no bar row and appear in the status-line summary.
+@MainActor
+final class NotificationLevelTests: XCTestCase {
+    private func banner(_ kind: String, _ level: String, _ text: String) -> Mason_V1_Banner {
+        var b = Mason_V1_Banner()
+        b.kind = kind
+        b.level = level
+        b.text = text
+        return b
+    }
+
+    func testOnlyActionAndWarningMakeRowsAndInfoIsSummarised() {
+        let m = MonitorModel(preferences: MemoryPreferences())
+        m.connected = true
+        var h = HeaderView()
+        h.banners = [
+            banner("push_auth", "action", "star: push refused"),
+            banner("ci_watch", "info", "mason: 2 red CI jobs being fixed: #935, #836"),
+            banner("landing_frozen", "warning", "Landing is frozen for mason"),
+        ]
+        var u = Mason_V1_UpdateInfo()
+        u.daemonText = "Updating masond: building 4259e0bc…"
+        u.daemonLevel = "info"
+        h.update = u
+        m.header = h
+        XCTAssertEqual(m.notificationRows().map(\.text), ["star: push refused", "Landing is frozen for mason"])
+        XCTAssertEqual(m.infoSummary, "masond updating · 2 CI jobs being fixed")
+        XCTAssertEqual(m.infoNotices.count, 2)
+    }
+
+    func testNoLevelStaysARow() {
+        let m = MonitorModel(preferences: MemoryPreferences())
+        m.connected = true
+        var h = HeaderView()
+        h.banners = [banner("x", "", "old daemon")]
+        m.header = h
+        XCTAssertEqual(m.notificationRows().count, 1)
+        XCTAssertEqual(m.infoSummary, "")
+    }
+}

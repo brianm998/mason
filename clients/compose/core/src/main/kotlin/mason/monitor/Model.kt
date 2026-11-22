@@ -162,6 +162,32 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
 
     /** What to say about the daemon's own version; empty when there is nothing to say. */
     val daemonUpdateText: String get() = updateInfo?.daemon_text ?: ""
+    /** The masond update is only progressing (fetching, building, testing, restarting): not a bar row. */
+    val daemonUpdateIsInfo: Boolean get() = updateInfo?.daemon_level == "info"
+
+    /** Everything the notification bar leaves out, one line each. An older daemon sends no level: a warning. */
+    val infoNotices: List<String>
+        get() = buildList {
+            if (daemonUpdateText.isNotEmpty() && daemonUpdateIsInfo) add(daemonUpdateText)
+            header?.banners?.filter { it.level == "info" }?.forEach { add(it.text) }
+        }
+
+    /** The top bar's status line: "masond updating · 2 CI jobs being fixed". Empty when nothing is quiet. */
+    val infoSummary: String
+        get() {
+            val parts = mutableListOf<String>()
+            if (daemonUpdateText.isNotEmpty() && daemonUpdateIsInfo) parts += "masond updating"
+            var jobs = 0
+            var other = 0
+            header?.banners?.filter { it.level == "info" }?.forEach {
+                val n = Regex("""(\d+) red CI jobs? being fixed""").find(it.text)?.groupValues?.get(1)?.toIntOrNull()
+                if (n != null) jobs += n else other++
+            }
+            if (jobs > 0) parts += "$jobs CI job${if (jobs == 1) "" else "s"} being fixed"
+            if (other > 0) parts += if (other == 1) "1 notice" else "$other notices"
+            return parts.joinToString(" · ")
+        }
+
     val canUpdateDaemon: Boolean get() = canAct && updateInfo?.daemon_can_update == true
 
     /** On the `release` channel (a packaged install) there is no source to build from: the button opens the download page. */

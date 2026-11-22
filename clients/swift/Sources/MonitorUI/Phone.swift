@@ -41,6 +41,7 @@ public struct PhoneRootView: View {
         #if !canImport(AppKit)
         .onChange(of: scenePhase, initial: true) { _, phase in SharedTick.shared.setVisible(phase == .active) }
         #endif
+        .onAppear { SharedTick.shared.model = model }
         .onOpenURL { url in if let p = Page.from(url: url) { model.open(url: url); nav.follow(p) } }
     }
 
