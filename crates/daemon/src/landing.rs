@@ -5814,7 +5814,10 @@ mod tests {
                    a/b.sh:12: bad thing\n\
                    scripts/other.sh: not in the diff\n\
                    note: something happened\n";
-        assert_eq!(lint_files(out, &known), vec!["scripts/exit/s960.sh", "a/b.sh"]);
+        assert_eq!(
+            lint_files(out, &known),
+            vec!["scripts/exit/s960.sh", "a/b.sh"]
+        );
         assert!(lint_files("scripts/other.sh: x\nnote: y\n", &known).is_empty());
         assert!(lint_files(out, &[]).is_empty());
     }
