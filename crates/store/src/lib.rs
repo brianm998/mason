@@ -1824,6 +1824,46 @@ impl Store {
         })
     }
 
+    /// A run at the base itself (no task) saw this many tests of the suite: the expected
+    /// total shown for later test steps. Not read by any gate.
+    pub fn put_suite_size(
+        &self,
+        project: &str,
+        suite: &str,
+        base: &str,
+        executed: usize,
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        let (p, s, b) = (project.to_string(), suite.to_string(), base.to_string());
+        self.write(move |c| {
+            c.execute(
+                "INSERT OR REPLACE INTO suite_size(project, suite, base, executed, at_ms) VALUES (?1,?2,?3,?4,?5)",
+                params![p, s, b, executed as i64, now_ms as i64],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// The suite's size from a base-level run: on this base if it has one, else the most
+    /// recent on any base.
+    pub fn suite_size(
+        &self,
+        project: &str,
+        suite: &str,
+        base: &str,
+    ) -> Result<Option<usize>, StoreError> {
+        let (p, s, b) = (project.to_string(), suite.to_string(), base.to_string());
+        self.read(move |c| {
+            c.query_row(
+                "SELECT executed FROM suite_size WHERE project = ?1 AND suite = ?2
+                 ORDER BY (base = ?3) DESC, at_ms DESC LIMIT 1",
+                params![p, s, b],
+                |r| Ok(r.get::<_, i64>(0)? as usize),
+            )
+            .optional()
+        })
+    }
+
     /// A suite went green at this base with these known-red tests skipped. Not the whole
     /// suite's green: `suite_green` is left alone.
     pub fn put_suite_skip_green(

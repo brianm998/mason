@@ -1393,3 +1393,20 @@ fn full_test_rows_survive_a_restart_and_come_back_newest_first() {
         ("red", "https://ci/1")
     );
 }
+
+/// #959: a task's green count is not another task's expected total; only base-level sizes are.
+#[test]
+fn suite_size_is_not_overwritten_by_task_greens() {
+    let (_d, p) = db();
+    let s = Store::open(&p).unwrap();
+    // Task A (178) and task B (183) go green on base X: the gate row is theirs.
+    s.put_suite_green("p", "core", "X", 178, 1).unwrap();
+    s.put_suite_green("p", "core", "X", 183, 2).unwrap();
+    assert_eq!(s.suite_green("p", "core", "X").unwrap(), Some(183));
+    // Nothing sized the suite yet: no expected total.
+    assert_eq!(s.suite_size("p", "core", "X").unwrap(), None);
+    // A base-level run of 180 is what a new task sees.
+    s.put_suite_size("p", "core", "X", 180, 3).unwrap();
+    assert_eq!(s.suite_size("p", "core", "X").unwrap(), Some(180));
+    assert_eq!(s.suite_size("p", "core", "Y").unwrap(), Some(180));
+}

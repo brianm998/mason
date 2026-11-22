@@ -891,6 +891,15 @@ fn run_hosted_once(
     })
 }
 
+/// An expected or minimum total the live count has passed is raised to the count, so the step
+/// never reads "N of M" with N > M. A reported total stays as reported.
+fn raise_total(s: &mut SubProgress) {
+    if matches!(s.total.source, Source::Expected | Source::Minimum) && s.done.value > s.total.value
+    {
+        s.total.value = s.done.value;
+    }
+}
+
 /// A suite's live count, as its sub-count: passed out of what is expected, with the
 /// failed and skipped in the message. A count the suite itself reports is kept.
 fn suite_counts(d: &Arc<Daemon>, run: StepRunId, name: &str, l: &LiveCount) {
@@ -900,6 +909,7 @@ fn suite_counts(d: &Arc<Daemon>, run: StepRunId, name: &str, l: &LiveCount) {
             s.unit = "tests".into();
             s.done = Figure::counted(c.passed);
         }
+        raise_total(s);
     });
     let note = format!("{name}: {} failed, {} skipped", c.failed, c.skipped);
     d.progress_report(run, |p, now| {
@@ -928,10 +938,10 @@ fn suite_report(d: &Arc<Daemon>, run: StepRunId, name: &str, r: &Report) {
     });
 }
 
-/// The expected total of a suite: the last green run's count for this base, else the
+/// The expected total of a suite: the last base-level run's count (never a task's own), else the
 /// declared minimum, else none.
 fn expected_total(d: &Arc<Daemon>, project: &str, suite: &Suite, base: &str) -> Figure {
-    match d.store.suite_green(project, &suite.name, base) {
+    match d.store.suite_size(project, &suite.name, base) {
         Ok(Some(n)) if n > 0 => Figure::expected(n as u64),
         _ if suite.min_tests > 0 => Figure::minimum(suite.min_tests as u64),
         _ => Figure::default(),
@@ -2182,6 +2192,16 @@ fn run_suite(
                         j.results.executed(),
                         now_ms(),
                     );
+                    // Only a run at the base itself sizes the suite for display (#959).
+                    if who.task.is_none() {
+                        let _ = d.store.put_suite_size(
+                            &who.project,
+                            &suite.name,
+                            &tree.base,
+                            j.results.executed(),
+                            now_ms(),
+                        );
+                    }
                     let _ = d.store.put_evidence(
                         &tree.tree,
                         &suite.name,
@@ -6666,5 +6686,37 @@ mod batch_cover_tests {
             exclusive: true,
             ..Default::default()
         }));
+    }
+}
+
+#[cfg(test)]
+mod raise_total_tests {
+    use super::*;
+
+    fn sub(done: u64, total: Figure) -> SubProgress {
+        SubProgress {
+            name: "core".into(),
+            unit: "tests".into(),
+            done: Figure::counted(done),
+            total,
+            jobs: None,
+        }
+    }
+
+    /// #959: a count past an expected or minimum total raises it; a reported total stays.
+    #[test]
+    fn a_count_past_an_expected_total_raises_it() {
+        let mut s = sub(184, Figure::expected(181));
+        raise_total(&mut s);
+        assert_eq!((s.total.value, s.total.source), (184, Source::Expected));
+        let mut s = sub(10, Figure::minimum(5));
+        raise_total(&mut s);
+        assert_eq!(s.total.value, 10);
+        let mut s = sub(184, Figure::reported(181));
+        raise_total(&mut s);
+        assert_eq!(s.total.value, 181);
+        let mut s = sub(100, Figure::expected(181));
+        raise_total(&mut s);
+        assert_eq!(s.total.value, 181);
     }
 }
