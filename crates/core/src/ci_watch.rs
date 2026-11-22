@@ -1488,11 +1488,15 @@ mod tests {
     }
 
     fn fixture(n: &str) -> String {
-        std::fs::read_to_string(format!(
-            "{}/tests/fixtures/ci_logs/{n}",
-            env!("CARGO_MANIFEST_DIR")
-        ))
-        .unwrap()
+        match n {
+            "lint_spdx.log" => include_str!("../tests/fixtures/ci_logs/lint_spdx.log"),
+            "monitor_compose.log" => include_str!("../tests/fixtures/ci_logs/monitor_compose.log"),
+            "cargo_test.log" => include_str!("../tests/fixtures/ci_logs/cargo_test.log"),
+            "rustfmt_diff.log" => include_str!("../tests/fixtures/ci_logs/rustfmt_diff.log"),
+            "no_marker.log" => include_str!("../tests/fixtures/ci_logs/no_marker.log"),
+            other => panic!("unknown ci log fixture {other}"),
+        }
+        .to_string()
     }
 
     #[test]
