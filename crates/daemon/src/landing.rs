@@ -3977,6 +3977,7 @@ impl Runner {
                         full: String::new(),
                         id: String::new(),
                         stopped: Some(note),
+                        phase: None,
                     });
                 }
                 crate::hostedcheck::run(d, spec)
