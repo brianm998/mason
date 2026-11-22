@@ -3615,46 +3615,135 @@ public nonisolated struct Mason_V1_NumberLine: Sendable {
 }
 
 /// A batch the landing engine formed, and where it is.
-public nonisolated struct Mason_V1_BatchLine: Sendable {
+public nonisolated struct Mason_V1_BatchLine: @unchecked Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
-  public var id: UInt64 = 0
+  public var id: UInt64 {
+    get {_storage._id}
+    set {_uniqueStorage()._id = newValue}
+  }
 
-  public var project: String = String()
+  public var project: String {
+    get {_storage._project}
+    set {_uniqueStorage()._project = newValue}
+  }
 
   /// forming, merged, verifying, red, promoting, landed, parked, failed, abandoned
-  public var phase: String = String()
+  public var phase: String {
+    get {_storage._phase}
+    set {_uniqueStorage()._phase = newValue}
+  }
 
-  public var tasks: [UInt64] = []
+  public var tasks: [UInt64] {
+    get {_storage._tasks}
+    set {_uniqueStorage()._tasks = newValue}
+  }
 
-  public var landed: [UInt64] = []
+  public var landed: [UInt64] {
+    get {_storage._landed}
+    set {_uniqueStorage()._landed = newValue}
+  }
 
-  public var parked: [UInt64] = []
+  public var parked: [UInt64] {
+    get {_storage._parked}
+    set {_uniqueStorage()._parked = newValue}
+  }
 
-  public var note: String = String()
+  public var note: String {
+    get {_storage._note}
+    set {_uniqueStorage()._note = newValue}
+  }
 
-  public var running: Bool = false
+  public var running: Bool {
+    get {_storage._running}
+    set {_uniqueStorage()._running = newValue}
+  }
 
   /// The CI the batch is waiting on, or waited on last. Absent when it has none.
   public var ci: Mason_V1_BatchCi {
-    get {_ci ?? Mason_V1_BatchCi()}
-    set {_ci = newValue}
+    get {_storage._ci ?? Mason_V1_BatchCi()}
+    set {_uniqueStorage()._ci = newValue}
   }
   /// Returns true if `ci` has been explicitly set.
-  public var hasCi: Bool {self._ci != nil}
+  public var hasCi: Bool {_storage._ci != nil}
   /// Clears the value of `ci`. Subsequent reads from it will return its default value.
-  public mutating func clearCi() {self._ci = nil}
+  public mutating func clearCi() {_uniqueStorage()._ci = nil}
 
   /// What the owner may do to the batch: "land_now" while it has not started promoting.
-  public var allowedActions: [String] = []
+  public var allowedActions: [String] {
+    get {_storage._allowedActions}
+    set {_uniqueStorage()._allowedActions = newValue}
+  }
+
+  /// s788: the batch as one thing. The state in words ("running suites", "red in lint, splitting
+  /// (round 1, 5 tasks left)", "red in lint, blamed #782"); never "running suites" for a red.
+  public var stateText: String {
+    get {_storage._stateText}
+    set {_uniqueStorage()._stateText = newValue}
+  }
+
+  /// "ok" | "warn" | "stuck". Colour is never the only signal: `severity_reason` says why.
+  public var severity: String {
+    get {_storage._severity}
+    set {_uniqueStorage()._severity = newValue}
+  }
+
+  public var severityReason: String {
+    get {_storage._severityReason}
+    set {_uniqueStorage()._severityReason = newValue}
+  }
+
+  /// Milliseconds in the current phase, and the median for that phase over the project's
+  /// recent batches; `typical_ms` is 0 (absent) with fewer than three samples.
+  public var phaseMs: UInt64 {
+    get {_storage._phaseMs}
+    set {_uniqueStorage()._phaseMs = newValue}
+  }
+
+  public var typicalMs: UInt64 {
+    get {_storage._typicalMs}
+    set {_uniqueStorage()._typicalMs = newValue}
+  }
+
+  /// The verification round, and the tasks neither landed nor parked yet.
+  public var splitRound: UInt32 {
+    get {_storage._splitRound}
+    set {_uniqueStorage()._splitRound = newValue}
+  }
+
+  public var remaining: UInt32 {
+    get {_storage._remaining}
+    set {_uniqueStorage()._remaining = newValue}
+  }
+
+  /// Every task of the batch with its own standing in it.
+  public var members: [Mason_V1_BatchMember] {
+    get {_storage._members}
+    set {_uniqueStorage()._members = newValue}
+  }
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
 
-  fileprivate var _ci: Mason_V1_BatchCi? = nil
+  fileprivate var _storage = _StorageClass.defaultInstance
+}
+
+/// A task's standing within its batch: "verifying", "parked by blame", "landed", ...
+public nonisolated struct Mason_V1_BatchMember: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var task: UInt64 = 0
+
+  public var standing: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
 }
 
 /// One workflow's job counts in a CI run.
@@ -3800,6 +3889,9 @@ public nonisolated struct Mason_V1_TaskLanding: Sendable {
 
   /// "land_now" while the task is queued or in a batch that has not started promoting.
   public var allowedActions: [String] = []
+
+  /// s788: the task's own standing in its batch ("verifying", "integrating", ...).
+  public var standing: String = String()
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -10593,7 +10685,196 @@ nonisolated extension Mason_V1_NumberLine: SwiftProtobuf.Message, SwiftProtobuf.
 
 nonisolated extension Mason_V1_BatchLine: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".BatchLine"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}project\0\u{1}phase\0\u{1}tasks\0\u{1}landed\0\u{1}parked\0\u{1}note\0\u{1}running\0\u{1}ci\0\u{3}allowed_actions\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}project\0\u{1}phase\0\u{1}tasks\0\u{1}landed\0\u{1}parked\0\u{1}note\0\u{1}running\0\u{1}ci\0\u{3}allowed_actions\0\u{3}state_text\0\u{1}severity\0\u{3}severity_reason\0\u{3}phase_ms\0\u{3}typical_ms\0\u{3}split_round\0\u{1}remaining\0\u{1}members\0")
+
+  fileprivate class _StorageClass {
+    var _id: UInt64 = 0
+    var _project: String = String()
+    var _phase: String = String()
+    var _tasks: [UInt64] = []
+    var _landed: [UInt64] = []
+    var _parked: [UInt64] = []
+    var _note: String = String()
+    var _running: Bool = false
+    var _ci: Mason_V1_BatchCi? = nil
+    var _allowedActions: [String] = []
+    var _stateText: String = String()
+    var _severity: String = String()
+    var _severityReason: String = String()
+    var _phaseMs: UInt64 = 0
+    var _typicalMs: UInt64 = 0
+    var _splitRound: UInt32 = 0
+    var _remaining: UInt32 = 0
+    var _members: [Mason_V1_BatchMember] = []
+
+      // This property is used as the initial default value for new instances of the type.
+      // The type itself is protecting the reference to its storage via CoW semantics.
+      // This will force a copy to be made of this reference when the first mutation occurs;
+      // hence, it is safe to mark this as `nonisolated(unsafe)`.
+      static nonisolated(unsafe) let defaultInstance = _StorageClass()
+
+    private init() {}
+
+    init(copying source: _StorageClass) {
+      _id = source._id
+      _project = source._project
+      _phase = source._phase
+      _tasks = source._tasks
+      _landed = source._landed
+      _parked = source._parked
+      _note = source._note
+      _running = source._running
+      _ci = source._ci
+      _allowedActions = source._allowedActions
+      _stateText = source._stateText
+      _severity = source._severity
+      _severityReason = source._severityReason
+      _phaseMs = source._phaseMs
+      _typicalMs = source._typicalMs
+      _splitRound = source._splitRound
+      _remaining = source._remaining
+      _members = source._members
+    }
+  }
+
+  fileprivate mutating func _uniqueStorage() -> _StorageClass {
+    if !isKnownUniquelyReferenced(&_storage) {
+      _storage = _StorageClass(copying: _storage)
+    }
+    return _storage
+  }
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    _ = _uniqueStorage()
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      while let fieldNumber = try decoder.nextFieldNumber() {
+        // The use of inline closures is to circumvent an issue where the compiler
+        // allocates stack space for every case branch when no optimizations are
+        // enabled. https://github.com/apple/swift-protobuf/issues/1034
+        switch fieldNumber {
+        case 1: try { try decoder.decodeSingularUInt64Field(value: &_storage._id) }()
+        case 2: try { try decoder.decodeSingularStringField(value: &_storage._project) }()
+        case 3: try { try decoder.decodeSingularStringField(value: &_storage._phase) }()
+        case 4: try { try decoder.decodeRepeatedUInt64Field(value: &_storage._tasks) }()
+        case 5: try { try decoder.decodeRepeatedUInt64Field(value: &_storage._landed) }()
+        case 6: try { try decoder.decodeRepeatedUInt64Field(value: &_storage._parked) }()
+        case 7: try { try decoder.decodeSingularStringField(value: &_storage._note) }()
+        case 8: try { try decoder.decodeSingularBoolField(value: &_storage._running) }()
+        case 9: try { try decoder.decodeSingularMessageField(value: &_storage._ci) }()
+        case 10: try { try decoder.decodeRepeatedStringField(value: &_storage._allowedActions) }()
+        case 11: try { try decoder.decodeSingularStringField(value: &_storage._stateText) }()
+        case 12: try { try decoder.decodeSingularStringField(value: &_storage._severity) }()
+        case 13: try { try decoder.decodeSingularStringField(value: &_storage._severityReason) }()
+        case 14: try { try decoder.decodeSingularUInt64Field(value: &_storage._phaseMs) }()
+        case 15: try { try decoder.decodeSingularUInt64Field(value: &_storage._typicalMs) }()
+        case 16: try { try decoder.decodeSingularUInt32Field(value: &_storage._splitRound) }()
+        case 17: try { try decoder.decodeSingularUInt32Field(value: &_storage._remaining) }()
+        case 18: try { try decoder.decodeRepeatedMessageField(value: &_storage._members) }()
+        default: break
+        }
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every if/case branch local when no optimizations
+      // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+      // https://github.com/apple/swift-protobuf/issues/1182
+      if _storage._id != 0 {
+        try visitor.visitSingularUInt64Field(value: _storage._id, fieldNumber: 1)
+      }
+      if !_storage._project.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._project, fieldNumber: 2)
+      }
+      if !_storage._phase.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._phase, fieldNumber: 3)
+      }
+      if !_storage._tasks.isEmpty {
+        try visitor.visitPackedUInt64Field(value: _storage._tasks, fieldNumber: 4)
+      }
+      if !_storage._landed.isEmpty {
+        try visitor.visitPackedUInt64Field(value: _storage._landed, fieldNumber: 5)
+      }
+      if !_storage._parked.isEmpty {
+        try visitor.visitPackedUInt64Field(value: _storage._parked, fieldNumber: 6)
+      }
+      if !_storage._note.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._note, fieldNumber: 7)
+      }
+      if _storage._running != false {
+        try visitor.visitSingularBoolField(value: _storage._running, fieldNumber: 8)
+      }
+      try { if let v = _storage._ci {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 9)
+      } }()
+      if !_storage._allowedActions.isEmpty {
+        try visitor.visitRepeatedStringField(value: _storage._allowedActions, fieldNumber: 10)
+      }
+      if !_storage._stateText.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._stateText, fieldNumber: 11)
+      }
+      if !_storage._severity.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._severity, fieldNumber: 12)
+      }
+      if !_storage._severityReason.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._severityReason, fieldNumber: 13)
+      }
+      if _storage._phaseMs != 0 {
+        try visitor.visitSingularUInt64Field(value: _storage._phaseMs, fieldNumber: 14)
+      }
+      if _storage._typicalMs != 0 {
+        try visitor.visitSingularUInt64Field(value: _storage._typicalMs, fieldNumber: 15)
+      }
+      if _storage._splitRound != 0 {
+        try visitor.visitSingularUInt32Field(value: _storage._splitRound, fieldNumber: 16)
+      }
+      if _storage._remaining != 0 {
+        try visitor.visitSingularUInt32Field(value: _storage._remaining, fieldNumber: 17)
+      }
+      if !_storage._members.isEmpty {
+        try visitor.visitRepeatedMessageField(value: _storage._members, fieldNumber: 18)
+      }
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Mason_V1_BatchLine, rhs: Mason_V1_BatchLine) -> Bool {
+    if lhs._storage !== rhs._storage {
+      let storagesAreEqual: Bool = withExtendedLifetime((lhs._storage, rhs._storage)) { (_args: (_StorageClass, _StorageClass)) in
+        let _storage = _args.0
+        let rhs_storage = _args.1
+        if _storage._id != rhs_storage._id {return false}
+        if _storage._project != rhs_storage._project {return false}
+        if _storage._phase != rhs_storage._phase {return false}
+        if _storage._tasks != rhs_storage._tasks {return false}
+        if _storage._landed != rhs_storage._landed {return false}
+        if _storage._parked != rhs_storage._parked {return false}
+        if _storage._note != rhs_storage._note {return false}
+        if _storage._running != rhs_storage._running {return false}
+        if _storage._ci != rhs_storage._ci {return false}
+        if _storage._allowedActions != rhs_storage._allowedActions {return false}
+        if _storage._stateText != rhs_storage._stateText {return false}
+        if _storage._severity != rhs_storage._severity {return false}
+        if _storage._severityReason != rhs_storage._severityReason {return false}
+        if _storage._phaseMs != rhs_storage._phaseMs {return false}
+        if _storage._typicalMs != rhs_storage._typicalMs {return false}
+        if _storage._splitRound != rhs_storage._splitRound {return false}
+        if _storage._remaining != rhs_storage._remaining {return false}
+        if _storage._members != rhs_storage._members {return false}
+        return true
+      }
+      if !storagesAreEqual {return false}
+    }
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Mason_V1_BatchMember: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".BatchMember"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}task\0\u{1}standing\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -10601,70 +10882,26 @@ nonisolated extension Mason_V1_BatchLine: SwiftProtobuf.Message, SwiftProtobuf._
       // allocates stack space for every case branch when no optimizations are
       // enabled. https://github.com/apple/swift-protobuf/issues/1034
       switch fieldNumber {
-      case 1: try { try decoder.decodeSingularUInt64Field(value: &self.id) }()
-      case 2: try { try decoder.decodeSingularStringField(value: &self.project) }()
-      case 3: try { try decoder.decodeSingularStringField(value: &self.phase) }()
-      case 4: try { try decoder.decodeRepeatedUInt64Field(value: &self.tasks) }()
-      case 5: try { try decoder.decodeRepeatedUInt64Field(value: &self.landed) }()
-      case 6: try { try decoder.decodeRepeatedUInt64Field(value: &self.parked) }()
-      case 7: try { try decoder.decodeSingularStringField(value: &self.note) }()
-      case 8: try { try decoder.decodeSingularBoolField(value: &self.running) }()
-      case 9: try { try decoder.decodeSingularMessageField(value: &self._ci) }()
-      case 10: try { try decoder.decodeRepeatedStringField(value: &self.allowedActions) }()
+      case 1: try { try decoder.decodeSingularUInt64Field(value: &self.task) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.standing) }()
       default: break
       }
     }
   }
 
   public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    // The use of inline closures is to circumvent an issue where the compiler
-    // allocates stack space for every if/case branch local when no optimizations
-    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
-    // https://github.com/apple/swift-protobuf/issues/1182
-    if self.id != 0 {
-      try visitor.visitSingularUInt64Field(value: self.id, fieldNumber: 1)
+    if self.task != 0 {
+      try visitor.visitSingularUInt64Field(value: self.task, fieldNumber: 1)
     }
-    if !self.project.isEmpty {
-      try visitor.visitSingularStringField(value: self.project, fieldNumber: 2)
-    }
-    if !self.phase.isEmpty {
-      try visitor.visitSingularStringField(value: self.phase, fieldNumber: 3)
-    }
-    if !self.tasks.isEmpty {
-      try visitor.visitPackedUInt64Field(value: self.tasks, fieldNumber: 4)
-    }
-    if !self.landed.isEmpty {
-      try visitor.visitPackedUInt64Field(value: self.landed, fieldNumber: 5)
-    }
-    if !self.parked.isEmpty {
-      try visitor.visitPackedUInt64Field(value: self.parked, fieldNumber: 6)
-    }
-    if !self.note.isEmpty {
-      try visitor.visitSingularStringField(value: self.note, fieldNumber: 7)
-    }
-    if self.running != false {
-      try visitor.visitSingularBoolField(value: self.running, fieldNumber: 8)
-    }
-    try { if let v = self._ci {
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 9)
-    } }()
-    if !self.allowedActions.isEmpty {
-      try visitor.visitRepeatedStringField(value: self.allowedActions, fieldNumber: 10)
+    if !self.standing.isEmpty {
+      try visitor.visitSingularStringField(value: self.standing, fieldNumber: 2)
     }
     try unknownFields.traverse(visitor: &visitor)
   }
 
-  public static func ==(lhs: Mason_V1_BatchLine, rhs: Mason_V1_BatchLine) -> Bool {
-    if lhs.id != rhs.id {return false}
-    if lhs.project != rhs.project {return false}
-    if lhs.phase != rhs.phase {return false}
-    if lhs.tasks != rhs.tasks {return false}
-    if lhs.landed != rhs.landed {return false}
-    if lhs.parked != rhs.parked {return false}
-    if lhs.note != rhs.note {return false}
-    if lhs.running != rhs.running {return false}
-    if lhs._ci != rhs._ci {return false}
-    if lhs.allowedActions != rhs.allowedActions {return false}
+  public static func ==(lhs: Mason_V1_BatchMember, rhs: Mason_V1_BatchMember) -> Bool {
+    if lhs.task != rhs.task {return false}
+    if lhs.standing != rhs.standing {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -10902,7 +11139,7 @@ nonisolated extension Mason_V1_LandingView: SwiftProtobuf.Message, SwiftProtobuf
 
 nonisolated extension Mason_V1_TaskLanding: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".TaskLanding"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}task\0\u{1}key\0\u{1}title\0\u{1}project\0\u{1}status\0\u{1}position\0\u{1}why\0\u{1}batch\0\u{1}phase\0\u{3}phase_index\0\u{3}phase_total\0\u{3}phase_ms\0\u{3}ci_state\0\u{3}allowed_actions\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}task\0\u{1}key\0\u{1}title\0\u{1}project\0\u{1}status\0\u{1}position\0\u{1}why\0\u{1}batch\0\u{1}phase\0\u{3}phase_index\0\u{3}phase_total\0\u{3}phase_ms\0\u{3}ci_state\0\u{3}allowed_actions\0\u{1}standing\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -10924,6 +11161,7 @@ nonisolated extension Mason_V1_TaskLanding: SwiftProtobuf.Message, SwiftProtobuf
       case 12: try { try decoder.decodeSingularUInt64Field(value: &self.phaseMs) }()
       case 13: try { try decoder.decodeSingularStringField(value: &self.ciState) }()
       case 14: try { try decoder.decodeRepeatedStringField(value: &self.allowedActions) }()
+      case 15: try { try decoder.decodeSingularStringField(value: &self.standing) }()
       default: break
       }
     }
@@ -10972,6 +11210,9 @@ nonisolated extension Mason_V1_TaskLanding: SwiftProtobuf.Message, SwiftProtobuf
     if !self.allowedActions.isEmpty {
       try visitor.visitRepeatedStringField(value: self.allowedActions, fieldNumber: 14)
     }
+    if !self.standing.isEmpty {
+      try visitor.visitSingularStringField(value: self.standing, fieldNumber: 15)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -10990,6 +11231,7 @@ nonisolated extension Mason_V1_TaskLanding: SwiftProtobuf.Message, SwiftProtobuf
     if lhs.phaseMs != rhs.phaseMs {return false}
     if lhs.ciState != rhs.ciState {return false}
     if lhs.allowedActions != rhs.allowedActions {return false}
+    if lhs.standing != rhs.standing {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

@@ -673,7 +673,7 @@ struct LandingPage: View {
                         }
                     }
                     if !l.items.isEmpty {
-                        section("Landing tasks", theme: theme) { LandingItems(model: model, items: l.items, batches: []) }
+                        section("Landing tasks", theme: theme) { LandingItems(model: model, items: l.items, batches: l.batches) }
                     }
                     section("Batches", theme: theme) {
                         if l.batches.isEmpty { Text("No batch has formed yet.").font(theme.body()).foregroundStyle(theme.muted) }
@@ -713,7 +713,7 @@ struct LandingPage: View {
 /// One line per batch: where it is, who landed, who was parked, and why.
 func batchText(_ b: Mason_V1_BatchLine) -> String {
     func list(_ v: [UInt64]) -> String { v.map { "#\($0)" }.joined(separator: " ") }
-    var t = "Batch #\(b.id) \(b.project) \(b.phase)\(b.running ? " (running)" : ""): \(list(b.tasks))"
+    var t = "Batch #\(b.id) \(b.project) \(b.stateText.isEmpty ? b.phase : b.stateText)\(b.running ? " (running)" : ""): \(list(b.tasks))"
     if !b.landed.isEmpty { t += ", landed \(list(b.landed))" }
     if !b.parked.isEmpty { t += ", parked \(list(b.parked))" }
     if !b.note.isEmpty { t += ". \(b.note)" }
@@ -960,16 +960,32 @@ struct LandingItems: View {
 
     var body: some View {
         let g = landingGroups(items)
+        let layout = landingLayout(items, batches)
         VStack(alignment: .leading, spacing: theme.spacing) {
             if !g.landing.isEmpty {
                 Text("Landing now").font(theme.body()).foregroundStyle(theme.muted)
-                ForEach(landNowBatches(batches), id: \.id) { b in
-                    HStack(spacing: theme.spacing) {
-                        LinkedText(model: model, text: "Batch #\(b.id) \(b.phase): \(b.tasks.map { "#\($0)" }.joined(separator: " "))")
-                        LandNowButton(model: model, target: .batch(b.id), shown: model.canLandNow(batch: b))
+                ForEach(layout.groups, id: \.batch) { grp in
+                    VStack(alignment: .leading, spacing: theme.spacing) {
+                        HStack(spacing: theme.spacing) {
+                            LinkedText(model: model, text: batchHeaderText(grp), color: batchSeverityColor(grp.header?.severity ?? "", theme))
+                            if let b = grp.header {
+                                LandNowButton(model: model, target: .batch(b.id), shown: model.canLandNow(batch: b))
+                            }
+                        }
+                        .accessibilityIdentifier("batchheader:\(grp.batch)")
+                        if let why = grp.header?.severityReason, !why.isEmpty, grp.header?.severity != "ok" {
+                            Text(why).font(theme.body()).foregroundStyle(batchSeverityColor(grp.header?.severity ?? "", theme))
+                        }
+                        ForEach(grp.members, id: \.task) { i in
+                            HStack(spacing: theme.spacing) {
+                                TaskLink(title: landingItemText(i), font: theme.body()) { model.go(.task(i.task)) }
+                                LandNowButton(model: model, target: .task(i.task), shown: model.canLandNow(i))
+                            }
+                        }
+                        .padding(.leading, theme.spacingLarge)
                     }
                 }
-                ForEach(g.landing, id: \.task) { i in
+                ForEach(layout.loose, id: \.task) { i in
                     HStack(spacing: theme.spacing) {
                         TaskLink(title: landingItemText(i), font: theme.body()) { model.go(.task(i.task)) }
                         LandNowButton(model: model, target: .task(i.task), shown: model.canLandNow(i))
@@ -984,6 +1000,7 @@ struct LandingItems: View {
                         LandNowButton(model: model, target: .task(i.task), shown: model.canLandNow(i))
                     }
                 }
+                .padding(.leading, theme.spacingLarge)
             }
         }
     }
@@ -1074,6 +1091,49 @@ func landingGroups(_ items: [Mason_V1_TaskLanding]) -> (landing: [Mason_V1_TaskL
      items.filter { $0.status != "in_batch" }.sorted { $0.position < $1.position })
 }
 
+/// One running batch with its tasks (s788).
+struct LandingBatchGroup {
+    let batch: UInt64
+    /// Absent when the daemon sent the task rows but not the batch line (an older daemon).
+    let header: Mason_V1_BatchLine?
+    let members: [Mason_V1_TaskLanding]
+}
+
+/// "Landing now": one group per running batch, in batch order, above the landing rows that
+/// belong to no batch.
+func landingLayout(_ items: [Mason_V1_TaskLanding], _ batches: [Mason_V1_BatchLine])
+    -> (groups: [LandingBatchGroup], loose: [Mason_V1_TaskLanding]) {
+    let landing = items.filter { $0.status == "in_batch" }
+    let ids = Set(landing.map(\.batch).filter { $0 != 0 })
+    let groups = ids.sorted().map { id in
+        LandingBatchGroup(batch: id, header: batches.first { $0.id == id }, members: landing.filter { $0.batch == id })
+    }
+    return (groups, landing.filter { $0.batch == 0 })
+}
+
+/// "Batch #494 · 10 tasks · running suites · 17 min (usually ~6 min)".
+func batchHeaderText(_ g: LandingBatchGroup) -> String {
+    var parts = ["Batch #\(g.batch)"]
+    let n = g.header?.members.count ?? 0
+    let count = n > 0 ? n : g.members.count
+    parts.append("\(count) task\(count == 1 ? "" : "s")")
+    guard let b = g.header else { return parts.joined(separator: " · ") }
+    parts.append(b.stateText.isEmpty ? b.phase : b.stateText)
+    var time = "\(b.phaseMs / 60000) min"
+    if b.typicalMs > 0 { time += " (usually ~\(max(1, b.typicalMs / 60000)) min)" }
+    parts.append(time)
+    return parts.joined(separator: " · ")
+}
+
+/// Stuck is the attention colour, a warning the slow (amber) one, else the normal text.
+func batchSeverityColor(_ severity: String, _ theme: Theme) -> Color {
+    switch severity {
+    case "stuck": return theme.attention
+    case "warn": return theme.slow
+    default: return theme.text
+    }
+}
+
 /// "▰▰▱▱" for phase 2 of 4.
 func phaseBar(_ index: UInt32, _ total: UInt32) -> String {
     let n = Int(min(index, total))
@@ -1083,6 +1143,8 @@ func phaseBar(_ index: UInt32, _ total: UInt32) -> String {
 /// "#5 Title: batch #3, running suites, phase 2 of 4 ▰▰▱▱, CI green, 4 min" or
 /// "#6 Title: queued #1, behind 1 batch".
 func landingItemText(_ i: Mason_V1_TaskLanding) -> String {
+    // Under a batch header the row is only the task and its own standing (a daemon of protocol 2).
+    if i.status == "in_batch" && !i.standing.isEmpty { return "\(i.key) \(i.title): \(i.standing)" }
     if i.status == "in_batch" {
         var t = "\(i.key) \(i.title): batch #\(i.batch), \(i.phase), phase \(i.phaseIndex) of \(i.phaseTotal) \(phaseBar(i.phaseIndex, i.phaseTotal))"
         if !i.ciState.isEmpty { t += ", CI \(i.ciState)" }

@@ -33,6 +33,31 @@ final class LandingItemsTests: XCTestCase {
         XCTAssertEqual(landingItemText(item(3, position: 1, why: "behind 1 batch")), "#3 t3: queued #1, behind 1 batch")
     }
 
+    func testBatchGroupsUnderOneHeaderAndMembersCarryNoBatchText() {
+        func member(_ t: UInt64, _ b: UInt64) -> Mason_V1_TaskLanding {
+            var i = item(t, batch: b); i.standing = "verifying"; return i
+        }
+        var h = Mason_V1_BatchLine()
+        h.id = 7; h.running = true; h.phase = "red"
+        h.stateText = "red in lint, splitting (round 1, 2 tasks left)"
+        h.severity = "warn"; h.phaseMs = 17 * 60_000; h.typicalMs = 6 * 60_000
+        h.members = ([1, 2] as [UInt64]).map { var m = Mason_V1_BatchMember(); m.task = $0; m.standing = "verifying"; return m }
+        h.allowedActions = ["land_now"]
+        var loose = item(9, batch: 0); loose.status = "in_batch"
+        let l = landingLayout([loose, member(1, 7), member(2, 7)], [h])
+        XCTAssertEqual(l.groups.map(\.batch), [7])
+        XCTAssertEqual(l.groups[0].members.map(\.task), [1, 2])
+        XCTAssertEqual(l.loose.map(\.task), [9], "loose rows come after the batches")
+        XCTAssertEqual(batchHeaderText(l.groups[0]),
+                       "Batch #7 · 2 tasks · red in lint, splitting (round 1, 2 tasks left) · 17 min (usually ~6 min)")
+        for m in l.groups[0].members { XCTAssertFalse(landingItemText(m).contains("batch #"), landingItemText(m)) }
+        XCTAssertEqual(landingItemText(member(1, 7)), "#1 t1: verifying")
+        h.typicalMs = 0
+        XCTAssertFalse(batchHeaderText(LandingBatchGroup(batch: 7, header: h, members: [])).contains("usually"))
+        // Land now sits on the header's batch.
+        XCTAssertEqual(landNowBatches([h]).map(\.id), [7])
+    }
+
     private final class Sent { var commands: [Mason_V1_Command] = [] }
 
     // ---- Land now (pure model: nothing rendered) ----
