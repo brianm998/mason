@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# s897 exit test: the source-free note test passes.
+# s897 exit test: the source-free note test keeps its note outside the worktree.
+# The test itself runs in the cargo-workspace step; this checks the fixture shape.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
-cargo test -p mason-daemon a_diff_with_none_of_the_planned_source_files_is_refused_once_and_accepted_with_a_note 2>&1 | tee /dev/stderr | grep -q '1 passed'
+grep -q 'tempfile::tempdir().unwrap().keep().join("source-free.txt")' crates/daemon/src/jobs.rs
+! grep -q 'dir.join("source-free.txt")' crates/daemon/src/jobs.rs
