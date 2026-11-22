@@ -1,0 +1,8 @@
+.github/workflows/ci.yml
+.github/workflows/mason-run.yml
+.mason/run.json
+crates/daemon/src/landing.rs
+docs/decisions/0789-lint-tests-red-at-base-already-fixed.md
+docs/decisions/0830-lint-tests-still-red-on-develop.md
+docs/stages/s837.md
+scripts/exit/s837.sh
