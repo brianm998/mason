@@ -45,6 +45,9 @@ struct SidebarPane: View {
                     }
                     .frame(width: width, alignment: .leading)
                 }
+                // A new project is a new scroll view: top offset, no stale content-height estimate from the
+                // old list (#926). Later sidebar updates keep the project, so they keep the realised rows.
+                .id(model.project)
                 .onChange(of: model.scrollTarget) { _, target in
                     guard let t = target else { return }
                     model.scrollTarget = nil
@@ -96,7 +99,15 @@ struct SidebarPane: View {
         .accessibilityIdentifier("sidebar:home")
     }
 
-    func pageLink(_ title: String, icon: String, page: Page) -> some View {
+    #if DEBUG
+    /// Page-link titles whose body has run, for the offscreen scroll test.
+    nonisolated(unsafe) static var realisedLinks = Set<String>()
+    #endif
+
+    @ViewBuilder func pageLink(_ title: String, icon: String, page: Page) -> some View {
+        #if DEBUG
+        let _ = { Self.realisedLinks.insert(title) }()
+        #endif
         Button { model.go(page) } label: {
             Label(title, systemImage: icon)
                 .font(theme.body())
