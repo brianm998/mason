@@ -1,0 +1,10 @@
+.mason/run.json
+clients/swift/Sources/MonitorCore/Format.swift
+clients/swift/Tests/MonitorCoreTests/FormatPercentTests.swift
+crates/daemon/src/suites.rs
+crates/store/src/lib.rs
+crates/store/src/migrations.rs
+crates/store/tests/store.rs
+docs/decisions/0973-expected-total-from-base-runs-only.md
+docs/stages/s980.md
+scripts/exit/s980.sh
