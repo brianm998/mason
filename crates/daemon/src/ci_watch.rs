@@ -434,6 +434,29 @@ pub(crate) fn source(p: &crate::config::ProjectCfg, what: &str) -> Result<(GitHu
     }
 }
 
+/// State saved before s928 keyed jobs by the run's display title (a commit message) instead of
+/// the workflow's name. Such an entry is dropped, to be rebuilt from the next runs under the
+/// workflow's name: one whose name has a line break, or whose last run is in `runs` under a
+/// different workflow name. Returns the names dropped.
+pub fn migrate_keys(saved: &mut Saved, runs: &[ActionsRun]) -> Vec<String> {
+    let stale: Vec<String> = saved
+        .state
+        .workflows
+        .iter()
+        .filter(|(w, ws)| {
+            w.contains('\n')
+                || runs
+                    .iter()
+                    .any(|r| r.id == ws.last_run && r.workflow != **w)
+        })
+        .map(|(w, _)| w.clone())
+        .collect();
+    for w in &stale {
+        saved.state.workflows.remove(w);
+    }
+    stale
+}
+
 /// One look at the base branch's runs, one pass of the rules, and the filing and freezing that
 /// follow. State is kept only when everything it decided was done, so a failed pass is repeated.
 pub fn pass(
@@ -451,6 +474,7 @@ pub fn pass(
     let p = d.project(pid).ok_or("no such project")?;
     let mut saved = load(d, &p.id);
     let runs = src.runs(&p.base)?;
+    migrate_keys(&mut saved, &runs);
     let mut recs: Vec<RunRec> = runs
         .iter()
         .map(|a| RunRec {

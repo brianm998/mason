@@ -998,3 +998,13 @@ fn an_artifact_is_downloaded_through_the_signed_redirect_without_the_token() {
         .download_artifact(7, "mason-run", &g._d.path().join("b.zip"))
         .unwrap());
 }
+
+#[test]
+fn a_base_run_is_named_by_its_workflow_not_its_display_title() {
+    let g = gh("base_runs_titled.json");
+    let runs = g.gh.base_runs("develop").unwrap();
+    assert_eq!(runs.len(), 2);
+    assert!(runs.iter().all(|r| r.workflow == "CI"));
+    // One read of the workflow list serves both runs.
+    assert!(g.http.unused().is_empty());
+}
