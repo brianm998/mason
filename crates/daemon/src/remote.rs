@@ -1765,7 +1765,7 @@ pub fn fallback_lease(
         }
     }
     let owner = task.and_then(|t| d.world().ok().and_then(|w| w.tasks.get(&t).cloned()));
-    let rank = fallback_rank(d, task, owner.as_ref(), def.as_ref());
+    let rank = fallback_rank(d, task, owner.as_ref(), def.as_deref());
     let who = task.unwrap_or(mason_core::TaskId(0));
     let alive = || match task {
         Some(t) => d
