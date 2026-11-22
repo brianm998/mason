@@ -515,7 +515,8 @@ pub fn show(d: &Daemon, json_out: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// The `gha` pool's split (#766): `MASON 7, other workflows 7 (develop CI: 7 jobs), ceiling 20`.
+/// The `gha` pool's split (#766, #819): `MASON 11, other 7 (mason CI 5 running, star pr-gate 2
+/// queued), ceiling 20; macOS: other 2, ceiling 5`, then what is not counted or how old the count is.
 pub fn gha_line(g: &Value) -> Option<String> {
     let mason = g["mason"].as_u64()?;
     let other = g["other"].as_u64().unwrap_or(0);
@@ -525,10 +526,36 @@ pub fn gha_line(g: &Value) -> Option<String> {
     } else {
         format!(" ({label})")
     };
-    Some(format!(
-        "MASON {mason}, other workflows {other}{label}, ceiling {}",
+    let mut line = format!(
+        "MASON {mason}, other {other}{label}, ceiling {}",
         g["ceiling"].as_u64().unwrap_or(0)
-    ))
+    );
+    if g["macos"].is_object() {
+        line.push_str(&format!(
+            "; macOS: other {}, ceiling {}",
+            g["macos"]["other"].as_u64().unwrap_or(0),
+            g["macos"]["ceiling"].as_u64().unwrap_or(0)
+        ));
+    }
+    let not: Vec<&str> = g["not_counted"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    if !not.is_empty() {
+        line.push_str(&format!("; not counted: {}", not.join(", ")));
+    }
+    if g["stale"].as_bool() == Some(true) {
+        line.push_str(&format!(
+            "; GitHub could not be read, count from {}",
+            g["read_at_ms"]
+                .as_u64()
+                .filter(|t| *t > 0)
+                .map_or("never".to_string(), |t| format!("{t} ms since the epoch"))
+        ));
+    }
+    Some(line)
 }
 
 /// One waiter of `mason resources`: an outside pipeline's reads
