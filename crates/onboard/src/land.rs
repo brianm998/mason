@@ -4,7 +4,7 @@
 //! unless `--land` (or the terminal question) asked for it; `--yes` and a missing terminal both
 //! mean `no`. Every refusal prints the exact commands and changes nothing.
 
-use super::questions::{Answers, Detected, Land, Landing, SETUP_BRANCH};
+use crate::questions::{Answers, Detected, Land, Landing, SETUP_BRANCH};
 use mason_adapter_api::http::Curl;
 use mason_adapter_api::service::GitHostAdapter;
 use mason_adapters::github::{GitHub, TokenRef};
@@ -12,7 +12,7 @@ use mason_landing::git;
 use std::sync::Arc;
 
 /// What happened to the base branch, for what comes after.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq, Clone, serde::Serialize)]
 pub struct Landed {
     /// The base branch here now has `.mason/`.
     pub merged: bool,
@@ -91,7 +91,7 @@ fn push(d: &Detected, what: &str) -> Result<(), String> {
         .map_err(|e| format!("git push {remote} {what} failed: {e}"))
 }
 
-fn open_pr(d: &Detected, a: &Answers) -> Result<(), String> {
+fn open_pr(d: &Detected, a: &Answers, say: &mut dyn FnMut(&str)) -> Result<(), String> {
     let Some(r) = d.github() else {
         return Err("the remote is not on GitHub".into());
     };
@@ -103,17 +103,17 @@ fn open_pr(d: &Detected, a: &Answers) -> Result<(), String> {
     let pr = gh
         .open_pr(&a.base, SETUP_BRANCH, PR_TITLE, PR_BODY)
         .map_err(|e| format!("opening the pull request failed: {e}"))?;
-    println!("  Opened pull request #{}: {}", pr.number, pr.url);
+    say(&format!("  Opened pull request #{}: {}", pr.number, pr.url));
     Ok(())
 }
 
 /// Do what the owner asked, saying each step. On a refusal, print what to run instead.
-pub fn apply(d: &Detected, a: &Answers) -> Landed {
+pub fn apply(d: &Detected, a: &Answers, say: &mut dyn FnMut(&str)) -> Landed {
     let mut out = Landed::default();
     if a.land == Land::No {
         return out;
     }
-    println!("\nLanding ({}):", a.land.name());
+    say(&format!("\nLanding ({}):", a.land.name()));
     let pr_mode = a.landing == Landing::Pr;
     let result = (|| -> Result<(), String> {
         // In pr mode the branch itself goes up, and the base moves only when the PR merges.
@@ -121,12 +121,15 @@ pub fn apply(d: &Detected, a: &Answers) -> Landed {
         if merge_here {
             merge(d, a)?;
             out.merged = true;
-            println!("  Merged {SETUP_BRANCH} into {} (fast-forward).", a.base);
+            say(&format!(
+                "  Merged {SETUP_BRANCH} into {} (fast-forward).",
+                a.base
+            ));
         }
         if d.remote_name.is_none() {
             out.published = out.merged;
             if out.merged {
-                println!("  No remote: masond cannot land onto a base branch that is checked out here, so switch to another branch (`git checkout -b my-work`) before the first task lands.");
+                say("  No remote: masond cannot land onto a base branch that is checked out here, so switch to another branch (`git checkout -b my-work`) before the first task lands.");
             }
             return Ok(());
         }
@@ -134,20 +137,20 @@ pub fn apply(d: &Detected, a: &Answers) -> Landed {
             Land::Push if !pr_mode => {
                 push(d, &a.base)?;
                 out.published = true;
-                println!("  Pushed {}.", a.base);
+                say(&format!("  Pushed {}.", a.base));
             }
             Land::Push | Land::Pr => {
                 push(d, SETUP_BRANCH)?;
-                println!("  Pushed {SETUP_BRANCH}.");
+                say(&format!("  Pushed {SETUP_BRANCH}."));
                 if a.land == Land::Pr {
-                    if let Err(e) = open_pr(d, a) {
-                        println!("  {e}. Open it yourself:\n  {}", pr_command(a));
+                    if let Err(e) = open_pr(d, a, say) {
+                        say(&format!("  {e}. Open it yourself:\n  {}", pr_command(a)));
                     }
                 } else {
-                    println!(
+                    say(&format!(
                         "  Open the pull request when you are ready:\n  {}",
                         pr_command(a)
-                    );
+                    ));
                 }
             }
             _ => {}
@@ -156,7 +159,10 @@ pub fn apply(d: &Detected, a: &Answers) -> Landed {
     })();
     if let Err(e) = result {
         out.refused = true;
-        println!("  Not done: {e}\n  To do it yourself:\n{}", commands(d, a));
+        say(&format!(
+            "  Not done: {e}\n  To do it yourself:\n{}",
+            commands(d, a)
+        ));
     }
     out
 }
@@ -164,7 +170,7 @@ pub fn apply(d: &Detected, a: &Answers) -> Landed {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::init::questions::*;
+    use crate::questions::*;
 
     fn d(remote: bool) -> Detected {
         Detected {
