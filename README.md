@@ -678,6 +678,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s838**: Align the active-models scheduling test with decision 0747 by opening the other session's lease before raising the limit.
 - **s840**: Exit scripts s741, s742, s746, s754 now name the real `mason-pipeline` package and its `mason` bin, s773 finds its test binary through cargo's JSON output, and the exit-script guards refuse a cargo `-p` name that is not a workspace package.
 - **s841**: The ci_watch test fixtures are loaded with include_str! instead of std::fs, so scripts/check-pure.sh and s02 pass again without changing the gate.
+- **s849**: The CI exit-scripts job limit rises from 60 to 90 minutes and the weights for s40, s61 and s84 are added, so shard 6 no longer gets cut off during the full run; no test or repeat count changed.
 - **s851**: The Compose conformance tool now waits for the views of each step (a new `lastViewSeq` that only applied views move) and a 1.5 s quiet window, instead of treating the events message's seq as proof the views had landed.
 - **s852**: `a_hung_git_is_killed_at_its_deadline` no longer asserts that it finished within 3 s; it checks `timed_out`, the "timed out" message and that the helper process is gone.
 <!-- status:end -->
