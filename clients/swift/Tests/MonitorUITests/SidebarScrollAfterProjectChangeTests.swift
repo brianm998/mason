@@ -56,6 +56,14 @@ final class SidebarScrollAfterProjectChangeTests: XCTestCase {
 
     private var hostWindows: [NSWindow] = []
 
+    /// Release the hosted views so no sidebar keeps running after the test (other suites render pixels).
+    override func tearDown() {
+        for w in hostWindows { w.contentView = nil; w.close() }
+        hostWindows = []
+        SidebarPane.realisedLinks = []
+        super.tearDown()
+    }
+
     private func host(_ m: MonitorModel) -> NSHostingView<AnyView> {
         let h = NSHostingView(rootView: AnyView(
             SidebarPane(model: m, width: 360).environment(\.theme, Theme(dark: false, scale: 1))))
