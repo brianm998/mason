@@ -3363,6 +3363,7 @@ fn agent_job(c: &Ctx) {
             end_run_leases(&self.0.d, self.0.task);
             // A check that ended without handing the session back leaves no parked mark (#765).
             self.0.d.set_parked(self.0.task, false);
+            crate::hostedcheck::cancel_task(&self.0.d, self.0.task.0);
         }
     }
     let _credit = StopCrediting(c);
