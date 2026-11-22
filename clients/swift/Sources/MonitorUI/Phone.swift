@@ -326,7 +326,7 @@ struct PhoneSidebarScreen: View {
     private func tile(_ c: StateCount, proxy: ScrollViewProxy) -> some View {
         let wants = c.wantsYou && model.connected
         return Button {
-            let rows = model.sidebar?.sections.first { $0.state == c.state }?.rows.map(\.id) ?? []
+            let rows = model.sectionRows(c.state).map(\.id)
             if let page = PhoneLayout.tileTarget(state: c.state, rows: rows, connected: model.connected) {
                 choose(page)
             } else {
