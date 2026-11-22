@@ -1337,8 +1337,9 @@ pub fn digest(d: &Daemon, project: Option<&str>, from: u64, to: u64) -> Value {
         .map(|x| json!({"id": x.id, "task": x.task, "scope": x.scope, "reason": x.reason}))
         .collect();
     let mut flaky: BTreeMap<String, u64> = BTreeMap::new();
-    for (suite, test, at) in d.store.flaky_since(from).unwrap_or_default() {
-        if at < to {
+    for (suite, test, at, task) in d.store.flaky_since_by_task(from).unwrap_or_default() {
+        let mine = project.is_none() || d.task_project_name(TaskId(task)).is_some_and(|p| in_p(&p));
+        if at < to && mine {
             *flaky.entry(format!("{suite}::{test}")).or_default() += 1;
         }
     }
