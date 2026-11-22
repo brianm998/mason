@@ -90,13 +90,28 @@ fn a_granted_run_of_an_ended_step_has_its_command_stopped_and_its_units_freed() 
         LeaseState::Waiting { .. }
     ));
     mason_daemon::jobs::end_run_leases(&d, TaskId(669));
-    wait_for("the units to be freed", 30, || !d.broker.lease_holds(id));
+    // Keep `next` polled through every wait: the broker reaps a request nobody polls.
+    wait_for("the units to be freed", 30, || {
+        let _ = d.broker.lease_poll(next);
+        !d.broker.lease_holds(id)
+    });
     wait_for("the command to end", 30, || {
+        let _ = d.broker.lease_poll(next);
         !mason_daemon::hung::read_ps().iter().any(|p| p.ppid == pid)
     });
     // The grant may wait on the CPU gate or the settle time; wait on the state, not on time.
-    wait_for("the next waiter to be granted", 60, || {
-        matches!(d.broker.lease_poll(next), LeaseState::Granted { .. })
+    let mut last = String::new();
+    wait_poll("the next waiter to be granted", 60, || {
+        match d.broker.lease_poll(next) {
+            LeaseState::Granted { .. } => Poll::Done,
+            LeaseState::Gone => Poll::Never(format!(
+                "the request was dropped, not granted (last explain: {last})"
+            )),
+            LeaseState::Waiting { explain } => {
+                last = explain;
+                Poll::Pending
+            }
+        }
     });
     d.broker.lease_close(next);
     let _ = client.kill();
