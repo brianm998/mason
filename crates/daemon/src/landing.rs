@@ -1212,6 +1212,7 @@ fn run_batch(
                     reused: std::sync::atomic::AtomicUsize::new(0),
                     yielded: std::sync::atomic::AtomicBool::new(false),
                     lint_files: Mutex::new(vec![]),
+                    lint_where: Mutex::new(String::new()),
                     host,
                     pr: Mutex::new(None),
                     service_error: Mutex::new(None),
@@ -1312,6 +1313,9 @@ struct Runner {
     /// The files the last lint red named (rustfmt's `Diff in`, clippy's `-->`): the ladder
     /// parks the tasks whose diff touches one, before it reruns or splits anything (s691).
     lint_files: Mutex<Vec<String>>,
+    /// The `file:line` places of the last red lint, as ` (at a.rs:1)`: a task parked for a
+    /// lint red is told where to look.
+    lint_where: Mutex<String>,
     host: Option<Arc<dyn GitHostAdapter>>,
     /// The pull request the batch is about to merge (pr modes).
     pr: Mutex<Option<OpenPr>>,
@@ -3681,6 +3685,8 @@ impl Runner {
                     out.failed.insert(name.clone());
                     *self.lint_files.lock().unwrap_or_else(|e| e.into_inner()) =
                         lint_files(&o.full);
+                    *self.lint_where.lock().unwrap_or_else(|e| e.into_inner()) =
+                        lint_places(&o.full);
                     out.notes.push(format!(
                         "{name}: the batch is not lint clean ({ran_on}){}{}\n{}",
                         if o.timed_out { " (timed out)" } else { "" },
@@ -4774,7 +4780,11 @@ impl Runner {
         for id in blamed {
             parked.push(Parked {
                 task: *id,
-                reason: format!("red in batch #{batch_id}: {}", vr.failed.iter().cloned().collect::<Vec<_>>().join(", ")),
+                reason: format!(
+                    "red in batch #{batch_id}: {}{}",
+                    vr.failed.iter().cloned().collect::<Vec<_>>().join(", "),
+                    self.lint_reason_places(vr)
+                ),
                 feedback: format!(
                     "Your change made {} red when it landed with the others (batch #{batch_id}).\n{}",
                     vr.failed.iter().cloned().collect::<Vec<_>>().join(", "),
@@ -4784,6 +4794,23 @@ impl Runner {
             });
         }
         active.retain(|t| !blamed.contains(&t.id));
+    }
+
+    /// Where the lint pointed, for a parked task's reason, when every failed suite is in the
+    /// lint tier; empty otherwise.
+    fn lint_reason_places(&self, vr: &crate::suites::OverRun) -> String {
+        let tier: Vec<String> = self
+            .cfg
+            .tier("lint")
+            .map(|t| t.suites.clone())
+            .unwrap_or_default();
+        if vr.failed.is_empty() || !vr.failed.iter().all(|f| tier.contains(f)) {
+            return String::new();
+        }
+        self.lint_where
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// True when the task's landing run is no longer its open run (retried or canceled).
