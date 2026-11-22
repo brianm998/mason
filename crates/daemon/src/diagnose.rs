@@ -383,6 +383,8 @@ pub fn apply_args(
                 seen: Some(latest),
                 auto,
                 message,
+                // The owner applying a diagnosis is the owner's retry.
+                forget_red: !auto,
                 ..Default::default()
             },
         )

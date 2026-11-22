@@ -14,6 +14,7 @@ struct TopBar: View {
     @State private var adding = false
     @State private var improving = false
     @State private var voices = false
+    @State private var notices = false
 
     #if DEBUG
     /// Body evaluations, for the offscreen test that counts them.
@@ -57,6 +58,24 @@ struct TopBar: View {
                     .buttonStyle(.plain)
                     .touchTarget().hint("Open the first task that needs you")
                     .accessibilityIdentifier("attention")
+                }
+
+                // What the notification bar leaves out: progress and what is being handled.
+                if !model.infoSummary.isEmpty {
+                    Button { notices = true } label: {
+                        Text(model.infoSummary).font(theme.small()).foregroundStyle(theme.muted).lineLimit(1)
+                    }
+                    .buttonStyle(.plain)
+                    .touchTarget().hint("Progress and what MASON is already handling")
+                    .accessibilityIdentifier("info-status")
+                    .popover(isPresented: $notices) {
+                        VStack(alignment: .leading, spacing: theme.spacingSmall) {
+                            ForEach(Array(model.infoNotices.enumerated()), id: \.offset) { _, t in
+                                Text(t).font(theme.body()).textSelection(.enabled)
+                            }
+                        }
+                        .padding(theme.spacing).frame(maxWidth: 420)
+                    }
                 }
 
                 Picker("", selection: $model.project) {
@@ -187,11 +206,14 @@ struct BannersView: View {
 
     /// The chosen height, kept between one row and all rows (and the window's share).
     private func scrollHeight(_ rows: [NotificationRow]) -> CGFloat {
+        // The 1 pt dividers between rows count toward the heights.
         let all = rows.map(rowHeight)
-        let first = rows.prefix(MonitorModel.visibleNotificationRows).map(rowHeight).reduce(0, +)
+        let shown = rows.prefix(MonitorModel.visibleNotificationRows).map(rowHeight)
+        let first = shown.reduce(0, +) + CGFloat(max(shown.count - 1, 0))
+        let total = all.reduce(0, +) + CGFloat(max(all.count - 1, 0))
         let want = model.notificationHeight.map { CGFloat($0) } ?? first
         return CGFloat(MonitorModel.clampNotificationHeight(Double(want), oneRow: Double(all.first ?? 0),
-                                                            total: Double(all.reduce(0, +)), window: Double(windowHeight)))
+                                                            total: Double(total), window: Double(windowHeight)))
     }
 
     var bar: some View {
@@ -230,6 +252,12 @@ struct BannersView: View {
     private func stack(_ rows: [NotificationRow], hidden: Int) -> some View {
         VStack(spacing: 0) {
             ForEach(Array(rows.enumerated()), id: \.element.key) { i, row in
+                // A 1 pt line between neighbouring rows, none above the first or below the last.
+                if i > 0 {
+                    Rectangle().fill(theme.border).frame(height: 1)
+                        .accessibilityHidden(true)
+                        .probe("divider:\(i)")
+                }
                 rowView(row, inset: i == 0 && hidden > 0 ? buttonWidth : 0)
                     .background(GeometryReader { Color.clear.preference(key: RowHeights.self, value: [row.key: $0.size.height]) })
             }
@@ -268,7 +296,7 @@ struct BannersView: View {
     private func set(height: CGFloat, rows: [NotificationRow]) {
         let all = rows.map(rowHeight)
         model.setNotificationHeight(MonitorModel.clampNotificationHeight(
-            Double(height), oneRow: Double(all.first ?? 0), total: Double(all.reduce(0, +)), window: Double(windowHeight)))
+            Double(height), oneRow: Double(all.first ?? 0), total: Double(all.reduce(0, +)) + Double(max(all.count - 1, 0)), window: Double(windowHeight)))
     }
 
     /// One row: its content, then the dismiss X; `inset` keeps it clear of the show-hidden button.

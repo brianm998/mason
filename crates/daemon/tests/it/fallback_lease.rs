@@ -238,6 +238,71 @@ fn room_for_a_fallback_reads_the_broker_and_a_covered_run_is_not_blocked_by_its_
     assert_eq!(room(false), None, "released: room");
 }
 
+/// s943: a landing batch holds nothing for a suite bound for GitHub, so one that comes back here
+/// takes its slots then. It is ranked as the batch's own work, ahead of a debt's run that queued
+/// first, not behind everything as a run no task owns is.
+#[test]
+fn a_batch_suite_falling_back_here_takes_its_slots_ranked_as_the_batch() {
+    use mason_daemon::remote::BatchOwner;
+    let w = world("window = \"20m\"\n", &[]);
+    let d = w.d.clone();
+    d.broker.set_limit("compile", 1).unwrap();
+    let held = mason_daemon::remote::fallback_lease(&d, "scratch", None, &compile(), "held")
+        .unwrap()
+        .expect("a lease");
+
+    // The debt queues first, so only its rank can put it behind the batch's suite.
+    let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
+    let debt = {
+        let (d, order) = (d.clone(), order.clone());
+        std::thread::spawn(move || {
+            let l = mason_daemon::remote::fallback_lease(&d, "scratch", None, &compile(), "debt")
+                .unwrap()
+                .expect("a lease");
+            order.lock().unwrap().push("debt");
+            l
+        })
+    };
+    wait_for("the debt's run to queue", 60, || {
+        d.broker.snapshot().to_string().contains("debt")
+    });
+    let owner = BatchOwner {
+        task: mason_core::TaskId(7),
+        rank: mason_scheduler::Rank::new(false, 1, 0, 1, 7, false),
+        tasks: vec![mason_core::TaskId(7)],
+        runs: vec![],
+        watch: false,
+    };
+    let batch = {
+        let (d, order) = (d.clone(), order.clone());
+        std::thread::spawn(move || {
+            let l = mason_daemon::remote::fallback_lease_for_batch(
+                &d,
+                "scratch",
+                &owner,
+                &compile(),
+                "batch suite",
+            )
+            .unwrap()
+            .expect("a lease");
+            order.lock().unwrap().push("batch");
+            l
+        })
+    };
+    wait_for("the batch's suite to queue", 60, || {
+        d.broker.snapshot().to_string().contains("batch suite")
+    });
+    drop(held);
+    wait_for("the first of them to be granted", 60, || {
+        !order.lock().unwrap().is_empty()
+    });
+    assert_eq!(order.lock().unwrap().clone(), vec!["batch"]);
+    // The debt gets it once the batch's suite is done.
+    drop(batch.join().unwrap());
+    drop(debt.join().unwrap());
+    assert_eq!(d.broker.used("compile"), 0);
+}
+
 #[test]
 fn a_skip_ends_the_wait_for_this_machines_slots() {
     // #873: the owner skipped a task's testing while its check queued behind another here.

@@ -274,7 +274,7 @@ fn uses_project_test(s: &Suite) -> bool {
         || s.rerun.as_deref().is_some_and(uses)
         || s.skip.as_deref().is_some_and(uses)
         || s.shard_command.as_deref().is_some_and(uses)
-        || s.shard_dev_command.as_deref().is_some_and(uses)
+        || s.dev_shard_command.as_deref().is_some_and(uses)
         || s.dev_command.as_deref().is_some_and(uses)
         || s.dev_build.as_deref().is_some_and(uses)
 }
@@ -304,7 +304,7 @@ pub(crate) fn with_project_test(suite: &Suite, test: Option<&str>) -> Result<Sui
     // owner's CARGO_TARGET_DIR, stays).
     let narrow = t.replace(" --workspace", "");
     s.dev_command = s.dev_command.map(|b| b.replace(KEY, &narrow));
-    s.shard_dev_command = s.shard_dev_command.map(|b| b.replace(KEY, &narrow));
+    s.dev_shard_command = s.dev_shard_command.map(|b| b.replace(KEY, &narrow));
     s.dev_build = s.dev_build.map(|b| b.replace(KEY, &narrow));
     Ok(s)
 }
@@ -418,10 +418,10 @@ fn run_hosted(
     th: Thresholds,
     env: Vec<(String, String)>,
     place: Option<(Option<TaskId>, &Suite)>,
-    covered: bool,
+    cover: &Cover,
 ) -> Result<Ran, String> {
     run_hosted_resuming(
-        d, project, id, cmd, cwd, limit, log_dir, check, run, watch, th, env, None, place, covered,
+        d, project, id, cmd, cwd, limit, log_dir, check, run, watch, th, env, None, place, cover,
     )
 }
 
@@ -444,9 +444,10 @@ fn run_hosted_resuming(
     env: Vec<(String, String)>,
     resume: Option<&str>,
     place: Option<(Option<TaskId>, &Suite)>,
-    covered: bool,
+    cover: &Cover,
 ) -> Result<Ran, String> {
     use crate::hostloss as hl;
+    let covered = cover.covered;
     // Where the run goes (#697, #698). Only a task's test step asks (`place`); a landing
     // batch, a base run and a debt stay here until #702. A remote run is returned as the same
     // `Ran`, so it is judged by the code below this call, not by it. A suite whose build runs
@@ -478,18 +479,34 @@ fn run_hosted_resuming(
                 })
                 .unwrap_or_default();
             let task = place.and_then(|(t, _)| t);
-            // `covered`: a landing batch holds this machine's slots for this very run, so it does
-            // not ask again (s911, decision 0904).
-            fallback = crate::remote::fallback_lease_unless_covered(
+            let label = format!(
+                "{} {id} (no GitHub runner, run here)",
+                task.map_or_else(|| "suite".to_string(), |t| format!("#{}", t.0))
+            );
+            fallback = match (&cover.batch, covered) {
+                // A landing batch's suite whose slots its lease does not hold takes them now,
+                // ranked as the batch's own work (s943).
+                (Some((owner, _)), false) => {
+                    crate::remote::fallback_lease_for_batch(d, project, owner, &uses, &label)?
+                }
+                // `covered`: a landing batch holds this machine's slots for this very run, so
+                // it does not ask again (s911, decision 0904).
+                _ => crate::remote::fallback_lease_unless_covered(
+                    d, project, task, &uses, &label, covered,
+                )?,
+            };
+        }
+    } else if let (Some((owner, needs)), false) = (&cover.batch, covered) {
+        // Placed here, though the batch's lease holds nothing for this suite (it was bound for
+        // GitHub when the batch took its slots, or the run is a baseline or a build that never
+        // goes there): it takes its slots as the batch before it starts (s943).
+        if !d.cfg.hosts_dir().join(id).join("host.kv").exists() {
+            fallback = crate::remote::batch_lease(
                 d,
                 project,
-                task,
-                &uses,
-                &format!(
-                    "{} {id} (no GitHub runner, run here)",
-                    task.map_or_else(|| "suite".to_string(), |t| format!("#{}", t.0))
-                ),
-                covered,
+                owner,
+                needs.clone(),
+                &format!("{id} (batch, run here)"),
             )?;
         }
     }
@@ -596,13 +613,18 @@ fn run_remote(
         ),
         &site,
     );
-    // The command of a suite that has shards is split across runners (#701), and so is a narrowed
-    // one whose `shard_command` was rewritten for the narrowing (#873: a narrowed run that sets
-    // `shards` to 0 runs on one). A run without the known-red tests and the like is not the
-    // suite's own command and runs on one.
+    // The whole command of a suite that has shards is split across runners (#701); a narrowed
+    // run, a run without the known-red tests and the like are not the whole suite and run on one.
     let sharded = watch.and_then(|s| {
         let sc = s.shard_command.as_deref()?;
-        (s.shards > 1 && cmd == s.command).then_some((s, sc))
+        (s.shards > 1 && !s.narrowed && cmd == s.command).then_some((s, sc))
+    });
+    // A narrowed run split the same way (#880): its `dev_shard_command` was filled in with the
+    // same pick as `command` (`dev_shard_for`); one still holding a `{...}` was not, and runs whole.
+    let sharded = sharded.or_else(|| {
+        let s = watch?;
+        let sc = s.dev_shard_command.as_deref()?;
+        (s.shards > 1 && s.narrowed && cmd == s.command && !sc.contains('{')).then_some((s, sc))
     });
     if let Some((s, sc)) = sharded {
         spec.shards = s.shards;
@@ -655,73 +677,17 @@ fn run_remote(
     })
 }
 
-/// How a narrowed run of `suite` is split across runners (#873): the shard command for the
-/// narrowing `n` and the number of runners, or `None` to run on one. A run of several test
-/// targets (or packages) is split, and so is one whose recorded time is over `shard_over_s`
-/// (600 s when unset), when the suite has `shards` and a `shard_dev_command`. The note says why
-/// not when the recorded time is over the runner `limit` and nothing can split it.
-pub(crate) fn narrowed_shard(
-    d: &Arc<Daemon>,
-    project: &str,
-    suite: &Suite,
-    n: &crate::scope::Narrow,
-    limit: Duration,
-) -> (Option<(String, u32)>, Option<String>) {
-    let (groups, targets) = match n {
-        crate::scope::Narrow::Targets(t) => (t.len(), Some(t.as_slice())),
-        crate::scope::Narrow::Packages(p) => (p.len(), None),
-    };
-    let est = targets.and_then(|t| {
-        let medians = d.store.target_medians(project, &suite.name).ok()?;
-        crate::targettimes::estimate_ms(t, &medians)
-    });
-    decide_narrowed_shard(suite, n, groups, est, limit)
-}
-
-/// [`narrowed_shard`] on what it read: no store, no clock.
-pub(crate) fn decide_narrowed_shard(
-    suite: &Suite,
-    n: &crate::scope::Narrow,
-    groups: usize,
-    est_ms: Option<u64>,
-    limit: Duration,
-) -> (Option<(String, u32)>, Option<String>) {
-    let over_s = if suite.shard_over_s == 0 {
-        600
-    } else {
-        suite.shard_over_s
-    };
-    let long = est_ms.is_some_and(|ms| ms > over_s.saturating_mul(1000));
-    let worth = groups > 1 || long;
-    match (&suite.shard_dev_command, suite.shards > 1) {
-        (Some(sdc), true) if worth => (
-            Some((crate::scope::expand(sdc, n, false), suite.shards)),
-            None,
-        ),
-        (_, can) if !can || suite.shard_dev_command.is_none() => {
-            let note = est_ms
-                .filter(|ms| *ms > limit.as_millis() as u64)
-                .map(|ms| {
-                    format!(
-                        "{}: its recorded time ({} s) is over the runner limit ({} s) and the \
-                         suite has no `shards` with a `shard_dev_command` to split it",
-                        suite.name,
-                        ms / 1000,
-                        limit.as_secs()
-                    )
-                });
-            (None, note)
-        }
-        _ => (None, None),
-    }
-}
-
 /// Do the shard lists name more than this run's own tests (#873)? A narrowed run takes its
 /// share of the whole suite's lists, and a shard command that is not `scripts/test-shard.py`
-/// (the exit scripts split by `weights.txt` on the runner) does not read them at all. A shard
-/// that ran none of the listed tests is then no defect.
+/// (the exit scripts pick their share on the runner) does not read them at all. A shard that ran
+/// none of the listed tests is then no defect.
 pub(crate) fn lists_partial(s: &Suite) -> bool {
+    let narrowed_cmd = s
+        .dev_shard_command
+        .as_deref()
+        .is_some_and(|c| !c.contains('{'));
     s.narrowed
+        || narrowed_cmd
         || !s
             .shard_command
             .as_deref()
@@ -738,6 +704,19 @@ pub(crate) fn shard_lists(d: &Arc<Daemon>, project: &str, suite: &Suite) -> Vec<
     let mut names: std::collections::BTreeSet<String> = weights.keys().cloned().collect();
     names.extend(d.store.passing_names(&suite.name).unwrap_or_default());
     crate::shards::assign(&names, &weights, suite.shards)
+}
+
+/// `suite`'s `dev_shard_command` filled in with the pick `n`, when one runner's share of it can be
+/// run by scripts/test-shard.py: the packages, or whole test targets (several are a compound shell
+/// command with the shard script in front of each cargo command, #873). A pick filtered by name
+/// stays on one runner, so `None` (#880).
+pub fn dev_shard_for(suite: &Suite, n: &crate::scope::Narrow) -> Option<String> {
+    use crate::scope::Narrow;
+    let t = suite.dev_shard_command.as_deref()?;
+    match n {
+        Narrow::Targets(g) if g.is_empty() || g.iter().any(|x| x.contains(" -- ")) => None,
+        _ => Some(crate::scope::expand(t, n, false)),
+    }
 }
 
 /// A finished remote run as the `Ran` a step host would have given.
@@ -978,6 +957,14 @@ fn expected_total(d: &Arc<Daemon>, project: &str, suite: &Suite, base: &str) -> 
     }
 }
 
+/// A narrowed (or not-run) suite does not run the whole suite, so the whole suite's expected
+/// size is no denominator for it: the line reads "N tests" until a run reports its own total.
+fn forget_whole_total(s: &mut SubProgress) {
+    if s.total.source != Source::Reported {
+        s.total = Figure::default();
+    }
+}
+
 fn quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
@@ -1090,10 +1077,55 @@ struct Who {
     /// The reuse plan of the suite now running (s707): what it ran is recorded as green or red
     /// against its input keys.
     reuse: Option<Arc<crate::reuse::Plan>>,
-    /// The caller already holds this machine's slots for these runs (a landing batch's lease,
-    /// `Landing::hold`), so a run sent back here from GitHub runs under that hold and does not
-    /// ask the broker for them again (s911, decision 0904).
+    /// What a landing batch's lease holds of this machine for the suite now running (s911,
+    /// s943); nothing for a task's or a debt's run.
+    cover: Cover,
+}
+
+/// What the caller holds of this machine for a run, so that `run_hosted_resuming` takes only
+/// what is not held already (s911, decision 0904; s943, decision 0936).
+#[derive(Clone, Default)]
+pub struct Cover {
+    /// The caller holds this machine's slots for this run (a landing batch's lease,
+    /// `Runner::hold`): a run sent back here from GitHub runs under that hold and does not ask
+    /// the broker for them again.
     covered: bool,
+    /// A landing batch's own run that its lease does not hold: the batch, and what the suite
+    /// needs here. Such a run takes its slots, as the batch, when it comes to run here.
+    batch: Option<(Arc<crate::remote::BatchOwner>, Needs)>,
+}
+
+/// What a landing batch holds, for the suites it runs: the batch (to rank what its runs take
+/// beside the lease) and the slots of the lease it took, if it took one (s943).
+#[derive(Clone, Default)]
+pub struct BatchCover {
+    pub owner: Option<Arc<crate::remote::BatchOwner>>,
+    /// What the batch's lease holds; `None` when it holds nothing.
+    pub held: Option<Needs>,
+}
+
+impl BatchCover {
+    /// `needs` is within what the lease holds, so a run of it needs nothing more of this
+    /// machine. Never true without a lease.
+    pub fn holds(&self, needs: &Needs) -> bool {
+        self.held.as_ref().is_some_and(|h| {
+            (!needs.exclusive || h.exclusive)
+                && needs
+                    .amounts
+                    .iter()
+                    .all(|(k, v)| h.amounts.get(k).is_some_and(|x| x >= v))
+        })
+    }
+
+    /// The cover of a run of `suite` of this batch.
+    fn of(&self, def: &Definition, suite: &str) -> Cover {
+        let needs = crate::landing::suites_needs(def, &[suite.to_string()]);
+        let covered = self.holds(&needs);
+        Cover {
+            covered,
+            batch: self.owner.clone().map(|o| (o, needs)),
+        }
+    }
 }
 
 /// The tasks of a landing batch, and the name of the definition's Test step. A batch's
@@ -1817,7 +1849,7 @@ fn run_on_base(
             who.thresholds(),
             who.env.clone(),
             None,
-            who.covered,
+            &who.cover,
         )
         .ok()?;
         if ran.stop != Stop::No {
@@ -2052,7 +2084,7 @@ fn run_suite(
             who.env.clone(),
             resume.as_deref(),
             who.place(suite),
-            who.covered,
+            &who.cover,
         ) {
             Ok(r) => r,
             Err(e) if crate::remote::environmental(&e).is_some() => {
@@ -2632,7 +2664,7 @@ fn run_tests_alone(
         who.thresholds(),
         who.env.clone(),
         who.place(suite),
-        who.covered,
+        &who.cover,
     )
     .ok()?;
     if ran.stop != Stop::No {
@@ -2680,7 +2712,7 @@ pub fn run_alone(
     sink: Option<StepRunId>,
     build: bool,
     serial: bool,
-    covered: bool,
+    cover: &BatchCover,
 ) -> OverRun {
     let who = Who {
         d: d.clone(),
@@ -2694,7 +2726,7 @@ pub fn run_alone(
         trust_base: true,
         members: Members::default(),
         reuse: None,
-        covered,
+        cover: Cover::default(),
     };
     let _ = std::fs::create_dir_all(log_dir);
     let project_test = d
@@ -2709,6 +2741,9 @@ pub fn run_alone(
         unfinished: Default::default(),
     };
     for (name, tests) in failing {
+        let mut who = who.clone();
+        who.cover = cover.of(def, name);
+        let who = &who;
         let red = |out: &mut OverRun, note: String| {
             out.green = false;
             out.failed.insert(name.clone());
@@ -2727,7 +2762,7 @@ pub fn run_alone(
         };
         if build {
             if let Some(b) = suite.build.as_deref() {
-                match run_build(&who, &suite, b, 0, wt) {
+                match run_build(who, &suite, b, 0, wt) {
                     Built::Ok => {}
                     Built::Gone => {
                         red(&mut out, format!("{name}: stopped"));
@@ -2741,7 +2776,7 @@ pub fn run_alone(
             }
         }
         let id = format!("{id_prefix}-n-{name}");
-        match run_tests_alone(&who, &suite, wt, tests, &id, serial, None) {
+        match run_tests_alone(who, &suite, wt, tests, &id, serial, None) {
             Some(still) if still.is_empty() => out.notes.push(format!(
                 "{name}: {} failing test(s) green on their own",
                 tests.len()
@@ -2901,8 +2936,6 @@ fn narrow_units_for_step(
     s.command = mason_testing::narrow::command(n, &picked);
     s.min_tests = 1;
     s.narrowed = true;
-    // The whole suite's shard command is not this run's: one runner (#873).
-    s.shards = 0;
     let names: Vec<&str> = picked.iter().take(8).map(|u| u.name.as_str()).collect();
     let more = picked.len().saturating_sub(names.len());
     let list = format!(
@@ -2987,32 +3020,22 @@ fn narrow_packages_for_step(
     };
     let mut s = suite.clone();
     s.command = crate::scope::expand(dc, &n, false);
+    s.dev_shard_command = dev_shard_for(suite, &n);
     if let Some(db) = &suite.dev_build {
         s.build = Some(crate::scope::expand(db, &n, true));
     }
     s.min_tests = 1;
     s.narrowed = true;
-    // Split across runners when it is more than one target or long (#873); else one runner.
-    let limit = suite.timeout.unwrap_or(Duration::from_secs(1800));
-    let (split, why_not) = narrowed_shard(&c.d, &c.project.id, suite, &n, limit);
-    match split {
-        Some((cmd, shards)) => {
-            s.shard_command = Some(cmd);
-            s.shards = shards;
-        }
-        None => s.shards = 0,
-    }
     let left = left_out_note(&dropped);
     let note = format!(
-        "{}: narrowed to {}{}{}; the landing batch runs it whole",
+        "{}: narrowed to {}{}; the landing batch runs it whole",
         suite.name,
         n.describe(),
         if left.is_empty() {
             String::new()
         } else {
             format!(" ({left})")
-        },
-        why_not.map(|w| format!(" [{w}]")).unwrap_or_default(),
+        }
     );
     let groups = match &n {
         crate::scope::Narrow::Targets(t) => Some(t.clone()),
@@ -3059,13 +3082,12 @@ pub fn narrow_for_batch(
     let n = crate::scope::narrow_for(wt, &paths, crate::scope::wants_tests(dc), true, &named)?;
     let mut s = suite.clone();
     s.command = crate::scope::expand(dc, &n, false);
+    s.dev_shard_command = dev_shard_for(suite, &n);
     if let Some(db) = &suite.dev_build {
         s.build = Some(crate::scope::expand(db, &n, true));
     }
     s.min_tests = 1;
     s.narrowed = true;
-    // The whole suite's shard command is not this run's: one runner (#873).
-    s.shards = 0;
     let left = left_out_note(&dropped);
     let note = format!(
         "{}: narrowed to {} over the batch's {} changed file(s){}; the scheduled full test runs it whole",
@@ -3254,7 +3276,7 @@ fn run_build(who: &Who, suite: &Suite, build: &str, n: usize, cwd: &Path) -> Bui
         who.thresholds(),
         who.env.clone(),
         None,
-        who.covered,
+        &who.cover,
     ) {
         Ok(r) => r,
         Err(e) => return Built::Red(format!("Building `{}` could not run: {e}", suite.name)),
@@ -3336,7 +3358,7 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
         trust_base: true,
         members: Members::default(),
         reuse: None,
-        covered: false,
+        cover: Cover::default(),
     };
     let head = |rev: &str| git::run(&c.wt, &["rev-parse", rev]).map(|s| s.trim().to_string());
     let (Ok(tree_hash), Ok(head_sha)) = (head("HEAD^{tree}"), head("HEAD")) else {
@@ -3484,12 +3506,15 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
                 // Said in the closing note too: a narrowed green is not the whole suite's.
                 details.push(note.clone());
                 notes.push(note);
+                // The stored total is the whole suite's size: wrong for a narrowed pick.
+                d.progress_sub(c.run, &name, None, forget_whole_total);
                 (*narrowed, groups)
             }
             StepNarrow::NotRun(note) => {
                 // It runs whole at landing: the step has nothing to prove, and says so.
                 details.push(note.clone());
                 notes.push(note);
+                d.progress_sub(c.run, &name, None, forget_whole_total);
                 outcomes.push((name, SuiteOutcome::NotSelected));
                 continue;
             }
@@ -4010,7 +4035,7 @@ fn run_new_tests_at_base(
             who.thresholds(),
             who.env.clone(),
             None,
-            who.covered,
+            &who.cover,
         )
         .ok()?;
         Some(judge_ran_with(suite, &ran, &wt, who.plugin_parser(suite).as_deref()).results)
@@ -4296,6 +4321,12 @@ fn suite_proof(
     None
 }
 
+/// Whether `name` is a suite the definition no longer has. A definition with no suites at all
+/// is taken as unloaded, not as proof that the suite is gone.
+fn suite_gone(def: &Definition, name: &str) -> bool {
+    !def.testing.suites.is_empty() && def.testing.suite(name).is_none()
+}
+
 /// Close every open debt whose suites (all of its step's, for a step) have been recorded
 /// green at a base that contains the commit its task landed. A green with known-red tests
 /// skipped counts too, unless the debt's own task touched a skipped test; the skipped tests
@@ -4312,7 +4343,19 @@ pub fn settle_debts(d: &Arc<Daemon>) -> usize {
         let Some(p) = d.project(pid).cloned() else {
             continue;
         };
-        let suites = debt_suites(&d.current_def(pid), &landing_tier(d, pid), &row.scope);
+        let def = d.current_def(pid);
+        if let Some(name) = row.scope.strip_prefix("suite:") {
+            if suite_gone(&def, name) {
+                let how = format!(
+                    "suite `{name}` is no longer in the project's definition, so nothing can pay this debt"
+                );
+                if d.store.pay_debt(row.id, now_ms(), &how).unwrap_or(false) {
+                    closed += 1;
+                }
+                continue;
+            }
+        }
+        let suites = debt_suites(&def, &landing_tier(d, pid), &row.scope);
         if suites.is_empty() {
             continue;
         }
@@ -4850,7 +4893,7 @@ fn pay_with(d: &Arc<Daemon>, debt: u64, only: Option<&str>) -> Result<String, St
         trust_base: true,
         members: Members::default(),
         reuse: None,
-        covered: false,
+        cover: Cover::default(),
     };
     let tree_hash = git::run(&wt, &["rev-parse", "HEAD^{tree}"])
         .map(|s| s.trim().to_string())
@@ -5161,7 +5204,7 @@ pub fn run_whole(
         trust_base: false,
         members: Members::default(),
         reuse: None,
-        covered: false,
+        cover: Cover::default(),
     };
     let tree_hash = git::run(&wt, &["rev-parse", "HEAD^{tree}"])
         .map(|s| s.trim().to_string())
@@ -5454,7 +5497,7 @@ pub fn ledger_run(d: &Arc<Daemon>, task: TaskId) -> Result<String, String> {
         trust_base: true,
         members: Members::default(),
         reuse: None,
-        covered: false,
+        cover: Cover::default(),
     };
     let tree = Tree {
         tree: git::run(&wt, &["rev-parse", "HEAD^{tree}"])
@@ -5699,8 +5742,9 @@ fn batch_reuse(
 /// batch started (baselines are taken there). A suite whose only reds are excused (also red
 /// at `base`, or known red) is green for the batch, with a note naming them; `base_excuses`
 /// false (post-land, where `base` is the tree itself) lets only known-red tests excuse.
-/// `covered`: the caller holds this machine's slots for the run, so a suite that falls back from
-/// GitHub runs under that hold (s911).
+/// `cover`: what the batch's lease holds of this machine. A suite whose slots it holds, and that
+/// falls back from GitHub, runs under that hold (s911); one it does not hold takes its slots as
+/// the batch when it runs here (s943).
 #[allow(clippy::too_many_arguments)]
 pub fn run_over(
     d: &Arc<Daemon>,
@@ -5715,7 +5759,7 @@ pub fn run_over(
     base_excuses: bool,
     members: &Members,
     reuse: bool,
-    covered: bool,
+    cover: &BatchCover,
 ) -> OverRun {
     let lock = d.repo_lock(d.project_id_by_name(&p.id).unwrap_or(ProjectId(0)));
     let tree_hash = git::run(wt, &["rev-parse", "HEAD^{tree}"])
@@ -5737,7 +5781,7 @@ pub fn run_over(
         trust_base: base_excuses,
         members: members.clone(),
         reuse: None,
-        covered,
+        cover: Cover::default(),
     };
     let _ = std::fs::create_dir_all(log_dir);
     let mut out = OverRun {
@@ -5759,6 +5803,7 @@ pub fn run_over(
         // Targets green on the same inputs are left out, except on the periodic full run that
         // checks the keys (s707).
         let mut who = who.clone();
+        who.cover = cover.of(def, name);
         let mut left_out: Option<Suite> = None;
         let full = reuse && p.reuse_green && full_run_due(&p.id, p.reuse_full_hours);
         if reuse && p.reuse_green {
@@ -6588,6 +6633,59 @@ mod narrow_batch_tests {
         s.dev_command = None;
         assert!(narrow_for_batch(&Definition::empty(), &s, d.path(), &b).is_err());
     }
+
+    #[test]
+    fn narrowed_suite_drops_the_whole_suites_total() {
+        let mut s = SubProgress {
+            total: Figure::expected(2356),
+            ..SubProgress::default()
+        };
+        forget_whole_total(&mut s);
+        assert_eq!(s.total, Figure::default());
+    }
+
+    #[test]
+    fn narrowed_suite_keeps_a_reported_total() {
+        let mut s = SubProgress {
+            total: Figure::reported(337),
+            ..SubProgress::default()
+        };
+        forget_whole_total(&mut s);
+        assert_eq!(s.total, Figure::reported(337));
+    }
+}
+
+#[cfg(test)]
+mod batch_cover_tests {
+    use super::*;
+
+    fn needs(items: &[(&str, u32)]) -> Needs {
+        Needs::of(items)
+    }
+
+    /// s943: a run is covered only when the batch's lease really holds its slots.
+    #[test]
+    fn a_batch_cover_holds_only_what_the_lease_holds() {
+        let none = BatchCover::default();
+        assert!(
+            !none.holds(&needs(&[("test-suite", 1)])),
+            "no lease, no cover"
+        );
+        assert!(!none.holds(&Needs::default()), "no lease: not even nothing");
+
+        let lease = BatchCover {
+            owner: None,
+            held: Some(needs(&[("test-suite", 2), ("compile", 1)])),
+        };
+        assert!(lease.holds(&needs(&[("test-suite", 1)])));
+        assert!(lease.holds(&needs(&[("test-suite", 2), ("compile", 1)])));
+        assert!(!lease.holds(&needs(&[("test-suite", 3)])), "more than held");
+        assert!(!lease.holds(&needs(&[("test-small", 1)])), "another slot");
+        assert!(!lease.holds(&Needs {
+            exclusive: true,
+            ..Default::default()
+        }));
+    }
 }
 
 #[cfg(test)]
@@ -6602,11 +6700,9 @@ mod narrowed_shard_tests {
             mason_testing::ParserKind::Tap,
         );
         s.shards = 2;
-        s.shard_command = Some("whole".into());
-        s.shard_dev_command = Some(
-            ": {packages}; python3 -I scripts/test-shard.py -- cargo test {tests_for_change}"
-                .into(),
-        );
+        s.shard_command = Some("python3 -I scripts/test-shard.py -- cargo test".into());
+        s.dev_shard_command =
+            Some("python3 -I scripts/test-shard.py -- cargo test {tests_for_change}".into());
         s
     }
 
@@ -6614,59 +6710,28 @@ mod narrowed_shard_tests {
         Narrow::Targets((0..n).map(|i| format!("-p c{i} --lib")).collect())
     }
 
-    const LIMIT: Duration = Duration::from_secs(3600);
-
     #[test]
-    fn three_targets_are_split_across_the_suites_shards_with_every_target_in_the_command() {
-        let (split, note) = decide_narrowed_shard(&suite(), &targets(3), 3, None, LIMIT);
-        let (cmd, shards) = split.expect("split");
-        assert_eq!(shards, 2);
+    fn three_targets_split_with_the_shard_script_in_front_of_each_cargo_command() {
+        let cmd = dev_shard_for(&suite(), &targets(3)).expect("split");
         for i in 0..3 {
             assert!(cmd.contains(&format!("-p c{i} --lib")), "{cmd}");
         }
         assert_eq!(cmd.matches("test-shard.py").count(), 3, "{cmd}");
-        assert!(note.is_none());
+        assert!(!cmd.contains('{'), "{cmd}");
     }
 
     #[test]
-    fn one_short_target_runs_on_one_runner_and_one_long_target_is_split() {
-        let one = targets(1);
-        assert_eq!(
-            decide_narrowed_shard(&suite(), &one, 1, Some(5_000), LIMIT).0,
-            None
-        );
-        assert_eq!(
-            decide_narrowed_shard(&suite(), &one, 1, None, LIMIT).0,
-            None
-        );
-        let (split, _) = decide_narrowed_shard(&suite(), &one, 1, Some(601_000), LIMIT);
-        assert_eq!(split.map(|s| s.1), Some(2));
-        // `shard_over_s` moves the line.
+    fn a_name_filtered_pick_or_a_suite_without_the_key_stays_on_one_runner() {
+        let filtered = Narrow::Targets(vec!["-p a --lib -- some::module".into()]);
+        assert_eq!(dev_shard_for(&suite(), &filtered), None);
         let mut s = suite();
-        s.shard_over_s = 60;
-        let (split, _) = decide_narrowed_shard(&s, &one, 1, Some(61_000), LIMIT);
-        assert!(split.is_some());
-    }
-
-    #[test]
-    fn work_over_the_runner_limit_that_cannot_be_split_says_why() {
-        let mut s = suite();
-        s.shard_dev_command = None;
-        let (split, note) = decide_narrowed_shard(&s, &targets(2), 2, Some(4_000_000), LIMIT);
-        assert!(split.is_none());
-        let note = note.expect("a reason");
-        assert!(note.contains("over the runner limit"), "{note}");
-        // Within the limit nothing needs saying.
-        assert_eq!(
-            decide_narrowed_shard(&s, &targets(2), 2, Some(4_000), LIMIT).1,
-            None
-        );
+        s.dev_shard_command = None;
+        assert_eq!(dev_shard_for(&s, &targets(3)), None);
     }
 
     #[test]
     fn shard_lists_are_partial_for_a_narrowed_run_and_for_a_command_that_does_not_read_them() {
         let mut s = suite();
-        s.shard_command = Some("python3 -I scripts/test-shard.py -- cargo test".into());
         assert!(!lists_partial(&s));
         s.narrowed = true;
         assert!(lists_partial(&s));

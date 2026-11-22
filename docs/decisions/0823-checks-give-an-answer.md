@@ -5,9 +5,9 @@ a narrowed run went to one runner and hit its limit, `exit-scripts` ran whole on
 runner came or the push was refused, and each of these reached the agent as "FAILED", so it reran.
 
 Decision, which the owner asked for:
-1. A narrowed `cargo-workspace` run of more than one target, or one recorded over `shard_over_s`,
-   and the `exit-scripts` selection, are split across the suite's `shards`. Work that cannot be
-   split and is recorded over the runner limit is reported, not silently sent.
+1. A narrowed `cargo-workspace` check of the agent, of one target or several, is split across the
+   suite's `shards` like the test step's (#880 did the exit scripts and one target). A recorded-time
+   rule (`shard_over_s`) was not built.
 2. A run that ended without a result about the code (no runner, refused push, runner limit with no
    failing test) is retried once on GitHub inside MASON, then goes to this machine where the
    project's fallback is local. After a second miss the agent gets "no result (infrastructure)",
@@ -16,5 +16,4 @@ Decision, which the owner asked for:
 3. A skip of the task's testing ends its waiting and running checks and gives the same
    "Not run" answer as a later call.
 
-Trust files touched with the owner's request: `suites.rs`, `.mason/mason.toml`,
-`crates/testing/src/model.rs`, `scripts/exit/s830.sh`.
+Trust files touched with the owner's request: `suites.rs`, `scripts/exit/s830.sh`.

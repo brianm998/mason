@@ -701,7 +701,13 @@ fn remote_check(
     // The suite's own command (whole, or narrowed with a shard command of its own, #873) goes
     // out as one job per shard.
     let rs = match place.map(|(_, s)| s) {
-        Some(ps) if ps.shards > 1 && spec.cmd == ps.command => match ps.shard_command.as_deref() {
+        Some(ps) if ps.shards > 1 && spec.cmd == ps.command => match ps
+            .dev_shard_command
+            .as_deref()
+            // A narrowed check's own shard command (filled in, #880); else the whole suite's.
+            .filter(|c| !c.contains('{'))
+            .or(ps.shard_command.as_deref())
+        {
             Some(sc) => {
                 let mut rs = rs;
                 rs.shards = ps.shards;

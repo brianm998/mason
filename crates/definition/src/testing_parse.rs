@@ -49,8 +49,7 @@ pub const SUITE_KEYS: &[&str] = &[
     "runs_on",
     "shards",
     "shard_command",
-    "shard_dev_command",
-    "shard_over_s",
+    "dev_shard_command",
     "ci_jobs",
 ];
 const ENV_KEYS: &[&str] = &[
@@ -191,10 +190,10 @@ fn narrow(
         return None;
     }
     let each = each.unwrap_or_else(|| "{}".into());
-    if !each.contains("{}") {
+    if !["{}", "{file}", "{path}"].iter().any(|k| each.contains(k)) {
         out.push(Problem::new(
             format!("{base}.narrow_each"),
-            "must contain `{}`, which becomes one test's name",
+            "must contain `{}` (one test's name), `{file}` (its file under narrow_root) or `{path}` (its file from the repository root)",
         ));
         return None;
     }
@@ -298,14 +297,7 @@ pub fn parse(doc: &DocumentMut, out: &mut Vec<Problem>) -> Testing {
                     )),
                 },
                 "shard_command" => s.shard_command = string(v, &path, out),
-                "shard_dev_command" => s.shard_dev_command = string(v, &path, out),
-                "shard_over_s" => match v.as_integer() {
-                    Some(n) if n >= 1 => s.shard_over_s = n as u64,
-                    _ => out.push(Problem::new(
-                        &path,
-                        "must be a whole number of seconds, 1 or more",
-                    )),
-                },
+                "dev_shard_command" => s.dev_shard_command = string(v, &path, out),
                 "ci_jobs" => s.ci_jobs = strings(v, &path, out),
                 "runs_on" => {
                     if let Some(r) = string(v, &path, out) {

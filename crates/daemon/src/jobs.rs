@@ -2132,23 +2132,13 @@ impl TestChecks {
                     match narrow(scope, crate::scope::wants_tests(&dc)) {
                         Ok(n) => {
                             suite.command = crate::scope::expand(&dc, &n, false);
-                            // More than one target, or a long one: split across runners (#873).
-                            let (split, why_not) = crate::suites::narrowed_shard(
-                                &self.slots.d,
-                                &self.project,
-                                &suite,
-                                &n,
-                                limit,
-                            );
-                            if let Some((cmd, shards)) = split {
-                                suite.shard_command = Some(cmd);
-                                suite.shards = shards;
+                            suite.dev_shard_command = crate::suites::dev_shard_for(&suite, &n);
+                            // Split across the suite's runners on GitHub (#880, #873).
+                            if suite.dev_shard_command.is_some() && suite.shards > 1 {
                                 suite.narrowed = true;
                                 split_kept = true;
-                                narrowed.push(format!("{name}: split across {shards} runners"));
-                            }
-                            if let Some(w) = why_not {
-                                lines.push(w);
+                                narrowed
+                                    .push(format!("{name}: split across {} runners", suite.shards));
                             }
                             if let Some(db) = &suite.dev_build {
                                 suite.build = Some(crate::scope::expand(db, &n, true));
@@ -3812,6 +3802,17 @@ fn agent_job(c: &Ctx) {
     // twice the budget (s401); it ends with the step.
     let seen = Arc::new(Seen::default());
     let started = Instant::now();
+    // What the step had already run when this process began watching it: the extender counts
+    // from the launch, as the host's limit does, not from this daemon's start (#800).
+    let already = {
+        let launched =
+            c.d.world()
+                .ok()
+                .and_then(|w| w.step_runs.get(&c.run).map(|r| r.started_at.0));
+        launch_elapsed(launched, now_ms(), c.d.started_ms, started)
+            .0
+            .saturating_sub(started.elapsed())
+    };
     let _extender = Some(()).map(|()| {
         let stop = Arc::new(AtomicBool::new(false));
         let (stop2, seen2, extra, wt) = (
@@ -3835,7 +3836,7 @@ fn agent_job(c: &Ctx) {
             while !stop2.load(Ordering::SeqCst) {
                 std::thread::sleep(Duration::from_secs(1));
                 if let Some(e) = ext.as_mut() {
-                    e.tick(started.elapsed(), &extra, &head, seen2.count());
+                    e.tick(already + started.elapsed(), &extra, &head, seen2.count());
                 }
                 last = crate::deadline::save(&extra, &extra_file, last);
             }
@@ -4175,6 +4176,10 @@ fn transcript_gone(detail: &str) -> bool {
 
 /// The CLI was stopped from outside (SIGTERM, status 143; or SIGKILL, 137) before it
 /// gave a result: a restart or a reaper, not something the agent did.
+/// How many times one step run is started again after its CLI was signaled. A daemon
+/// restart or a reaper can hit the same step more than once in a row.
+const MAX_SIGNALED_RETRIES: usize = 3;
+
 fn cli_was_signaled(detail: &str) -> bool {
     detail.contains("the CLI exited with status 143 and no result")
         || detail.contains("the CLI exited with status 137 and no result")
@@ -4211,7 +4216,7 @@ fn settle_all(
     let mut resumed = false;
     let mut fresh_after_gone = false;
     let mut silent = false;
-    let mut signaled_retried = false;
+    let mut signaled_retries = 0usize;
     // Lost invocations before a resumed session that reached its own end: they are
     // not counted toward the restart budget again (s399).
     let mut forgiven = 0usize;
@@ -4273,9 +4278,9 @@ fn settle_all(
                 true
             }
             StepEnd::Failed(FailReason::Crash { detail })
-                if !signaled_retried && cli_was_signaled(detail) =>
+                if signaled_retries < MAX_SIGNALED_RETRIES && cli_was_signaled(detail) =>
             {
-                signaled_retried = true;
+                signaled_retries += 1;
                 report.session_id.is_none()
             }
             _ => return Some(report),

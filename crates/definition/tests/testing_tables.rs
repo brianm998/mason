@@ -721,27 +721,24 @@ fn shards_parse_and_need_a_shard_command() {
 }
 
 #[test]
-fn narrowed_shard_keys_parse() {
-    // #873
-    let base = r#"rerun = "cargo nextest run {tests}""#;
-    let d = parse(&with(
-        base,
-        &format!(
-            "{base}\nshards = 2\nshard_command = \"x\"\nshard_dev_command = \"y {{packages}}\"\nshard_over_s = 300"
-        ),
-    ))
-    .unwrap();
-    let s = d.testing.suite("unit").unwrap();
-    assert_eq!(s.shard_dev_command.as_deref(), Some("y {packages}"));
-    assert_eq!(s.shard_over_s, 300);
-    let plain = parse(&with(base, base)).unwrap();
-    let s = plain.testing.suite("unit").unwrap();
-    assert_eq!((s.shard_dev_command.as_deref(), s.shard_over_s), (None, 0));
-    for extra in ["shard_over_s = 0", "shard_over_s = \"ten\""] {
-        let p = problems(&with(base, &format!("{base}\n{extra}")));
-        assert!(
-            p.iter().any(|x| x.contains("whole number of seconds")),
-            "{extra}: {p:?}"
+fn a_pytest_suite_narrowed_by_dotted_names_warns_and_file_does_not() {
+    // #924: pytest takes paths, so `{}` alone (a dotted name) names a file that is not there.
+    let warn = |each: &str| {
+        let keys = format!(
+            "rerun = \"cargo nextest run {{tests}}\"\nnarrow_command = \"uv run pytest -v {{tests}}\"\nnarrow_tests = \"pipeline/tests/*.py\"\nnarrow_root = \"pipeline/\"\nnarrow_each = \"{each}\""
         );
-    }
+        let d = parse(&with(r#"rerun = "cargo nextest run {tests}""#, &keys)).unwrap();
+        assert!(validate(&d, &Capabilities::now()).is_empty());
+        mason_definition::validate::warnings(&d, &Capabilities::now())
+            .iter()
+            .map(|w| w.to_string())
+            .collect::<Vec<_>>()
+    };
+    let w = warn("{}");
+    assert!(w.iter().any(|x| x.contains("use {file}")), "{w:?}");
+    assert!(!warn("{file}").iter().any(|x| x.contains("pytest takes")));
+    assert!(!warn("{path}").iter().any(|x| x.contains("pytest takes")));
+    assert!(!warn("{file}::{}")
+        .iter()
+        .any(|x| x.contains("pytest takes")));
 }
