@@ -209,11 +209,28 @@ pub fn select_later(n: &Narrow, files: &BTreeMap<String, String>, change: &Chang
 }
 
 /// The suite's narrowed command: `{tests}` becomes `narrow_each` for each unit, joined by
-/// spaces, with `{}` in it the unit's name.
+/// spaces. In it `{}` is the unit's name, `{file}` its file's path under `narrow_root` and
+/// `{path}` its path from the repository root (#924). A smoke unit has no file; both give its
+/// name.
 pub fn command(n: &Narrow, picked: &[Unit]) -> String {
     let each: Vec<String> = picked
         .iter()
-        .map(|u| n.each.replace("{}", &u.name))
+        .map(|u| {
+            let (file, path) = if u.file.is_empty() {
+                (u.name.as_str(), u.name.as_str())
+            } else {
+                let rel = n
+                    .root
+                    .as_deref()
+                    .and_then(|r| u.file.strip_prefix(r))
+                    .unwrap_or(&u.file);
+                (rel, u.file.as_str())
+            };
+            n.each
+                .replace("{file}", file)
+                .replace("{path}", path)
+                .replace("{}", &u.name)
+        })
         .collect();
     n.command.replace("{tests}", &each.join(" "))
 }
@@ -373,6 +390,47 @@ mod tests {
         assert_eq!(
             command(&gui, &picked),
             "xcodebuild test -only-testing:starTests/DropZoneTests -only-testing:starTests/DeltaTests"
+        );
+    }
+
+    fn pytest(each: &str) -> Narrow {
+        Narrow {
+            tests: "pipeline/tests/test_*.py".into(),
+            root: Some("pipeline/".into()),
+            split: None,
+            command: "uv run pytest -v {tests}".into(),
+            each: each.into(),
+            never: vec![],
+            smoke: vec![],
+        }
+    }
+
+    fn unit(name: &str, file: &str) -> Unit {
+        Unit {
+            name: name.into(),
+            file: file.into(),
+            lines: (1, 1),
+        }
+    }
+
+    #[test]
+    fn file_and_path_placeholders_name_the_unit_by_its_file() {
+        let u = [unit("tests.test_engine", "pipeline/tests/test_engine.py")];
+        let run = |each: &str| command(&pytest(each), &u);
+        assert_eq!(run("{file}"), "uv run pytest -v tests/test_engine.py");
+        assert_eq!(
+            run("{path}"),
+            "uv run pytest -v pipeline/tests/test_engine.py"
+        );
+        assert_eq!(run("{}"), "uv run pytest -v tests.test_engine");
+    }
+
+    #[test]
+    fn a_split_unit_gives_its_file_and_its_class() {
+        let u = [unit("TestA", "pipeline/tests/test_x.py")];
+        assert_eq!(
+            command(&pytest("{file}::{}"), &u),
+            "uv run pytest -v tests/test_x.py::TestA"
         );
     }
 }
