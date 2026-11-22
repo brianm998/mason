@@ -1,0 +1,14 @@
+.mason/mason.toml
+.mason/run.json
+crates/daemon/src/hostedcheck.rs
+crates/daemon/src/jobs.rs
+crates/daemon/src/remote.rs
+crates/daemon/src/suites.rs
+crates/daemon/tests/it/fallback_lease.rs
+crates/definition/src/testing_parse.rs
+crates/definition/tests/testing_tables.rs
+crates/testing/src/model.rs
+docs/decisions/0823-checks-give-an-answer.md
+docs/stages/s830.md
+scripts/exit/s830.sh
+scripts/run-changed-exit-scripts.sh
