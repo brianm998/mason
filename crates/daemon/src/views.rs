@@ -2396,9 +2396,19 @@ mod batch_state_tests {
 
     #[test]
     fn a_red_batch_in_a_split_round_is_a_warning_not_running_suites() {
-        let s = batch_state(&facts("red", "lint is red in lint (3 tests)", 1, 1_000, None));
+        let s = batch_state(&facts(
+            "red",
+            "lint is red in lint (3 tests)",
+            1,
+            1_000,
+            None,
+        ));
         assert_eq!(s.severity, "warn");
-        assert!(s.text.contains("splitting (round 1, 5 tasks left)"), "{}", s.text);
+        assert!(
+            s.text.contains("splitting (round 1, 5 tasks left)"),
+            "{}",
+            s.text
+        );
         assert!(!s.text.contains("running suites"));
     }
 
