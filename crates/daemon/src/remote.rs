@@ -4273,13 +4273,15 @@ mod tests {
 
     /// A fake Actions API: per repository, runs in two lists (`in_progress`, `queued`) behind one
     /// ETag, jobs with labels, a repository the token cannot read, and a request log.
+    type FakeJobs = Vec<(String, String)>;
+    type FakeRuns = Vec<(u64, String, String, FakeJobs)>;
+    type FakeSeed<'a> = Vec<(&'a str, Vec<(u64, &'a str, &'a str, FakeJobs)>)>;
+
     #[derive(Default)]
     struct FakeActions {
         etag: Mutex<String>,
         /// repo -> run id -> (workflow name, workflow file, jobs as (status, label))
-        repos: Mutex<
-            std::collections::BTreeMap<String, Vec<(u64, String, String, Vec<(String, String)>)>>,
-        >,
+        repos: Mutex<std::collections::BTreeMap<String, FakeRuns>>,
         log: Mutex<Vec<String>>,
     }
 
@@ -4373,7 +4375,7 @@ mod tests {
         )
     }
 
-    fn fake(repos: Vec<(&str, Vec<(u64, &str, &str, Vec<(String, String)>)>)>) -> Arc<FakeActions> {
+    fn fake(repos: FakeSeed) -> Arc<FakeActions> {
         let api = Arc::new(FakeActions {
             etag: Mutex::new("\"a\"".into()),
             ..Default::default()
