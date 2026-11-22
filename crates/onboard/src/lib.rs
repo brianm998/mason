@@ -197,7 +197,7 @@ pub fn setup(
         }
     }
     let test_cmd = if kept.is_empty() {
-        say(&format!("\nwarning: no test suite is set up, so the test step runs `true` and proves nothing. Add one in .mason/mason.toml (see `mason test parse`) before trusting a landing."));
+        say("\nwarning: no test suite is set up, so the test step runs `true` and proves nothing. Add one in .mason/mason.toml (see `mason test parse`) before trusting a landing.");
         "true".to_string()
     } else {
         kept.iter()

@@ -8,13 +8,11 @@
 //! never does. Then it registers the project with a running masond, files the proof task and
 //! points at the monitor.
 
-pub use mason_onboard::{
-    detect, filing_file, land, overlay_path, questions, suites, summary, FILING_FILES,
-};
+pub use mason_onboard::{detect, land, overlay_path, questions, summary, FILING_FILES};
 
 use crate::client;
 use mason_landing::git;
-use mason_onboard::questions::{Detected, Mode, Question};
+use mason_onboard::questions::{Detected, Mode, Question, SETUP_BRANCH};
 use serde_json::json;
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
