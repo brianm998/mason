@@ -35,7 +35,7 @@ expect_refused "missing SPDX" scripts/exit/s3.sh '#!/usr/bin/env bash\necho hi\n
 # The fixtures are built from pieces so this script does not trip the lint it tests.
 pcre='(?'; empty="''"
 expect_refused "PCRE grep -E" scripts/exit/s4.sh "#!/usr/bin/env bash\n# SPDX-License-Identifier: GPL-3.0-or-later\necho a | grep -E '${pcre}:a)'\n"
-expect_refused "two cargo test names" scripts/exit/s5.sh '#!/usr/bin/env bash\n# SPDX-License-Identifier: GPL-3.0-or-later\ncargo test -p x --test it a:: b::\n'
+expect_refused "two cargo test names" scripts/exit/s5.sh '#!/usr/bin/env bash\n# SPDX-License-Identifier: GPL-3.0-or-later\ncargo test -p x --test it a:: b::\n' # guard-ok: fixture package
 expect_refused "sed -i empty suffix" scripts/exit/s6.sh "#!/usr/bin/env bash\n# SPDX-License-Identifier: GPL-3.0-or-later\nsed -i $empty x f\n"
 bash -c "$cmd" || { echo "FAIL tree not clean again"; exit 1; }
 

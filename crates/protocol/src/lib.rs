@@ -18,7 +18,7 @@ pub mod client;
 use prost::Message;
 
 /// The protocol version this build speaks.
-pub const PROTOCOL: u32 = 1;
+pub const PROTOCOL: u32 = 2;
 
 /// The oldest client protocol this build still serves: current and previous, so
 /// that a daemon and its monitors need not update at the same moment.

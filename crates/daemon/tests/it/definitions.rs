@@ -1003,3 +1003,64 @@ fn the_project_mode_sits_between_the_task_and_the_global_mode() {
     assert_eq!(line(t.0)["from"], "task");
     assert_eq!(line(other.0)["mode"], "favor-local");
 }
+
+/// #832: `favor-local` runs here while this machine has room, and starts on GitHub when its
+/// `compile` slot is held and requests are already waiting for it. A run that is over is
+/// forgotten, so the next one is decided afresh. No duration is asserted.
+#[test]
+fn favor_local_spills_to_github_only_while_this_machine_is_full() {
+    use mason_daemon::remote::{executor_for, Executor, Kind};
+    use mason_daemon::sched::LeaseState;
+    let s = scratch_with(Some(DEF_SKIP), happy_script());
+    s.write_project(
+        "scratch",
+        "test -f hello.txt",
+        "[remote_runs]\nkind = \"github-actions\"\nrepo = \"o/r\"\ntoken = \"env:MASON_T832_TOKEN\"\nmode = \"favor-local\"\nspill_after = 1\n",
+    );
+    let d = s.start();
+    let t = flagged(&d, "Favors this Mac");
+    let suite = mason_testing::Suite::new("unit", "true", mason_testing::ParserKind::Tap);
+    let at = |d: &std::sync::Arc<mason_daemon::Daemon>| {
+        executor_for(d, "scratch", Kind::Check, Some((Some(t), &suite)))
+    };
+    let compile = std::collections::BTreeMap::from([("compile".to_string(), 1u32)]);
+    d.broker.set_limit("compile", 1).unwrap();
+
+    // The slot is free: here, and it says why.
+    assert_eq!(at(&d), Executor::Local);
+    let why = || {
+        mason_daemon::place::seen(Some(t.0))
+            .last()
+            .map(|v| v["why"].as_str().unwrap_or("").to_string())
+            .unwrap_or_default()
+    };
+    assert!(
+        why().contains("favor-local, 1 compile slot free"),
+        "{}",
+        why()
+    );
+    mason_daemon::place::forget("scratch", Some(t.0), "unit", "check");
+
+    // The slot is held and another request waits for it: GitHub.
+    let held = d.broker.lease_open_as("hold", &compile, None);
+    crate::support::wait_for("the hold to be granted", 60, || {
+        matches!(d.broker.lease_poll(held), LeaseState::Granted { .. })
+    });
+    let waiter = d.broker.lease_open_as("waiter", &compile, None);
+    assert!(!matches!(
+        d.broker.lease_poll(waiter),
+        LeaseState::Granted { .. }
+    ));
+    assert!(matches!(at(&d), Executor::GitHub { .. }));
+    assert!(
+        why().contains("favor-local, no compile slot free and 1 waiting"),
+        "{}",
+        why()
+    );
+
+    // Released, and the run over: the next one runs here.
+    d.broker.lease_close(waiter);
+    d.broker.lease_close(held);
+    mason_daemon::place::forget("scratch", Some(t.0), "unit", "check");
+    assert_eq!(at(&d), Executor::Local);
+}

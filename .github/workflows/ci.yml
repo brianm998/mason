@@ -125,7 +125,8 @@ jobs:
         os: [ubuntu-latest]
         shard: [1, 2, 3, 4, 5, 6]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    # The full run's repeat scripts (s170, s482, s497, s636, s773) take about 60 minutes of cargo time, so the job limit is 90.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
