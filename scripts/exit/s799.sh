@@ -8,7 +8,7 @@ cd "$(dirname "$0")/../.."
 awk '/^\[suite.swift-clients\]/{f=1;next} /^\[/{f=0} f&&/^runs_on = "macos-latest"/{ok=1} END{exit !ok}' .mason/mason.toml
 f=crates/daemon/src/landing.rs
 # Every CheckSpec that names a suite in the floor and the fast tier carries the suite's placement.
-n=$(grep -c 'place: Some((None, Box::new(suite.clone())))' "$f")
+n=$(grep -cE 'Box::new\(crate::hostedcheck::without_build\(suite\)\)' "$f")
 [ "$n" -ge 2 ] || { echo "s799: floor and fast tier must pass the suite's placement" >&2; exit 1; }
 # The floor spec must not be a global one.
 awk '/id_prefix: format!\("\{prefix\}-floor-/{f=1} f&&/global: true/{bad=1} f&&/global:/{exit} END{exit bad}' "$f" \
