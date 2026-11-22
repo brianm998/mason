@@ -131,7 +131,7 @@ daemon=$!
 until m status >/dev/null 2>&1; do kill -0 "$daemon" || { cat "$root/masond.log" >&2; exit 1; }; sleep 0.1; done
 
 echo "== the switch is off"
-m remote status | grep -q '^default local' || fail "remote is not local by default"
+m remote status | grep -q '^mode local' || fail "remote is not local by default"
 pushes() { awk '$3 ~ /^refs\/heads\/mason\/run\// && $2 !~ /^0+$/' "$root/pushes.log" | wc -l | tr -d ' '; }
 
 echo "== 1. --run-on github runs remotely although the switch is off"
@@ -160,6 +160,6 @@ m task run-on 2 default | grep -q 'this Mac (global switch)' || fail "run-on def
 
 echo "== 4. refusals"
 m task override 0 run_on github >/dev/null 2>&1 && fail "run_on was accepted as a plain override"
-m task add "Bad" --project alpha --body "q" --run-on remote >/dev/null 2>&1 && fail "--run-on remote was accepted"
+m task add "Bad" --project alpha --body "q" --run-on sideways >/dev/null 2>&1 && fail "--run-on sideways was accepted"
 m task run-on 0 sideways >/dev/null 2>&1 && fail "run-on sideways was accepted"
 echo "s727 passed"
