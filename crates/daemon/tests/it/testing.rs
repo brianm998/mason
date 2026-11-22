@@ -1321,7 +1321,10 @@ fn owe(d: &Arc<mason_daemon::Daemon>, t: TaskId, scopes: &[&str]) {
     d.store
         .write(|c| {
             c.execute("DELETE FROM suite_green", [])?;
-            c.execute("DELETE FROM suite_skip_green", []).map(|_| ())
+            c.execute("DELETE FROM suite_skip_green", [])?;
+            // The landing recorded the tip's tree as tested; the debt is for a run that has not
+            // been made, so that record would pay it without one.
+            c.execute("DELETE FROM evidence", []).map(|_| ())
         })
         .unwrap();
 }
@@ -1351,32 +1354,7 @@ fn three_debts_of_different_scopes_on_one_tip_run_the_suite_once_and_one_green_s
     wait_state(&d, t, State::Landed, 120);
     owe(&d, t, &["suite:checks", "step:test", "tests:all"]);
     let before = runs_of(&log);
-    let c = d.broker.compilation();
-    eprintln!(
-        "PROBE pending={:?} used={} limit={} gha={} idle={}",
-        c.pending.len(),
-        c.used,
-        c.limit,
-        d.broker.gha_waiting(),
-        0
-    );
     mason_daemon::suites::run_idle_debts(&d);
-    for x in d.store.debts(Some(t.0), false).unwrap() {
-        eprintln!(
-            "PROBE pay {} -> {:?}",
-            x.id,
-            mason_daemon::suites::pay(&d, x.id)
-        );
-    }
-    eprintln!(
-        "PROBE debts={:?}",
-        d.store
-            .debts(Some(t.0), false)
-            .unwrap()
-            .iter()
-            .map(|x| (x.scope.clone(), x.status.clone(), x.how.clone()))
-            .collect::<Vec<_>>()
-    );
     assert_eq!(
         runs_of(&log) - before,
         1,
