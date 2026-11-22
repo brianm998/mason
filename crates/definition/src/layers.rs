@@ -419,11 +419,26 @@ mod tests {
     }
 
     #[test]
+    fn run_on_takes_the_placement_modes_and_nothing_else() {
+        let d = builtin();
+        // github and local, and the placement modes s816 added beside them.
+        for good in ["github", "local", "remote", "favor-local", "favor-remote"] {
+            assert!(check_override(&d, "run_on", good).is_ok(), "{good}");
+        }
+        for bad in ["", "GitHub", "anywhere", "default"] {
+            let e = check_override(&d, "run_on", bad).unwrap_err();
+            assert!(e.contains("github") && e.contains("local"), "{e}");
+        }
+    }
+
+    /// The name the known-red ledger filed (#896): every entry of RUN_ON_VALUES is taken.
+    #[test]
     fn run_on_takes_github_or_local_and_nothing_else() {
         let d = builtin();
-        assert!(check_override(&d, "run_on", "github").is_ok());
-        assert!(check_override(&d, "run_on", "local").is_ok());
-        for bad in ["", "GitHub", "remote", "default"] {
+        for v in RUN_ON_VALUES {
+            assert!(check_override(&d, "run_on", v).is_ok(), "{v}");
+        }
+        for bad in ["", "GitHub", "default", "nowhere"] {
             let e = check_override(&d, "run_on", bad).unwrap_err();
             assert!(e.contains("github") && e.contains("local"), "{e}");
         }

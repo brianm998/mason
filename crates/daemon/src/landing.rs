@@ -915,7 +915,9 @@ fn form_and_start(
     }
     if d.landing.draining() {
         // A self-update is waiting for the running batches: nothing new starts, and the
-        // queue is left as it is. `set_draining(false)` wakes this again.
+        // queue is left as it is. `set_draining(false)` wakes this again. A deliberate hold
+        // is not idleness.
+        d.landing.lock().idle_ms.remove(&pid);
         return (waiting.len(), Some(Duration::from_secs(1)));
     }
     let cfg = match read_config(d, pid) {
@@ -927,6 +929,8 @@ fn form_and_start(
             // Git failed: nobody knows what the configuration says, so nothing starts and
             // nothing is failed. The queue stays as it is; look again shortly.
             note_read(d, pid, Some(&e), UNREAD_ALERT_AFTER);
+            // Held and alerted on its own: not idleness.
+            d.landing.lock().idle_ms.remove(&pid);
             return (waiting.len(), Some(Duration::from_secs(2)));
         }
         Err(ConfigError::Refused(e)) => {
@@ -978,6 +982,10 @@ fn form_and_start(
                 });
             }
         }
+    }
+    if normal.is_empty() && singles.is_empty() {
+        // Every waiting task is held behind a freeze: a deliberate hold, not idleness.
+        d.landing.lock().idle_ms.remove(&pid);
     }
     for (w, kind) in singles {
         take(d, pid, w.task);
@@ -1212,6 +1220,7 @@ fn run_batch(
                     reused: std::sync::atomic::AtomicUsize::new(0),
                     yielded: std::sync::atomic::AtomicBool::new(false),
                     lint_files: Mutex::new(vec![]),
+                    lint_where: Mutex::new(String::new()),
                     host,
                     pr: Mutex::new(None),
                     service_error: Mutex::new(None),
@@ -1312,6 +1321,9 @@ struct Runner {
     /// The files the last lint red named (rustfmt's `Diff in`, clippy's `-->`): the ladder
     /// parks the tasks whose diff touches one, before it reruns or splits anything (s691).
     lint_files: Mutex<Vec<String>>,
+    /// The `file:line` places of the last red lint, as ` (at a.rs:1)`: a task parked for a
+    /// lint red is told where to look.
+    lint_where: Mutex<String>,
     host: Option<Arc<dyn GitHostAdapter>>,
     /// The pull request the batch is about to merge (pr modes).
     pr: Mutex<Option<OpenPr>>,
@@ -2884,6 +2896,9 @@ impl Runner {
                     true,
                     &self.members(def),
                     reuse,
+                    // The batch's lease holds this machine's slots for the whole run, so a suite
+                    // that falls back from GitHub runs under it (s911).
+                    _lease.is_some(),
                 );
                 stop.store(true, std::sync::atomic::Ordering::SeqCst);
                 r
@@ -3021,6 +3036,7 @@ impl Runner {
                 self.sink(),
                 build,
                 serial,
+                _lease.is_some(),
             );
             stop.store(true, std::sync::atomic::Ordering::SeqCst);
             r
@@ -3677,6 +3693,8 @@ impl Runner {
                     out.failed.insert(name.clone());
                     *self.lint_files.lock().unwrap_or_else(|e| e.into_inner()) =
                         lint_files(&o.full);
+                    *self.lint_where.lock().unwrap_or_else(|e| e.into_inner()) =
+                        lint_places(&o.full);
                     out.notes.push(format!(
                         "{name}: the batch is not lint clean ({ran_on}){}{}\n{}",
                         if o.timed_out { " (timed out)" } else { "" },
@@ -4770,7 +4788,11 @@ impl Runner {
         for id in blamed {
             parked.push(Parked {
                 task: *id,
-                reason: format!("red in batch #{batch_id}: {}", vr.failed.iter().cloned().collect::<Vec<_>>().join(", ")),
+                reason: format!(
+                    "red in batch #{batch_id}: {}{}",
+                    vr.failed.iter().cloned().collect::<Vec<_>>().join(", "),
+                    self.lint_reason_places(vr)
+                ),
                 feedback: format!(
                     "Your change made {} red when it landed with the others (batch #{batch_id}).\n{}",
                     vr.failed.iter().cloned().collect::<Vec<_>>().join(", "),
@@ -4780,6 +4802,23 @@ impl Runner {
             });
         }
         active.retain(|t| !blamed.contains(&t.id));
+    }
+
+    /// Where the lint pointed, for a parked task's reason, when every failed suite is in the
+    /// lint tier; empty otherwise.
+    fn lint_reason_places(&self, vr: &crate::suites::OverRun) -> String {
+        let tier: Vec<String> = self
+            .cfg
+            .tier("lint")
+            .map(|t| t.suites.clone())
+            .unwrap_or_default();
+        if vr.failed.is_empty() || !vr.failed.iter().all(|f| tier.contains(f)) {
+            return String::new();
+        }
+        self.lint_where
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// True when the task's landing run is no longer its open run (retried or canceled).
@@ -5195,6 +5234,7 @@ impl Runner {
             false,
             &crate::suites::Members::default(),
             false,
+            _lease.is_some(),
         );
         {
             let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -5330,6 +5370,16 @@ mod idle_tests {
         assert_eq!(s.idle_ms.get(&p).copied(), None);
         s.note_idle(p, true, false, d);
         s.note_idle(p, false, false, d);
+        assert_eq!(s.idle_ms.get(&p).copied(), None);
+    }
+
+    #[test]
+    fn a_deliberate_hold_resets_the_idle_spell() {
+        let p = ProjectId(1);
+        let mut s = State::default();
+        s.note_idle(p, true, false, Duration::from_millis(500));
+        // What a drain, an unread configuration or a freeze does in `form_and_start`.
+        s.idle_ms.remove(&p);
         assert_eq!(s.idle_ms.get(&p).copied(), None);
     }
 }

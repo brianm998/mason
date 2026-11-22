@@ -59,6 +59,7 @@ impl SweepState {
 }
 
 /// Zombie children of `parent` right now, from `ps`.
+#[cfg(unix)]
 fn zombie_children(parent: u32) -> HashSet<u32> {
     let Ok(out) = std::process::Command::new("ps")
         .args(["-A", "-o", "pid=,ppid=,stat="])
