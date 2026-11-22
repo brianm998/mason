@@ -170,11 +170,35 @@ pub fn pid_alive(pid: u32) -> bool {
     mason_platform::process::is_alive(pid)
 }
 
+/// Whether the process recorded as the host in `dir` is still that process: the pid is
+/// alive, its start time is the recorded `host_start` (a reused pid has another), and it
+/// is not a zombie (dead, but not yet reaped by its parent).
+fn host_is_running(dir: &Path, info: &HostInfo) -> bool {
+    if !pid_alive(info.host_pid) {
+        return false;
+    }
+    let kv = read_kv(&dir.join("host.kv")).unwrap_or_default();
+    kv_matches(&kv, "host_start", info.host_pid) && !is_zombie(info.host_pid)
+}
+
+/// Whether `pid` is a zombie. Always false where `ps` has no such state (Windows).
+pub fn is_zombie(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        ps_field(pid, "stat").is_some_and(|s| s.starts_with('Z'))
+    }
+    #[cfg(windows)]
+    {
+        let _ = pid;
+        false
+    }
+}
+
 pub fn status_of(dir: &Path) -> io::Result<HostStatus> {
     let info = HostInfo::read(dir)?;
     let state = match ExitRecord::read(dir) {
         Ok(rec) => HostState::Exited(rec),
-        Err(_) if pid_alive(info.host_pid) => HostState::Running,
+        Err(_) if host_is_running(dir, &info) => HostState::Running,
         Err(_) => HostState::Lost,
     };
     let last_heartbeat_ms = fs::read_to_string(dir.join("hb"))
@@ -654,5 +678,59 @@ mod ran_past_tests {
             ran_past(D::from_secs(1800), none.path()),
             "no records: it did"
         );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod status_tests {
+    use super::*;
+
+    fn host_dir(start: &str) -> tempfile::TempDir {
+        let t = tempfile::tempdir().unwrap();
+        write_kv(
+            &t.path().join("host.kv"),
+            &[
+                ("id", "t1r1-1".to_string()),
+                ("host_pid", std::process::id().to_string()),
+                ("host_start", start.to_string()),
+                ("child_pid", "0".to_string()),
+                ("sock", t.path().join("sock").display().to_string()),
+                ("started_ms", "0".to_string()),
+                ("heartbeat_ms", "0".to_string()),
+            ],
+        )
+        .unwrap();
+        t
+    }
+
+    #[test]
+    fn a_live_pid_with_another_start_time_is_lost() {
+        let t = host_dir("Wed Nov 18 07:03:30 2026");
+        assert_eq!(status_of(t.path()).unwrap().state, HostState::Lost);
+    }
+
+    #[test]
+    fn a_live_host_with_its_recorded_start_time_is_running() {
+        let start = proc_start(std::process::id()).unwrap();
+        let t = host_dir(&start);
+        assert_eq!(status_of(t.path()).unwrap().state, HostState::Running);
+    }
+
+    #[test]
+    fn a_zombie_is_not_running() {
+        let child = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+        let pid = child.id();
+        while !is_zombie(pid) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let t = host_dir(&proc_start(pid).unwrap());
+        let kv = read_kv(&t.path().join("host.kv")).unwrap();
+        let mut pairs: Vec<(&str, String)> =
+            kv.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+        pairs.retain(|(k, _)| *k != "host_pid");
+        pairs.push(("host_pid", pid.to_string()));
+        write_kv(&t.path().join("host.kv"), &pairs).unwrap();
+        assert_eq!(status_of(t.path()).unwrap().state, HostState::Lost);
+        drop(child);
     }
 }
