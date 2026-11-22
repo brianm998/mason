@@ -2714,7 +2714,7 @@ pub fn run_alone(
         };
         if build {
             if let Some(b) = suite.build.as_deref() {
-                match run_build(&who, &suite, b, 0, wt) {
+                match run_build(who, &suite, b, 0, wt) {
                     Built::Ok => {}
                     Built::Gone => {
                         red(&mut out, format!("{name}: stopped"));
@@ -2728,7 +2728,7 @@ pub fn run_alone(
             }
         }
         let id = format!("{id_prefix}-n-{name}");
-        match run_tests_alone(&who, &suite, wt, tests, &id, serial, None) {
+        match run_tests_alone(who, &suite, wt, tests, &id, serial, None) {
             Some(still) if still.is_empty() => out.notes.push(format!(
                 "{name}: {} failing test(s) green on their own",
                 tests.len()
