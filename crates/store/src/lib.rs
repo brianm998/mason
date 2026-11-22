@@ -2683,6 +2683,37 @@ impl Store {
         })
     }
 
+    /// Forget every red run of `project` whose task key includes `task` (at any head), and say
+    /// how many went. Greens stay. The id is matched whole inside the `id@head,id@head` key made
+    /// by [`batch_run_key`]: `#84` does not match `#841`.
+    pub fn forget_red_batch_runs(&self, project: &str, task: u64) -> Result<usize, StoreError> {
+        let p = project.to_string();
+        self.write(move |c| {
+            let rows: Vec<(String, String, String, String)> = {
+                let mut st = c.prepare(
+                    "SELECT base, tasks, filter, project FROM batch_runs WHERE project = ?1 AND green = 0",
+                )?;
+                let rows = st.query_map(params![p], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                })?;
+                rows.collect::<Result<_, _>>()?
+            };
+            let mut gone = 0;
+            for (base, tasks, filter, project) in rows {
+                let includes = tasks
+                    .split(',')
+                    .any(|e| e.split('@').next().and_then(|i| i.parse::<u64>().ok()) == Some(task));
+                if includes {
+                    gone += c.execute(
+                        "DELETE FROM batch_runs WHERE project = ?1 AND base = ?2 AND tasks = ?3 AND filter = ?4",
+                        params![project, base, tasks, filter],
+                    )?;
+                }
+            }
+            Ok(gone)
+        })
+    }
+
     /// Runs older than `before_ms` are forgotten.
     pub fn prune_batch_runs(&self, before_ms: u64) -> Result<usize, StoreError> {
         self.write(move |c| {
