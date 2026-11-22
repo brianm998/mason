@@ -322,6 +322,15 @@ impl ProjectCfg {
     }
 }
 
+/// Does the project have a full-test schedule with a trigger (`at` or `when_quiet`)? A
+/// batch narrowed to its tests (s804) needs one: the whole suite runs there.
+pub fn has_full_test_trigger(specs: &[Spec]) -> bool {
+    specs.iter().any(|s| {
+        s.ci.as_ref()
+            .is_some_and(|c| c.at.is_some() || c.when_quiet.is_some())
+    })
+}
+
 /// The row name of a project's schedule.
 pub fn row_name(project: &str, name: &str) -> String {
     format!("{project}/{name}")

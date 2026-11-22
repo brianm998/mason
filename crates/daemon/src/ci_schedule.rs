@@ -217,7 +217,7 @@ pub fn is_due(row: &ScheduleRow, spec: &Spec, now: u64) -> bool {
 
 // ---- the record of full tests ------------------------------------------------------------------
 
-fn tested(rows: &[FullTestRow]) -> Vec<full::Tested> {
+pub(crate) fn tested(rows: &[FullTestRow]) -> Vec<full::Tested> {
     rows.iter()
         .map(|r| full::Tested {
             commit: r.commit.clone(),

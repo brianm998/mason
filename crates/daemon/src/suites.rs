@@ -2912,6 +2912,64 @@ fn narrow_packages_for_step(
     Some((s, note, groups))
 }
 
+/// A batch suite narrowed to the union diff `base..HEAD` in `wt` (s804): its `dev_command` (and
+/// `dev_build`) over the affected tests plus the smoke set, the pick a task's test step makes.
+/// `Err` says why it runs whole: no `dev_command`, an empty union, or a path that reaches every
+/// target (`Cargo.lock`, `Cargo.toml`, `build.rs`, `tests/support/**`, ...). The copy is marked
+/// narrowed, so it records no evidence.
+pub fn narrow_for_batch(
+    def: &Definition,
+    suite: &Suite,
+    wt: &Path,
+    base: &str,
+) -> Result<(Suite, String), String> {
+    let dc = suite
+        .dev_command
+        .as_ref()
+        .ok_or_else(|| "it has no dev_command".to_string())?;
+    let diff = git::run(wt, &["diff", "--name-only", base, "HEAD"]).map_err(|e| e.to_string())?;
+    let all: Vec<String> = diff
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .collect();
+    if all.is_empty() {
+        return Err("the union changes nothing".into());
+    }
+    let (paths, dropped) = split_for_suite(def, suite, &all);
+    let named = [
+        Some(suite.command.as_str()),
+        suite.build.as_deref(),
+        suite.dev_command.as_deref(),
+        suite.dev_build.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join("\n");
+    let n = crate::scope::narrow_for(wt, &paths, crate::scope::wants_tests(dc), true, &named)?;
+    let mut s = suite.clone();
+    s.command = crate::scope::expand(dc, &n, false);
+    if let Some(db) = &suite.dev_build {
+        s.build = Some(crate::scope::expand(db, &n, true));
+    }
+    s.min_tests = 1;
+    s.narrowed = true;
+    let left = left_out_note(&dropped);
+    let note = format!(
+        "{}: narrowed to {} over the batch's {} changed file(s){}; the scheduled full test runs it whole",
+        suite.name,
+        n.describe(),
+        all.len(),
+        if left.is_empty() {
+            String::new()
+        } else {
+            format!(" ({left})")
+        }
+    );
+    Ok((s, note))
+}
+
 /// The new-file line numbers a `git diff -U0` adds or changes (`@@ -a,b +c,d @@`).
 fn added_lines(diff: &str) -> Vec<u32> {
     let mut out = vec![];
@@ -6285,5 +6343,111 @@ mod timeout_tests {
         let none = format!("`s` is red ({RAN_OUT_OF_TIME}).\nLast output of `s`:\n");
         assert_eq!(timeout_names(&none), Some(vec![]));
         assert_eq!(timeout_names("`s` is red (3 tests failed).\n"), None);
+    }
+}
+
+#[cfg(test)]
+mod narrow_batch_tests {
+    use super::*;
+    use mason_testing::ParserKind;
+
+    fn git_in(d: &Path, args: &[&str]) {
+        let ok = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .current_dir(d)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git {args:?}");
+    }
+
+    fn put(d: &Path, p: &str, s: &str) {
+        let f = d.join(p);
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        std::fs::write(f, s).unwrap();
+    }
+
+    /// Two crates, `a` and `b`, one commit: the base.
+    fn repo() -> tempfile::TempDir {
+        let d = tempfile::tempdir().unwrap();
+        let r = d.path();
+        put(
+            r,
+            "Cargo.toml",
+            "[workspace]\nresolver = \"2\"\nmembers = [\"crates/*\"]\n",
+        );
+        for n in ["a", "b"] {
+            put(
+                r,
+                &format!("crates/{n}/Cargo.toml"),
+                &format!("[package]\nname = \"{n}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
+            );
+            put(r, &format!("crates/{n}/src/lib.rs"), "");
+        }
+        git_in(r, &["init", "-q"]);
+        git_in(r, &["add", "-A"]);
+        git_in(r, &["commit", "-q", "-m", "base"]);
+        d
+    }
+
+    fn base(d: &Path) -> String {
+        git::run(d, &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_string()
+    }
+
+    fn commit(d: &Path, file: &str) {
+        put(d, file, "// changed\n");
+        git_in(d, &["add", "-A"]);
+        git_in(d, &["commit", "-q", "-m", "change"]);
+    }
+
+    fn suite() -> Suite {
+        let mut s = Suite::new("cw", "cargo test --workspace", ParserKind::Tap);
+        s.dev_command = Some("cargo test {tests_for_change}".into());
+        s
+    }
+
+    #[test]
+    fn a_batch_touching_one_crate_runs_the_narrowed_command_over_the_union() {
+        let d = repo();
+        let b = base(d.path());
+        commit(d.path(), "crates/a/src/lib.rs");
+        let (s, note) = narrow_for_batch(&Definition::empty(), &suite(), d.path(), &b).unwrap();
+        assert!(s.narrowed);
+        assert!(s.command.starts_with("cargo test "), "{}", s.command);
+        assert!(s.command.contains("-p a"), "{}", s.command);
+        assert!(!s.command.contains("-p b"), "{}", s.command);
+        assert!(note.contains("scheduled full test"), "{note}");
+        // A second commit in the other crate joins the union.
+        commit(d.path(), "crates/b/src/lib.rs");
+        let (s, _) = narrow_for_batch(&Definition::empty(), &suite(), d.path(), &b).unwrap();
+        assert!(
+            s.command.contains("-p a") && s.command.contains("-p b"),
+            "{}",
+            s.command
+        );
+    }
+
+    #[test]
+    fn a_batch_touching_cargo_lock_runs_whole() {
+        let d = repo();
+        let b = base(d.path());
+        commit(d.path(), "Cargo.lock");
+        let why = narrow_for_batch(&Definition::empty(), &suite(), d.path(), &b).unwrap_err();
+        assert!(why.contains("Cargo.lock"), "{why}");
+    }
+
+    #[test]
+    fn an_empty_union_and_a_suite_without_a_dev_command_run_whole() {
+        let d = repo();
+        let b = base(d.path());
+        assert!(narrow_for_batch(&Definition::empty(), &suite(), d.path(), &b).is_err());
+        commit(d.path(), "crates/a/src/lib.rs");
+        let mut s = suite();
+        s.dev_command = None;
+        assert!(narrow_for_batch(&Definition::empty(), &s, d.path(), &b).is_err());
     }
 }
