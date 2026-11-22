@@ -876,9 +876,14 @@ fn active_models_lists_only_tasks_that_hold_a_session() {
     .unwrap();
     wait_explained(&d, t2);
     assert_eq!(home_active(&d), (vec![], 0));
-    // A session held by someone else counts, but is not a task's.
+    // A session held by someone else counts, but is not a task's. Under 0747 the
+    // list also holds started steps waiting for a check or a session, so the
+    // hold is opened first: a person's request ranks ahead of pipeline work and
+    // gets the one session, so no task starts during the assertions.
+    let map = std::iter::once(("llm:claude".to_string(), 1)).collect();
+    let id = d.broker.lease_open("other session", &map);
     d.broker.set_limit("llm:claude", 1).unwrap();
-    let (id, held) = hold(&d, "other session", &[("llm:claude", 1)]);
+    let (id, held) = take_when_granted(&d, id, "other session");
     assert_eq!(home_active(&d), (vec![], 1));
     // Lowering the limit below what is held changes nothing about who is listed.
     d.broker.set_limit("llm:claude", 0).unwrap();

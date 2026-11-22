@@ -839,6 +839,16 @@ const STEPS: &[&str] = &[
          at_ms   INTEGER NOT NULL,
          PRIMARY KEY (project, suite)
      );",
+    // When each batch entered each phase (s788), so the monitor can say how long a batch has
+    // been in its state and how long that state usually takes; and the split round it is in.
+    // Additive.
+    "CREATE TABLE batch_phases (
+         batch INTEGER NOT NULL,
+         phase TEXT NOT NULL,
+         at    INTEGER NOT NULL
+     );
+     CREATE INDEX batch_phases_batch ON batch_phases(batch);
+     ALTER TABLE batches ADD COLUMN round INTEGER NOT NULL DEFAULT 0;",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;
