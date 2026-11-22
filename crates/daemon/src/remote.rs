@@ -2794,7 +2794,8 @@ mod tests {
     }
 
     #[test]
-    fn a_due_map_pushes_one_covmap_run_and_returns_the_map_it_made_and_a_fresh_one_pushes_nothing() {
+    fn a_due_map_pushes_one_covmap_run_and_returns_the_map_it_made_and_a_fresh_one_pushes_nothing()
+    {
         use crate::covmap::{make_remote, Want, REMOTE_COMMAND};
         token();
         let r = repo();
@@ -2812,9 +2813,16 @@ mod tests {
             changed_src: true,
             now_secs: 5_000,
         };
-        let m = make_remote(&s, &want, "proj", logs.path(), Duration::from_secs(600), &|| None)
-            .unwrap()
-            .expect("a map was due");
+        let m = make_remote(
+            &s,
+            &want,
+            "proj",
+            logs.path(),
+            Duration::from_secs(600),
+            &|| None,
+        )
+        .unwrap()
+        .expect("a map was due");
         assert_eq!(m.commit, tip);
         assert!(m.knows("crates/daemon/src/holds.rs"));
         assert_eq!(gh.runs_seen.lock().unwrap().len(), 1, "one run was pushed");
@@ -2841,8 +2849,15 @@ mod tests {
             changed_src: true,
             now_secs: 5_000 + 3600,
         };
-        let none = make_remote(&s2, &fresh, "proj", logs.path(), Duration::from_secs(600), &|| None)
-            .unwrap();
+        let none = make_remote(
+            &s2,
+            &fresh,
+            "proj",
+            logs.path(),
+            Duration::from_secs(600),
+            &|| None,
+        )
+        .unwrap();
         assert!(none.is_none());
         assert!(gh2.requests().is_empty(), "{:?}", gh2.requests());
         assert_eq!(refs(&r.bare), "");
@@ -2870,8 +2885,15 @@ mod tests {
             changed_src: true,
             now_secs: 1,
         };
-        let e = make_remote(&s, &want, "proj", logs.path(), Duration::from_secs(600), &|| None)
-            .unwrap_err();
+        let e = make_remote(
+            &s,
+            &want,
+            "proj",
+            logs.path(),
+            Duration::from_secs(600),
+            &|| None,
+        )
+        .unwrap_err();
         assert!(e.contains("not of"), "{e}");
     }
 
