@@ -210,13 +210,18 @@ fn a_branch_that_adds_conflict_markers_goes_back_before_it_joins_a_batch() {
 
 // ---- #816: the floor builds on this Mac while the switch says GitHub --------------------------
 
+const WORKFLOW: &str = "name: mason-run\non:\n  workflow_dispatch:\n";
+
 fn floor_github_world(landing: &str, files: &[(&str, &str)]) -> (W, Arc<AtomicUsize>) {
     let (url, n) = crate::landing::silent_github();
     std::env::set_var("MASON_T816_TOKEN", "x");
     let extra = format!(
         "[remote_runs]\nkind = \"github-actions\"\napi = \"{url}\"\nrepo = \"o/r\"\ntoken = \"env:MASON_T816_TOKEN\"\nruns_on = \"ubuntu-latest\"\n"
     );
-    let w = world_built_extra(landing, &extra, files, false);
+    // The snapshot needs the base's copy of the workflow, as in the real repo.
+    let mut all = vec![(".github/workflows/mason-run.yml", WORKFLOW)];
+    all.extend_from_slice(files);
+    let w = world_built_extra(landing, &extra, &all, false);
     mason_daemon::place::set_global(&w.d, mason_daemon::place::Mode::Remote, "test").unwrap();
     (w, n)
 }
