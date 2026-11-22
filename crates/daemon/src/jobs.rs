@@ -1981,9 +1981,12 @@ impl TestChecks {
             // The one function that decides where runs go (#698) is asked for this suite.
             let placed = |mut s: crate::hostedcheck::CheckSpec, suite: &mason_testing::Suite| {
                 s.place = Some((Some(TaskId(self.task)), Box::new(suite.clone())));
+                // A skip while it waits or runs ends it (#873).
+                s.stop = Some(self.skip_stop(&suite.name));
                 s
             };
             let before = suite.command.clone();
+            let mut split_kept = false;
             // What a changed path can be named in: the commands that run and build the suite.
             let named = [
                 Some(suite.command.as_str()),
@@ -2105,6 +2108,24 @@ impl TestChecks {
                     match narrow(scope, crate::scope::wants_tests(&dc)) {
                         Ok(n) => {
                             suite.command = crate::scope::expand(&dc, &n, false);
+                            // More than one target, or a long one: split across runners (#873).
+                            let (split, why_not) = crate::suites::narrowed_shard(
+                                &self.slots.d,
+                                &self.project,
+                                &suite,
+                                &n,
+                                limit,
+                            );
+                            if let Some((cmd, shards)) = split {
+                                suite.shard_command = Some(cmd);
+                                suite.shards = shards;
+                                suite.narrowed = true;
+                                split_kept = true;
+                                narrowed.push(format!("{name}: split across {shards} runners"));
+                            }
+                            if let Some(w) = why_not {
+                                lines.push(w);
+                            }
                             if let Some(db) = &suite.dev_build {
                                 suite.build = Some(crate::scope::expand(db, &n, true));
                             }
@@ -2127,6 +2148,11 @@ impl TestChecks {
                         "{name}: cannot be narrowed that way, so it runs whole"
                     ));
                 }
+            }
+            // A command that is not the suite's own is not what its `shard_command` runs: one
+            // runner, unless the narrowing above split it for itself (#873).
+            if suite.command != before && !split_kept {
+                suite.shards = 0;
             }
             if let Some(b) = &suite.build {
                 let known = built.iter().find(|(c, _)| c == b).map(|(_, ok)| *ok);
@@ -2175,6 +2201,11 @@ impl TestChecks {
                         self.phase(mason_core::checks::CheckPhase::Building);
                         let res = crate::hostedcheck::run(&self.slots.d, &bspec);
                         drop(lease);
+                        if matches!(&res, Ok(o) if o.stopped.is_some()) {
+                            if let Some(r) = self.skipped_run(&name) {
+                                return r;
+                            }
+                        }
                         let ok = matches!(&res, Ok(o) if o.passed);
                         if !ok {
                             lines.push(match &res {
@@ -2252,6 +2283,13 @@ impl TestChecks {
                 crate::hostedcheck::run_with(&self.slots.d, &rspec, pr.as_ref())
             });
             drop(lease);
+            // The owner skipped testing while it waited or ran: the same answer as a call made
+            // after the skip (#873).
+            if matches!(&res, Ok(o) if o.stopped.is_some()) {
+                if let Some(r) = self.skipped_run(&name) {
+                    return r;
+                }
+            }
             match &res {
                 Ok(o) if o.passed => self.reds.passed(&name),
                 Ok(o) => self.remember_red(&name, &o.id),
@@ -2422,6 +2460,31 @@ impl TestChecks {
     fn skipped_by_owner(&self) -> Option<u64> {
         let step = self.slots.test_step.as_deref()?;
         crate::suites::skip_for(&self.slots.d, TaskId(self.task), "", step)
+    }
+
+    /// A function that says whether the owner skipped testing for this task's suite `suite`
+    /// (or its step, or all of it): `Some(note)` stops a check that waits or runs (#873).
+    fn skip_stop(&self, suite: &str) -> crate::hostedcheck::StopFn {
+        let (d, task, step) = (
+            self.slots.d.clone(),
+            TaskId(self.task),
+            self.slots.test_step.clone(),
+        );
+        let suite = suite.to_string();
+        Arc::new(move || {
+            let step = step.as_deref()?;
+            crate::suites::skip_for(&d, task, &suite, step)
+                .map(|debt| format!("skipped by the owner (debt #{debt})"))
+        })
+    }
+
+    /// The "Not run: skipped by the owner" answer when `suite` is skipped now, with the agent's
+    /// slot given back as at the end of a check.
+    fn skipped_run(&self, suite: &str) -> Option<CheckRun> {
+        let step = self.slots.test_step.as_deref()?;
+        let debt = crate::suites::skip_for(&self.slots.d, TaskId(self.task), suite, step)?;
+        self.slots.take_agent_slot_back();
+        Some(not_run_skipped(debt))
     }
 
     /// Conflict markers the agent's work adds to the base, as a failed check. Read from the

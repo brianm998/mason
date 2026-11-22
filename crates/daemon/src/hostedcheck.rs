@@ -636,7 +636,12 @@ fn dir_has_host(d: &Arc<Daemon>, id: &str) -> bool {
     d.cfg.hosts_dir().join(id).join("host.kv").exists()
 }
 
-fn remote_check(d: &Arc<Daemon>, spec: &CheckSpec, id: &str) -> Option<Shared> {
+fn remote_check(
+    d: &Arc<Daemon>,
+    spec: &CheckSpec,
+    id: &str,
+    progress: Option<&CheckProgress>,
+) -> Option<Shared> {
     use crate::remote as rm;
     let runs_on = runs_on_github(d, spec)?;
     let project = rm::project_of(d, &spec.cwd)?;
@@ -654,13 +659,29 @@ fn remote_check(d: &Arc<Daemon>, spec: &CheckSpec, id: &str) -> Option<Shared> {
         ),
         &site,
     );
+    // The suite's own command (whole, or narrowed with a shard command of its own, #873) goes
+    // out as one job per shard.
+    let rs = match place.map(|(_, s)| s) {
+        Some(ps) if ps.shards > 1 && spec.cmd == ps.command => match ps.shard_command.as_deref() {
+            Some(sc) => {
+                let mut rs = rs;
+                rs.shards = ps.shards;
+                rs.shard_command = Some(sc.to_string());
+                rs.shard_lists = crate::suites::shard_lists(d, &project, ps);
+                rs.partial_lists = crate::suites::lists_partial(ps);
+                rs
+            }
+            None => rs,
+        },
+        _ => rs,
+    };
     // The units it holds, on record until it ends, for a daemon that restarts (#700).
     let _hold = rm::HoldGuard::new(
         &d.cfg.hosts_dir(),
         &rs,
         id,
         id,
-        1,
+        rs.shards.max(1),
         &spec.log_dir,
         if spec.global || place.is_some_and(|(t, _)| t.is_none()) {
             "batch"
@@ -683,10 +704,17 @@ fn remote_check(d: &Arc<Daemon>, spec: &CheckSpec, id: &str) -> Option<Shared> {
         *note.lock().unwrap_or_else(|e| e.into_inner()) = Some(n);
         Some(rm::StopWhy::Skipped)
     };
+    // A run that gave no result is tried again here, not handed back to the agent (#873); the
+    // retry is shown in the check's progress.
+    let said = |t: &str| {
+        if let Some(p) = progress {
+            d.check_edit(p.run, p.check, |c, _| c.current = t.to_string());
+        }
+    };
     Some(
-        match rm::run_or_fallback(&site, &rs, &spec.log_dir, &stop) {
-            Ok(None) => return None,
-            Ok(Some(rm::Outcome::Stopped(_))) => Ok(CheckOutcome {
+        match rm::run_retrying(&site, &rs, &spec.log_dir, &stop, &said) {
+            Ok((None, _)) => return None,
+            Ok((Some(rm::Outcome::Stopped(_)), _)) => Ok(CheckOutcome {
                 passed: false,
                 timed_out: false,
                 output: String::new(),
@@ -694,16 +722,23 @@ fn remote_check(d: &Arc<Daemon>, spec: &CheckSpec, id: &str) -> Option<Shared> {
                 id: id.to_string(),
                 stopped: note.lock().unwrap_or_else(|e| e.into_inner()).clone(),
             }),
-            Ok(Some(rm::Outcome::Done(f))) => Ok(CheckOutcome {
-                passed: f.code == 0 && f.signal == 0 && !f.timed_out,
-                timed_out: f.timed_out,
-                output: format!("({})\n{}", f.ran_on, crate::jobs::tail(&f.output, 40)),
-                full: f.output.clone(),
-                id: id.to_string(),
-                stopped: None,
-            }),
+            Ok((Some(rm::Outcome::Done(f)), notes)) => {
+                let retried: String = notes.iter().map(|n| format!("({n})\n")).collect();
+                Ok(CheckOutcome {
+                    passed: f.code == 0 && f.signal == 0 && !f.timed_out,
+                    timed_out: f.timed_out,
+                    output: format!(
+                        "{retried}({})\n{}",
+                        f.ran_on,
+                        crate::jobs::tail(&f.output, 40)
+                    ),
+                    full: f.output.clone(),
+                    id: id.to_string(),
+                    stopped: None,
+                })
+            }
             Err(e) => Err(match rm::environmental(&e) {
-                Some(why) => format!("the check could not run on GitHub: {why}; run it again"),
+                Some(why) => format!("no result (infrastructure): {why}"),
                 None => e,
             }),
         },
@@ -717,7 +752,7 @@ fn collect(
     progress: Option<&CheckProgress>,
 ) -> Shared {
     let bound_remote = runs_on_github(d, spec).is_some();
-    if let Some(r) = remote_check(d, spec, id) {
+    if let Some(r) = remote_check(d, spec, id, progress) {
         return r;
     }
     // Meant for GitHub but sent here (`fallback = "local"`): it skipped this machine's queue,
@@ -725,13 +760,19 @@ fn collect(
     // and CPU and thermal holds as any local run. Held until the command ends.
     let _fallback = if bound_remote && !dir_has_host(d, id) {
         match crate::remote::project_of(d, &spec.cwd) {
-            Some(project) => crate::remote::fallback_lease(
+            Some(project) => crate::remote::fallback_lease_until(
                 d,
                 &project,
                 spec.place.as_ref().and_then(|(t, _)| *t),
                 &spec.holds,
                 &format!("{} (no GitHub runner, run here)", spec.label),
-            )?,
+                // A skip ends the wait for this machine's slots too (#873).
+                &|| spec.stop.as_ref().is_some_and(|f| f().is_some()),
+            )
+            .map_err(|e| match spec.stop.as_ref().and_then(|f| f()) {
+                Some(_) => return_stopped(id),
+                None => e,
+            })?,
             None => None,
         }
     } else {

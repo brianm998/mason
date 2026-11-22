@@ -707,3 +707,29 @@ fn shards_parse_and_need_a_shard_command() {
         assert!(p.iter().any(|x| x.contains(want)), "{extra}: {p:?}");
     }
 }
+
+#[test]
+fn narrowed_shard_keys_parse() {
+    // #873
+    let base = r#"rerun = "cargo nextest run {tests}""#;
+    let d = parse(&with(
+        base,
+        &format!(
+            "{base}\nshards = 2\nshard_command = \"x\"\nshard_dev_command = \"y {{packages}}\"\nshard_over_s = 300"
+        ),
+    ))
+    .unwrap();
+    let s = d.testing.suite("unit").unwrap();
+    assert_eq!(s.shard_dev_command.as_deref(), Some("y {packages}"));
+    assert_eq!(s.shard_over_s, 300);
+    let plain = parse(&with(base, base)).unwrap();
+    let s = plain.testing.suite("unit").unwrap();
+    assert_eq!((s.shard_dev_command.as_deref(), s.shard_over_s), (None, 0));
+    for extra in ["shard_over_s = 0", "shard_over_s = \"ten\""] {
+        let p = problems(&with(base, &format!("{base}\n{extra}")));
+        assert!(
+            p.iter().any(|x| x.contains("whole number of seconds")),
+            "{extra}: {p:?}"
+        );
+    }
+}

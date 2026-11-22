@@ -76,10 +76,14 @@ rerun = "{project_test} -- --exact {tests}"
 # Each runner runs `shard_command` instead of `command`: scripts/test-shard.py lists every test
 # executable's tests, keeps this shard's and runs them with `--exact`, printing libtest's lines
 # unchanged, so `pass_regex` and `min_tests` judge the merged output as they do one run's. A local run
-# ignores both keys; a narrowed run (`dev_command`) is not split.
+# ignores these keys. A narrowed run (`dev_command`) of more than one test target, or one whose
+# recorded time is over `shard_over_s`, is split the same way with `shard_dev_command` (#873); a
+# single short target runs on one runner.
 # On since 2026-11-20, now that the daemon that reads these keys is running (s729 had them commented out).
 shards = 8
 shard_command = '''RUSTDOC="$PWD/scripts/rustdoc-bootstrap.sh" python3 -I scripts/test-shard.py -- {project_test} --config 'target."cfg(unix)".runner=["env","RUSTC_BOOTSTRAP=1"]' -- -Z unstable-options --report-time'''
+shard_dev_command = ''': {packages}; RUSTDOC="$PWD/scripts/rustdoc-bootstrap.sh" python3 -I scripts/test-shard.py -- {project_test} {tests_for_change} --config 'target."cfg(unix)".runner=["env","RUSTC_BOOTSTRAP=1"]' -- -Z unstable-options --report-time'''
+shard_over_s = 600
 # The affected tests, not the whole workspace (decision 0539, superseding 0205). `{tests_for_change}`
 # is the test targets a change can affect, found by a static source scan (crates/daemon/src/affected.rs):
 # a changed test file runs itself, a changed `src` file runs its crate's unit tests and the targets
@@ -131,6 +135,10 @@ fail_regex = '^FAIL (.+)$'
 min_tests = 1
 level = "unit"
 uses = { test-suite = 1 }
+# On GitHub the selected scripts are split across runners by scripts/exit/weights.txt (#873): each
+# runner takes its share through MASON_EXIT_SHARD. Hundreds of scripts do not fit one runner.
+shards = 4
+shard_command = 'MASON_EXIT_SHARD="$MASON_SHARD/$MASON_SHARDS" bash scripts/run-changed-exit-scripts.sh'
 
 # A fast formatting gate for the test step (s691): no build, no slot, a few seconds. An unformatted
 # change goes back from its own test step, and `run_check` shows the develop agent the `Diff in`

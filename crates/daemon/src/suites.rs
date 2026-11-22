@@ -274,6 +274,7 @@ fn uses_project_test(s: &Suite) -> bool {
         || s.rerun.as_deref().is_some_and(uses)
         || s.skip.as_deref().is_some_and(uses)
         || s.shard_command.as_deref().is_some_and(uses)
+        || s.shard_dev_command.as_deref().is_some_and(uses)
         || s.dev_command.as_deref().is_some_and(uses)
         || s.dev_build.as_deref().is_some_and(uses)
 }
@@ -303,6 +304,7 @@ pub(crate) fn with_project_test(suite: &Suite, test: Option<&str>) -> Result<Sui
     // owner's CARGO_TARGET_DIR, stays).
     let narrow = t.replace(" --workspace", "");
     s.dev_command = s.dev_command.map(|b| b.replace(KEY, &narrow));
+    s.shard_dev_command = s.shard_dev_command.map(|b| b.replace(KEY, &narrow));
     s.dev_build = s.dev_build.map(|b| b.replace(KEY, &narrow));
     Ok(s)
 }
@@ -584,16 +586,19 @@ fn run_remote(
         ),
         &site,
     );
-    // The whole command of a suite that has shards is split across runners (#701); a narrowed
-    // run, a run without the known-red tests and the like are not the whole suite and run on one.
+    // The command of a suite that has shards is split across runners (#701), and so is a narrowed
+    // one whose `shard_command` was rewritten for the narrowing (#873: a narrowed run that sets
+    // `shards` to 0 runs on one). A run without the known-red tests and the like is not the
+    // suite's own command and runs on one.
     let sharded = watch.and_then(|s| {
         let sc = s.shard_command.as_deref()?;
-        (s.shards > 1 && !s.narrowed && cmd == s.command).then_some((s, sc))
+        (s.shards > 1 && cmd == s.command).then_some((s, sc))
     });
     if let Some((s, sc)) = sharded {
         spec.shards = s.shards;
         spec.shard_command = Some(sc.to_string());
         spec.shard_lists = shard_lists(d, project, s);
+        spec.partial_lists = lists_partial(s);
     }
     let stop = || match check() {
         Stop::No => None,
@@ -641,9 +646,82 @@ fn run_remote(
     })
 }
 
+/// How a narrowed run of `suite` is split across runners (#873): the shard command for the
+/// narrowing `n` and the number of runners, or `None` to run on one. A run of several test
+/// targets (or packages) is split, and so is one whose recorded time is over `shard_over_s`
+/// (600 s when unset), when the suite has `shards` and a `shard_dev_command`. The note says why
+/// not when the recorded time is over the runner `limit` and nothing can split it.
+pub(crate) fn narrowed_shard(
+    d: &Arc<Daemon>,
+    project: &str,
+    suite: &Suite,
+    n: &crate::scope::Narrow,
+    limit: Duration,
+) -> (Option<(String, u32)>, Option<String>) {
+    let (groups, targets) = match n {
+        crate::scope::Narrow::Targets(t) => (t.len(), Some(t.as_slice())),
+        crate::scope::Narrow::Packages(p) => (p.len(), None),
+    };
+    let est = targets.and_then(|t| {
+        let medians = d.store.target_medians(project, &suite.name).ok()?;
+        crate::targettimes::estimate_ms(t, &medians)
+    });
+    decide_narrowed_shard(suite, n, groups, est, limit)
+}
+
+/// [`narrowed_shard`] on what it read: no store, no clock.
+pub(crate) fn decide_narrowed_shard(
+    suite: &Suite,
+    n: &crate::scope::Narrow,
+    groups: usize,
+    est_ms: Option<u64>,
+    limit: Duration,
+) -> (Option<(String, u32)>, Option<String>) {
+    let over_s = if suite.shard_over_s == 0 {
+        600
+    } else {
+        suite.shard_over_s
+    };
+    let long = est_ms.is_some_and(|ms| ms > over_s.saturating_mul(1000));
+    let worth = groups > 1 || long;
+    match (&suite.shard_dev_command, suite.shards > 1) {
+        (Some(sdc), true) if worth => (
+            Some((crate::scope::expand(sdc, n, false), suite.shards)),
+            None,
+        ),
+        (_, can) if !can || suite.shard_dev_command.is_none() => {
+            let note = est_ms
+                .filter(|ms| *ms > limit.as_millis() as u64)
+                .map(|ms| {
+                    format!(
+                        "{}: its recorded time ({} s) is over the runner limit ({} s) and the \
+                         suite has no `shards` with a `shard_dev_command` to split it",
+                        suite.name,
+                        ms / 1000,
+                        limit.as_secs()
+                    )
+                });
+            (None, note)
+        }
+        _ => (None, None),
+    }
+}
+
+/// Do the shard lists name more than this run's own tests (#873)? A narrowed run takes its
+/// share of the whole suite's lists, and a shard command that is not `scripts/test-shard.py`
+/// (the exit scripts split by `weights.txt` on the runner) does not read them at all. A shard
+/// that ran none of the listed tests is then no defect.
+pub(crate) fn lists_partial(s: &Suite) -> bool {
+    s.narrowed
+        || !s
+            .shard_command
+            .as_deref()
+            .is_some_and(|c| c.contains("test-shard.py"))
+}
+
 /// Which tests go to which shard, from the times and names this daemon has recorded for the
 /// suite (#701). Nothing recorded gives empty lists: every test then runs on its hash shard.
-fn shard_lists(d: &Arc<Daemon>, project: &str, suite: &Suite) -> Vec<Vec<String>> {
+pub(crate) fn shard_lists(d: &Arc<Daemon>, project: &str, suite: &Suite) -> Vec<Vec<String>> {
     let weights = d
         .store
         .test_medians(project, &suite.name)
@@ -2805,6 +2883,8 @@ fn narrow_units_for_step(
     s.command = mason_testing::narrow::command(n, &picked);
     s.min_tests = 1;
     s.narrowed = true;
+    // The whole suite's shard command is not this run's: one runner (#873).
+    s.shards = 0;
     let names: Vec<&str> = picked.iter().take(8).map(|u| u.name.as_str()).collect();
     let more = picked.len().saturating_sub(names.len());
     let list = format!(
@@ -2894,16 +2974,27 @@ fn narrow_packages_for_step(
     }
     s.min_tests = 1;
     s.narrowed = true;
+    // Split across runners when it is more than one target or long (#873); else one runner.
+    let limit = suite.timeout.unwrap_or(Duration::from_secs(1800));
+    let (split, why_not) = narrowed_shard(&c.d, &c.project.id, suite, &n, limit);
+    match split {
+        Some((cmd, shards)) => {
+            s.shard_command = Some(cmd);
+            s.shards = shards;
+        }
+        None => s.shards = 0,
+    }
     let left = left_out_note(&dropped);
     let note = format!(
-        "{}: narrowed to {}{}; the landing batch runs it whole",
+        "{}: narrowed to {}{}{}; the landing batch runs it whole",
         suite.name,
         n.describe(),
         if left.is_empty() {
             String::new()
         } else {
             format!(" ({left})")
-        }
+        },
+        why_not.map(|w| format!(" [{w}]")).unwrap_or_default(),
     );
     let groups = match &n {
         crate::scope::Narrow::Targets(t) => Some(t.clone()),
@@ -2955,6 +3046,8 @@ pub fn narrow_for_batch(
     }
     s.min_tests = 1;
     s.narrowed = true;
+    // The whole suite's shard command is not this run's: one runner (#873).
+    s.shards = 0;
     let left = left_out_note(&dropped);
     let note = format!(
         "{}: narrowed to {} over the batch's {} changed file(s){}; the scheduled full test runs it whole",
@@ -6187,5 +6280,91 @@ mod narrow_batch_tests {
         let mut s = suite();
         s.dev_command = None;
         assert!(narrow_for_batch(&Definition::empty(), &s, d.path(), &b).is_err());
+    }
+}
+
+#[cfg(test)]
+mod narrowed_shard_tests {
+    use super::*;
+    use crate::scope::Narrow;
+
+    fn suite() -> Suite {
+        let mut s = Suite::new(
+            "cargo-workspace",
+            "cargo test",
+            mason_testing::ParserKind::Tap,
+        );
+        s.shards = 2;
+        s.shard_command = Some("whole".into());
+        s.shard_dev_command = Some(
+            ": {packages}; python3 -I scripts/test-shard.py -- cargo test {tests_for_change}"
+                .into(),
+        );
+        s
+    }
+
+    fn targets(n: usize) -> Narrow {
+        Narrow::Targets((0..n).map(|i| format!("-p c{i} --lib")).collect())
+    }
+
+    const LIMIT: Duration = Duration::from_secs(3600);
+
+    #[test]
+    fn three_targets_are_split_across_the_suites_shards_with_every_target_in_the_command() {
+        let (split, note) = decide_narrowed_shard(&suite(), &targets(3), 3, None, LIMIT);
+        let (cmd, shards) = split.expect("split");
+        assert_eq!(shards, 2);
+        for i in 0..3 {
+            assert!(cmd.contains(&format!("-p c{i} --lib")), "{cmd}");
+        }
+        assert_eq!(cmd.matches("test-shard.py").count(), 3, "{cmd}");
+        assert!(note.is_none());
+    }
+
+    #[test]
+    fn one_short_target_runs_on_one_runner_and_one_long_target_is_split() {
+        let one = targets(1);
+        assert_eq!(
+            decide_narrowed_shard(&suite(), &one, 1, Some(5_000), LIMIT).0,
+            None
+        );
+        assert_eq!(
+            decide_narrowed_shard(&suite(), &one, 1, None, LIMIT).0,
+            None
+        );
+        let (split, _) = decide_narrowed_shard(&suite(), &one, 1, Some(601_000), LIMIT);
+        assert_eq!(split.map(|s| s.1), Some(2));
+        // `shard_over_s` moves the line.
+        let mut s = suite();
+        s.shard_over_s = 60;
+        let (split, _) = decide_narrowed_shard(&s, &one, 1, Some(61_000), LIMIT);
+        assert!(split.is_some());
+    }
+
+    #[test]
+    fn work_over_the_runner_limit_that_cannot_be_split_says_why() {
+        let mut s = suite();
+        s.shard_dev_command = None;
+        let (split, note) = decide_narrowed_shard(&s, &targets(2), 2, Some(4_000_000), LIMIT);
+        assert!(split.is_none());
+        let note = note.expect("a reason");
+        assert!(note.contains("over the runner limit"), "{note}");
+        // Within the limit nothing needs saying.
+        assert_eq!(
+            decide_narrowed_shard(&s, &targets(2), 2, Some(4_000), LIMIT).1,
+            None
+        );
+    }
+
+    #[test]
+    fn shard_lists_are_partial_for_a_narrowed_run_and_for_a_command_that_does_not_read_them() {
+        let mut s = suite();
+        s.shard_command = Some("python3 -I scripts/test-shard.py -- cargo test".into());
+        assert!(!lists_partial(&s));
+        s.narrowed = true;
+        assert!(lists_partial(&s));
+        s.narrowed = false;
+        s.shard_command = Some("MASON_EXIT_SHARD=1/2 bash x.sh".into());
+        assert!(lists_partial(&s));
     }
 }

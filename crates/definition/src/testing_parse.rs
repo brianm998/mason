@@ -49,6 +49,8 @@ pub const SUITE_KEYS: &[&str] = &[
     "runs_on",
     "shards",
     "shard_command",
+    "shard_dev_command",
+    "shard_over_s",
     "ci_jobs",
 ];
 const ENV_KEYS: &[&str] = &[
@@ -296,6 +298,14 @@ pub fn parse(doc: &DocumentMut, out: &mut Vec<Problem>) -> Testing {
                     )),
                 },
                 "shard_command" => s.shard_command = string(v, &path, out),
+                "shard_dev_command" => s.shard_dev_command = string(v, &path, out),
+                "shard_over_s" => match v.as_integer() {
+                    Some(n) if n >= 1 => s.shard_over_s = n as u64,
+                    _ => out.push(Problem::new(
+                        &path,
+                        "must be a whole number of seconds, 1 or more",
+                    )),
+                },
                 "ci_jobs" => s.ci_jobs = strings(v, &path, out),
                 "runs_on" => {
                     if let Some(r) = string(v, &path, out) {

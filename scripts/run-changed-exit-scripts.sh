@@ -32,6 +32,29 @@ fail=0; n=0
 # (scripts/select-exit-scripts.sh, s669).
 # The selector is read from this helper'"'"'s own directory, so a helper run inside another repository still finds it (s716).
 selected=$(bash "$here/select-exit-scripts.sh" "$base") || { echo "FAIL select-exit-scripts"; exit 1; }
+# MASON_EXIT_SHARD=i/n (a sharded remote run sets it from MASON_SHARD and MASON_SHARDS, #873): run only
+# shard i of the n, the selected scripts assigned heaviest first onto the lightest shard by
+# scripts/exit/weights.txt (an unknown script weighs MASON_EXIT_DEFAULT_WEIGHT, 60), as
+# scripts/run-exit-scripts.sh assigns them. Every selected script lands on exactly one shard.
+shard=${MASON_EXIT_SHARD:-1/1}; si=${shard%/*}; sn=${shard#*/}
+if [ "$sn" -gt 1 ] 2>/dev/null && [ -n "$selected" ]; then
+  weights=${MASON_EXIT_WEIGHTS:-scripts/exit/weights.txt}
+  selected=$(printf '%s\n' $selected | awk -v si="$si" -v sn="$sn" -v wf="$weights" -v dw="${MASON_EXIT_DEFAULT_WEIGHT:-60}" '
+    BEGIN { while ((getline line < wf) > 0) { split(line, f, " "); if (f[1] ~ /^s[0-9]+$/ && f[2] ~ /^[0-9]+$/) w[f[1]] = f[2] + 0 } }
+    { n++; path[n] = $0; name = $0; sub(/.*\//, "", name); sub(/\.sh$/, "", name)
+      wt[n] = (name in w) ? w[name] : dw + 0 }
+    END {
+      for (k = 1; k <= sn; k++) tot[k] = 0
+      for (a = 1; a <= n; a++) idx[a] = a
+      for (a = 2; a <= n; a++) { v = idx[a]; b = a - 1
+        while (b >= 1 && wt[idx[b]] < wt[v]) { idx[b + 1] = idx[b]; b-- }
+        idx[b + 1] = v }
+      for (a = 1; a <= n; a++) { i = idx[a]; best = 1
+        for (k = 2; k <= sn; k++) if (tot[k] < tot[best]) best = k
+        tot[best] += wt[i]; owner[i] = best }
+      for (i = 1; i <= n; i++) if (owner[i] == si) print path[i]
+    }')
+fi
 for s in $selected; do
   case "$s" in
     *-real.sh|*-manual.sh) continue ;;
