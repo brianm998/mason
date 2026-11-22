@@ -23,6 +23,7 @@ pub struct Ledger {
     stall: Option<StallGate>,
     policy: Option<PolicyGate>,
     thermal: Option<ThermalGate>,
+    heat_ceiling: bool,
     /// When each resource last had a grant. Only observed, never consulted by `plan`.
     last_grant: BTreeMap<String, u64>,
     last_any_grant: Option<u64>,
@@ -134,6 +135,7 @@ impl Ledger {
             since: now,
             expected_ms: None,
             drains_compile: false,
+            hold_exempt: false,
         });
         id
     }
@@ -144,6 +146,19 @@ impl Ledger {
         if let Some(r) = self.waiting.iter_mut().find(|r| r.id == id) {
             r.drains_compile = on;
         }
+    }
+
+    /// Mark a waiting request as exempt from the CPU, stall, syspolicyd, thermal and pacing
+    /// holds (the owner's self-update build, s868).
+    pub fn set_hold_exempt(&mut self, id: u64, on: bool) {
+        if let Some(r) = self.waiting.iter_mut().find(|r| r.id == id) {
+            r.hold_exempt = on;
+        }
+    }
+
+    /// The caller's latest reading: the die is over the hard heat ceiling.
+    pub fn set_heat_ceiling(&mut self, on: bool) {
+        self.heat_ceiling = on;
     }
 
     /// How long a waiting request is expected to hold what it asks for (s385).
@@ -212,6 +227,7 @@ impl Ledger {
                 stall: self.stall,
                 policy: self.policy,
                 thermal: self.thermal,
+                heat_ceiling: self.heat_ceiling,
                 max_wait: self.max_wait_ms,
                 exclusive_max_wait: self.exclusive_max_wait_ms,
             },
@@ -355,6 +371,7 @@ impl Ledger {
                 stall: self.stall,
                 policy: self.policy,
                 thermal: self.thermal,
+                heat_ceiling: self.heat_ceiling,
                 max_wait: self.max_wait_ms,
                 exclusive_max_wait: self.exclusive_max_wait_ms,
             },

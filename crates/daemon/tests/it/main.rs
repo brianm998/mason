@@ -17,6 +17,7 @@ mod audit_e2e;
 mod auto_quarantine;
 mod auto_retry;
 mod base_red;
+mod batch_remote_hold;
 mod blockers;
 mod bug_alerts;
 mod ci_infra;
