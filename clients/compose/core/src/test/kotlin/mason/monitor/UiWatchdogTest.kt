@@ -36,4 +36,44 @@ class UiWatchdogTest {
         )
         assertEquals("UI thread: worst 0 ms late in the last 10 minutes, 1 late ping", LatenessWindow(late = 1).line(10))
     }
+
+    private class Fake {
+        var now = 0.0
+        val held = ArrayDeque<() -> Unit>()
+        var state = AppVisibility.FRONTMOST
+        val lines = mutableListOf<String>()
+        val dog = UiWatchdog({ held.addLast(it) }, WatchdogConfig.RELEASE, { now }, { lines += it }, { state })
+    }
+
+    @Test
+    fun aBlockedUiThreadIsOneSampleAndOneLine() {
+        val f = Fake()
+        repeat(14) { f.dog.tick(); f.now += 250.0 }
+        assertEquals(1, f.held.size)
+        f.now = 3500.0
+        f.held.removeFirst()()
+        assertEquals(listOf("ui thread blocked for 3500 ms"), f.lines)
+        assertEquals(LatenessWindow(1, 1, 3500.0, 3500.0), f.dog.recent())
+        f.dog.tick()
+        assertEquals(1, f.held.size)
+    }
+
+    @Test
+    fun aHiddenPingCountsInTheBackgroundWindowOnly() {
+        val f = Fake()
+        f.state = AppVisibility.HIDDEN
+        f.dog.tick(); f.now = 1500.0
+        f.held.removeFirst()()
+        assertEquals(LatenessWindow(), f.dog.recent())
+        assertEquals(LatenessWindow(1, 1, 1500.0, 1500.0), f.dog.recentBackground())
+        assertEquals(listOf("ui thread blocked for 1500 ms (app in background)"), f.lines)
+    }
+
+    @Test
+    fun theBackgroundLineHasTheSameWordsAsTheSwiftMonitor() {
+        assertEquals(
+            "In the background: worst 3500 ms late in the last 10 minutes, 2 late pings",
+            LatenessWindow(pings = 3, late = 2, worstMs = 3500.0, totalLateMs = 5000.0).backgroundLine(10),
+        )
+    }
 }
