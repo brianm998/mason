@@ -1317,6 +1317,9 @@ fn owe(d: &Arc<mason_daemon::Daemon>, t: TaskId, scopes: &[&str]) {
     d.store
         .write(|c| {
             c.execute("DELETE FROM suite_green", [])?;
+            // The task's own run left evidence for this exact tree; with it the suite is
+            // `Reused` and its script never runs again (s882).
+            c.execute("DELETE FROM evidence", [])?;
             c.execute("DELETE FROM suite_skip_green", []).map(|_| ())
         })
         .unwrap();
