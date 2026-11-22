@@ -183,6 +183,8 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
 
     /** The Land now the owner pressed and has not yet confirmed (the landing queue's one-line confirm). */
     var landNowAsk by mutableStateOf<LandNowTarget?>(null)
+    /** The placement change the owner chose and has not yet confirmed (#834). */
+    var placementAsk by mutableStateOf<PlacementAsk?>(null)
 
     /** The button was pressed: ask first if the daemon says to, else act. */
     fun pressUpdateDaemon() {
@@ -1116,7 +1118,7 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         fun pushAuthProject(b: Banner): String = b.text.substringBefore(":")
 
         /** The protocol this monitor speaks. */
-        const val PROTOCOL = 1
+        const val PROTOCOL = 2
         const val MONITOR_KIND = "compose"
         const val LOG_KEEP = 40
         const val CLAIM_EVERY_MS = 3_000L

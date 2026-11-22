@@ -1046,6 +1046,16 @@ impl Store {
         })
     }
 
+    /// Every task's value for one override key (the monitors' "overrides its project" marker).
+    pub fn task_overrides_for_key(&self, key: &str) -> Result<Vec<(u64, String)>, StoreError> {
+        let k = key.to_string();
+        self.read(move |c| {
+            let mut st = c.prepare("SELECT task, value FROM task_overrides WHERE key = ?1")?;
+            let rows = st.query_map(params![k], |r| Ok((r.get::<_, i64>(0)? as u64, r.get(1)?)))?;
+            rows.collect()
+        })
+    }
+
     pub fn clear_task_override(&self, task: u64, key: &str) -> Result<usize, StoreError> {
         let k = key.to_string();
         self.write(move |c| {
