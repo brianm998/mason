@@ -56,6 +56,7 @@ pub mod landing;
 pub mod launchview;
 pub mod markers;
 pub mod monitor_inplace;
+pub mod newtests;
 pub mod notify;
 pub mod numbers;
 pub mod outside;
