@@ -246,6 +246,8 @@ impl FailClass {
             || (r.contains("git fetch") && r.contains("timed out"))
             || (r.starts_with("the agent failed: the CLI exited with status")
                 && r.contains("and no result"))
+            || r.contains("the check could not run on GitHub")
+            || r.contains("waiting for GitHub")
             || (r.contains("mason/ci/") && (r.contains("push") || r.contains("refused")));
         if outside {
             FailClass::Outside
@@ -282,6 +284,7 @@ mod fail_class_tests {
             "could not start the step: Spawn(TimedOut) step host did not start within 30s",
             "the agent failed: the CLI exited with status 1 and no result",
             "could not push mason/ci/t12 to origin: refused",
+            "landing failed: lint: the lint check gave no result: the check could not run on GitHub: could not push mason/run/p/b1-r1: [remote rejected]; run it again",
         ] {
             assert_eq!(
                 FailClass::classify(State::Developing, outside),

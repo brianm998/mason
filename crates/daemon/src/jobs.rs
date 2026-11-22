@@ -1957,6 +1957,7 @@ impl TestChecks {
                 id_prefix: prefix,
                 log_dir: self.log_dir.clone(),
                 cmd: cmd.to_string(),
+                build: None,
                 cwd: self.wt.clone(),
                 env: vec![("MASON_HELD".to_string(), held_text(uses))],
                 limit,
@@ -2652,6 +2653,7 @@ impl TestChecks {
                 id_prefix: prefix,
                 log_dir: self.log_dir.clone(),
                 cmd: cmd.to_string(),
+                build: None,
                 cwd: self.wt.clone(),
                 env: vec![("MASON_HELD".to_string(), held_text(uses))],
                 limit: self.timeout,
@@ -2664,12 +2666,26 @@ impl TestChecks {
             }
         };
         let merges = self.reds.merges();
+        // On GitHub the build is part of the same run as the tests (#771): a second runner
+        // starts from nothing and would compile everything again.
+        let mut folded: Option<String> = None;
         // A build first, holding one `compile` slot; the tests then hold the
         // rest of what the test step uses.
         let uses = match &cmds.build {
             None => self.slots.test_uses.clone(),
             Some(build) if build_reused(&self.slots.d, ctree.as_deref(), build, &self.wt) => {
                 tracing::info!(wt = %self.wt.display(), "build already passed for this tree; reused");
+                tests_uses(&self.slots.test_uses)
+            }
+            Some(build)
+                if {
+                    let t = spec(self.id_prefix.clone(), &cmds.test, &self.slots.test_uses);
+                    let b = spec(format!("{}build", self.id_prefix), build, &build_uses());
+                    !crate::hostedcheck::pending(&self.slots.d, &b)
+                        && crate::hostedcheck::goes_remote(&self.slots.d, &t)
+                } =>
+            {
+                folded = Some(build.clone());
                 tests_uses(&self.slots.test_uses)
             }
             Some(build) => {
@@ -2736,7 +2752,12 @@ impl TestChecks {
                     .into(),
             };
         }
-        let tspec = spec(self.id_prefix.clone(), &cmds.test, &uses);
+        let with_build = |mut s: crate::hostedcheck::CheckSpec| {
+            s.build = folded.clone();
+            s
+        };
+        let tspec = with_build(spec(self.id_prefix.clone(), &cmds.test, &uses));
+
         // The same call sent again after a restart attaches to the run already
         // going (or takes its result) at once: it starts nothing, so it does not
         // queue behind other work for a slot the run it joins already took.
@@ -2750,7 +2771,7 @@ impl TestChecks {
             tspec
         } else {
             ctree = crate::cmdreuse::content_tree(&self.wt);
-            spec(self.id_prefix.clone(), &cmds.test, &uses)
+            with_build(spec(self.id_prefix.clone(), &cmds.test, &uses))
         };
         self.phase(mason_core::checks::CheckPhase::Running);
         let pr = self.check_progress("check tests", None);
@@ -2759,6 +2780,15 @@ impl TestChecks {
         });
         drop(test_lease);
         self.slots.take_agent_slot_back();
+        // The build ran inside this run: what it says of the build is recorded for the tree.
+        if let (Some(build), Ok(o), Some(t)) = (&folded, &res, &ctree) {
+            let bk = crate::cmdreuse::build_key(build);
+            if o.passed || o.phase.as_deref() == Some("run") {
+                crate::cmdreuse::record_build_green(&self.slots.d, t, &bk, &self.wt);
+            } else if o.phase.as_deref() == Some("build") {
+                crate::cmdreuse::record_build_red(&self.slots.d, t, &bk, &self.wt);
+            }
+        }
         if let (Ok(o), Some(t)) = (&res, &ctree) {
             if o.passed {
                 let src = format!("run_check of task #{}, run {}", self.task, self.run);
@@ -2770,6 +2800,23 @@ impl TestChecks {
             Ok(o) if o.passed => self.reds.passed(step),
             Ok(o) => self.remember_red(step, &o.id),
             Err(_) => {}
+        }
+        // A red build of a folded run reads as the separate build did.
+        if let (Some(_), Ok(o)) = (&folded, &res) {
+            if !o.passed && o.phase.as_deref() == Some("build") {
+                return CheckRun::Done {
+                    passed: false,
+                    summary: if o.timed_out {
+                        format!(
+                            "Building the tests did not finish within {} s and was stopped. Last output:\n{}",
+                            self.timeout.as_secs(),
+                            o.output
+                        )
+                    } else {
+                        format!("Building the tests failed. Last output:\n{}", o.output)
+                    },
+                };
+            }
         }
         let header = match &res {
             Ok(o) if !o.passed => known_header(&self.slots.d, &self.log_dir, &o.id, step)
@@ -3000,6 +3047,8 @@ impl CheckSlots {
     ) -> Result<Option<crate::sched::Lease>, crate::sched::Cancelled> {
         let held = self.lease.lock().unwrap_or_else(|e| e.into_inner()).take();
         if held.is_some() {
+            // Parked on a check: the session is free for others while it waits (#765).
+            self.d.set_parked(self.task, true);
             drop(held);
             self.d.admit();
         }
@@ -3028,6 +3077,9 @@ impl CheckSlots {
 
     /// Queue for the agent's slot again, before the agent is told the result.
     fn take_agent_slot_back(&self) {
+        // No longer parked: from here the task counts as waiting for its session, which
+        // keeps a new admission from taking it.
+        self.d.set_parked(self.task, false);
         self.d.admit();
         let needs = crate::sched::needs_of(&self.agent_uses, Some(&self.account));
         if let Ok(l) = self.acquire(needs, &self.step, false, None) {
@@ -3520,6 +3572,8 @@ fn agent_job(c: &Ctx) {
         fn drop(&mut self) {
             self.0.d.broker.stop_crediting_waits(self.0.task);
             end_run_leases(&self.0.d, self.0.task);
+            // A check that ended without handing the session back leaves no parked mark (#765).
+            self.0.d.set_parked(self.0.task, false);
             crate::hostedcheck::cancel_task(&self.0.d, self.0.task.0);
         }
     }

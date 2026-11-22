@@ -207,6 +207,8 @@ fun HomePage(model: MonitorModel) {
                 }
             }
         }
+        PlacementControl(model, PlacementScope.Global)
+        h?.project?.takeIf { it.isNotEmpty() }?.let { PlacementControl(model, PlacementScope.Project(it)) }
         Row(horizontalArrangement = Arrangement.spacedBy(theme.spacingLarge * 2)) {
             Section("Active models", open = { model.go(Page.Section("active_models")) }) {
                 val active = h?.active.orEmpty()
@@ -433,6 +435,7 @@ private fun TaskDetail(model: MonitorModel, d: TaskDetailView, loading: Boolean 
         }
         if (r.issue != 0L || d.ci_links.isNotEmpty()) CiLinksLine(d.ci_links, r.issue, r.issue_url)
         Text(cpuTaskLine(d.cpu_permille), style = theme.body(color = theme.muted), modifier = Modifier.testTag("cpu"))
+        PlacementControl(model, PlacementScope.Task(r.id))
         Row(horizontalArrangement = Arrangement.spacedBy(theme.spacingLarge)) {
             CopyButton(r.key, r.key)
             CopyTarget.detail(d.branch, d.worktree).forEach { t ->
@@ -549,7 +552,7 @@ fun LandingPage(model: MonitorModel) {
                 }
                 l.queue.forEach { r -> Link("${r.key} ${r.title}") { model.go(Page.Task(r.id)) } }
             }
-            if (l.items.isNotEmpty()) Section("Landing tasks") { LandingItems(model, l.items, emptyList()) }
+            if (l.items.isNotEmpty()) Section("Landing tasks") { LandingItems(model, l.items, l.batches) }
             Section("Batches") {
                 if (l.batches.isEmpty()) Text("No batch has formed yet.", style = theme.body(color = theme.muted))
                 l.batches.forEach { b ->
@@ -591,7 +594,7 @@ fun LandingPage(model: MonitorModel) {
 /** One line per batch: where it is, who landed, who was parked, and why. */
 fun batchText(b: mason.v1.BatchLine): String {
     fun list(v: List<Long>) = v.joinToString(" ") { "#$it" }
-    var t = "Batch #${b.id} ${b.project} ${b.phase}${if (b.running) " (running)" else ""}: ${list(b.tasks)}"
+    var t = "Batch #${b.id} ${b.project} ${b.state_text.ifEmpty { b.phase }}${if (b.running) " (running)" else ""}: ${list(b.tasks)}"
     if (b.landed.isNotEmpty()) t += ", landed ${list(b.landed)}"
     if (b.parked.isNotEmpty()) t += ", parked ${list(b.parked)}"
     if (b.note.isNotEmpty()) t += ". ${b.note}"
@@ -775,14 +778,24 @@ internal fun LandingItems(model: MonitorModel, items: List<mason.v1.TaskLanding>
     val g = landingGroups(items)
     if (g.first.isNotEmpty()) {
         Text("Landing now", style = theme.body(color = theme.muted))
-        // The running batches that offer Land now are drawn here too (Home; the Landing page lists its own).
-        landNowBatches(batches).forEach { b ->
-            Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing)) {
-                LinkedText(model, "Batch #${b.id} ${b.phase}: ${b.tasks.joinToString(" ") { "#$it" }}", theme.body())
-                LandNowButton(model, LandNowTarget.Batch(b.id), model.canLandNow(b))
+        val layout = landingLayout(items, batches)
+        layout.groups.forEach { grp ->
+            Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), modifier = Modifier.testTag("batchheader:${grp.batch}")) {
+                LinkedText(model, batchHeaderText(grp), theme.body(color = batchSeverityColor(grp.header?.severity ?: "", theme)))
+                grp.header?.let { LandNowButton(model, LandNowTarget.Batch(it.id), model.canLandNow(it)) }
+            }
+            val why = grp.header?.severity_reason.orEmpty()
+            if (why.isNotEmpty() && grp.header?.severity != "ok") {
+                Text(why, style = theme.body(color = batchSeverityColor(grp.header?.severity ?: "", theme)))
+            }
+            grp.members.forEach { i ->
+                Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), modifier = Modifier.padding(start = theme.spacingLarge)) {
+                    Link(landingItemText(i)) { model.go(Page.Task(i.task)) }
+                    LandNowButton(model, LandNowTarget.Task(i.task), model.canLandNow(i))
+                }
             }
         }
-        g.first.forEach { i ->
+        layout.loose.forEach { i ->
             Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing)) {
                 Link(landingItemText(i)) { model.go(Page.Task(i.task)) }
                 LandNowButton(model, LandNowTarget.Task(i.task), model.canLandNow(i))
@@ -792,11 +805,59 @@ internal fun LandingItems(model: MonitorModel, items: List<mason.v1.TaskLanding>
     if (g.second.isNotEmpty()) {
         Text("Queued", style = theme.body(color = theme.muted))
         g.second.forEach { i ->
-            Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), modifier = Modifier.padding(start = theme.spacingLarge)) {
                 Link(landingItemText(i)) { model.go(Page.Task(i.task)) }
                 LandNowButton(model, LandNowTarget.Task(i.task), model.canLandNow(i))
             }
         }
+    }
+}
+
+/**
+ * "Runs on" for one level (#834): the mode in force and where it came from, the four modes, and
+ * "Follow MASON" / "Follow project" to clear the level's own choice. Owner devices that can act
+ * only; a one-line confirm, then the pending label until the next view arrives.
+ */
+@Composable
+internal fun PlacementControl(model: MonitorModel, scope: PlacementScope) {
+    val theme = LocalTheme.current
+    val p = model.placement(scope) ?: return
+    val key = when (scope) {
+        PlacementScope.Global -> "global"
+        is PlacementScope.Project -> "project:${scope.name}"
+        is PlacementScope.Task -> "task:${scope.id}"
+    }
+    val pending = model.placementPendingLabel(scope)
+    Column(verticalArrangement = Arrangement.spacedBy(theme.spacingSmall)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), verticalAlignment = Alignment.CenterVertically) {
+            Text("Runs on", style = theme.body(FontWeight.SemiBold))
+            Text(placementText(p), style = theme.body(color = theme.muted), modifier = Modifier.testTag("placement:$key:text"))
+            if (pending != null) Text(pending, style = theme.small(color = theme.muted), modifier = Modifier.testTag("placement:$key:pending"))
+        }
+        if (model.canSetPlacement(scope) && pending == null) {
+            Row(horizontalArrangement = Arrangement.spacedBy(theme.spacingSmall)) {
+                placementModes.forEach { m ->
+                    Pill(m, prominent = m == p.mode, modifier = Modifier.testTag("placement:$key:$m")) { model.askPlacement(scope, m) }
+                }
+                val follow = scope.followLabel
+                if (follow != null && model.canFollow(scope)) {
+                    Pill(follow, modifier = Modifier.testTag("placement:$key:default")) { model.askPlacement(scope, "default") }
+                }
+            }
+        }
+    }
+    val ask = model.placementAsk
+    if (ask != null && ask.scope == scope) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { model.cancelPlacement() },
+            text = { Text(ask.confirmText) },
+            confirmButton = {
+                androidx.compose.material3.Button(onClick = { model.confirmPlacement() }, modifier = Modifier.testTag("placement-confirm")) { Text("Change") }
+            },
+            dismissButton = {
+                androidx.compose.material3.Button(onClick = { model.cancelPlacement() }) { Text("Cancel") }
+            },
+        )
     }
 }
 
@@ -828,6 +889,42 @@ internal fun LandNowButton(model: MonitorModel, target: LandNowTarget, shown: Bo
 fun landingGroups(items: List<mason.v1.TaskLanding>): Pair<List<mason.v1.TaskLanding>, List<mason.v1.TaskLanding>> =
     items.filter { it.status == "in_batch" } to items.filter { it.status != "in_batch" }.sortedBy { it.position }
 
+/** One running batch with its tasks (s788). [header] is null when an older daemon sent only the task rows. */
+data class LandingBatchGroup(val batch: Long, val header: mason.v1.BatchLine?, val members: List<mason.v1.TaskLanding>)
+
+/** "Landing now": one group per running batch, in batch order, above the landing rows that belong to no batch. */
+class LandingLayout(val groups: List<LandingBatchGroup>, val loose: List<mason.v1.TaskLanding>)
+
+fun landingLayout(items: List<mason.v1.TaskLanding>, batches: List<mason.v1.BatchLine>): LandingLayout {
+    val landing = items.filter { it.status == "in_batch" }
+    val ids = landing.map { it.batch }.filter { it != 0L }.toSortedSet()
+    return LandingLayout(
+        ids.map { id -> LandingBatchGroup(id, batches.firstOrNull { it.id == id }, landing.filter { it.batch == id }) },
+        landing.filter { it.batch == 0L },
+    )
+}
+
+/** "Batch #494 · 10 tasks · running suites · 17 min (usually ~6 min)". */
+fun batchHeaderText(g: LandingBatchGroup): String {
+    val parts = mutableListOf("Batch #${g.batch}")
+    val n = g.header?.members?.size ?: 0
+    val count = if (n > 0) n else g.members.size
+    parts += "$count task${if (count == 1) "" else "s"}"
+    val b = g.header ?: return parts.joinToString(" · ")
+    parts += b.state_text.ifEmpty { b.phase }
+    var time = "${b.phase_ms / 60000} min"
+    if (b.typical_ms > 0) time += " (usually ~${maxOf(1L, b.typical_ms / 60000)} min)"
+    parts += time
+    return parts.joinToString(" · ")
+}
+
+/** Stuck is the attention colour, a warning the slow (amber) one, else the normal text. */
+fun batchSeverityColor(severity: String, theme: Theme) = when (severity) {
+    "stuck" -> theme.attention
+    "warn" -> theme.slow
+    else -> theme.text
+}
+
 /** "▰▰▱▱" for phase 2 of 4. */
 fun phaseBar(index: Int, total: Int): String {
     val n = index.coerceIn(0, total)
@@ -835,6 +932,8 @@ fun phaseBar(index: Int, total: Int): String {
 }
 
 fun landingItemText(i: mason.v1.TaskLanding): String {
+    // Under a batch header the row is only the task and its own standing (a daemon of protocol 2).
+    if (i.status == "in_batch" && i.standing.isNotEmpty()) return "${i.key} ${i.title}: ${i.standing}"
     if (i.status == "in_batch") {
         var t = "${i.key} ${i.title}: batch #${i.batch}, ${i.phase}, phase ${i.phase_index} of ${i.phase_total} ${phaseBar(i.phase_index, i.phase_total)}"
         if (i.ci_state.isNotEmpty()) t += ", CI ${i.ci_state}"
