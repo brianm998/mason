@@ -118,6 +118,111 @@ pub struct Facts {
     pub exclusive: bool,
     /// The project's remote setup check (#703) failed: why.
     pub setup_failed: Option<String>,
+    /// What `favor-local` weighs (#832); `None` reads as "this machine has room".
+    pub spill: Option<Spill>,
+}
+
+/// A reading of this machine's load, built from the scheduler's state (#832). Only the slots a
+/// run needs are in `free`, `waiting` and `oldest_wait_ms`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LocalLoad {
+    /// An active hold ("held for heat (die 99 °C)", "held for CPU (87% busy, limit 50%)").
+    pub held: Option<String>,
+    /// Free units of each slot the run needs.
+    pub free: BTreeMap<String, u32>,
+    /// Requests already waiting for any of those slots.
+    pub waiting: u32,
+    /// The longest any of them has waited, in ms.
+    pub oldest_wait_ms: u64,
+}
+
+impl LocalLoad {
+    /// Build it from a scheduler reading, for a run that needs `needs`.
+    pub fn from_reading(r: &crate::sched::LoadReading, needs: &[String]) -> LocalLoad {
+        let mut load = LocalLoad {
+            held: r.held.clone(),
+            ..LocalLoad::default()
+        };
+        for n in needs {
+            let used = r.used.get(n).copied().unwrap_or(0);
+            let free = match r.limits.get(n) {
+                Some(l) => l.saturating_sub(used),
+                None => 1,
+            };
+            load.free.insert(n.clone(), free);
+        }
+        for (names, waited) in &r.waiting {
+            if names.iter().any(|x| needs.contains(x)) {
+                load.waiting += 1;
+                load.oldest_wait_ms = load.oldest_wait_ms.max(*waited);
+            }
+        }
+        load
+    }
+
+    /// Why this machine is overloaded, or `None`: a hold is active; or none of the needed slots
+    /// is free and requests are already waiting; or the oldest wait is over `spill_after_ms`.
+    /// Pure.
+    pub fn overloaded(&self, spill_after_ms: u64) -> Option<String> {
+        if let Some(h) = &self.held {
+            return Some(format!("this machine {h}"));
+        }
+        let full = !self.free.is_empty() && self.free.values().all(|n| *n == 0);
+        if full && self.waiting > 0 {
+            let names: Vec<&str> = self.free.keys().map(String::as_str).collect();
+            return Some(format!(
+                "no {} slot free and {} waiting",
+                names.join("/"),
+                self.waiting
+            ));
+        }
+        if self.waiting > 0 && self.oldest_wait_ms > spill_after_ms {
+            return Some(format!(
+                "the oldest local wait is {} s, over {} s",
+                self.oldest_wait_ms / 1000,
+                spill_after_ms / 1000
+            ));
+        }
+        None
+    }
+
+    /// "2 compile slots free" for the local reason.
+    pub fn room_text(&self) -> String {
+        let free: Vec<String> = self
+            .free
+            .iter()
+            .filter(|(_, n)| **n > 0)
+            .map(|(k, n)| format!("{n} {k} slot{} free", if *n == 1 { "" } else { "s" }))
+            .collect();
+        if free.is_empty() {
+            "this machine had room".into()
+        } else {
+            free.join(", ")
+        }
+    }
+}
+
+/// The inputs of the `favor-local` rules besides the mode itself.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Spill {
+    pub load: LocalLoad,
+    /// GitHub has a free `gha` unit (and `gha-macos` for a macOS runner).
+    pub github_room: bool,
+    pub spill_after_ms: u64,
+}
+
+/// A local run already queued for `waited_ms` while a hold is active moves to GitHub when GitHub
+/// has room and the wait is over `spill_after_ms`. Returns why. Pure (#832).
+pub fn replace_waiting(waited_ms: u64, sp: &Spill) -> Option<String> {
+    let held = sp.load.held.as_ref()?;
+    if sp.github_room && waited_ms > sp.spill_after_ms {
+        Some(format!(
+            "waited {} s here while this machine {held}",
+            waited_ms / 1000
+        ))
+    } else {
+        None
+    }
 }
 
 impl Facts {
@@ -133,6 +238,7 @@ impl Facts {
             device: false,
             exclusive: false,
             setup_failed: None,
+            spill: None,
         }
     }
 
@@ -188,16 +294,30 @@ impl Place {
 }
 
 /// The two balancing modes (#831). Called only for `favor-local` and `favor-remote`, after the
-/// suite's own rules have let the run go to GitHub. For now `favor-local` is `local` and
-/// `favor-remote` is `remote`; the bounded fallback to this machine after `pickup_timeout`
+/// suite's own rules have let the run go to GitHub. `favor-local` runs here unless this machine
+/// is overloaded and GitHub has room (#832); `favor-remote` is `remote`; the bounded fallback to this machine after `pickup_timeout`
 /// (s812, `remote::fallback_lease`) is what spills `favor-remote` over. The load rules of the
 /// follow-up tickets replace this body.
 pub fn balance(mode: Mode, f: &Facts, runs_on: &str, from: Source) -> Place {
     match mode {
-        Mode::FavorLocal => Place::Local {
-            why: "favor-local, this machine had room".into(),
-            from,
-        },
+        Mode::FavorLocal => {
+            let local = |why: String| Place::Local {
+                why: format!("favor-local, {why}"),
+                from,
+            };
+            let Some(sp) = &f.spill else {
+                return local("this machine had room".into());
+            };
+            match sp.load.overloaded(sp.spill_after_ms) {
+                None => local(sp.load.room_text()),
+                Some(why) if sp.github_room => Place::GitHub {
+                    runs_on: runs_on.to_string(),
+                    from,
+                    why: format!("favor-local, {why}"),
+                },
+                Some(why) => local(format!("{why}, and GitHub is full too, so it queues here")),
+            }
+        }
         _ => Place::GitHub {
             runs_on: runs_on.to_string(),
             from,
@@ -401,6 +521,16 @@ pub fn status(d: &Daemon) -> Value {
 /// reload`). The file's comments and other keys stay. A project with no `[remote_runs]` is
 /// always local, so there is nothing to set and the answer says so.
 pub fn set_project_mode(d: &Daemon, project: &str, to: Mode) -> Result<Value, (u16, String)> {
+    write_project_mode(d, project, Some(to))
+}
+
+/// Remove `[remote_runs] mode` (and the old `fallback`), so the project follows the global mode
+/// again ("Follow MASON" in the monitors).
+pub fn clear_project_mode(d: &Daemon, project: &str) -> Result<Value, (u16, String)> {
+    write_project_mode(d, project, None)
+}
+
+fn write_project_mode(d: &Daemon, project: &str, to: Option<Mode>) -> Result<Value, (u16, String)> {
     let _one = EDITING.lock().unwrap_or_else(|e| e.into_inner());
     if d.project_id_by_name(project).is_none() {
         return Err((404, format!("no project {project:?}")));
@@ -424,7 +554,15 @@ pub fn set_project_mode(d: &Daemon, project: &str, to: Mode) -> Result<Value, (u
             format!("{project} has no [remote_runs], so it always runs here; add one first"),
         ));
     };
-    t.insert("mode", value(to.name()));
+    match to {
+        Some(m) => {
+            t.insert("mode", value(m.name()));
+        }
+        None => {
+            t.remove("mode");
+            t.remove("fallback");
+        }
+    }
     let tmp = path.with_extension("toml.tmp");
     std::fs::write(&tmp, doc.to_string()).map_err(|e| (500, format!("{}: {e}", tmp.display())))?;
     std::fs::rename(&tmp, &path).map_err(|e| {
@@ -434,7 +572,62 @@ pub fn set_project_mode(d: &Daemon, project: &str, to: Mode) -> Result<Value, (u
     let changed = d
         .reload_registration(project)
         .map_err(|e| (400, e.join("; ")))?;
-    Ok(json!({"project": project, "mode": to.name(), "source": "project", "changed": changed}))
+    let (mode, source) = project_effective(d, project);
+    Ok(json!({"project": project, "mode": mode.name(), "source": source, "changed": changed}))
+}
+
+/// The placement of a task as the views carry it: the mode in force and the level that set it.
+/// `project` is the task's project name; `None` for no task.
+pub fn task_placement(d: &Daemon, project: &str, task: u64) -> mason_protocol::Placement {
+    let mut f = Facts::plain(read_global(d).0);
+    f.task = task_choice(d, Some(task));
+    f.project = project_mode(d, project);
+    let has = has_remote(d, project);
+    let (m, s) = if has {
+        f.effective()
+    } else {
+        (Mode::Local, Source::Project)
+    };
+    mason_protocol::Placement {
+        mode: m.name().into(),
+        source: s.key().into(),
+        own: f.task.is_some(),
+        settable: true,
+    }
+}
+
+/// A project's placement: its own mode, else the global one. A project with no `[remote_runs]`
+/// always runs here and cannot be set.
+pub fn project_placement(d: &Daemon, project: &str) -> mason_protocol::Placement {
+    let own = project_mode(d, project);
+    let (m, s) = project_effective(d, project);
+    let settable = has_remote(d, project);
+    mason_protocol::Placement {
+        mode: m.name().into(),
+        source: if settable {
+            s.to_string()
+        } else {
+            "project".into()
+        },
+        own: own.is_some(),
+        settable,
+    }
+}
+
+/// The global placement, for the home view.
+pub fn global_placement(d: &Daemon) -> mason_protocol::Placement {
+    mason_protocol::Placement {
+        mode: read_global(d).0.name().into(),
+        source: "global".into(),
+        own: true,
+        settable: true,
+    }
+}
+
+fn has_remote(d: &Daemon, project: &str) -> bool {
+    d.project_id_by_name(project)
+        .and_then(|p| d.project(p))
+        .is_some_and(|p| p.services.remote.is_some())
 }
 
 // ---- the facts of a real run ---------------------------------------------------------------
@@ -544,7 +737,7 @@ pub fn facts_for(
             .environment(&suite.env)
             .is_some_and(|e| mason_testing::env::device_of(e).is_some())
     });
-    Facts {
+    let mut f = Facts {
         task: task_choice(d, task),
         project: project_mode(d, project),
         global: read_global(d).0,
@@ -556,7 +749,38 @@ pub fn facts_for(
         device,
         exclusive: suite.uses.get("exclusive").is_some_and(|n| *n > 0),
         setup_failed: None,
+        spill: None,
+    };
+    if f.effective().0 == Mode::FavorLocal {
+        f.spill = spill_for(d, project, suite);
     }
+    f
+}
+
+/// The load and GitHub's room for a suite of `project`, read from the scheduler (#832).
+fn spill_for(d: &Daemon, project: &str, suite: &mason_testing::Suite) -> Option<Spill> {
+    let cfg = d
+        .project_id_by_name(project)
+        .and_then(|p| d.project(p))
+        .and_then(|p| p.services.remote.clone())?;
+    let mut needs = vec![mason_scheduler::COMPILE.to_string()];
+    needs.extend(
+        suite
+            .uses
+            .iter()
+            .filter(|(k, n)| {
+                **n > 0 && k.as_str() != mason_scheduler::COMPILE && k.as_str() != "exclusive"
+            })
+            .map(|(k, _)| k.clone()),
+    );
+    let runs_on = suite.runs_on.clone().unwrap_or(cfg.runs_on);
+    let room = |name: &str| d.broker.limit(name).is_none_or(|l| d.broker.used(name) < l);
+    Some(Spill {
+        load: LocalLoad::from_reading(&d.broker.load_reading(now_ms()), &needs),
+        github_room: room(mason_scheduler::GHA)
+            && (!runs_on.contains("macos") || room(mason_scheduler::GHA_MACOS)),
+        spill_after_ms: cfg.spill_after_s.saturating_mul(1000),
+    })
 }
 
 // ---- what is running where, for status and task show -----------------------------------------
@@ -657,6 +881,50 @@ pub fn seen(task: Option<u64>) -> Vec<Value> {
     v.into_iter().map(seen_json).collect()
 }
 
+/// How long a `favor-local` placement stands, so the several calls one run makes (is it remote?
+/// then the run itself) agree, and a run queued here is only re-placed by [`keep_or_move`].
+const STICKY_MS: u64 = 600_000;
+
+type StickyKey = (String, u64, String, &'static str);
+static STICKY: Mutex<BTreeMap<StickyKey, (Place, u64)>> = Mutex::new(BTreeMap::new());
+
+/// Forget the standing placement of a run that is over, so the next one is decided afresh.
+pub fn forget(project: &str, task: Option<u64>, suite: &str, kind: &'static str) {
+    STICKY.lock().unwrap_or_else(|e| e.into_inner()).remove(&(
+        project.to_string(),
+        task.unwrap_or(0),
+        suite.to_string(),
+        kind,
+    ));
+}
+
+/// A `favor-local` run placed at `placed_at` stays where it was, except that one placed here
+/// and waiting longer than `spill_after` while a hold is active moves to GitHub when GitHub has
+/// room (#832). `now` is given, so a test fixes the clock. `None`: decide afresh.
+pub fn keep_or_move(prev: &(Place, u64), now: u64, f: &Facts) -> Option<Place> {
+    let (place, at) = prev;
+    if now.saturating_sub(*at) > STICKY_MS {
+        return None;
+    }
+    let Place::Local { from, .. } = place else {
+        return Some(place.clone());
+    };
+    let (Some(sp), Some(runs_on)) = (
+        &f.spill,
+        f.suite_runs_on.as_ref().or(f.project_runs_on.as_ref()),
+    ) else {
+        return Some(place.clone());
+    };
+    match replace_waiting(now.saturating_sub(*at), sp) {
+        Some(why) => Some(Place::GitHub {
+            runs_on: runs_on.clone(),
+            from: *from,
+            why: format!("favor-local, {why}"),
+        }),
+        None => Some(place.clone()),
+    }
+}
+
 /// Decide for a suite of a project and remember it.
 pub fn place_of(
     d: &Daemon,
@@ -665,7 +933,39 @@ pub fn place_of(
     suite: &mason_testing::Suite,
     kind: &'static str,
 ) -> Place {
-    let p = decide(&facts_for(d, project, task, suite));
+    let f = facts_for(d, project, task, suite);
+    let key = (
+        project.to_string(),
+        task.unwrap_or(0),
+        suite.name.clone(),
+        kind,
+    );
+    let balanced = f.spill.is_some();
+    let now = now_ms();
+    if balanced {
+        let prev = STICKY
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+            .cloned();
+        if let Some(p) = prev.as_ref().and_then(|pv| keep_or_move(pv, now, &f)) {
+            if prev.as_ref().is_some_and(|pv| pv.0 != p) {
+                STICKY
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(key, (p.clone(), now));
+            }
+            note(project, task, &suite.name, kind, &p);
+            return p;
+        }
+    }
+    let p = decide(&f);
+    if balanced {
+        STICKY
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key, (p.clone(), now));
+    }
     note(project, task, &suite.name, kind, &p);
     p
 }
@@ -698,6 +998,154 @@ pub fn config_view(d: &Daemon, project: &str) -> Vec<Value> {
 
 #[cfg(test)]
 mod tests {
+    fn load(held: Option<&str>, free: u32, waiting: u32, oldest_s: u64) -> LocalLoad {
+        LocalLoad {
+            held: held.map(String::from),
+            free: BTreeMap::from([("compile".to_string(), free)]),
+            waiting,
+            oldest_wait_ms: oldest_s * 1000,
+        }
+    }
+
+    fn favor_local(load: LocalLoad, github_room: bool) -> Facts {
+        Facts {
+            task: Some(Mode::FavorLocal),
+            spill: Some(Spill {
+                load,
+                github_room,
+                spill_after_ms: 120_000,
+            }),
+            ..Facts::plain(Mode::Local)
+        }
+    }
+
+    /// #832: the pure favor-local table.
+    #[test]
+    fn favor_local_spills_only_when_overloaded_and_github_has_room() {
+        let heat = Some("held for heat (die 99 °C)");
+        let rows: Vec<(&str, LocalLoad, bool, bool)> = vec![
+            ("hold, GitHub room", load(heat, 2, 0, 0), true, true),
+            ("hold, GitHub full", load(heat, 2, 0, 0), false, false),
+            ("slots free", load(None, 2, 0, 0), true, false),
+            ("slots full, waiters, room", load(None, 0, 3, 5), true, true),
+            (
+                "slots full, waiters, GitHub full",
+                load(None, 0, 3, 5),
+                false,
+                false,
+            ),
+            (
+                "slots full, nobody waiting",
+                load(None, 0, 0, 0),
+                true,
+                false,
+            ),
+            (
+                "oldest wait over spill_after",
+                load(None, 1, 1, 121),
+                true,
+                true,
+            ),
+            (
+                "oldest wait under spill_after",
+                load(None, 1, 1, 119),
+                true,
+                false,
+            ),
+        ];
+        for (name, l, room, remote) in rows {
+            let got = decide(&favor_local(l, room));
+            assert_eq!(got.is_github(), remote, "{name}: {got:?}");
+        }
+        // A project without [remote_runs] stays here, however loaded.
+        let f = Facts {
+            project_runs_on: None,
+            ..favor_local(load(heat, 0, 3, 500), true)
+        };
+        assert!(!decide(&f).is_github());
+    }
+
+    #[test]
+    fn a_favor_local_placement_says_why() {
+        let t = decide(&favor_local(
+            load(Some("held for heat (die 99 °C)"), 2, 0, 0),
+            true,
+        ))
+        .text();
+        assert!(
+            t.contains("favor-local, this machine held for heat (die 99 °C)"),
+            "{t}"
+        );
+        let t = decide(&favor_local(load(None, 2, 0, 0), true)).text();
+        assert!(t.contains("favor-local, 2 compile slots free"), "{t}");
+        let t = decide(&favor_local(load(None, 0, 2, 0), false)).text();
+        assert!(t.contains("GitHub is full too"), "{t}");
+    }
+
+    /// #832: a run queued here moves once its wait passes `spill_after` while a hold is active
+    /// and GitHub has room; the clock is a fixed number.
+    #[test]
+    fn a_queued_local_run_moves_when_its_wait_passes_spill_after_under_a_hold() {
+        let here = Place::Local {
+            why: "favor-local, 1 compile slot free".into(),
+            from: Source::Task,
+        };
+        let placed_at = 1_000_000;
+        let prev = (here.clone(), placed_at);
+        let heat = Some("held for heat (die 99 °C)");
+        let f = |l, room| favor_local(l, room);
+        // Under spill_after: stays.
+        assert_eq!(
+            keep_or_move(&prev, placed_at + 100_000, &f(load(heat, 0, 1, 0), true)),
+            Some(here.clone())
+        );
+        // Over it, held, GitHub room: moves.
+        let moved =
+            keep_or_move(&prev, placed_at + 130_000, &f(load(heat, 0, 1, 0), true)).unwrap();
+        assert!(moved.is_github(), "{moved:?}");
+        // Over it but no hold, or GitHub full: stays.
+        assert_eq!(
+            keep_or_move(&prev, placed_at + 130_000, &f(load(None, 0, 1, 0), true)),
+            Some(here.clone())
+        );
+        assert_eq!(
+            keep_or_move(&prev, placed_at + 130_000, &f(load(heat, 0, 1, 0), false)),
+            Some(here)
+        );
+        // A placement on GitHub stands; an old one is decided afresh.
+        let gh = (moved.clone(), placed_at);
+        assert_eq!(
+            keep_or_move(&gh, placed_at + 1, &f(load(None, 2, 0, 0), true)),
+            Some(moved)
+        );
+        assert_eq!(
+            keep_or_move(
+                &gh,
+                placed_at + STICKY_MS + 1,
+                &f(load(None, 2, 0, 0), true)
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_load_is_built_from_a_scheduler_reading() {
+        let r = crate::sched::LoadReading {
+            used: BTreeMap::from([("compile".to_string(), 2)]),
+            limits: BTreeMap::from([("compile".to_string(), 2), ("test-suite".to_string(), 4)]),
+            waiting: vec![
+                (vec!["compile".to_string()], 7_000),
+                (vec!["test-suite".to_string()], 99_000),
+            ],
+            held: None,
+        };
+        let l = LocalLoad::from_reading(&r, &["compile".to_string()]);
+        assert_eq!(
+            (l.free["compile"], l.waiting, l.oldest_wait_ms),
+            (0, 1, 7_000)
+        );
+    }
+
     #[test]
     fn a_landing_run_is_remembered_once_with_where_it_ran() {
         note_landing_run("p733", "b9-u-unit", "unit", "ran on this Mac");
