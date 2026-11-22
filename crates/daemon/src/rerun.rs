@@ -16,9 +16,14 @@ pub fn failing_names(text: &str) -> Vec<String> {
     for l in text.lines() {
         let l = l.trim_end();
         if let Some(rest) = l.strip_prefix("test ") {
-            // libtest: `test a::b ... FAILED`
-            if let Some(name) = rest.strip_suffix(" ... FAILED") {
-                out.insert(name.to_string());
+            // libtest: `test a::b ... FAILED`, or with `--report-time` (s634)
+            // `test a::b ... FAILED <0.054s>`. Without the timed form no cargo-workspace failure
+            // was read, so no check said a failing test was red on develop too.
+            if let Some((name, verdict)) = rest.rsplit_once(" ... ") {
+                let verdict = verdict.split_once(" <").map_or(verdict, |(v, _)| v);
+                if verdict == "FAILED" {
+                    out.insert(name.to_string());
+                }
             }
         } else if let Some(rest) = l
             .strip_prefix("FAILED ")
@@ -103,6 +108,13 @@ mod tests {
             ]
         );
         assert!(failing_names("nope\nexit 1\n").is_empty());
+    }
+
+    #[test]
+    fn libtest_failures_with_report_time_are_read() {
+        let t = "test a::one ... ok <0.001s>\ntest a::two ... FAILED <0.054s>\n\
+                 test a::three ... FAILED\ntest a::slow has been running for over 60 seconds\n";
+        assert_eq!(failing_names(t), vec!["a::three", "a::two"]);
     }
 
     #[test]
