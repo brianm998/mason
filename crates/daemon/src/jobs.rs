@@ -5561,7 +5561,11 @@ mod tests {
         sh(&dir, &["add", "-A"]);
         sh(&dir, &["commit", "-qm", "tests and docs only"]);
         let head = git::rev_parse(&dir, "HEAD").unwrap();
-        let note = dir.join("source-free.txt");
+        // The note must sit outside the repository: the validator writes it
+        // there, and an untracked file would make the next submit's tree dirty.
+        // Production keeps it in the task dir, also outside the worktree.
+        let note_dir = tempfile::tempdir().unwrap().keep();
+        let note = note_dir.join("source-free.txt");
         let v = change_validator(
             dir.clone(),
             "main".into(),
