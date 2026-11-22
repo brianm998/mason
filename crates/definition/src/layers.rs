@@ -30,11 +30,12 @@ pub const OVERRIDABLE: &[&str] = &[
 ];
 
 /// The task-wide override key that says where the task's compiles and tests run (#699):
-/// `github` or `local`. It is not a step attribute and no layer but the task's own may set it.
+/// a placement mode (#831): `local`, `remote`, `favor-local` or `favor-remote`; the old `github`
+/// reads as `remote`. It is not a step attribute and no layer but the task's own may set it.
 pub const RUN_ON: &str = "run_on";
 
 /// The values `run_on` takes.
-pub const RUN_ON_VALUES: &[&str] = &["github", "local"];
+pub const RUN_ON_VALUES: &[&str] = &["local", "remote", "favor-local", "favor-remote", "github"];
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Source {
@@ -132,7 +133,7 @@ pub fn check_override(
             Ok((String::new(), RUN_ON.to_string()))
         } else {
             Err(format!(
-                "`{value}` is not a place to run; run_on is {} (or `default` to follow the global switch, with `mason task run-on`)",
+                "`{value}` is not a place to run; run_on is {} (or `default` to follow the project or global mode, with `mason task run-on`)",
                 RUN_ON_VALUES.join(" or ")
             ))
         };

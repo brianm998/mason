@@ -261,6 +261,82 @@ pub fn tree_key(wt: &Path) -> String {
     format!("{tree}+{}", &sum[..16])
 }
 
+/// A develop check this process is running: whose it is, and which suite (#826).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LiveCheck {
+    task: u64,
+    suite: String,
+}
+
+fn live_checks() -> &'static Mutex<HashMap<String, LiveCheck>> {
+    static M: std::sync::OnceLock<Mutex<HashMap<String, LiveCheck>>> = std::sync::OnceLock::new();
+    M.get_or_init(Default::default)
+}
+
+/// Runs asked to cancel, by host id, with the words the owner reads.
+fn cancel_requests() -> &'static Mutex<HashMap<String, String>> {
+    static M: std::sync::OnceLock<Mutex<HashMap<String, String>>> = std::sync::OnceLock::new();
+    M.get_or_init(Default::default)
+}
+
+/// The suite a develop check's host id names: `t5r7-check-exit-scripts9` is `exit-scripts`.
+fn suite_of(id: &str) -> Option<String> {
+    let (_, tail) = id.split_once("-check-")?;
+    let s = tail.trim_end_matches(|c: char| c.is_ascii_digit());
+    (!s.is_empty()).then(|| s.to_string())
+}
+
+/// Which of `live` a new run `id` of `task` and `suite` supersedes: every other run of the
+/// same task and suite, whatever its run number. Other suites and other tasks are never named.
+fn superseded_by(
+    live: &HashMap<String, LiveCheck>,
+    id: &str,
+    task: u64,
+    suite: &str,
+) -> Vec<String> {
+    let mut v: Vec<String> = live
+        .iter()
+        .filter(|(i, l)| i.as_str() != id && l.task == task && l.suite == suite)
+        .map(|(i, _)| i.clone())
+        .collect();
+    v.sort();
+    v
+}
+
+/// Ask the check `id` to end now: a remote one is cancelled on GitHub, its ref deleted and its
+/// units freed by the path a skip takes; a local one has its host stopped. The cancellation
+/// is logged, and noted beside the run's log for the task's progress.
+fn cancel_check(d: &Daemon, id: &str, why: &str) {
+    tracing::info!(host = %id, "{why}");
+    cancel_requests()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(id.to_string(), why.to_string());
+    if running(d, id) {
+        stop_host(d, id);
+    }
+}
+
+/// The agent step of `task` ended: cancel every check it still has running (#826).
+pub fn cancel_task(d: &Daemon, task: u64) -> usize {
+    let ids: Vec<String> = live_checks()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter(|(_, l)| l.task == task)
+        .map(|(i, _)| i.clone())
+        .collect();
+    for id in &ids {
+        let suite = suite_of(id).unwrap_or_default();
+        cancel_check(
+            d,
+            id,
+            &format!("cancelled a {suite} run (#{task}): its develop step ended"),
+        );
+    }
+    ids.len()
+}
+
 fn run_key(spec: &CheckSpec) -> String {
     let mut h = Sha256::new();
     h.update(spec.tree.as_bytes());
@@ -375,6 +451,32 @@ pub fn run_with(d: &Arc<Daemon>, spec: &CheckSpec, progress: Option<&CheckProgre
             ],
         );
     }
+    let mine = check_owner(&id).zip(suite_of(&id));
+    if collector {
+        if let Some(((task, _), suite)) = &mine {
+            let older = {
+                let mut live = live_checks().lock().unwrap_or_else(|e| e.into_inner());
+                let older = superseded_by(&live, &id, *task, suite);
+                live.insert(
+                    id.clone(),
+                    LiveCheck {
+                        task: *task,
+                        suite: suite.clone(),
+                    },
+                );
+                older
+            };
+            for old in older {
+                cancel_check(
+                    d,
+                    &old,
+                    &format!(
+                        "cancelled an older {suite} run ({old}) for #{task}: {id} replaces it"
+                    ),
+                );
+            }
+        }
+    }
     if !collector {
         let mut g = slot.result.lock().unwrap_or_else(|e| e.into_inner());
         while g.is_none() {
@@ -383,6 +485,14 @@ pub fn run_with(d: &Arc<Daemon>, spec: &CheckSpec, progress: Option<&CheckProgre
         return g.clone().unwrap_or_else(|| Err("no result".into()));
     }
     let res = collect(d, spec, &id, progress);
+    live_checks()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&id);
+    cancel_requests()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&id);
     // Given to its callers now: a later call on the same tree runs again.
     mark_delivered(spec, &id, &key);
     {
@@ -561,7 +671,15 @@ fn remote_check(d: &Arc<Daemon>, spec: &CheckSpec, id: &str) -> Option<Shared> {
     );
     let note: Mutex<Option<String>> = Mutex::new(None);
     let stop = || {
-        let n = spec.stop.as_ref().and_then(|f| f())?;
+        let asked = cancel_requests()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(id)
+            .cloned();
+        let n = match asked {
+            Some(n) => n,
+            None => spec.stop.as_ref().and_then(|f| f())?,
+        };
         *note.lock().unwrap_or_else(|e| e.into_inner()) = Some(n);
         Some(rm::StopWhy::Skipped)
     };
@@ -714,6 +832,45 @@ fn collect(
 #[cfg(test)]
 mod build_choice_tests {
     use super::*;
+
+    fn live(pairs: &[(&str, u64, &str)]) -> HashMap<String, LiveCheck> {
+        pairs
+            .iter()
+            .map(|(i, t, s)| {
+                (
+                    i.to_string(),
+                    LiveCheck {
+                        task: *t,
+                        suite: s.to_string(),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_new_run_supersedes_the_same_suite_of_the_same_task_only() {
+        let l = live(&[
+            ("t765r1-check-exit-scripts7", 765, "exit-scripts"),
+            ("t765r2-check-exit-scripts8", 765, "exit-scripts"),
+            ("t765r2-check-build3", 765, "build"),
+            ("t788r1-check-exit-scripts1", 788, "exit-scripts"),
+        ]);
+        assert_eq!(
+            superseded_by(&l, "t765r2-check-exit-scripts9", 765, "exit-scripts"),
+            vec!["t765r1-check-exit-scripts7", "t765r2-check-exit-scripts8"]
+        );
+        assert!(superseded_by(&l, "t765r2-check-exit-scripts8", 765, "build").len() == 1);
+    }
+
+    #[test]
+    fn the_suite_is_read_from_the_host_id() {
+        assert_eq!(
+            suite_of("t575r3670-check-cargo-workspace2").as_deref(),
+            Some("cargo-workspace")
+        );
+        assert_eq!(suite_of("b3-retest1"), None);
+    }
 
     fn suite(build: Option<&str>) -> mason_testing::Suite {
         let mut s = mason_testing::Suite::new("t", "c", mason_testing::ParserKind::Junit);
