@@ -198,6 +198,8 @@ public final class MonitorModel {
     public var daemonUpdateConfirm: String { updateInfo?.daemonConfirm ?? "" }
     /// The confirmation dialog is open.
     public var confirmingDaemonUpdate = false
+    /// The key of the notification row whose "?" dialog is open (#951).
+    public var notificationDetailKey: String?
     /// The Land now the owner pressed and has not yet confirmed (the landing queue's one-line confirm).
     public var landNowAsk: LandNowTarget?
     /// The placement change the owner chose and has not yet confirmed (#834).

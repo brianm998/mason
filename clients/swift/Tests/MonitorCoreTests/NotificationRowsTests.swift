@@ -146,4 +146,33 @@ final class NotificationLevelTests: XCTestCase {
         XCTAssertEqual(m.notificationRows().count, 1)
         XCTAssertEqual(m.infoSummary, "")
     }
+
+    /// #951: a long or multi-line text becomes one short line with the whole text as detail.
+    func testOneLineKeepsTheWholeTextAsDetail() {
+        let short = MonitorModel.oneLine("Paused for p")
+        XCTAssertEqual(short.text, "Paused for p")
+        XCTAssertEqual(short.detail, "")
+        let long = "Landing is frozen for p:\nonly the fix task lands " + String(repeating: "until green ", count: 12)
+        let one = MonitorModel.oneLine(long)
+        XCTAssertFalse(one.text.contains("\n"))
+        XCTAssertLessThanOrEqual(one.text.count, MonitorModel.notificationTextLimit)
+        XCTAssertEqual(one.detail, long)
+    }
+
+    func testRowsCarryDetailAndTaskNumbers() {
+        var b = banner("ci_watch", "p: 2 red CI jobs being fixed")
+        b.detail = "p: 2 red CI jobs being fixed: #7, #9"
+        var plain = banner("warn", "Short")
+        plain.level = "warning"
+        b.level = "warning"
+        let m = model([b, plain])
+        let rows = m.notificationRows()
+        XCTAssertTrue(rows[0].hasDetails)
+        XCTAssertEqual(rows[0].taskNumbers, [7, 9])
+        XCTAssertFalse(rows[1].hasDetails)
+        m.readOnlyReason = String(repeating: "because of a long reason ", count: 8)
+        let ro = m.notificationRows().first { $0.clientID == "read-only" }
+        XCTAssertEqual(ro?.hasDetails, true)
+        XCTAssertTrue(ro?.detail.contains("long reason") == true)
+    }
 }

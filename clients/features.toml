@@ -361,6 +361,15 @@ compose = "done"
 ios = "done"
 android = "done"
 
+[feature.notification-details]
+description = "Each notification is one line; a \"?\" button on a row with more to say opens a dialog with the reason, the choices and an Open task action for each task named"
+swift = "done"
+compose = "done"
+ios = "todo"
+ios_reason = "Not in the first pass (#951): the phone layout draws its own banner rows"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
+
 [feature.text-scaling]
 description = "Text scales and reflows so it stays sharp from across the room"
 swift = "done"
