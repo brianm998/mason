@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+/// The band of a debt payment: after every other pipeline band (2, or 2 + priority).
+const DEBT_BAND: u8 = u8::MAX;
+
 /// The ordering rule, as a tuple:
 ///
 /// ```text
@@ -46,6 +49,7 @@ pub struct Rank {
     priority: u8,
     jump: bool,
     landing: bool,
+    debt: bool,
     by_priority: bool,
     aged: bool,
     waiting_since: u64,
@@ -76,6 +80,7 @@ impl Rank {
             priority,
             jump,
             landing: false,
+            debt: false,
             by_priority: false,
             aged: false,
             waiting_since: 0,
@@ -99,6 +104,12 @@ impl Rank {
             2
         } else if self.landing {
             0
+        } else if self.debt {
+            // Owed work on landed code goes after all task work, oldest first, then by id;
+            // neither progress, priority nor waiting moves it up.
+            self.remaining = 0;
+            self.priority_key = 0;
+            DEBT_BAND
         } else if self.aged {
             // Progress still decides (s349): the pipeline's rule is that work further along
             // goes first. Aging only lifts a request over issue priority and arrival among
@@ -137,6 +148,21 @@ impl Rank {
         self.recompute()
     }
 
+    /// The same rank for a debt payment (owed work on already-landed code): behind all task
+    /// work and the landing band, ahead of nothing but another younger debt. Debts order by
+    /// arrival (age), then id. An interactive caller keeps its place.
+    pub fn debt(mut self) -> Rank {
+        if !self.interactive() {
+            self.debt = true;
+        }
+        self.recompute()
+    }
+
+    /// Is this a debt payment's rank?
+    pub fn is_debt(&self) -> bool {
+        !self.interactive() && self.debt && !self.landing
+    }
+
     /// Is this a landing's work?
     pub fn is_landing(&self) -> bool {
         !self.interactive() && self.landing
@@ -163,7 +189,7 @@ impl Rank {
 
     /// Is this rank aged?
     pub fn is_aged(&self) -> bool {
-        !self.interactive() && !self.landing && self.aged
+        !self.interactive() && !self.landing && !self.debt && self.aged
     }
 
     /// The same rank for another tracker priority, keeping everything else
@@ -218,6 +244,26 @@ mod tests {
             !person.landing().is_landing(),
             "a person's request is never a landing"
         );
+    }
+
+    #[test]
+    fn a_debt_goes_after_all_task_work_and_after_a_landing_oldest_first() {
+        let far_low = Rank::new(false, 40, 9, 999, 99, false).priority_first();
+        let aged = Rank::new(false, 40, 9, 999, 99, false).aged(1);
+        let land = Rank::new(false, 1, 0, 1, 1, false).landing();
+        let old = Rank::new(false, 0, 0, 10, 5, false).debt();
+        let young = Rank::new(false, 0, 0, 20, 1, false).debt();
+        assert!(old.is_debt() && !far_low.is_debt());
+        assert!(far_low < old && aged < old && land < old);
+        assert!(old < young, "oldest first");
+        assert!(
+            Rank::new(false, 0, 0, 10, 1, false).debt()
+                < Rank::new(false, 0, 0, 10, 2, false).debt()
+        );
+        assert!(old.priority_first().aged(0) < young.priority_first());
+        assert!(old.priority_first().aged(0) > far_low);
+        let person = Rank::new(true, 9, 9, 99, 99, false).debt();
+        assert!(!person.is_debt() && person < land);
     }
 
     #[test]

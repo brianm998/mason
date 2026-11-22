@@ -137,9 +137,9 @@ daemon=$!
 until m status >/dev/null 2>&1; do kill -0 "$daemon" || { cat "$root/masond.log" >&2; exit 1; }; sleep 0.1; done
 
 echo "== the switch is off by default; turn it on"
-m remote status | grep -q '^default local' || fail "remote is not local by default"
+m remote status | grep -q '^mode local' || fail "remote is not local by default"
 m remote on > /dev/null
-m remote status | grep -q '^default github' || fail "remote on did not take"
+m remote status | grep -q '^mode remote' || fail "remote on did not take"
 grep -q "^changed_by" "$root/c/remote.toml" || fail "remote.toml does not record who"
 
 echo "== 1. a task's test step with two suites"
@@ -171,7 +171,7 @@ m remote on > /dev/null
 m remote off > /dev/null
 grep -q '^# my note' "$root/c/remote.toml" || fail "a comment was lost"
 grep -q '^extra = 1 # keep this' "$root/c/remote.toml" || fail "another key was lost"
-grep -q '^default = "local"' "$root/c/remote.toml" || fail "remote off did not take"
+grep -q '^mode = "local"' "$root/c/remote.toml" || fail "remote off did not take"
 [ "$(wc -l < "$root/c/remote-changes.log")" -ge 4 ] || fail "changes are not recorded"
 
 echo "== 3. with remote off the next round runs both suites here"
