@@ -189,10 +189,10 @@ fn narrow(
         return None;
     }
     let each = each.unwrap_or_else(|| "{}".into());
-    if !each.contains("{}") {
+    if !["{}", "{file}", "{path}"].iter().any(|k| each.contains(k)) {
         out.push(Problem::new(
             format!("{base}.narrow_each"),
-            "must contain `{}`, which becomes one test's name",
+            "must contain `{}` (one test's name), `{file}` (its file under narrow_root) or `{path}` (its file from the repository root)",
         ));
         return None;
     }

@@ -142,6 +142,9 @@ pub fn check(path: &Path, plugins: &[PluginType]) -> i32 {
             println!("{line}");
         }
     }
+    for w in validate::warnings(&def, &Capabilities::now().with_plugins(plugins.to_vec())) {
+        println!("warning  {w}");
+    }
     println!(
         "ok  {} steps, definition {}",
         def.steps.len(),
