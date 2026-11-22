@@ -556,6 +556,16 @@ struct DiskCfg {
     every: Duration,
 }
 
+/// A read of the machine's state for placement (#832): see [`Broker::load_reading`].
+#[derive(Clone, Debug, Default)]
+pub struct LoadReading {
+    pub used: BTreeMap<String, u32>,
+    pub limits: BTreeMap<String, u32>,
+    /// Each waiting request: the resources it asks for and how long it has waited, in ms.
+    pub waiting: Vec<(Vec<String>, u64)>,
+    pub held: Option<String>,
+}
+
 pub struct Broker {
     st: Mutex<State>,
     cv: Condvar,
@@ -2233,6 +2243,41 @@ impl Broker {
             })
             .map(|(t, _)| *t)
             .collect()
+    }
+
+    /// What this machine is doing, read only, for placement (#832): per resource the units held
+    /// and the limit, each waiting request's resource names and age (ms since it asked, on the
+    /// `now` given), and the hold in force, if any ("held for heat (99 °C)"). Changes nothing.
+    pub fn load_reading(&self, now: u64) -> LoadReading {
+        let mut st = lock(&self.st);
+        self.cpu_gate(&mut st);
+        let snap = st.ledger.snapshot();
+        let held = if let Some(why) = st.thermal_why.clone() {
+            Some(format!("held for heat ({why})"))
+        } else {
+            st.cpu_busy
+                .filter(|b| *b >= st.cpu_max && st.cpu_max > 0)
+                .map(|b| format!("held for CPU ({b}% busy, limit {}%)", st.cpu_max))
+        };
+        LoadReading {
+            used: snap.used,
+            limits: snap
+                .capacity
+                .iter()
+                .map(|(k, c)| (k.clone(), c.units))
+                .collect(),
+            waiting: snap
+                .waiting
+                .iter()
+                .map(|r| {
+                    (
+                        r.needs.amounts.keys().cloned().collect(),
+                        now.saturating_sub(r.since),
+                    )
+                })
+                .collect(),
+            held,
+        }
     }
 
     /// Units of a resource held right now.

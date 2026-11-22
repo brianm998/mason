@@ -897,6 +897,9 @@ pub struct RemoteCfg {
     pub runs_on: String,
     /// Seconds a run may wait for a runner before it counts as an outage.
     pub pickup_timeout_s: u64,
+    /// `favor-local` (#832): a run whose wait for this machine's slots passes this many seconds
+    /// may start on GitHub instead.
+    pub spill_after_s: u64,
     /// With `fallback = "local"` a run that cannot go remote runs here instead.
     pub fallback_local: bool,
     /// The project's placement mode (#831): `[remote_runs] mode`, else the old `fallback` (`local`
@@ -1227,6 +1230,7 @@ fn parse_services(id: &str, doc: &DocumentMut) -> Result<ServicesCfg, String> {
             workflow: get(t, "workflow").unwrap_or_else(|| "mason-run.yml".into()),
             runs_on: get(t, "runs_on").unwrap_or_else(|| "ubuntu-latest".into()),
             pickup_timeout_s: int(t, "pickup_timeout", 1200),
+            spill_after_s: int(t, "spill_after", 120),
             fallback_local,
             mode,
             test_env: match t.get("test_env") {
@@ -1836,7 +1840,7 @@ mod tests {
             ),
             ("a/b", "file:/t", "w.yml", "macos-latest")
         );
-        assert!(r.fallback_local && r.pickup_timeout_s == 60);
+        assert!(r.fallback_local && r.pickup_timeout_s == 60 && r.spill_after_s == 120);
         assert_eq!(
             r.test_env,
             vec![("MASON_TEST_MIN_WAIT_S".to_string(), "180".to_string())]
