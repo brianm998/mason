@@ -441,7 +441,7 @@ pub struct AccountJobs {
     last: crate::sched::OtherJobs,
 }
 
-fn is_macos(j: &mason_adapters::github::ActionJob) -> bool {
+fn job_is_macos(j: &mason_adapters::github::ActionJob) -> bool {
     j.labels.iter().any(|l| l.starts_with("macos"))
 }
 
@@ -545,7 +545,7 @@ impl AccountJobs {
                 ..Default::default()
             };
             for j in &jobs {
-                let mac = is_macos(j) as u32;
+                let mac = job_is_macos(j) as u32;
                 match j.status.as_str() {
                     "in_progress" => {
                         run.running += 1;

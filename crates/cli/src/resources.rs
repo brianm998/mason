@@ -470,7 +470,7 @@ pub fn show(d: &Daemon, json_out: bool) -> Result<(), String> {
             r["limit"]
         );
         if r["name"].as_str() == Some("gha") {
-            if let Some(l) = gha_line(&v["gha"]) {
+            if let Some(l) = gha_line(&v["gha"], now) {
                 println!("      {l}");
             }
         }
@@ -517,7 +517,7 @@ pub fn show(d: &Daemon, json_out: bool) -> Result<(), String> {
 
 /// The `gha` pool's split (#766, #819): `MASON 11, other 7 (mason CI 5 running, star pr-gate 2
 /// queued), ceiling 20; macOS: other 2, ceiling 5`, then what is not counted or how old the count is.
-pub fn gha_line(g: &Value) -> Option<String> {
+pub fn gha_line(g: &Value, now: u64) -> Option<String> {
     let mason = g["mason"].as_u64()?;
     let other = g["other"].as_u64().unwrap_or(0);
     let label = g["other_label"].as_str().unwrap_or("");
@@ -547,13 +547,11 @@ pub fn gha_line(g: &Value) -> Option<String> {
         line.push_str(&format!("; not counted: {}", not.join(", ")));
     }
     if g["stale"].as_bool() == Some(true) {
-        line.push_str(&format!(
-            "; GitHub could not be read, count from {}",
-            g["read_at_ms"]
-                .as_u64()
-                .filter(|t| *t > 0)
-                .map_or("never".to_string(), |t| format!("{t} ms since the epoch"))
-        ));
+        let age = match g["read_at_ms"].as_u64().filter(|t| *t > 0) {
+            Some(t) => format!("{} s old", now.saturating_sub(t) / 1000),
+            None => "unread".to_string(),
+        };
+        line.push_str(&format!("; GitHub could not be read, count is {age}"));
     }
     Some(line)
 }

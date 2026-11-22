@@ -3394,7 +3394,7 @@ pub(crate) fn broker_with_waiting(dir: &Path, n: u64) -> Arc<Broker> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -4358,7 +4358,7 @@ mod tests {
         }
     }
 
-    fn runner_broker(dir: &Path, gha: u32, macos: u32, cpu_pct: u32) -> Arc<Broker> {
+    pub(crate) fn runner_broker(dir: &Path, gha: u32, macos: u32, cpu_pct: u32) -> Arc<Broker> {
         let cfg = ResourceCfg {
             machine: BTreeMap::from([("compile".to_string(), 3)]),
             pools: BTreeMap::from([("gha".to_string(), gha), ("gha-macos".to_string(), macos)]),
@@ -4373,6 +4373,15 @@ mod tests {
             &[],
         )
         .unwrap()
+    }
+
+    pub(crate) fn is_held(b: &Broker, id: u64) -> bool {
+        held(b, id)
+    }
+
+    /// A request for one `gha` unit, queued as task `t`.
+    pub(crate) fn queue_gha(b: &Broker, t: u64) -> u64 {
+        queue_ranked(b, t, false, &BTreeMap::from([("gha".to_string(), 1)]))
     }
 
     fn held(b: &Broker, id: u64) -> bool {
