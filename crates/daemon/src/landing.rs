@@ -22,6 +22,7 @@ pub const TIMED_OUT_TWICE: &str = "timed out twice";
 
 use crate::daemon::{now_ms, Daemon};
 use crate::jobs::Ctx;
+use crate::newtests::Added;
 use mason_adapter_api::service::{
     CheckCounts, Checks, CiJobCounts, CiRunJobs, CiState, GitHostAdapter, Observed, PollEvent,
     Poller, PrState, Review,
@@ -307,6 +308,16 @@ pub fn read_config(d: &Daemon, pid: ProjectId) -> Result<LandingConfig, ConfigEr
             problems.join("; ")
         )));
     }
+    // `narrow = true` is only safe with a scheduled full test to catch what narrowing misses (s804).
+    let problems =
+        config::narrow_problems(&c, crate::schedule::has_full_test_trigger(&p.schedules()));
+    if !problems.is_empty() {
+        return Err(ConfigError::Refused(format!(
+            "{}: {}",
+            p.id,
+            problems.join("; ")
+        )));
+    }
     if let Some(b) = &c.base {
         if *b != p.base {
             return Err(ConfigError::Refused(format!(
@@ -316,6 +327,47 @@ pub fn read_config(d: &Daemon, pid: ProjectId) -> Result<LandingConfig, ConfigEr
         }
     }
     Ok(c)
+}
+
+/// What the `batch` tier runs now (s804): `None` when it does not narrow; `Some(Narrow)` when the
+/// scheduled full test stands behind it; `Some(Whole(why))` when the last full test is red, too
+/// old with untested commits since, or missing, so batches run the whole suite.
+pub fn batch_gate(
+    d: &Daemon,
+    p: &crate::config::ProjectCfg,
+    cfg: &LandingConfig,
+) -> Option<mason_core::full_test::Gate> {
+    use mason_core::full_test as full;
+    if !cfg.narrows() {
+        return None;
+    }
+    let mut rows: Vec<full::Tested> = vec![];
+    for spec in p.schedules().iter().filter(|s| s.ci.is_some()) {
+        rows.extend(crate::ci_schedule::tested(
+            &d.store.full_tests(&p.id, &spec.name).unwrap_or_default(),
+        ));
+    }
+    rows.sort_by(|a, b| {
+        b.finished_ms
+            .max(b.started_ms)
+            .cmp(&a.finished_ms.max(a.started_ms))
+    });
+    let now = now_ms();
+    let max_age = cfg
+        .full_test_max_age
+        .map_or(full::DEFAULT_MAX_AGE_MS, |m| m.as_millis() as u64);
+    let base = p.base_ref();
+    Some(full::narrow_gate(
+        &rows,
+        now,
+        max_age,
+        &|sha| {
+            git::run(&p.path, &["rev-list", "--count", &format!("{sha}..{base}")])
+                .ok()
+                .and_then(|o| o.trim().parse().ok())
+        },
+        &|ms| crate::ci_schedule::when_text(ms, now),
+    ))
 }
 
 // ---- the landing job's side ------------------------------------------------------
@@ -1762,9 +1814,10 @@ impl Runner {
                 &format!("b{batch_id}-r{rounds}"),
                 &run_key,
                 &format!(
-                    "full|{}|fast={}",
+                    "full|{}|fast={}|narrow={}",
                     suites.join(","),
-                    self.fast_tier.load(std::sync::atomic::Ordering::SeqCst)
+                    self.fast_tier.load(std::sync::atomic::Ordering::SeqCst),
+                    self.narrow_tag()
                 ),
             );
             if let Some(e) = self.take_service_error() {
@@ -2789,7 +2842,11 @@ impl Runner {
             .cloned()
             .collect();
         let (local, stopped) = self.without_stopped(def, local);
-        let notes = stopped;
+        let mut notes = stopped;
+        // The batch tier's narrowed selection, when `narrow = true` and the full test stands behind it.
+        let narrowed = self.narrowed_def(def, &local, wt, base, &mut notes);
+        let reuse = narrowed.is_none();
+        let def = narrowed.as_ref().unwrap_or(def);
         if local.is_empty() {
             let mut g = green();
             g.notes = notes;
@@ -2824,7 +2881,7 @@ impl Runner {
                     self.sink(),
                     true,
                     &self.members(def),
-                    true,
+                    reuse,
                 );
                 stop.store(true, std::sync::atomic::Ordering::SeqCst);
                 r
@@ -2832,6 +2889,57 @@ impl Runner {
             r.notes.splice(0..0, notes);
             r
         }
+    }
+
+    /// `narrow` or `whole`, for the keys that keep a red result: the two prove different things.
+    fn narrow_tag(&self) -> &'static str {
+        match crate::landing::batch_gate(&self.d, self.project(), &self.cfg) {
+            Some(mason_core::full_test::Gate::Narrow) => "narrow",
+            _ => "whole",
+        }
+    }
+
+    /// The definition with the batch tier's suites narrowed to the union diff of `wt` against
+    /// `base` (s804), or `None` to run them whole: the tier does not narrow, the gate says whole
+    /// (a note says why), or no suite of `local` narrows. A suite whose pick is everything stays
+    /// whole, with the reason in a note. Every rung of the red ladder runs through here, so a
+    /// bisect step narrows to the union of its own subset.
+    fn narrowed_def(
+        &self,
+        def: &mason_definition::Definition,
+        local: &[String],
+        wt: &Path,
+        base: &str,
+        notes: &mut Vec<String>,
+    ) -> Option<mason_definition::Definition> {
+        let tier = self.cfg.batch_suites()?;
+        match crate::landing::batch_gate(&self.d, self.project(), &self.cfg)? {
+            mason_core::full_test::Gate::Narrow => {}
+            mason_core::full_test::Gate::Whole(why) => {
+                if local.iter().any(|s| tier.contains(s)) {
+                    notes.push(format!("the batch runs the whole suite: {why}"));
+                }
+                return None;
+            }
+        }
+        let mut out = def.clone();
+        let mut any = false;
+        for name in local.iter().filter(|s| tier.contains(s)) {
+            let Some(suite) = def.testing.suite(name) else {
+                continue;
+            };
+            match crate::suites::narrow_for_batch(def, suite, wt, base) {
+                Ok((s, note)) => {
+                    if let Some(slot) = out.testing.suites.iter_mut().find(|x| x.name == *name) {
+                        *slot = s;
+                        any = true;
+                        notes.push(note);
+                    }
+                }
+                Err(why) => notes.push(format!("{name}: the batch runs it whole because {why}")),
+            }
+        }
+        any.then_some(out)
     }
 
     /// Split off the suites the owner has already stopped for the whole batch (every member
@@ -3028,6 +3136,9 @@ impl Runner {
                     r.failed.extend(t.failed);
                     r.notes.extend(t.notes);
                 }
+                if r.green {
+                    self.merge_new_tests(&mut r, def, wt, base, log_dir, prefix);
+                }
             }
             return r;
         };
@@ -3050,6 +3161,9 @@ impl Runner {
                     r.green = f.green;
                     r.failed.extend(f.failed);
                     r.notes.extend(f.notes);
+                    if r.green {
+                        self.merge_new_tests(&mut r, def, wt, base, log_dir, prefix);
+                    }
                 }
             }
             Ok((false, notes, failed)) => {
@@ -3180,6 +3294,220 @@ impl Runner {
                 }
                 Err(e) => {
                     let why = format!("{name}: the fast tier gave no result: {e}");
+                    self.fail_service(why.clone());
+                    out.green = false;
+                    out.notes.push(why);
+                    return out;
+                }
+            }
+        }
+        out
+    }
+
+    /// [`Self::new_tests`] after a green floor, its red recorded as the floor's own so that the
+    /// ladder blames by file (the files that add the failing tests).
+    fn merge_new_tests(
+        &self,
+        r: &mut crate::suites::OverRun,
+        def: &mason_definition::Definition,
+        wt: &Path,
+        base: &str,
+        log_dir: &Path,
+        prefix: &str,
+    ) {
+        let t = self.new_tests(def, wt, base, log_dir, prefix);
+        if !t.green {
+            self.floor_red
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        r.green = t.green;
+        r.failed.extend(t.failed);
+        r.notes.extend(t.notes);
+    }
+
+    /// The tests the batch's skipped tasks add (#812). The floor only proves the merged tree
+    /// builds, so a fast-tracked task whose change adds a failing test, or whose code never got
+    /// made, used to land. The new `#[test]` fns of the tasks whose testing was skipped run here
+    /// by name (and their new exit scripts), and nothing else of the suites does. A red names the
+    /// files that add the failing tests (`lint_files`), so only the task that added them is parked.
+    fn new_tests(
+        &self,
+        def: &mason_definition::Definition,
+        wt: &Path,
+        base: &str,
+        log_dir: &Path,
+        prefix: &str,
+    ) -> crate::suites::OverRun {
+        let d = &self.d;
+        let mut out = crate::suites::OverRun {
+            green: true,
+            failed: BTreeSet::new(),
+            notes: vec![],
+            failing: Default::default(),
+            ..Default::default()
+        };
+        let Some(step) = def
+            .steps
+            .iter()
+            .find(|s| s.kind == mason_definition::StepType::Test)
+        else {
+            return out;
+        };
+        // Only the tasks whose testing the owner skipped: the others had theirs run.
+        let mut files: Vec<String> = vec![];
+        for t in &self.member_tasks {
+            if crate::suites::skip_for(d, *t, "", &step.name).is_some() {
+                if let Some(fp) = self.fps.get(&t.0) {
+                    files.extend(fp.files.iter().cloned());
+                }
+            }
+        }
+        if files.is_empty() {
+            return out;
+        }
+        let added = match crate::newtests::in_range(wt, base, "HEAD") {
+            Ok(a) => a.restricted(&files),
+            Err(e) => {
+                let why = format!("the new-tests tier could not read the batch's diff: {e}");
+                self.fail_service(why.clone());
+                out.green = false;
+                out.notes.push(why);
+                return out;
+            }
+        };
+        if added.is_empty() {
+            return out;
+        }
+        self.lint_files
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        let project_test = self.legacy_cmd(def).map(|c| c.test);
+        // (suite it counts under, command, the tests it runs)
+        let mut runs: Vec<(String, String, crate::newtests::Added)> = vec![];
+        let names = added.names();
+        if !names.is_empty() {
+            for sname in &step.suites {
+                let Some(suite) = def.testing.suite(sname) else {
+                    continue;
+                };
+                let Ok(suite) = crate::suites::with_project_test(suite, project_test.as_deref())
+                else {
+                    continue;
+                };
+                let Some(t) = suite.rerun.as_deref().filter(|t| t.contains("{tests}")) else {
+                    continue;
+                };
+                let words: Vec<String> = names
+                    .iter()
+                    .map(|n| format!("'{}'", n.replace('\'', "'\\''")))
+                    .collect();
+                let cmd = t
+                    .replace("--exact ", "")
+                    .replace("{tests}", &words.join(" "));
+                let only = Added {
+                    tests: added.tests.clone(),
+                    exits: vec![],
+                };
+                runs.push((sname.clone(), cmd, only));
+                break;
+            }
+        }
+        if !added.exits.is_empty() {
+            let list: Vec<String> = added.exits.iter().map(|e| format!("'{e}'")).collect();
+            let cmd = format!(
+                "for s in {}; do bash \"$s\" || exit 1; done",
+                list.join(" ")
+            );
+            let name = step
+                .suites
+                .iter()
+                .find(|n| n.starts_with("exit-scripts"))
+                .cloned()
+                .unwrap_or_else(|| "exit-scripts".into());
+            runs.push((
+                name,
+                cmd,
+                Added {
+                    tests: vec![],
+                    exits: added.exits.clone(),
+                },
+            ));
+        }
+        let members = self.members(def);
+        for (name, cmd, only) in runs {
+            let _lease = match self.hold(def, self.test_step_needs(def, false), true) {
+                Ok(l) => l,
+                Err(e) => {
+                    self.fail_service(e.clone());
+                    out.green = false;
+                    out.notes.push(e);
+                    return out;
+                }
+            };
+            let spec = crate::hostedcheck::CheckSpec {
+                id_prefix: format!("{prefix}-new-{name}"),
+                log_dir: log_dir.to_path_buf(),
+                cmd,
+                cwd: wt.to_path_buf(),
+                env: vec![],
+                limit: self.project().test_timeout,
+                tree: crate::hostedcheck::tree_key(wt),
+                holds: Default::default(),
+                label: String::new(),
+                stop: Some({
+                    let (d, m) = (d.clone(), members.clone());
+                    Arc::new(move || m.forced(&d)) as crate::hostedcheck::StopFn
+                }),
+                place: None,
+                global: true,
+            };
+            match crate::hostedcheck::run(d, &spec) {
+                Ok(o) if o.stopped.is_some() => out.notes.push(format!(
+                    "{name}: the new tests were not run to the end: {}",
+                    o.stopped.unwrap_or_default()
+                )),
+                Ok(o) if o.passed => out.notes.push(format!(
+                    "{name}: the new tests of the skipped tasks pass ({})",
+                    only.describe()
+                )),
+                Ok(o) => {
+                    out.green = false;
+                    out.failed.insert(name.clone());
+                    let bad = crate::newtests::failing_among(&only, &o.full);
+                    // The files that add what failed; every file that adds a test when no
+                    // name can be read.
+                    let blame: Vec<String> = if bad.is_empty() {
+                        only.files()
+                    } else {
+                        only.restricted(
+                            &only
+                                .tests
+                                .iter()
+                                .filter(|(_, n)| bad.contains(n))
+                                .map(|(f, _)| f.clone())
+                                .collect::<Vec<_>>(),
+                        )
+                        .files()
+                    };
+                    let mut lf = self.lint_files.lock().unwrap_or_else(|e| e.into_inner());
+                    for f in blame {
+                        if !lf.contains(&f) {
+                            lf.push(f);
+                        }
+                    }
+                    out.notes.push(format!(
+                        "{name}: a test a skipped task adds failed{}\n{}",
+                        if bad.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" ({})", bad.join(", "))
+                        },
+                        crate::jobs::tail(&o.output, 15)
+                    ));
+                }
+                Err(e) => {
+                    let why = format!("{name}: the new tests gave no result: {e}");
                     self.fail_service(why.clone());
                     out.green = false;
                     out.notes.push(why);
@@ -4523,10 +4851,11 @@ impl Runner {
                     .collect::<Vec<_>>(),
             );
             let run_filter = format!(
-                "split|alone={:?}|mapped={:?}|failed={}",
+                "split|alone={:?}|mapped={:?}|failed={}|narrow={}",
                 alone,
                 mapped,
-                failed.join(",")
+                failed.join(","),
+                self.narrow_tag()
             );
             if let Some(r) = self.cached_run(&a.base_tip, &run_key, &run_filter, true) {
                 self.say(&format!(

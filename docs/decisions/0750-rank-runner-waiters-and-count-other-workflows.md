@@ -1,0 +1,3 @@
+# 0750: other workflows' jobs and a ceiling are held units in the `gha` pool
+
+Other workflows' running jobs share GitHub's runners with MASON, so they are counted as held `gha` units (read from the Actions API, ETag-conditional) rather than as a separate limit; `gha_ceiling` takes away the part of MASON's limit above what the account allows. Ranking needed no new rule: the broker's ledger already orders `gha` waiters by rank, and landing batches now request pool units like test steps do. Debt payments yield to any `gha` waiter. Trust: `sched.rs` and `suites.rs` are protected; the change alters admission order to GitHub, not verdicts, and the owner asked for it on 2026-11-20.

@@ -1830,6 +1830,14 @@ async fn landing_status(Shared(d): Shared<Arc<Daemon>>) -> Res {
                             }),
                             Err(e) => json!({"error": e}),
                         },
+                        "batch_tests": match crate::landing::load_config(&d2, *pid)
+                            .ok()
+                            .and_then(|c| crate::landing::batch_gate(&d2, p, &c))
+                        {
+                            None => json!("whole suite"),
+                            Some(mason_core::full_test::Gate::Narrow) => json!("narrowed to the batch's tests; the scheduled full test is the backstop"),
+                            Some(mason_core::full_test::Gate::Whole(why)) => json!(format!("whole suite: {why}")),
+                        },
                         "queued": d2.landing().queued(*pid).iter().map(|t| t.0).collect::<Vec<_>>(),
                         "running_batches": d2.landing().running_batches(*pid),
                         "queue_idle_ms": d2.landing().idle_ms(*pid),
@@ -3374,6 +3382,26 @@ async fn home_view(
     Ok(Json(v))
 }
 
+/// The runs MASON has on GitHub (`mason remote runs`): the home view's GitHub section.
+async fn remote_runs_get(
+    Shared(d): Shared<Arc<Daemon>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Res {
+    let project = q.get("project").cloned().unwrap_or_default();
+    let d2 = d.clone();
+    let v = d
+        .view_pool
+        .run(move || {
+            let w = d2.world().map_err(store_err)?;
+            let h = crate::views::Ctx::new(&d2, &w).home(&project);
+            serde_json::to_value(h.github.unwrap_or_default())
+                .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        })
+        .await
+        .map_err(pool_err)??;
+    Ok(Json(v))
+}
+
 async fn resources(Shared(d): Shared<Arc<Daemon>>) -> Res {
     let d2 = d.clone();
     let v = d
@@ -4023,6 +4051,7 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
             get(notify_settings_get).post(notify_settings_set),
         )
         .route("/remote", get(remote_get).post(remote_set))
+        .route("/remote/runs", get(remote_runs_get))
         .route(
             "/projects/{name}/settings",
             get(project_settings_get).post(project_settings_set),

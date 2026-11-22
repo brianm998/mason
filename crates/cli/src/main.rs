@@ -108,7 +108,9 @@ mason: command-line client for the MASON pipeline
   mason triage list | review <id> (--agree | --disagree)   the triage agent's sampled suggestions; it never answers
   mason task skip <id> (--suite S | --step S | --all) [--reason R] [--deferred]
                                       skip a suite or step by force, even mid-run; records a debt;
-                                      --all makes the task immune to testing through landing
+                                      --all is a fast track: the task skips the suites, but run_check
+                                      and the landing floor still build the change and run the tests it
+                                      adds (new #[test] fns, new exit scripts); a red there still stops it
   mason debt list | run <id>          what was skipped and not yet proven; run one on the base branch
   mason quarantine list | add <suite> <test> --owner O --days N [--reason R] | remove <suite> <test>
   mason test parse <parser> <file> [--min N]   read a results file the way a suite would, and judge it
@@ -578,16 +580,20 @@ fn main() {
         finish(&a);
         // With --project, the step types the project's approved extensions provide are
         // known too, so a plugin step validates offline.
-        let plugins = match &project {
-            Some(id) => {
-                let p =
-                    mason_daemon::config::load_project(&config_dir, id).unwrap_or_else(|e| die(&e));
-                mason_daemon::plugins::approved_types(&p)
-            }
+        let loaded = project.as_ref().map(|id| {
+            mason_daemon::config::load_project(&config_dir, id).unwrap_or_else(|e| die(&e))
+        });
+        let plugins = match &loaded {
+            Some(p) => mason_daemon::plugins::approved_types(p),
             None => vec![],
         };
+        // Whether the project has a full-test schedule with a trigger, for `narrow = true`.
+        let full_test = loaded
+            .as_ref()
+            .map(|p| mason_daemon::schedule::has_full_test_trigger(&p.schedules()));
         exit(if sub == "check" {
-            definition::check(&file, &plugins)
+            let c = definition::check(&file, &plugins);
+            c.max(definition::check_narrow(&file, full_test))
         } else {
             definition::dry(&file, scenarios.as_deref())
         });
@@ -702,6 +708,15 @@ fn main() {
             "on" => Some("remote".to_string()),
             "off" => Some("local".to_string()),
             "status" => None,
+            "runs" => {
+                finish(&a);
+                let r = or_die(d.call("GET", "/remote/runs", None));
+                if json_out {
+                    return println!("{r:#}");
+                }
+                remote::print_runs(&r);
+                return;
+            }
             "mode" => {
                 let m = a.pos().unwrap_or_else(|| {
                     die("which mode? local, remote, favor-local or favor-remote")
@@ -3490,8 +3505,9 @@ fn main() {
                     let r = or_die(d.call("POST", &format!("/tasks/{id}/skip"), Some(&body)));
                     if all {
                         println!(
-                            "Task #{id} is immune to testing: no test runs for it through landing \
-                             (lint and the build floor still do). Debt #{} owes the full run.",
+                            "Task #{id} is on the fast track: the suites do not run for it through \
+                             landing, but lint, the build floor and the tests its own change adds \
+                             still do. Debt #{} owes the full run.",
                             r["debt"]
                         );
                     } else {
@@ -3940,7 +3956,7 @@ fn print_report(r: &serde_json::Value) {
     );
     let slow = r["slowest_tests"].as_array().cloned().unwrap_or_default();
     if !slow.is_empty() {
-        println!("slowest tests (median of the last runs, share of the suite's tests):");
+        println!("slowest tests (median run time of the last runs, without the wait for a test world; share of the suite's tests):");
         for t in &slow {
             println!(
                 "  {:>8}  {:>5}%  {}::{}",
@@ -4333,6 +4349,8 @@ fn print_ci_watch(project: &str, w: &Value) {
             if f["urgent"] == true { " (urgent)" } else { "" },
             if f["proposed"] == true {
                 " (proposed)"
+            } else if f["auto"] == true {
+                " (auto-approved: cancel it if it is wrong)"
             } else {
                 ""
             },

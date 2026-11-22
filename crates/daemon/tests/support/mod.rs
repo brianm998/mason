@@ -85,11 +85,20 @@ struct Slot(#[allow(dead_code)] Option<slots::Held>);
 #[cfg(unix)]
 impl Slot {
     fn take() -> Slot {
-        Slot(slots::take(
+        let t = std::time::Instant::now();
+        let held = slots::take(
             &slots::shared_dir(),
             world_limit(),
             Duration::from_secs(600),
-        ))
+        );
+        // The wait counts in libtest's `--report-time`; say how long it was so the parser can
+        // take it off (#778). The thread's name is the test's name.
+        let ms = t.elapsed().as_millis();
+        if ms >= 50 {
+            let me = std::thread::current();
+            eprintln!("mason-world-wait {ms} {}", me.name().unwrap_or("?"));
+        }
+        Slot(held)
     }
 }
 
