@@ -1239,7 +1239,9 @@ final class SharedTick: ObservableObject {
             forName: NSApplication.didChangeOcclusionStateNotification, object: nil, queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated {
-                self?.visible = NSApp.occlusionState.contains(.visible)
+                let v = NSApp.occlusionState.contains(.visible)
+                self?.model?.visible = v
+                self?.visible = v
                 self?.update()
             }
         }
@@ -1247,7 +1249,11 @@ final class SharedTick: ObservableObject {
     }
 
     /// iOS: the root view reports the scene phase here (active means visible).
+    /// The model that is told the same thing (task #973): one notion of "visible".
+    weak var model: MonitorModel?
+
     func setVisible(_ v: Bool) {
+        model?.visible = v
         guard visible != v else { return }
         visible = v
         update()
