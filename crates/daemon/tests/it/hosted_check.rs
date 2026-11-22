@@ -25,6 +25,7 @@ fn spec(
         id_prefix: "t0r1-check".into(),
         log_dir: dir.join("logs"),
         cmd: cmd.into(),
+        build: None,
         cwd: dir.to_path_buf(),
         env: vec![],
         limit: Duration::from_secs(secs),

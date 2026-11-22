@@ -3094,6 +3094,17 @@ async fn remote_set(
 ) -> Res {
     let who = who_of(&headers);
     owner_only(&d, &who, "change where runs go")?;
+    let project = b["project"].as_str().map(str::to_string);
+    // `default` for a project clears its own mode, so it follows MASON's.
+    if let (Some(p), Some("default")) = (&project, b["mode"].as_str()) {
+        let (d2, p) = (d.clone(), p.clone());
+        let r = d
+            .pool
+            .run(move || crate::place::clear_project_mode(&d2, &p))
+            .await
+            .map_err(pool_err)?;
+        return r.map(Json).map_err(|(c, m)| fail(code(c), m));
+    }
     let to = b["mode"]
         .as_str()
         .or_else(|| b["default"].as_str())
@@ -3104,7 +3115,6 @@ async fn remote_set(
                 "`mode` must be local, remote, favor-local or favor-remote",
             )
         })?;
-    let project = b["project"].as_str().map(str::to_string);
     let d2 = d.clone();
     let r = d
         .pool
@@ -3375,6 +3385,26 @@ async fn home_view(
             let w = d2.world().map_err(store_err)?;
             let h = crate::views::Ctx::new(&d2, &w).home(&project);
             serde_json::to_value(&h)
+                .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        })
+        .await
+        .map_err(pool_err)??;
+    Ok(Json(v))
+}
+
+/// The runs MASON has on GitHub (`mason remote runs`): the home view's GitHub section.
+async fn remote_runs_get(
+    Shared(d): Shared<Arc<Daemon>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Res {
+    let project = q.get("project").cloned().unwrap_or_default();
+    let d2 = d.clone();
+    let v = d
+        .view_pool
+        .run(move || {
+            let w = d2.world().map_err(store_err)?;
+            let h = crate::views::Ctx::new(&d2, &w).home(&project);
+            serde_json::to_value(h.github.unwrap_or_default())
                 .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
         })
         .await
@@ -4031,6 +4061,7 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
             get(notify_settings_get).post(notify_settings_set),
         )
         .route("/remote", get(remote_get).post(remote_set))
+        .route("/remote/runs", get(remote_runs_get))
         .route(
             "/projects/{name}/settings",
             get(project_settings_get).post(project_settings_set),

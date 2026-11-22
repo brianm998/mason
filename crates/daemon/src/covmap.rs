@@ -320,6 +320,123 @@ pub fn due(
     }
 }
 
+/// What the runner runs for a `covmap` run (#780): the daemon's own coverage job, in this
+/// checkout, writing [`RESULTS`]. `rustup component add llvm-tools` is here, not in the workflow,
+/// so the workflow file stays as it is.
+pub const REMOTE_COMMAND: &str = "rustup component add llvm-tools && \
+cargo run -q -p mason-daemon --bin masond -- covmap-job";
+
+/// The results file the remote run leaves in the checkout's root.
+pub const RESULTS: &str = "covmap.kv";
+
+/// `masond covmap-job`: make the map of the checkout in the current directory and write it to
+/// [`RESULTS`]. The commit comes from `MASON_COVMAP_COMMIT` (the runner's checkout is a snapshot
+/// commit, not the base tip). Returns the exit code.
+pub fn job_main() -> i32 {
+    let Ok(cwd) = std::env::current_dir() else {
+        return 2;
+    };
+    let Ok(commit) = std::env::var("MASON_COVMAP_COMMIT") else {
+        eprintln!("covmap-job: MASON_COVMAP_COMMIT is not set");
+        return 2;
+    };
+    let r = run_job(&Job {
+        wt: &cwd,
+        pkg_dir: PKG_DIR,
+        package: PACKAGE,
+        test: TEST,
+        main_rs: MAIN_RS,
+        commit: &commit,
+        target_dir: &cwd.join("target/covmap"),
+        work_dir: &cwd.join("target/covmap-prof"),
+        now_secs: now_secs(),
+        go_on: &|| true,
+    });
+    match r {
+        Ok(m) => match std::fs::write(cwd.join(RESULTS), m.encode()) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("covmap-job: cannot write {RESULTS}: {e}");
+                1
+            }
+        },
+        Err(e) => {
+            eprintln!("covmap-job: {e:?}");
+            1
+        }
+    }
+}
+
+/// A map made on GitHub is used only if it is of the commit asked for and of the `main.rs` the
+/// daemon saw.
+pub fn accept(text: &str, tip: &str, main_hash: u64) -> Result<CoverageMap, String> {
+    let m = CoverageMap::decode(text).ok_or("the run returned no coverage map")?;
+    if m.commit != tip {
+        return Err(format!("the map is of {}, not of {tip}", m.commit));
+    }
+    if m.main_hash != main_hash {
+        return Err("the map's main.rs is not the one the daemon saw".into());
+    }
+    Ok(m)
+}
+
+/// The facts a due-check needs, as the daemon finds them.
+pub struct Want<'a> {
+    pub old: Option<&'a CoverageMap>,
+    pub tip: &'a str,
+    pub main_text: &'a str,
+    pub changed_src: bool,
+    pub now_secs: u64,
+}
+
+/// Ask GitHub for a map when one is due: one run of kind `covmap` on `tip` (`site.cwd` is a
+/// checkout of it), whose command is [`REMOTE_COMMAND`] and whose results file is [`RESULTS`].
+/// `Ok(None)`: none is due, nothing was pushed.
+pub fn make_remote(
+    site: &crate::remote::Site,
+    want: &Want,
+    project: &str,
+    log_dir: &Path,
+    limit: std::time::Duration,
+    stop: &dyn Fn() -> Option<crate::remote::StopWhy>,
+) -> Result<Option<CoverageMap>, String> {
+    use crate::remote as rm;
+    let hash = hash_text(want.main_text);
+    if !due(want.old, want.now_secs, want.changed_src, hash) {
+        return Ok(None);
+    }
+    let _ = std::fs::remove_file(site.cwd.join(RESULTS));
+    let id = format!("covmap-{}", &want.tip[..want.tip.len().min(12)]);
+    let env = vec![("MASON_COVMAP_COMMIT".to_string(), want.tip.to_string())];
+    let mut spec = rm::spec_for(
+        project,
+        &id,
+        None,
+        REMOTE_COMMAND,
+        limit,
+        &env,
+        "ubuntu-latest",
+        "",
+    );
+    spec.suite = "covmap".into();
+    spec.results_file = Some(RESULTS.into());
+    let spec = rm::with_site_env(spec, site);
+    let out = match rm::execute(site, &spec, log_dir, stop) {
+        Ok(o) => o,
+        Err(rm::Fail::Environmental(e)) | Err(rm::Fail::Error(e)) => return Err(e),
+    };
+    let f = match out {
+        rm::Outcome::Done(f) => f,
+        rm::Outcome::Stopped(_) => return Err("stopped".into()),
+    };
+    if f.code != 0 {
+        return Err(format!("the covmap run exited {}", f.code));
+    }
+    let text = std::fs::read_to_string(site.cwd.join(RESULTS))
+        .map_err(|_| "the covmap run left no covmap.kv".to_string())?;
+    accept(&text, want.tip, hash).map(Some)
+}
+
 /// The package the map is made for. The job is about the daemon's `it` executable.
 const PACKAGE: &str = "mason-daemon";
 const PKG_DIR: &str = "crates/daemon";
@@ -396,12 +513,25 @@ pub fn pass(d: &std::sync::Arc<crate::daemon::Daemon>) {
         if !due(old.as_ref(), now_secs(), changed_src, hash_text(&main_text)) {
             continue;
         }
+        // With remote runs on, GitHub makes the map and the work leases `gha`, not this Mac's
+        // `test-suite` (#780). `gha` full: wait for a later pass.
+        let remote = matches!(
+            crate::remote::executor_global(d, &p.id),
+            crate::remote::Executor::GitHub { .. }
+        ) && crate::remote::site_for(d, &p.id, &p.path).is_some();
         let c = d.broker.compilation();
-        if !c.pending.is_empty() || (c.limit > 0 && c.used >= c.limit) {
+        if remote {
+            if d.broker
+                .limit("gha")
+                .is_some_and(|l| d.broker.used("gha") >= l)
+            {
+                return;
+            }
+        } else if !c.pending.is_empty() || (c.limit > 0 && c.used >= c.limit) {
             return;
         }
         let mut uses = BTreeMap::new();
-        uses.insert("test-suite".to_string(), 1u32);
+        uses.insert(if remote { "gha" } else { "test-suite" }.to_string(), 1u32);
         let id = d.broker.lease_open_as(
             "coverage map",
             &uses,
@@ -423,10 +553,109 @@ pub fn pass(d: &std::sync::Arc<crate::daemon::Daemon>) {
                 }
             }
         };
-        if granted {
+        if granted && remote {
+            let want = Want {
+                old: old.as_ref(),
+                tip: &tip,
+                main_text: &main_text,
+                changed_src,
+                now_secs: now_secs(),
+            };
+            make_on_github(d, pid, &p.id, &p.path, &dir, &want);
+        } else if granted {
             make(d, pid, &p.path, &dir, &tip);
         }
         d.broker.lease_close(id);
+    }
+}
+
+/// Make the map on GitHub, from a checkout of the tip, and keep it.
+fn make_on_github(
+    d: &std::sync::Arc<crate::daemon::Daemon>,
+    pid: mason_core::ProjectId,
+    project: &str,
+    repo: &Path,
+    dir: &Path,
+    want: &Want,
+) {
+    use mason_landing::git;
+    let _ = std::fs::create_dir_all(dir);
+    let wt = dir.join("wt");
+    let lock = d.repo_lock(pid);
+    {
+        let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+        git::remove_worktree(repo, &wt);
+        if let Err(e) = git::run(
+            repo,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                &wt.to_string_lossy(),
+                want.tip,
+            ],
+        ) {
+            tracing::warn!("coverage map: cannot make a checkout: {e}");
+            return;
+        }
+    }
+    let r = match crate::remote::site_for(d, project, &wt) {
+        Some(site) => {
+            let spec_like = crate::remote::spec_for(
+                project,
+                &format!("covmap-{}", &want.tip[..want.tip.len().min(12)]),
+                None,
+                REMOTE_COMMAND,
+                REMOTE_LIMIT,
+                &[],
+                "ubuntu-latest",
+                "",
+            );
+            let _hold = crate::remote::HoldGuard::new(
+                &d.cfg.hosts_dir(),
+                &spec_like,
+                "coverage map",
+                "coverage map",
+                1,
+                &dir.join("remote"),
+                "debt",
+                0,
+            );
+            make_remote(
+                &site,
+                want,
+                project,
+                &dir.join("remote"),
+                REMOTE_LIMIT,
+                &|| d.is_shutting_down().then_some(crate::remote::StopWhy::Gone),
+            )
+        }
+        None => Err("the project has no [remote_runs] section".into()),
+    };
+    {
+        let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+        git::remove_worktree(repo, &wt);
+    }
+    match r {
+        Ok(Some(m)) => store(dir, &m, want.tip),
+        Ok(None) => {}
+        Err(e) => tracing::warn!("coverage map (GitHub): {e}"),
+    }
+}
+
+/// How long the remote job may run: an instrumented build and one run per module.
+const REMOTE_LIMIT: std::time::Duration = std::time::Duration::from_secs(2 * 3600);
+
+/// Keep a made map (a temporary file, then a rename).
+pub fn store(dir: &Path, m: &CoverageMap, tip: &str) {
+    let tmp = dir.join("covmap.kv.tmp");
+    if std::fs::write(&tmp, m.encode())
+        .and_then(|()| std::fs::rename(&tmp, file_in(dir)))
+        .is_err()
+    {
+        tracing::warn!("coverage map: cannot write it");
+    } else {
+        tracing::info!(commit = tip, modules = m.modules.len(), "coverage map made");
     }
 }
 
@@ -474,17 +703,7 @@ fn make(
         git::remove_worktree(repo, &wt);
     }
     match r {
-        Ok(m) => {
-            let tmp = dir.join("covmap.kv.tmp");
-            if std::fs::write(&tmp, m.encode())
-                .and_then(|()| std::fs::rename(&tmp, file_in(dir)))
-                .is_err()
-            {
-                tracing::warn!("coverage map: cannot write it");
-            } else {
-                tracing::info!(commit = tip, modules = m.modules.len(), "coverage map made");
-            }
-        }
+        Ok(m) => store(dir, &m, tip),
         Err(JobError::NoLlvmTools) => {
             if !SAID_NO_TOOLS.swap(true, std::sync::atomic::Ordering::SeqCst) {
                 tracing::warn!(

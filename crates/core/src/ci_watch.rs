@@ -45,6 +45,11 @@ pub struct Rules {
     pub red_ticket_after_ms: u64,
     pub max_open_auto: u32,
     pub freeze_on_gate: bool,
+    /// `auto_approve = "confirmed"` (decision 0798): a red seen on `agreement` finished runs
+    /// that ran the job is filed approved; every other red is filed `proposed`.
+    pub auto_approve: bool,
+    /// With `auto_approve`, how many such tickets are open at once; beyond it they stay proposed.
+    pub auto_approve_max: u32,
 }
 
 impl Rules {
@@ -240,6 +245,8 @@ pub struct Filed {
     pub at: u64,
     pub urgent: bool,
     pub proposed: bool,
+    /// Filed approved by `auto_approve`, so the owner can see and cancel it.
+    pub auto: bool,
     pub url: String,
 }
 
@@ -267,6 +274,9 @@ pub struct File {
     pub urgent: bool,
     /// Past the cap: filed `proposed`.
     pub proposed: bool,
+    /// Filed approved because the red was confirmed (`auto_approve`). The daemon turns it
+    /// back into `proposed` when the ticket names a trust file.
+    pub auto: bool,
     pub why: Why,
     pub at: RunRef,
     /// What failed (scripts, tests), merged over the shards filed together.
@@ -305,6 +315,8 @@ pub struct Ctx<'a> {
     /// `workflow/job` to the open task or issue naming it (`None`: an issue, no task).
     pub named: &'a BTreeMap<String, Option<u64>>,
     pub open_auto: u32,
+    /// How many tickets filed by `auto_approve` are still open.
+    pub open_approved: u32,
     /// Tasks that landed or closed within the lookback.
     pub recent: &'a [RecentTask],
     /// Tasks that landed with a change, to when (ms).
@@ -484,6 +496,7 @@ pub fn step(state: &mut State, runs: &[RunRec], ctx: &Ctx) -> Vec<File> {
     let rules = ctx.rules;
     let mut out: Vec<File> = vec![];
     let mut open_auto = ctx.open_auto;
+    let mut open_approved = ctx.open_approved;
     let mut decided: BTreeSet<String> = BTreeSet::new();
 
     let mut file = |state: &mut State, out: &mut Vec<File>, mut f: File| {
@@ -513,6 +526,8 @@ pub fn step(state: &mut State, runs: &[RunRec], ctx: &Ctx) -> Vec<File> {
         }
         let group = f.group();
         f.signatures = js.signatures.clone();
+        // Red on `agreement` finished runs that ran the job, with no green or skip between.
+        let confirmed = js.pending.len() as u32 >= rules.agreement.max(2);
         if let Some(t) = ctx.named.get(&k).or_else(|| ctx.named.get(&group)) {
             // An open task or issue already names it: no second ticket.
             if js.ticket.is_none() {
@@ -542,6 +557,23 @@ pub fn step(state: &mut State, runs: &[RunRec], ctx: &Ctx) -> Vec<File> {
             js.covered = js.covered.max(f.at.run);
             js.landed_ms = ctx.landed.get(&t.id).copied();
             return;
+        }
+        if !f.signatures.is_empty() && !decided.contains(&group) {
+            // The same failure on another system (another group of the same workflow, filed
+            // in this pass): one ticket naming both.
+            if let Some(g) = out.iter_mut().find(|g| {
+                g.why != Why::Timeout
+                    && g.workflow == f.workflow
+                    && g.group() != group
+                    && g.signatures.iter().any(|s| f.signatures.contains(s))
+            }) {
+                decided.insert(group.clone());
+                g.also.push(f.job.clone());
+                g.signatures.extend(f.signatures.iter().cloned());
+                g.signatures.sort();
+                g.signatures.dedup();
+                return;
+            }
         }
         if !decided.insert(group.clone()) {
             // Another shard of the same job was filed in this pass: one ticket for both.
@@ -575,7 +607,14 @@ pub fn step(state: &mut State, runs: &[RunRec], ctx: &Ctx) -> Vec<File> {
                 })
             })
             .collect();
-        if open_auto >= rules.max_open_auto {
+        if rules.auto_approve && f.why != Why::Gate {
+            if confirmed && open_approved < rules.auto_approve_max {
+                open_approved += 1;
+                f.auto = true;
+            } else {
+                f.proposed = true;
+            }
+        } else if open_auto >= rules.max_open_auto {
             f.proposed = true;
         } else {
             open_auto += 1;
@@ -669,6 +708,7 @@ pub fn step(state: &mut State, runs: &[RunRec], ctx: &Ctx) -> Vec<File> {
                                     job: j.name.clone(),
                                     urgent: false,
                                     proposed: false,
+                                    auto: false,
                                     why: Why::Timeout,
                                     at,
                                     signatures: vec![],
@@ -699,6 +739,7 @@ pub fn step(state: &mut State, runs: &[RunRec], ctx: &Ctx) -> Vec<File> {
                                         job: j.name.clone(),
                                         urgent: true,
                                         proposed: false,
+                                        auto: false,
                                         why: Why::Gate,
                                         at,
                                         signatures: vec![],
@@ -728,6 +769,7 @@ pub fn step(state: &mut State, runs: &[RunRec], ctx: &Ctx) -> Vec<File> {
                                     job: j.name.clone(),
                                     urgent: false,
                                     proposed: false,
+                                    auto: false,
                                     why: Why::Agreed,
                                     at,
                                     signatures: vec![],
@@ -795,6 +837,7 @@ pub fn step(state: &mut State, runs: &[RunRec], ctx: &Ctx) -> Vec<File> {
                 job,
                 urgent: gate,
                 proposed: false,
+                auto: false,
                 why: Why::LongRed,
                 at,
                 signatures: vec![],
@@ -1063,6 +1106,7 @@ pub fn filed(state: &mut State, f: &File, task: Option<u64>, now_ms: u64, url: &
         at: now_ms,
         urgent: f.urgent,
         proposed: f.proposed,
+        auto: f.auto,
         url: url.to_string(),
     });
     let n = state.filed.len();
@@ -1084,6 +1128,8 @@ mod tests {
             red_ticket_after_ms: 3 * 3_600_000,
             max_open_auto: 2,
             freeze_on_gate: true,
+            auto_approve: false,
+            auto_approve_max: 5,
         }
     }
 
@@ -1125,6 +1171,7 @@ mod tests {
                 now_ms: now,
                 named,
                 open_auto: open,
+                open_approved: 0,
                 recent: &[],
                 landed: &BTreeMap::new(),
                 named_sigs: &BTreeMap::new(),
@@ -1227,6 +1274,7 @@ mod tests {
                     now_ms: 9000,
                     named: &named,
                     open_auto: 0,
+                    open_approved: 0,
                     recent: &[],
                     landed: &BTreeMap::new(),
                     named_sigs: &BTreeMap::new(),
@@ -1488,11 +1536,15 @@ mod tests {
     }
 
     fn fixture(n: &str) -> String {
-        std::fs::read_to_string(format!(
-            "{}/tests/fixtures/ci_logs/{n}",
-            env!("CARGO_MANIFEST_DIR")
-        ))
-        .unwrap()
+        match n {
+            "lint_spdx.log" => include_str!("../tests/fixtures/ci_logs/lint_spdx.log"),
+            "monitor_compose.log" => include_str!("../tests/fixtures/ci_logs/monitor_compose.log"),
+            "cargo_test.log" => include_str!("../tests/fixtures/ci_logs/cargo_test.log"),
+            "rustfmt_diff.log" => include_str!("../tests/fixtures/ci_logs/rustfmt_diff.log"),
+            "no_marker.log" => include_str!("../tests/fixtures/ci_logs/no_marker.log"),
+            other => panic!("unknown ci log fixture {other}"),
+        }
+        .to_string()
     }
 
     #[test]
@@ -1640,6 +1692,7 @@ mod tests {
                 now_ms: now,
                 named: &none(),
                 open_auto: 0,
+                open_approved: 0,
                 recent,
                 landed,
                 named_sigs: &none(),
@@ -1872,5 +1925,164 @@ mod tests {
         assert!(s.workflows["Gherkin"].jobs["a"].red);
         assert!(go(&mut s, &[], 100 * 3_600_000, &none(), 0).is_empty());
         assert!(pending(&s, &rules()).is_empty());
+    }
+
+    /// A run with a failing script per job, for the auto-approval tests.
+    fn run_sigs(id: u64, jobs: &[(&str, &str)]) -> RunRec {
+        let mut r = run(id, "CI", "failure", jobs);
+        for j in &mut r.jobs {
+            if j.conclusion.as_deref() == Some("failure") {
+                j.signatures = vec!["scripts/exit/s9.sh".into()];
+            }
+        }
+        r
+    }
+
+    fn auto_go(
+        s: &mut State,
+        runs: &[RunRec],
+        named: &BTreeMap<String, Option<u64>>,
+        open_approved: u32,
+    ) -> Vec<File> {
+        let mut r = rules();
+        r.auto_approve = true;
+        step(
+            s,
+            runs,
+            &Ctx {
+                rules: &r,
+                now_ms: 5000,
+                named,
+                open_auto: 0,
+                open_approved,
+                recent: &[],
+                landed: &BTreeMap::new(),
+                named_sigs: &none(),
+            },
+        )
+    }
+
+    fn seeded() -> State {
+        let mut s = State::default();
+        auto_go(
+            &mut s,
+            &[run(
+                1,
+                "CI",
+                "success",
+                &[("a", "success"), ("b", "success")],
+            )],
+            &none(),
+            0,
+        );
+        s
+    }
+
+    #[test]
+    fn auto_approve_files_a_red_seen_on_two_runs_approved_and_one_run_not_at_all() {
+        let mut s = seeded();
+        // Seen once: nothing is filed yet (agreement), so nothing is approved either.
+        assert!(auto_go(&mut s, &[run_sigs(2, &[("a", "failure")])], &none(), 0).is_empty());
+        let f = auto_go(&mut s, &[run_sigs(3, &[("a", "failure")])], &none(), 0);
+        assert_eq!(f.len(), 1);
+        assert!(f[0].auto && !f[0].proposed);
+    }
+
+    #[test]
+    fn auto_approve_off_leaves_filing_as_it_was() {
+        let mut s = seeded();
+        go(
+            &mut s,
+            &[run_sigs(2, &[("a", "failure")])],
+            5000,
+            &none(),
+            0,
+        );
+        let f = go(
+            &mut s,
+            &[run_sigs(3, &[("a", "failure")])],
+            5000,
+            &none(),
+            0,
+        );
+        assert!(!f[0].auto && !f[0].proposed);
+    }
+
+    #[test]
+    fn a_long_red_seen_on_one_run_is_proposed() {
+        let mut s = seeded();
+        auto_go(&mut s, &[run_sigs(2, &[("a", "failure")])], &none(), 0);
+        let mut r = rules();
+        r.auto_approve = true;
+        r.agreement = 1;
+        r.red_ticket_after_ms = 1;
+        let f = step(
+            &mut s,
+            &[],
+            &Ctx {
+                rules: &r,
+                now_ms: 9_000_000,
+                named: &none(),
+                open_auto: 0,
+                open_approved: 0,
+                recent: &[],
+                landed: &BTreeMap::new(),
+                named_sigs: &none(),
+            },
+        );
+        // One red run only: not confirmed.
+        assert_eq!(f.len(), 1);
+        assert!(f[0].proposed && !f[0].auto);
+    }
+
+    #[test]
+    fn a_red_an_open_task_covers_files_nothing() {
+        let mut s = seeded();
+        let named: BTreeMap<String, Option<u64>> = [("CI/a".to_string(), Some(7))].into();
+        auto_go(&mut s, &[run_sigs(2, &[("a", "failure")])], &named, 0);
+        assert!(auto_go(&mut s, &[run_sigs(3, &[("a", "failure")])], &named, 0).is_empty());
+    }
+
+    #[test]
+    fn shards_of_one_job_fold_into_one_ticket() {
+        let mut s = State::default();
+        let shards = ["x (ubuntu, 1)", "x (ubuntu, 2)", "x (ubuntu, 4)"];
+        let green: Vec<(&str, &str)> = shards.iter().map(|n| (*n, "success")).collect();
+        let red: Vec<(&str, &str)> = shards.iter().map(|n| (*n, "failure")).collect();
+        auto_go(&mut s, &[run(1, "CI", "success", &green)], &none(), 0);
+        auto_go(&mut s, &[run_sigs(2, &red)], &none(), 0);
+        let f = auto_go(&mut s, &[run_sigs(3, &red)], &none(), 0);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].also.len(), 2);
+        assert!(f[0].auto);
+    }
+
+    #[test]
+    fn one_failure_on_two_systems_is_one_ticket_naming_both() {
+        let mut s = State::default();
+        let green = [("t (ubuntu)", "success"), ("t (macos)", "success")];
+        let red = [("t (ubuntu)", "failure"), ("t (macos)", "failure")];
+        auto_go(&mut s, &[run(1, "CI", "success", &green)], &none(), 0);
+        auto_go(&mut s, &[run_sigs(2, &red)], &none(), 0);
+        let f = auto_go(&mut s, &[run_sigs(3, &red)], &none(), 0);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].also, vec!["t (macos)".to_string()]);
+    }
+
+    #[test]
+    fn the_cap_on_auto_approved_tickets_holds() {
+        let mut s = seeded();
+        let two = [("a", "failure"), ("b", "failure")];
+        // Different failures, so they are two tickets.
+        let mut r2 = run_sigs(2, &two);
+        let mut r3 = run_sigs(3, &two);
+        for r in [&mut r2, &mut r3] {
+            r.jobs[1].signatures = vec!["scripts/exit/s10.sh".into()];
+        }
+        auto_go(&mut s, &[r2], &none(), 4);
+        let f = auto_go(&mut s, &[r3], &none(), 4);
+        assert_eq!(f.len(), 2);
+        assert_eq!(f.iter().filter(|x| x.auto).count(), 1);
+        assert_eq!(f.iter().filter(|x| x.proposed).count(), 1);
     }
 }

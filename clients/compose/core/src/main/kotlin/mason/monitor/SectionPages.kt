@@ -14,6 +14,7 @@ object SectionPages {
         "queued" -> "Queued"
         "cpu" -> "CPU"
         "disk" -> "Disk"
+        "github" -> "GitHub"
         "compilation" -> "Compilation"
         "exploring" -> "Exploring"
         "developing" -> "Developing"

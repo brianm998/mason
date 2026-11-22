@@ -61,6 +61,7 @@ public struct PendingCommand: Equatable, Sendable {
         case "unblock": return ("Releasing…", "Released")
         case "pause": return ("Pausing…", "Paused")
         case "resume": return ("Resuming…", "Resumed")
+        case "set_placement": return ("Changing where runs go…", "Changed")
         case "set_limit": return ("Saving…", "Saved")
         case "add_task": return ("Filing…", "Filed")
         default:
@@ -88,6 +89,9 @@ public struct PendingCommand: Equatable, Sendable {
         case .revive(let x)?: return ("revive", x.task)
         case .defer(let x)?: return ("defer", x.task)
         case .undefer(let x)?: return ("undefer", x.task)
+        case .setPlacement(let x)?:
+            let scope: PlacementScope = x.scope == "task" ? .task(x.task) : x.scope == "project" ? .project(x.project) : .global
+            return ("set_placement", placementKey(scope))
         default: return nil
         }
     }

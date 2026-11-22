@@ -596,6 +596,15 @@ public nonisolated struct Mason_V1_Command: Sendable {
     set {body = .landNowBatch(newValue)}
   }
 
+  /// Where runs go (protocol 2): for all of MASON, one project or one task. Owner only.
+  public var setPlacement: Mason_V1_SetPlacement {
+    get {
+      if case .setPlacement(let v)? = body {return v}
+      return Mason_V1_SetPlacement()
+    }
+    set {body = .setPlacement(newValue)}
+  }
+
   public var raw: Mason_V1_Raw {
     get {
       if case .raw(let v)? = body {return v}
@@ -641,6 +650,8 @@ public nonisolated struct Mason_V1_Command: Sendable {
     /// Land now for a whole running batch: every member lands past its remaining testing,
     /// and what was skipped runs on the base after the merge.
     case landNowBatch(Mason_V1_BatchRef)
+    /// Where runs go (protocol 2): for all of MASON, one project or one task. Owner only.
+    case setPlacement(Mason_V1_SetPlacement)
     case raw(Mason_V1_Raw)
 
   }
@@ -658,6 +669,72 @@ public nonisolated struct Mason_V1_TaskRef: Sendable {
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
+}
+
+/// Set the placement mode (#834). `scope` is "global", "project" (with `project`) or "task" (with
+/// `task`). `mode` is local, remote, favor-local or favor-remote; for a project or a task also
+/// "default", which clears the choice so the level above applies.
+public nonisolated struct Mason_V1_SetPlacement: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var scope: String = String()
+
+  public var project: String = String()
+
+  public var task: UInt64 = 0
+
+  public var mode: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// The mode in force and the level that set it: "task", "project" or "global". Additive (#834).
+public nonisolated struct Mason_V1_Placement: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var mode: String = String()
+
+  public var source: String = String()
+
+  /// True when this level sets its own mode (a project with its own `[remote_runs] mode`; a task
+  /// with a `run_on` choice). A control offers "Follow MASON" / "Follow project" only then.
+  public var own: Bool = false
+
+  /// False for a project with no `[remote_runs]`: it always runs here and cannot be set.
+  public var settable: Bool = false
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public nonisolated struct Mason_V1_ProjectPlacement: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var project: String = String()
+
+  public var placement: Mason_V1_Placement {
+    get {_placement ?? Mason_V1_Placement()}
+    set {_placement = newValue}
+  }
+  /// Returns true if `placement` has been explicitly set.
+  public var hasPlacement: Bool {self._placement != nil}
+  /// Clears the value of `placement`. Subsequent reads from it will return its default value.
+  public mutating func clearPlacement() {self._placement = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _placement: Mason_V1_Placement? = nil
 }
 
 public nonisolated struct Mason_V1_BatchRef: Sendable {
@@ -1808,6 +1885,12 @@ public nonisolated struct Mason_V1_TaskRow: @unchecked Sendable {
     set {_uniqueStorage()._stateSinceMs = newValue}
   }
 
+  /// The task's own placement mode when it overrides its project's ("" when it follows). Additive (#834).
+  public var runOnOverride: String {
+    get {_storage._runOnOverride}
+    set {_uniqueStorage()._runOnOverride = newValue}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -2181,6 +2264,12 @@ public nonisolated struct Mason_V1_HeaderView: @unchecked Sendable {
   public var activeSessions: [Mason_V1_ActiveSession] {
     get {_storage._activeSessions}
     set {_uniqueStorage()._activeSessions = newValue}
+  }
+
+  /// The placement mode of every project (protocol 2, #834). Additive.
+  public var projectPlacements: [Mason_V1_ProjectPlacement] {
+    get {_storage._projectPlacements}
+    set {_uniqueStorage()._projectPlacements = newValue}
   }
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
@@ -2695,11 +2784,190 @@ public nonisolated struct Mason_V1_HomeView: @unchecked Sendable {
   /// Clears the value of `remote`. Subsequent reads from it will return its default value.
   public mutating func clearRemote() {_uniqueStorage()._remote = nil}
 
+  /// The runs MASON has on GitHub (#767). Unset from an older daemon.
+  public var github: Mason_V1_GithubRunList {
+    get {_storage._github ?? Mason_V1_GithubRunList()}
+    set {_uniqueStorage()._github = newValue}
+  }
+  /// Returns true if `github` has been explicitly set.
+  public var hasGithub: Bool {_storage._github != nil}
+  /// Clears the value of `github`. Subsequent reads from it will return its default value.
+  public mutating func clearGithub() {_uniqueStorage()._github = nil}
+
+  /// The global placement mode (protocol 2, #834). Additive.
+  public var placement: Mason_V1_Placement {
+    get {_storage._placement ?? Mason_V1_Placement()}
+    set {_uniqueStorage()._placement = newValue}
+  }
+  /// Returns true if `placement` has been explicitly set.
+  public var hasPlacement: Bool {_storage._placement != nil}
+  /// Clears the value of `placement`. Subsequent reads from it will return its default value.
+  public mutating func clearPlacement() {_uniqueStorage()._placement = nil}
+
+  /// For a home view of one project: that project's mode. Additive.
+  public var projectPlacement: Mason_V1_Placement {
+    get {_storage._projectPlacement ?? Mason_V1_Placement()}
+    set {_uniqueStorage()._projectPlacement = newValue}
+  }
+  /// Returns true if `projectPlacement` has been explicitly set.
+  public var hasProjectPlacement: Bool {_storage._projectPlacement != nil}
+  /// Clears the value of `projectPlacement`. Subsequent reads from it will return its default value.
+  public mutating func clearProjectPlacement() {_uniqueStorage()._projectPlacement = nil}
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
 
   fileprivate var _storage = _StorageClass.defaultInstance
+}
+
+/// One job of a remote run, from the Actions jobs API.
+public nonisolated struct Mason_V1_GithubJob: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var name: String = String()
+
+  /// queued, running, done.
+  public var state: String = String()
+
+  /// success, failure, cancelled... once done.
+  public var conclusion: String = String()
+
+  /// The step it is on now ("Set up job", "run").
+  public var step: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// One run on GitHub: what owns it, where it stands and its jobs.
+public nonisolated struct Mason_V1_GithubRun: @unchecked Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var id: String {
+    get {_storage._id}
+    set {_uniqueStorage()._id = newValue}
+  }
+
+  /// The owning task (0 for a landing batch).
+  public var task: UInt64 {
+    get {_storage._task}
+    set {_uniqueStorage()._task = newValue}
+  }
+
+  public var title: String {
+    get {_storage._title}
+    set {_uniqueStorage()._title = newValue}
+  }
+
+  /// "#12", "b480" or the run id.
+  public var owner: String {
+    get {_storage._owner}
+    set {_uniqueStorage()._owner = newValue}
+  }
+
+  public var taskState: String {
+    get {_storage._taskState}
+    set {_uniqueStorage()._taskState = newValue}
+  }
+
+  public var taskActivity: String {
+    get {_storage._taskActivity}
+    set {_uniqueStorage()._taskActivity = newValue}
+  }
+
+  /// agent check, test step, landing lint, landing suite, debt payment.
+  public var kind: String {
+    get {_storage._kind}
+    set {_uniqueStorage()._kind = newValue}
+  }
+
+  public var suite: String {
+    get {_storage._suite}
+    set {_uniqueStorage()._suite = newValue}
+  }
+
+  public var runsOn: String {
+    get {_storage._runsOn}
+    set {_uniqueStorage()._runsOn = newValue}
+  }
+
+  public var shards: UInt32 {
+    get {_storage._shards}
+    set {_uniqueStorage()._shards = newValue}
+  }
+
+  /// waiting (for a MASON pool unit), queued (on GitHub), running, green, red, cancelled.
+  public var state: String {
+    get {_storage._state}
+    set {_uniqueStorage()._state = newValue}
+  }
+
+  /// How long it has been in that state (0 once done).
+  public var elapsedS: UInt64 {
+    get {_storage._elapsedS}
+    set {_uniqueStorage()._elapsedS = newValue}
+  }
+
+  public var url: String {
+    get {_storage._url}
+    set {_uniqueStorage()._url = newValue}
+  }
+
+  public var jobs: [Mason_V1_GithubJob] {
+    get {_storage._jobs}
+    set {_uniqueStorage()._jobs = newValue}
+  }
+
+  /// "3 of 8 jobs done, step run", or the live test progress.
+  public var progress: String {
+    get {_storage._progress}
+    set {_uniqueStorage()._progress = newValue}
+  }
+
+  public var updatedAgoS: UInt64 {
+    get {_storage._updatedAgoS}
+    set {_uniqueStorage()._updatedAgoS = newValue}
+  }
+
+  public var project: String {
+    get {_storage._project}
+    set {_uniqueStorage()._project = newValue}
+  }
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _storage = _StorageClass.defaultInstance
+}
+
+/// The home page's GitHub section.
+public nonisolated struct Mason_V1_GithubRunList: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  /// Some project has [remote_runs]; the section is hidden otherwise.
+  public var enabled: Bool = false
+
+  public var poolUsed: UInt32 = 0
+
+  public var poolLimit: UInt32 = 0
+
+  /// Runs waiting for a pool unit.
+  public var waiting: UInt32 = 0
+
+  public var runs: [Mason_V1_GithubRun] = []
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
 }
 
 /// One bucket's share of the machine's CPU.
@@ -3184,6 +3452,16 @@ public nonisolated struct Mason_V1_TaskDetailView: @unchecked Sendable {
     set {_uniqueStorage()._ciLinks = newValue}
   }
 
+  /// Where this task's runs go and who decided it (#834). Additive.
+  public var placement: Mason_V1_Placement {
+    get {_storage._placement ?? Mason_V1_Placement()}
+    set {_uniqueStorage()._placement = newValue}
+  }
+  /// Returns true if `placement` has been explicitly set.
+  public var hasPlacement: Bool {_storage._placement != nil}
+  /// Clears the value of `placement`. Subsequent reads from it will return its default value.
+  public mutating func clearPlacement() {_uniqueStorage()._placement = nil}
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -3337,46 +3615,135 @@ public nonisolated struct Mason_V1_NumberLine: Sendable {
 }
 
 /// A batch the landing engine formed, and where it is.
-public nonisolated struct Mason_V1_BatchLine: Sendable {
+public nonisolated struct Mason_V1_BatchLine: @unchecked Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
-  public var id: UInt64 = 0
+  public var id: UInt64 {
+    get {_storage._id}
+    set {_uniqueStorage()._id = newValue}
+  }
 
-  public var project: String = String()
+  public var project: String {
+    get {_storage._project}
+    set {_uniqueStorage()._project = newValue}
+  }
 
   /// forming, merged, verifying, red, promoting, landed, parked, failed, abandoned
-  public var phase: String = String()
+  public var phase: String {
+    get {_storage._phase}
+    set {_uniqueStorage()._phase = newValue}
+  }
 
-  public var tasks: [UInt64] = []
+  public var tasks: [UInt64] {
+    get {_storage._tasks}
+    set {_uniqueStorage()._tasks = newValue}
+  }
 
-  public var landed: [UInt64] = []
+  public var landed: [UInt64] {
+    get {_storage._landed}
+    set {_uniqueStorage()._landed = newValue}
+  }
 
-  public var parked: [UInt64] = []
+  public var parked: [UInt64] {
+    get {_storage._parked}
+    set {_uniqueStorage()._parked = newValue}
+  }
 
-  public var note: String = String()
+  public var note: String {
+    get {_storage._note}
+    set {_uniqueStorage()._note = newValue}
+  }
 
-  public var running: Bool = false
+  public var running: Bool {
+    get {_storage._running}
+    set {_uniqueStorage()._running = newValue}
+  }
 
   /// The CI the batch is waiting on, or waited on last. Absent when it has none.
   public var ci: Mason_V1_BatchCi {
-    get {_ci ?? Mason_V1_BatchCi()}
-    set {_ci = newValue}
+    get {_storage._ci ?? Mason_V1_BatchCi()}
+    set {_uniqueStorage()._ci = newValue}
   }
   /// Returns true if `ci` has been explicitly set.
-  public var hasCi: Bool {self._ci != nil}
+  public var hasCi: Bool {_storage._ci != nil}
   /// Clears the value of `ci`. Subsequent reads from it will return its default value.
-  public mutating func clearCi() {self._ci = nil}
+  public mutating func clearCi() {_uniqueStorage()._ci = nil}
 
   /// What the owner may do to the batch: "land_now" while it has not started promoting.
-  public var allowedActions: [String] = []
+  public var allowedActions: [String] {
+    get {_storage._allowedActions}
+    set {_uniqueStorage()._allowedActions = newValue}
+  }
+
+  /// s788: the batch as one thing. The state in words ("running suites", "red in lint, splitting
+  /// (round 1, 5 tasks left)", "red in lint, blamed #782"); never "running suites" for a red.
+  public var stateText: String {
+    get {_storage._stateText}
+    set {_uniqueStorage()._stateText = newValue}
+  }
+
+  /// "ok" | "warn" | "stuck". Colour is never the only signal: `severity_reason` says why.
+  public var severity: String {
+    get {_storage._severity}
+    set {_uniqueStorage()._severity = newValue}
+  }
+
+  public var severityReason: String {
+    get {_storage._severityReason}
+    set {_uniqueStorage()._severityReason = newValue}
+  }
+
+  /// Milliseconds in the current phase, and the median for that phase over the project's
+  /// recent batches; `typical_ms` is 0 (absent) with fewer than three samples.
+  public var phaseMs: UInt64 {
+    get {_storage._phaseMs}
+    set {_uniqueStorage()._phaseMs = newValue}
+  }
+
+  public var typicalMs: UInt64 {
+    get {_storage._typicalMs}
+    set {_uniqueStorage()._typicalMs = newValue}
+  }
+
+  /// The verification round, and the tasks neither landed nor parked yet.
+  public var splitRound: UInt32 {
+    get {_storage._splitRound}
+    set {_uniqueStorage()._splitRound = newValue}
+  }
+
+  public var remaining: UInt32 {
+    get {_storage._remaining}
+    set {_uniqueStorage()._remaining = newValue}
+  }
+
+  /// Every task of the batch with its own standing in it.
+  public var members: [Mason_V1_BatchMember] {
+    get {_storage._members}
+    set {_uniqueStorage()._members = newValue}
+  }
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
 
-  fileprivate var _ci: Mason_V1_BatchCi? = nil
+  fileprivate var _storage = _StorageClass.defaultInstance
+}
+
+/// A task's standing within its batch: "verifying", "parked by blame", "landed", ...
+public nonisolated struct Mason_V1_BatchMember: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var task: UInt64 = 0
+
+  public var standing: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
 }
 
 /// One workflow's job counts in a CI run.
@@ -3522,6 +3889,9 @@ public nonisolated struct Mason_V1_TaskLanding: Sendable {
 
   /// "land_now" while the task is queued or in a batch that has not started promoting.
   public var allowedActions: [String] = []
+
+  /// s788: the task's own standing in its batch ("verifying", "integrating", ...).
+  public var standing: String = String()
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -4414,7 +4784,7 @@ nonisolated extension Mason_V1_Ping: SwiftProtobuf.Message, SwiftProtobuf._Messa
 
 nonisolated extension Mason_V1_Command: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Command"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{3}add_task\0\u{1}cancel\0\u{1}retry\0\u{1}approve\0\u{1}reject\0\u{3}explore_anyway\0\u{1}answer\0\u{1}skip\0\u{3}land_now\0\u{1}force\0\u{1}pause\0\u{1}resume\0\u{3}set_limit\0\u{3}approve_hold\0\u{1}unblock\0\u{1}block\0\u{1}revive\0\u{3}set_gate\0\u{1}defer\0\u{1}undefer\0\u{3}land_now_batch\0\u{2}\u{8}raw\0\u{2}\u{a}actor\0\u{1}reason\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{3}add_task\0\u{1}cancel\0\u{1}retry\0\u{1}approve\0\u{1}reject\0\u{3}explore_anyway\0\u{1}answer\0\u{1}skip\0\u{3}land_now\0\u{1}force\0\u{1}pause\0\u{1}resume\0\u{3}set_limit\0\u{3}approve_hold\0\u{1}unblock\0\u{1}block\0\u{1}revive\0\u{3}set_gate\0\u{1}defer\0\u{1}undefer\0\u{3}land_now_batch\0\u{3}set_placement\0\u{2}\u{7}raw\0\u{2}\u{a}actor\0\u{1}reason\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -4696,6 +5066,19 @@ nonisolated extension Mason_V1_Command: SwiftProtobuf.Message, SwiftProtobuf._Me
           self.body = .landNowBatch(v)
         }
       }()
+      case 23: try {
+        var v: Mason_V1_SetPlacement?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .setPlacement(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .setPlacement(v)
+        }
+      }()
       case 30: try {
         var v: Mason_V1_Raw?
         var hadOneofValue = false
@@ -4809,6 +5192,10 @@ nonisolated extension Mason_V1_Command: SwiftProtobuf.Message, SwiftProtobuf._Me
       guard case .landNowBatch(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 22)
     }()
+    case .setPlacement?: try {
+      guard case .setPlacement(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 23)
+    }()
     case .raw?: try {
       guard case .raw(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 30)
@@ -4859,6 +5246,135 @@ nonisolated extension Mason_V1_TaskRef: SwiftProtobuf.Message, SwiftProtobuf._Me
 
   public static func ==(lhs: Mason_V1_TaskRef, rhs: Mason_V1_TaskRef) -> Bool {
     if lhs.task != rhs.task {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Mason_V1_SetPlacement: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".SetPlacement"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}scope\0\u{1}project\0\u{1}task\0\u{1}mode\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.scope) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.project) }()
+      case 3: try { try decoder.decodeSingularUInt64Field(value: &self.task) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.mode) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.scope.isEmpty {
+      try visitor.visitSingularStringField(value: self.scope, fieldNumber: 1)
+    }
+    if !self.project.isEmpty {
+      try visitor.visitSingularStringField(value: self.project, fieldNumber: 2)
+    }
+    if self.task != 0 {
+      try visitor.visitSingularUInt64Field(value: self.task, fieldNumber: 3)
+    }
+    if !self.mode.isEmpty {
+      try visitor.visitSingularStringField(value: self.mode, fieldNumber: 4)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Mason_V1_SetPlacement, rhs: Mason_V1_SetPlacement) -> Bool {
+    if lhs.scope != rhs.scope {return false}
+    if lhs.project != rhs.project {return false}
+    if lhs.task != rhs.task {return false}
+    if lhs.mode != rhs.mode {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Mason_V1_Placement: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".Placement"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}mode\0\u{1}source\0\u{1}own\0\u{1}settable\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.mode) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.source) }()
+      case 3: try { try decoder.decodeSingularBoolField(value: &self.own) }()
+      case 4: try { try decoder.decodeSingularBoolField(value: &self.settable) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.mode.isEmpty {
+      try visitor.visitSingularStringField(value: self.mode, fieldNumber: 1)
+    }
+    if !self.source.isEmpty {
+      try visitor.visitSingularStringField(value: self.source, fieldNumber: 2)
+    }
+    if self.own != false {
+      try visitor.visitSingularBoolField(value: self.own, fieldNumber: 3)
+    }
+    if self.settable != false {
+      try visitor.visitSingularBoolField(value: self.settable, fieldNumber: 4)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Mason_V1_Placement, rhs: Mason_V1_Placement) -> Bool {
+    if lhs.mode != rhs.mode {return false}
+    if lhs.source != rhs.source {return false}
+    if lhs.own != rhs.own {return false}
+    if lhs.settable != rhs.settable {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Mason_V1_ProjectPlacement: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ProjectPlacement"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}project\0\u{1}placement\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.project) }()
+      case 2: try { try decoder.decodeSingularMessageField(value: &self._placement) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.project.isEmpty {
+      try visitor.visitSingularStringField(value: self.project, fieldNumber: 1)
+    }
+    try { if let v = self._placement {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Mason_V1_ProjectPlacement, rhs: Mason_V1_ProjectPlacement) -> Bool {
+    if lhs.project != rhs.project {return false}
+    if lhs._placement != rhs._placement {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -6719,7 +7235,7 @@ nonisolated extension Mason_V1_TodoItem: SwiftProtobuf.Message, SwiftProtobuf._M
 
 nonisolated extension Mason_V1_TaskRow: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".TaskRow"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}key\0\u{1}title\0\u{1}project\0\u{1}state\0\u{1}activity\0\u{3}why_waiting\0\u{3}enqueued_ms\0\u{3}in_state_ms\0\u{1}model\0\u{1}progress\0\u{3}allowed_actions\0\u{1}blockers\0\u{1}typical\0\u{1}slow\0\u{1}step\0\u{1}body\0\u{1}blocks\0\u{1}display\0\u{3}model_use\0\u{1}proposal\0\u{1}issue\0\u{3}issue_url\0\u{3}blocker_links\0\u{3}last_run\0\u{3}owner_session\0\u{1}wait\0\u{1}check\0\u{1}doing\0\u{3}test_immune\0\u{3}state_since_ms\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}key\0\u{1}title\0\u{1}project\0\u{1}state\0\u{1}activity\0\u{3}why_waiting\0\u{3}enqueued_ms\0\u{3}in_state_ms\0\u{1}model\0\u{1}progress\0\u{3}allowed_actions\0\u{1}blockers\0\u{1}typical\0\u{1}slow\0\u{1}step\0\u{1}body\0\u{1}blocks\0\u{1}display\0\u{3}model_use\0\u{1}proposal\0\u{1}issue\0\u{3}issue_url\0\u{3}blocker_links\0\u{3}last_run\0\u{3}owner_session\0\u{1}wait\0\u{1}check\0\u{1}doing\0\u{3}test_immune\0\u{3}state_since_ms\0\u{3}run_on_override\0")
 
   fileprivate class _StorageClass {
     var _id: UInt64 = 0
@@ -6753,6 +7269,7 @@ nonisolated extension Mason_V1_TaskRow: SwiftProtobuf.Message, SwiftProtobuf._Me
     var _doing: String = String()
     var _testImmune: Bool = false
     var _stateSinceMs: UInt64 = 0
+    var _runOnOverride: String = String()
 
       // This property is used as the initial default value for new instances of the type.
       // The type itself is protecting the reference to its storage via CoW semantics.
@@ -6794,6 +7311,7 @@ nonisolated extension Mason_V1_TaskRow: SwiftProtobuf.Message, SwiftProtobuf._Me
       _doing = source._doing
       _testImmune = source._testImmune
       _stateSinceMs = source._stateSinceMs
+      _runOnOverride = source._runOnOverride
     }
   }
 
@@ -6843,6 +7361,7 @@ nonisolated extension Mason_V1_TaskRow: SwiftProtobuf.Message, SwiftProtobuf._Me
         case 29: try { try decoder.decodeSingularStringField(value: &_storage._doing) }()
         case 30: try { try decoder.decodeSingularBoolField(value: &_storage._testImmune) }()
         case 31: try { try decoder.decodeSingularUInt64Field(value: &_storage._stateSinceMs) }()
+        case 32: try { try decoder.decodeSingularStringField(value: &_storage._runOnOverride) }()
         default: break
         }
       }
@@ -6948,6 +7467,9 @@ nonisolated extension Mason_V1_TaskRow: SwiftProtobuf.Message, SwiftProtobuf._Me
       if _storage._stateSinceMs != 0 {
         try visitor.visitSingularUInt64Field(value: _storage._stateSinceMs, fieldNumber: 31)
       }
+      if !_storage._runOnOverride.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._runOnOverride, fieldNumber: 32)
+      }
     }
     try unknownFields.traverse(visitor: &visitor)
   }
@@ -6988,6 +7510,7 @@ nonisolated extension Mason_V1_TaskRow: SwiftProtobuf.Message, SwiftProtobuf._Me
         if _storage._doing != rhs_storage._doing {return false}
         if _storage._testImmune != rhs_storage._testImmune {return false}
         if _storage._stateSinceMs != rhs_storage._stateSinceMs {return false}
+        if _storage._runOnOverride != rhs_storage._runOnOverride {return false}
         return true
       }
       if !storagesAreEqual {return false}
@@ -7551,7 +8074,7 @@ nonisolated extension Mason_V1_Banner: SwiftProtobuf.Message, SwiftProtobuf._Mes
 
 nonisolated extension Mason_V1_HeaderView: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".HeaderView"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}attention\0\u{1}counts\0\u{1}banners\0\u{1}projects\0\u{1}status\0\u{3}self_project\0\u{3}pending_issues\0\u{1}update\0\u{1}project\0\u{3}open_owner_sessions\0\u{3}active_sessions\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}attention\0\u{1}counts\0\u{1}banners\0\u{1}projects\0\u{1}status\0\u{3}self_project\0\u{3}pending_issues\0\u{1}update\0\u{1}project\0\u{3}open_owner_sessions\0\u{3}active_sessions\0\u{3}project_placements\0")
 
   fileprivate class _StorageClass {
     var _attention: UInt32 = 0
@@ -7565,6 +8088,7 @@ nonisolated extension Mason_V1_HeaderView: SwiftProtobuf.Message, SwiftProtobuf.
     var _project: String = String()
     var _openOwnerSessions: UInt32 = 0
     var _activeSessions: [Mason_V1_ActiveSession] = []
+    var _projectPlacements: [Mason_V1_ProjectPlacement] = []
 
       // This property is used as the initial default value for new instances of the type.
       // The type itself is protecting the reference to its storage via CoW semantics.
@@ -7586,6 +8110,7 @@ nonisolated extension Mason_V1_HeaderView: SwiftProtobuf.Message, SwiftProtobuf.
       _project = source._project
       _openOwnerSessions = source._openOwnerSessions
       _activeSessions = source._activeSessions
+      _projectPlacements = source._projectPlacements
     }
   }
 
@@ -7615,6 +8140,7 @@ nonisolated extension Mason_V1_HeaderView: SwiftProtobuf.Message, SwiftProtobuf.
         case 9: try { try decoder.decodeSingularStringField(value: &_storage._project) }()
         case 10: try { try decoder.decodeSingularUInt32Field(value: &_storage._openOwnerSessions) }()
         case 11: try { try decoder.decodeRepeatedMessageField(value: &_storage._activeSessions) }()
+        case 12: try { try decoder.decodeRepeatedMessageField(value: &_storage._projectPlacements) }()
         default: break
         }
       }
@@ -7660,6 +8186,9 @@ nonisolated extension Mason_V1_HeaderView: SwiftProtobuf.Message, SwiftProtobuf.
       if !_storage._activeSessions.isEmpty {
         try visitor.visitRepeatedMessageField(value: _storage._activeSessions, fieldNumber: 11)
       }
+      if !_storage._projectPlacements.isEmpty {
+        try visitor.visitRepeatedMessageField(value: _storage._projectPlacements, fieldNumber: 12)
+      }
     }
     try unknownFields.traverse(visitor: &visitor)
   }
@@ -7680,6 +8209,7 @@ nonisolated extension Mason_V1_HeaderView: SwiftProtobuf.Message, SwiftProtobuf.
         if _storage._project != rhs_storage._project {return false}
         if _storage._openOwnerSessions != rhs_storage._openOwnerSessions {return false}
         if _storage._activeSessions != rhs_storage._activeSessions {return false}
+        if _storage._projectPlacements != rhs_storage._projectPlacements {return false}
         return true
       }
       if !storagesAreEqual {return false}
@@ -8505,7 +9035,7 @@ nonisolated extension Mason_V1_RemoteSummary: SwiftProtobuf.Message, SwiftProtob
 
 nonisolated extension Mason_V1_HomeView: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".HomeView"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}status\0\u{1}attention\0\u{1}active\0\u{3}sessions_used\0\u{3}sessions_limit\0\u{1}stages\0\u{1}compilation\0\u{1}cpu\0\u{1}project\0\u{3}queue_hold\0\u{1}developing\0\u{1}remote\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}status\0\u{1}attention\0\u{1}active\0\u{3}sessions_used\0\u{3}sessions_limit\0\u{1}stages\0\u{1}compilation\0\u{1}cpu\0\u{1}project\0\u{3}queue_hold\0\u{1}developing\0\u{1}remote\0\u{1}github\0\u{1}placement\0\u{3}project_placement\0")
 
   fileprivate class _StorageClass {
     var _status: String = String()
@@ -8520,6 +9050,9 @@ nonisolated extension Mason_V1_HomeView: SwiftProtobuf.Message, SwiftProtobuf._M
     var _queueHold: Mason_V1_QueueHold? = nil
     var _developing: String = String()
     var _remote: Mason_V1_RemoteSummary? = nil
+    var _github: Mason_V1_GithubRunList? = nil
+    var _placement: Mason_V1_Placement? = nil
+    var _projectPlacement: Mason_V1_Placement? = nil
 
       // This property is used as the initial default value for new instances of the type.
       // The type itself is protecting the reference to its storage via CoW semantics.
@@ -8542,6 +9075,9 @@ nonisolated extension Mason_V1_HomeView: SwiftProtobuf.Message, SwiftProtobuf._M
       _queueHold = source._queueHold
       _developing = source._developing
       _remote = source._remote
+      _github = source._github
+      _placement = source._placement
+      _projectPlacement = source._projectPlacement
     }
   }
 
@@ -8572,6 +9108,9 @@ nonisolated extension Mason_V1_HomeView: SwiftProtobuf.Message, SwiftProtobuf._M
         case 10: try { try decoder.decodeSingularMessageField(value: &_storage._queueHold) }()
         case 11: try { try decoder.decodeSingularStringField(value: &_storage._developing) }()
         case 12: try { try decoder.decodeSingularMessageField(value: &_storage._remote) }()
+        case 13: try { try decoder.decodeSingularMessageField(value: &_storage._github) }()
+        case 14: try { try decoder.decodeSingularMessageField(value: &_storage._placement) }()
+        case 15: try { try decoder.decodeSingularMessageField(value: &_storage._projectPlacement) }()
         default: break
         }
       }
@@ -8620,6 +9159,15 @@ nonisolated extension Mason_V1_HomeView: SwiftProtobuf.Message, SwiftProtobuf._M
       try { if let v = _storage._remote {
         try visitor.visitSingularMessageField(value: v, fieldNumber: 12)
       } }()
+      try { if let v = _storage._github {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 13)
+      } }()
+      try { if let v = _storage._placement {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 14)
+      } }()
+      try { if let v = _storage._projectPlacement {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 15)
+      } }()
     }
     try unknownFields.traverse(visitor: &visitor)
   }
@@ -8641,10 +9189,286 @@ nonisolated extension Mason_V1_HomeView: SwiftProtobuf.Message, SwiftProtobuf._M
         if _storage._queueHold != rhs_storage._queueHold {return false}
         if _storage._developing != rhs_storage._developing {return false}
         if _storage._remote != rhs_storage._remote {return false}
+        if _storage._github != rhs_storage._github {return false}
+        if _storage._placement != rhs_storage._placement {return false}
+        if _storage._projectPlacement != rhs_storage._projectPlacement {return false}
         return true
       }
       if !storagesAreEqual {return false}
     }
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Mason_V1_GithubJob: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".GithubJob"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}name\0\u{1}state\0\u{1}conclusion\0\u{1}step\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.name) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.state) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.conclusion) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.step) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.name.isEmpty {
+      try visitor.visitSingularStringField(value: self.name, fieldNumber: 1)
+    }
+    if !self.state.isEmpty {
+      try visitor.visitSingularStringField(value: self.state, fieldNumber: 2)
+    }
+    if !self.conclusion.isEmpty {
+      try visitor.visitSingularStringField(value: self.conclusion, fieldNumber: 3)
+    }
+    if !self.step.isEmpty {
+      try visitor.visitSingularStringField(value: self.step, fieldNumber: 4)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Mason_V1_GithubJob, rhs: Mason_V1_GithubJob) -> Bool {
+    if lhs.name != rhs.name {return false}
+    if lhs.state != rhs.state {return false}
+    if lhs.conclusion != rhs.conclusion {return false}
+    if lhs.step != rhs.step {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Mason_V1_GithubRun: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".GithubRun"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}task\0\u{1}title\0\u{1}owner\0\u{3}task_state\0\u{3}task_activity\0\u{1}kind\0\u{1}suite\0\u{3}runs_on\0\u{1}shards\0\u{1}state\0\u{3}elapsed_s\0\u{1}url\0\u{1}jobs\0\u{1}progress\0\u{3}updated_ago_s\0\u{1}project\0")
+
+  fileprivate class _StorageClass {
+    var _id: String = String()
+    var _task: UInt64 = 0
+    var _title: String = String()
+    var _owner: String = String()
+    var _taskState: String = String()
+    var _taskActivity: String = String()
+    var _kind: String = String()
+    var _suite: String = String()
+    var _runsOn: String = String()
+    var _shards: UInt32 = 0
+    var _state: String = String()
+    var _elapsedS: UInt64 = 0
+    var _url: String = String()
+    var _jobs: [Mason_V1_GithubJob] = []
+    var _progress: String = String()
+    var _updatedAgoS: UInt64 = 0
+    var _project: String = String()
+
+      // This property is used as the initial default value for new instances of the type.
+      // The type itself is protecting the reference to its storage via CoW semantics.
+      // This will force a copy to be made of this reference when the first mutation occurs;
+      // hence, it is safe to mark this as `nonisolated(unsafe)`.
+      static nonisolated(unsafe) let defaultInstance = _StorageClass()
+
+    private init() {}
+
+    init(copying source: _StorageClass) {
+      _id = source._id
+      _task = source._task
+      _title = source._title
+      _owner = source._owner
+      _taskState = source._taskState
+      _taskActivity = source._taskActivity
+      _kind = source._kind
+      _suite = source._suite
+      _runsOn = source._runsOn
+      _shards = source._shards
+      _state = source._state
+      _elapsedS = source._elapsedS
+      _url = source._url
+      _jobs = source._jobs
+      _progress = source._progress
+      _updatedAgoS = source._updatedAgoS
+      _project = source._project
+    }
+  }
+
+  fileprivate mutating func _uniqueStorage() -> _StorageClass {
+    if !isKnownUniquelyReferenced(&_storage) {
+      _storage = _StorageClass(copying: _storage)
+    }
+    return _storage
+  }
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    _ = _uniqueStorage()
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      while let fieldNumber = try decoder.nextFieldNumber() {
+        // The use of inline closures is to circumvent an issue where the compiler
+        // allocates stack space for every case branch when no optimizations are
+        // enabled. https://github.com/apple/swift-protobuf/issues/1034
+        switch fieldNumber {
+        case 1: try { try decoder.decodeSingularStringField(value: &_storage._id) }()
+        case 2: try { try decoder.decodeSingularUInt64Field(value: &_storage._task) }()
+        case 3: try { try decoder.decodeSingularStringField(value: &_storage._title) }()
+        case 4: try { try decoder.decodeSingularStringField(value: &_storage._owner) }()
+        case 5: try { try decoder.decodeSingularStringField(value: &_storage._taskState) }()
+        case 6: try { try decoder.decodeSingularStringField(value: &_storage._taskActivity) }()
+        case 7: try { try decoder.decodeSingularStringField(value: &_storage._kind) }()
+        case 8: try { try decoder.decodeSingularStringField(value: &_storage._suite) }()
+        case 9: try { try decoder.decodeSingularStringField(value: &_storage._runsOn) }()
+        case 10: try { try decoder.decodeSingularUInt32Field(value: &_storage._shards) }()
+        case 11: try { try decoder.decodeSingularStringField(value: &_storage._state) }()
+        case 12: try { try decoder.decodeSingularUInt64Field(value: &_storage._elapsedS) }()
+        case 13: try { try decoder.decodeSingularStringField(value: &_storage._url) }()
+        case 14: try { try decoder.decodeRepeatedMessageField(value: &_storage._jobs) }()
+        case 15: try { try decoder.decodeSingularStringField(value: &_storage._progress) }()
+        case 16: try { try decoder.decodeSingularUInt64Field(value: &_storage._updatedAgoS) }()
+        case 17: try { try decoder.decodeSingularStringField(value: &_storage._project) }()
+        default: break
+        }
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      if !_storage._id.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._id, fieldNumber: 1)
+      }
+      if _storage._task != 0 {
+        try visitor.visitSingularUInt64Field(value: _storage._task, fieldNumber: 2)
+      }
+      if !_storage._title.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._title, fieldNumber: 3)
+      }
+      if !_storage._owner.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._owner, fieldNumber: 4)
+      }
+      if !_storage._taskState.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._taskState, fieldNumber: 5)
+      }
+      if !_storage._taskActivity.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._taskActivity, fieldNumber: 6)
+      }
+      if !_storage._kind.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._kind, fieldNumber: 7)
+      }
+      if !_storage._suite.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._suite, fieldNumber: 8)
+      }
+      if !_storage._runsOn.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._runsOn, fieldNumber: 9)
+      }
+      if _storage._shards != 0 {
+        try visitor.visitSingularUInt32Field(value: _storage._shards, fieldNumber: 10)
+      }
+      if !_storage._state.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._state, fieldNumber: 11)
+      }
+      if _storage._elapsedS != 0 {
+        try visitor.visitSingularUInt64Field(value: _storage._elapsedS, fieldNumber: 12)
+      }
+      if !_storage._url.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._url, fieldNumber: 13)
+      }
+      if !_storage._jobs.isEmpty {
+        try visitor.visitRepeatedMessageField(value: _storage._jobs, fieldNumber: 14)
+      }
+      if !_storage._progress.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._progress, fieldNumber: 15)
+      }
+      if _storage._updatedAgoS != 0 {
+        try visitor.visitSingularUInt64Field(value: _storage._updatedAgoS, fieldNumber: 16)
+      }
+      if !_storage._project.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._project, fieldNumber: 17)
+      }
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Mason_V1_GithubRun, rhs: Mason_V1_GithubRun) -> Bool {
+    if lhs._storage !== rhs._storage {
+      let storagesAreEqual: Bool = withExtendedLifetime((lhs._storage, rhs._storage)) { (_args: (_StorageClass, _StorageClass)) in
+        let _storage = _args.0
+        let rhs_storage = _args.1
+        if _storage._id != rhs_storage._id {return false}
+        if _storage._task != rhs_storage._task {return false}
+        if _storage._title != rhs_storage._title {return false}
+        if _storage._owner != rhs_storage._owner {return false}
+        if _storage._taskState != rhs_storage._taskState {return false}
+        if _storage._taskActivity != rhs_storage._taskActivity {return false}
+        if _storage._kind != rhs_storage._kind {return false}
+        if _storage._suite != rhs_storage._suite {return false}
+        if _storage._runsOn != rhs_storage._runsOn {return false}
+        if _storage._shards != rhs_storage._shards {return false}
+        if _storage._state != rhs_storage._state {return false}
+        if _storage._elapsedS != rhs_storage._elapsedS {return false}
+        if _storage._url != rhs_storage._url {return false}
+        if _storage._jobs != rhs_storage._jobs {return false}
+        if _storage._progress != rhs_storage._progress {return false}
+        if _storage._updatedAgoS != rhs_storage._updatedAgoS {return false}
+        if _storage._project != rhs_storage._project {return false}
+        return true
+      }
+      if !storagesAreEqual {return false}
+    }
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Mason_V1_GithubRunList: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".GithubRunList"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}enabled\0\u{3}pool_used\0\u{3}pool_limit\0\u{1}waiting\0\u{1}runs\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularBoolField(value: &self.enabled) }()
+      case 2: try { try decoder.decodeSingularUInt32Field(value: &self.poolUsed) }()
+      case 3: try { try decoder.decodeSingularUInt32Field(value: &self.poolLimit) }()
+      case 4: try { try decoder.decodeSingularUInt32Field(value: &self.waiting) }()
+      case 5: try { try decoder.decodeRepeatedMessageField(value: &self.runs) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.enabled != false {
+      try visitor.visitSingularBoolField(value: self.enabled, fieldNumber: 1)
+    }
+    if self.poolUsed != 0 {
+      try visitor.visitSingularUInt32Field(value: self.poolUsed, fieldNumber: 2)
+    }
+    if self.poolLimit != 0 {
+      try visitor.visitSingularUInt32Field(value: self.poolLimit, fieldNumber: 3)
+    }
+    if self.waiting != 0 {
+      try visitor.visitSingularUInt32Field(value: self.waiting, fieldNumber: 4)
+    }
+    if !self.runs.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.runs, fieldNumber: 5)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Mason_V1_GithubRunList, rhs: Mason_V1_GithubRunList) -> Bool {
+    if lhs.enabled != rhs.enabled {return false}
+    if lhs.poolUsed != rhs.poolUsed {return false}
+    if lhs.poolLimit != rhs.poolLimit {return false}
+    if lhs.waiting != rhs.waiting {return false}
+    if lhs.runs != rhs.runs {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -9342,7 +10166,7 @@ nonisolated extension Mason_V1_DebtLine: SwiftProtobuf.Message, SwiftProtobuf._M
 
 nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".TaskDetailView"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}row\0\u{1}steps\0\u{1}plan\0\u{1}card\0\u{1}closing\0\u{1}debts\0\u{3}log_tail\0\u{1}branch\0\u{1}worktree\0\u{1}definition\0\u{1}failure\0\u{1}body\0\u{1}route\0\u{3}started_at\0\u{3}explore_returns\0\u{2}\u{2}approval\0\u{1}numbers\0\u{3}plan_view\0\u{1}proposal\0\u{3}step_tokens\0\u{3}cpu_permille\0\u{3}ci_links\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}row\0\u{1}steps\0\u{1}plan\0\u{1}card\0\u{1}closing\0\u{1}debts\0\u{3}log_tail\0\u{1}branch\0\u{1}worktree\0\u{1}definition\0\u{1}failure\0\u{1}body\0\u{1}route\0\u{3}started_at\0\u{3}explore_returns\0\u{2}\u{2}approval\0\u{1}numbers\0\u{3}plan_view\0\u{1}proposal\0\u{3}step_tokens\0\u{3}cpu_permille\0\u{3}ci_links\0\u{1}placement\0")
 
   fileprivate class _StorageClass {
     var _row: Mason_V1_TaskRow? = nil
@@ -9367,6 +10191,7 @@ nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProto
     var _stepTokens: [Mason_V1_TokenLine] = []
     var _cpuPermille: Int32 = 0
     var _ciLinks: [Mason_V1_CiLink] = []
+    var _placement: Mason_V1_Placement? = nil
 
       // This property is used as the initial default value for new instances of the type.
       // The type itself is protecting the reference to its storage via CoW semantics.
@@ -9399,6 +10224,7 @@ nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProto
       _stepTokens = source._stepTokens
       _cpuPermille = source._cpuPermille
       _ciLinks = source._ciLinks
+      _placement = source._placement
     }
   }
 
@@ -9439,6 +10265,7 @@ nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProto
         case 21: try { try decoder.decodeRepeatedMessageField(value: &_storage._stepTokens) }()
         case 22: try { try decoder.decodeSingularInt32Field(value: &_storage._cpuPermille) }()
         case 23: try { try decoder.decodeRepeatedMessageField(value: &_storage._ciLinks) }()
+        case 24: try { try decoder.decodeSingularMessageField(value: &_storage._placement) }()
         default: break
         }
       }
@@ -9517,6 +10344,9 @@ nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProto
       if !_storage._ciLinks.isEmpty {
         try visitor.visitRepeatedMessageField(value: _storage._ciLinks, fieldNumber: 23)
       }
+      try { if let v = _storage._placement {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 24)
+      } }()
     }
     try unknownFields.traverse(visitor: &visitor)
   }
@@ -9548,6 +10378,7 @@ nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProto
         if _storage._stepTokens != rhs_storage._stepTokens {return false}
         if _storage._cpuPermille != rhs_storage._cpuPermille {return false}
         if _storage._ciLinks != rhs_storage._ciLinks {return false}
+        if _storage._placement != rhs_storage._placement {return false}
         return true
       }
       if !storagesAreEqual {return false}
@@ -9854,7 +10685,196 @@ nonisolated extension Mason_V1_NumberLine: SwiftProtobuf.Message, SwiftProtobuf.
 
 nonisolated extension Mason_V1_BatchLine: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".BatchLine"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}project\0\u{1}phase\0\u{1}tasks\0\u{1}landed\0\u{1}parked\0\u{1}note\0\u{1}running\0\u{1}ci\0\u{3}allowed_actions\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}project\0\u{1}phase\0\u{1}tasks\0\u{1}landed\0\u{1}parked\0\u{1}note\0\u{1}running\0\u{1}ci\0\u{3}allowed_actions\0\u{3}state_text\0\u{1}severity\0\u{3}severity_reason\0\u{3}phase_ms\0\u{3}typical_ms\0\u{3}split_round\0\u{1}remaining\0\u{1}members\0")
+
+  fileprivate class _StorageClass {
+    var _id: UInt64 = 0
+    var _project: String = String()
+    var _phase: String = String()
+    var _tasks: [UInt64] = []
+    var _landed: [UInt64] = []
+    var _parked: [UInt64] = []
+    var _note: String = String()
+    var _running: Bool = false
+    var _ci: Mason_V1_BatchCi? = nil
+    var _allowedActions: [String] = []
+    var _stateText: String = String()
+    var _severity: String = String()
+    var _severityReason: String = String()
+    var _phaseMs: UInt64 = 0
+    var _typicalMs: UInt64 = 0
+    var _splitRound: UInt32 = 0
+    var _remaining: UInt32 = 0
+    var _members: [Mason_V1_BatchMember] = []
+
+      // This property is used as the initial default value for new instances of the type.
+      // The type itself is protecting the reference to its storage via CoW semantics.
+      // This will force a copy to be made of this reference when the first mutation occurs;
+      // hence, it is safe to mark this as `nonisolated(unsafe)`.
+      static nonisolated(unsafe) let defaultInstance = _StorageClass()
+
+    private init() {}
+
+    init(copying source: _StorageClass) {
+      _id = source._id
+      _project = source._project
+      _phase = source._phase
+      _tasks = source._tasks
+      _landed = source._landed
+      _parked = source._parked
+      _note = source._note
+      _running = source._running
+      _ci = source._ci
+      _allowedActions = source._allowedActions
+      _stateText = source._stateText
+      _severity = source._severity
+      _severityReason = source._severityReason
+      _phaseMs = source._phaseMs
+      _typicalMs = source._typicalMs
+      _splitRound = source._splitRound
+      _remaining = source._remaining
+      _members = source._members
+    }
+  }
+
+  fileprivate mutating func _uniqueStorage() -> _StorageClass {
+    if !isKnownUniquelyReferenced(&_storage) {
+      _storage = _StorageClass(copying: _storage)
+    }
+    return _storage
+  }
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    _ = _uniqueStorage()
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      while let fieldNumber = try decoder.nextFieldNumber() {
+        // The use of inline closures is to circumvent an issue where the compiler
+        // allocates stack space for every case branch when no optimizations are
+        // enabled. https://github.com/apple/swift-protobuf/issues/1034
+        switch fieldNumber {
+        case 1: try { try decoder.decodeSingularUInt64Field(value: &_storage._id) }()
+        case 2: try { try decoder.decodeSingularStringField(value: &_storage._project) }()
+        case 3: try { try decoder.decodeSingularStringField(value: &_storage._phase) }()
+        case 4: try { try decoder.decodeRepeatedUInt64Field(value: &_storage._tasks) }()
+        case 5: try { try decoder.decodeRepeatedUInt64Field(value: &_storage._landed) }()
+        case 6: try { try decoder.decodeRepeatedUInt64Field(value: &_storage._parked) }()
+        case 7: try { try decoder.decodeSingularStringField(value: &_storage._note) }()
+        case 8: try { try decoder.decodeSingularBoolField(value: &_storage._running) }()
+        case 9: try { try decoder.decodeSingularMessageField(value: &_storage._ci) }()
+        case 10: try { try decoder.decodeRepeatedStringField(value: &_storage._allowedActions) }()
+        case 11: try { try decoder.decodeSingularStringField(value: &_storage._stateText) }()
+        case 12: try { try decoder.decodeSingularStringField(value: &_storage._severity) }()
+        case 13: try { try decoder.decodeSingularStringField(value: &_storage._severityReason) }()
+        case 14: try { try decoder.decodeSingularUInt64Field(value: &_storage._phaseMs) }()
+        case 15: try { try decoder.decodeSingularUInt64Field(value: &_storage._typicalMs) }()
+        case 16: try { try decoder.decodeSingularUInt32Field(value: &_storage._splitRound) }()
+        case 17: try { try decoder.decodeSingularUInt32Field(value: &_storage._remaining) }()
+        case 18: try { try decoder.decodeRepeatedMessageField(value: &_storage._members) }()
+        default: break
+        }
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every if/case branch local when no optimizations
+      // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+      // https://github.com/apple/swift-protobuf/issues/1182
+      if _storage._id != 0 {
+        try visitor.visitSingularUInt64Field(value: _storage._id, fieldNumber: 1)
+      }
+      if !_storage._project.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._project, fieldNumber: 2)
+      }
+      if !_storage._phase.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._phase, fieldNumber: 3)
+      }
+      if !_storage._tasks.isEmpty {
+        try visitor.visitPackedUInt64Field(value: _storage._tasks, fieldNumber: 4)
+      }
+      if !_storage._landed.isEmpty {
+        try visitor.visitPackedUInt64Field(value: _storage._landed, fieldNumber: 5)
+      }
+      if !_storage._parked.isEmpty {
+        try visitor.visitPackedUInt64Field(value: _storage._parked, fieldNumber: 6)
+      }
+      if !_storage._note.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._note, fieldNumber: 7)
+      }
+      if _storage._running != false {
+        try visitor.visitSingularBoolField(value: _storage._running, fieldNumber: 8)
+      }
+      try { if let v = _storage._ci {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 9)
+      } }()
+      if !_storage._allowedActions.isEmpty {
+        try visitor.visitRepeatedStringField(value: _storage._allowedActions, fieldNumber: 10)
+      }
+      if !_storage._stateText.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._stateText, fieldNumber: 11)
+      }
+      if !_storage._severity.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._severity, fieldNumber: 12)
+      }
+      if !_storage._severityReason.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._severityReason, fieldNumber: 13)
+      }
+      if _storage._phaseMs != 0 {
+        try visitor.visitSingularUInt64Field(value: _storage._phaseMs, fieldNumber: 14)
+      }
+      if _storage._typicalMs != 0 {
+        try visitor.visitSingularUInt64Field(value: _storage._typicalMs, fieldNumber: 15)
+      }
+      if _storage._splitRound != 0 {
+        try visitor.visitSingularUInt32Field(value: _storage._splitRound, fieldNumber: 16)
+      }
+      if _storage._remaining != 0 {
+        try visitor.visitSingularUInt32Field(value: _storage._remaining, fieldNumber: 17)
+      }
+      if !_storage._members.isEmpty {
+        try visitor.visitRepeatedMessageField(value: _storage._members, fieldNumber: 18)
+      }
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Mason_V1_BatchLine, rhs: Mason_V1_BatchLine) -> Bool {
+    if lhs._storage !== rhs._storage {
+      let storagesAreEqual: Bool = withExtendedLifetime((lhs._storage, rhs._storage)) { (_args: (_StorageClass, _StorageClass)) in
+        let _storage = _args.0
+        let rhs_storage = _args.1
+        if _storage._id != rhs_storage._id {return false}
+        if _storage._project != rhs_storage._project {return false}
+        if _storage._phase != rhs_storage._phase {return false}
+        if _storage._tasks != rhs_storage._tasks {return false}
+        if _storage._landed != rhs_storage._landed {return false}
+        if _storage._parked != rhs_storage._parked {return false}
+        if _storage._note != rhs_storage._note {return false}
+        if _storage._running != rhs_storage._running {return false}
+        if _storage._ci != rhs_storage._ci {return false}
+        if _storage._allowedActions != rhs_storage._allowedActions {return false}
+        if _storage._stateText != rhs_storage._stateText {return false}
+        if _storage._severity != rhs_storage._severity {return false}
+        if _storage._severityReason != rhs_storage._severityReason {return false}
+        if _storage._phaseMs != rhs_storage._phaseMs {return false}
+        if _storage._typicalMs != rhs_storage._typicalMs {return false}
+        if _storage._splitRound != rhs_storage._splitRound {return false}
+        if _storage._remaining != rhs_storage._remaining {return false}
+        if _storage._members != rhs_storage._members {return false}
+        return true
+      }
+      if !storagesAreEqual {return false}
+    }
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Mason_V1_BatchMember: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".BatchMember"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}task\0\u{1}standing\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -9862,70 +10882,26 @@ nonisolated extension Mason_V1_BatchLine: SwiftProtobuf.Message, SwiftProtobuf._
       // allocates stack space for every case branch when no optimizations are
       // enabled. https://github.com/apple/swift-protobuf/issues/1034
       switch fieldNumber {
-      case 1: try { try decoder.decodeSingularUInt64Field(value: &self.id) }()
-      case 2: try { try decoder.decodeSingularStringField(value: &self.project) }()
-      case 3: try { try decoder.decodeSingularStringField(value: &self.phase) }()
-      case 4: try { try decoder.decodeRepeatedUInt64Field(value: &self.tasks) }()
-      case 5: try { try decoder.decodeRepeatedUInt64Field(value: &self.landed) }()
-      case 6: try { try decoder.decodeRepeatedUInt64Field(value: &self.parked) }()
-      case 7: try { try decoder.decodeSingularStringField(value: &self.note) }()
-      case 8: try { try decoder.decodeSingularBoolField(value: &self.running) }()
-      case 9: try { try decoder.decodeSingularMessageField(value: &self._ci) }()
-      case 10: try { try decoder.decodeRepeatedStringField(value: &self.allowedActions) }()
+      case 1: try { try decoder.decodeSingularUInt64Field(value: &self.task) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.standing) }()
       default: break
       }
     }
   }
 
   public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    // The use of inline closures is to circumvent an issue where the compiler
-    // allocates stack space for every if/case branch local when no optimizations
-    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
-    // https://github.com/apple/swift-protobuf/issues/1182
-    if self.id != 0 {
-      try visitor.visitSingularUInt64Field(value: self.id, fieldNumber: 1)
+    if self.task != 0 {
+      try visitor.visitSingularUInt64Field(value: self.task, fieldNumber: 1)
     }
-    if !self.project.isEmpty {
-      try visitor.visitSingularStringField(value: self.project, fieldNumber: 2)
-    }
-    if !self.phase.isEmpty {
-      try visitor.visitSingularStringField(value: self.phase, fieldNumber: 3)
-    }
-    if !self.tasks.isEmpty {
-      try visitor.visitPackedUInt64Field(value: self.tasks, fieldNumber: 4)
-    }
-    if !self.landed.isEmpty {
-      try visitor.visitPackedUInt64Field(value: self.landed, fieldNumber: 5)
-    }
-    if !self.parked.isEmpty {
-      try visitor.visitPackedUInt64Field(value: self.parked, fieldNumber: 6)
-    }
-    if !self.note.isEmpty {
-      try visitor.visitSingularStringField(value: self.note, fieldNumber: 7)
-    }
-    if self.running != false {
-      try visitor.visitSingularBoolField(value: self.running, fieldNumber: 8)
-    }
-    try { if let v = self._ci {
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 9)
-    } }()
-    if !self.allowedActions.isEmpty {
-      try visitor.visitRepeatedStringField(value: self.allowedActions, fieldNumber: 10)
+    if !self.standing.isEmpty {
+      try visitor.visitSingularStringField(value: self.standing, fieldNumber: 2)
     }
     try unknownFields.traverse(visitor: &visitor)
   }
 
-  public static func ==(lhs: Mason_V1_BatchLine, rhs: Mason_V1_BatchLine) -> Bool {
-    if lhs.id != rhs.id {return false}
-    if lhs.project != rhs.project {return false}
-    if lhs.phase != rhs.phase {return false}
-    if lhs.tasks != rhs.tasks {return false}
-    if lhs.landed != rhs.landed {return false}
-    if lhs.parked != rhs.parked {return false}
-    if lhs.note != rhs.note {return false}
-    if lhs.running != rhs.running {return false}
-    if lhs._ci != rhs._ci {return false}
-    if lhs.allowedActions != rhs.allowedActions {return false}
+  public static func ==(lhs: Mason_V1_BatchMember, rhs: Mason_V1_BatchMember) -> Bool {
+    if lhs.task != rhs.task {return false}
+    if lhs.standing != rhs.standing {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -10163,7 +11139,7 @@ nonisolated extension Mason_V1_LandingView: SwiftProtobuf.Message, SwiftProtobuf
 
 nonisolated extension Mason_V1_TaskLanding: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".TaskLanding"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}task\0\u{1}key\0\u{1}title\0\u{1}project\0\u{1}status\0\u{1}position\0\u{1}why\0\u{1}batch\0\u{1}phase\0\u{3}phase_index\0\u{3}phase_total\0\u{3}phase_ms\0\u{3}ci_state\0\u{3}allowed_actions\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}task\0\u{1}key\0\u{1}title\0\u{1}project\0\u{1}status\0\u{1}position\0\u{1}why\0\u{1}batch\0\u{1}phase\0\u{3}phase_index\0\u{3}phase_total\0\u{3}phase_ms\0\u{3}ci_state\0\u{3}allowed_actions\0\u{1}standing\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -10185,6 +11161,7 @@ nonisolated extension Mason_V1_TaskLanding: SwiftProtobuf.Message, SwiftProtobuf
       case 12: try { try decoder.decodeSingularUInt64Field(value: &self.phaseMs) }()
       case 13: try { try decoder.decodeSingularStringField(value: &self.ciState) }()
       case 14: try { try decoder.decodeRepeatedStringField(value: &self.allowedActions) }()
+      case 15: try { try decoder.decodeSingularStringField(value: &self.standing) }()
       default: break
       }
     }
@@ -10233,6 +11210,9 @@ nonisolated extension Mason_V1_TaskLanding: SwiftProtobuf.Message, SwiftProtobuf
     if !self.allowedActions.isEmpty {
       try visitor.visitRepeatedStringField(value: self.allowedActions, fieldNumber: 14)
     }
+    if !self.standing.isEmpty {
+      try visitor.visitSingularStringField(value: self.standing, fieldNumber: 15)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -10251,6 +11231,7 @@ nonisolated extension Mason_V1_TaskLanding: SwiftProtobuf.Message, SwiftProtobuf
     if lhs.phaseMs != rhs.phaseMs {return false}
     if lhs.ciState != rhs.ciState {return false}
     if lhs.allowedActions != rhs.allowedActions {return false}
+    if lhs.standing != rhs.standing {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
