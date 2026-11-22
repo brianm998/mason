@@ -485,6 +485,15 @@ pub fn run_with(d: &Arc<Daemon>, spec: &CheckSpec, progress: Option<&CheckProgre
         return g.clone().unwrap_or_else(|| Err("no result".into()));
     }
     let res = collect(d, spec, &id, progress);
+    // A `favor-local` placement stood for this run only (#832).
+    if let (Some((t, s)), Some(project)) = (
+        spec.place.as_ref(),
+        crate::remote::any_remote(d)
+            .then(|| crate::remote::project_of(d, &spec.cwd))
+            .flatten(),
+    ) {
+        crate::place::forget(&project, t.map(|t| t.0), &s.name, "check");
+    }
     live_checks()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
