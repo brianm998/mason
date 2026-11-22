@@ -4268,7 +4268,19 @@ fn hold_for_debt(
         return Ok(None);
     }
     // A payment that runs on GitHub holds runner pool units, not this machine's slots (#761).
-    let needs = crate::remote::pool_needs(d, project, &needs, Some(task)).unwrap_or(needs);
+    let mut _waiting = None;
+    let needs = match crate::remote::pool_needs(d, project, &needs, Some(task)) {
+        Some(n) => {
+            _waiting = Some(crate::remote_runs::waiting(
+                d,
+                task.0,
+                "debt payment",
+                &format!("debt #{}", task.0),
+            ));
+            n
+        }
+        None => needs,
+    };
     if needs.amounts.keys().any(|n| n.starts_with("device:")) {
         d.targets.declare_all(d);
     }
@@ -4473,6 +4485,10 @@ pub fn run_idle_debts(d: &Arc<Daemon>) {
         let c = d.broker.compilation();
         // A limit of 0 means no `compile` pool is declared: nothing to wait for.
         if !c.pending.is_empty() || (c.limit > 0 && c.used >= c.limit) {
+            return;
+        }
+        // Debt payments go to GitHub only when nothing else waits for a runner (#766).
+        if d.broker.gha_waiting() > 0 {
             return;
         }
         let Some(Ok(pick)) = next_pick(d, &ran) else {
@@ -4826,6 +4842,268 @@ fn pay_with(d: &Arc<Daemon>, debt: u64, only: Option<&str>) -> Result<String, St
         let _ = d.store.debt_tried(debt, now_ms());
         Err(format!("still owed: {}", verdicts.join("; ")))
     }
+}
+
+// ---- the scheduled full test: every listed suite, whole, on the base tip (#783) ----------------
+
+/// How one suite of a scheduled full test turned out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WholeState {
+    /// Green, and recorded green at the tip.
+    Green,
+    /// Green at the tip already (a recorded green), so not run again.
+    AlreadyGreen,
+    /// Red, then green on the immediate rerun: a flake.
+    Flaky,
+    /// Failed only on quarantined or known-red tests: set aside, no green recorded.
+    Excused,
+    /// Red (after the rerun), or the suite could not be judged.
+    Red,
+}
+
+/// One suite's part of a [`Whole`] run.
+#[derive(Clone, Debug)]
+pub struct WholeSuite {
+    pub name: String,
+    pub state: WholeState,
+    /// What the run said, for the status and for a ticket.
+    pub note: String,
+    /// The tests that failed (red only).
+    pub failing: Vec<String>,
+}
+
+/// What a scheduled full test did: the tip it ran on and each suite's part.
+#[derive(Clone, Debug)]
+pub struct Whole {
+    pub tip: String,
+    pub suites: Vec<WholeSuite>,
+}
+
+impl Whole {
+    pub fn red(&self) -> bool {
+        self.suites.iter().any(|s| s.state == WholeState::Red)
+    }
+}
+
+/// The suites a `suites` schedule runs when it names none: every suite bound to the Test step
+/// and to the landing tiers, or every suite when the definition has no Test step.
+pub fn default_full_suites(d: &Daemon, pid: ProjectId, def: &Definition) -> Vec<String> {
+    let mut names: Vec<String> = match test_step_name(def) {
+        Some(test) => debt_suites(def, &[], &format!("step:{test}"))
+            .into_iter()
+            .map(|s| s.name)
+            .collect(),
+        None => def.testing.suites.iter().map(|s| s.name.clone()).collect(),
+    };
+    for n in landing_tier(d, pid) {
+        if !names.contains(&n) {
+            names.push(n);
+        }
+    }
+    names
+}
+
+/// Hold what the Test step `uses` as work below every task: the lowest rank there is, so a
+/// task's step never waits behind it. With remote on the units are `gha` pool units (#761).
+fn hold_below_all(
+    d: &Arc<Daemon>,
+    def: &Definition,
+    project: &str,
+    label: &str,
+    alive: &dyn Fn() -> bool,
+) -> Result<Option<crate::sched::Lease>, String> {
+    let Some(step) = def
+        .steps
+        .iter()
+        .find(|s| s.kind == mason_definition::StepType::Test)
+    else {
+        return Ok(None);
+    };
+    let needs = needs_of(&step.uses, None);
+    if !needs.exclusive && needs.amounts.is_empty() {
+        return Ok(None);
+    }
+    let needs = crate::remote::pool_needs(d, project, &needs, None).unwrap_or(needs);
+    if needs.amounts.keys().any(|n| n.starts_with("device:")) {
+        d.targets.declare_all(d);
+    }
+    for name in needs.amounts.keys() {
+        if !name.starts_with("llm:") && !name.starts_with("device:") {
+            d.broker
+                .declare(name, def.resources.get(name).copied().unwrap_or(1));
+        }
+    }
+    let rank = mason_scheduler::Rank::new(false, u32::MAX, u8::MAX, now_ms(), 0, false);
+    d.broker
+        .acquire_beside(TaskId(0), label, rank, needs, alive, &mut |_| {})
+        .map(Some)
+        .map_err(|_| PAY_CANCELLED.to_string())
+}
+
+/// Run `names` (suites of the definition) whole on the base branch's tip, one after another, on
+/// a clean checkout. Each goes through [`run_suite`], so the quarantine, the immediate rerun of
+/// a red test, the judge and the executor (GitHub shards when remote is on, this Mac when it is
+/// off) are the ones a debt payment uses. A suite that was green is recorded green at the tip,
+/// which closes every debt it covers ([`settle_debts`]); a red is recorded in `suite_red`.
+/// `at` is the commit to run on (the base tip the caller read); `force` runs a suite even when
+/// a green at it is on record. Waits behind every task for
+/// its slots and behind a running payment; `alive` says whether to go on waiting.
+pub fn run_whole(
+    d: &Arc<Daemon>,
+    pid: ProjectId,
+    names: &[String],
+    at: &str,
+    force: bool,
+    alive: &dyn Fn() -> bool,
+) -> Result<Whole, String> {
+    let p = d.project(pid).ok_or("its project is gone")?.clone();
+    let def = d.current_def(pid);
+    let names: Vec<String> = if names.is_empty() {
+        default_full_suites(d, pid, &def)
+    } else {
+        names.to_vec()
+    };
+    if names.is_empty() {
+        return Err("the definition has no suites to run".into());
+    }
+    let mut suites = vec![];
+    for n in &names {
+        match def.testing.suite(n) {
+            Some(s) => suites.push(s.clone()),
+            None => return Err(format!("the definition has no suite `{n}`")),
+        }
+    }
+    // One payment or full test at a time in this daemon.
+    let _one = loop {
+        match d.paying.try_lock() {
+            Ok(g) => break g,
+            Err(std::sync::TryLockError::Poisoned(e)) => break e.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if d.is_shutting_down() || !alive() {
+                    return Err(PAY_CANCELLED.into());
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+    };
+    let _lease = hold_below_all(d, &def, &p.id, "scheduled full test", alive)?;
+    // The commit the caller decided on; nothing is fetched here, so the record and the run agree.
+    let tip = git::run(&p.path, &["rev-parse", &format!("{at}^{{commit}}")])
+        .map_err(|e| e.to_string())?
+        .trim()
+        .to_string();
+    let mut out = Whole {
+        tip: tip.clone(),
+        suites: vec![],
+    };
+    let mut todo = vec![];
+    for s in suites {
+        let known = d
+            .store
+            .suite_green_bases(&p.id, &s.name)
+            .unwrap_or_default();
+        if !force && known.iter().any(|(b, _)| *b == tip) {
+            out.suites.push(WholeSuite {
+                name: s.name.clone(),
+                state: WholeState::AlreadyGreen,
+                note: format!("{}: already green at {}", s.name, &tip[..tip.len().min(10)]),
+                failing: vec![],
+            });
+        } else {
+            todo.push(s);
+        }
+    }
+    if todo.is_empty() {
+        return Ok(out);
+    }
+    let dir = d.cfg.task_dir(0).join(format!("full-{}", p.id));
+    let wt = dir.join("wt");
+    let lock = d.repo_lock(pid);
+    {
+        let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+        git::remove_worktree(&p.path, &wt);
+        git::run(
+            &p.path,
+            &["worktree", "add", "--detach", &wt.to_string_lossy(), &tip],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    if let Err(e) = crate::jobs::setup_checkout(&def, &wt) {
+        let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+        git::remove_worktree(&p.path, &wt);
+        return Err(e);
+    }
+    let who = Who {
+        d: d.clone(),
+        task: None,
+        step: String::new(),
+        project: p.id.clone(),
+        log_dir: dir.clone(),
+        id_prefix: format!("full-{}", p.id),
+        sink: None,
+        env: vec![],
+        // The tip is the tree under test, so no red is excused as "also red at the base".
+        trust_base: false,
+        members: Members::default(),
+        reuse: None,
+    };
+    let tree_hash = git::run(&wt, &["rev-parse", "HEAD^{tree}"])
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let tree = Tree {
+        tree: tree_hash,
+        base: tip.clone(),
+    };
+    for s in &todo {
+        let r = run_suite(&who, &p.path, &lock, &def, s, &wt, &tree, &mut |_| {});
+        let part = |state, note: String, failing: Vec<String>| WholeSuite {
+            name: s.name.clone(),
+            state,
+            note,
+            failing,
+        };
+        let part = match r {
+            SuiteRun::Done {
+                outcome: SuiteOutcome::Proven | SuiteOutcome::Reused,
+                results,
+                notes,
+            } => {
+                if let Some(r) = &results {
+                    lift_proven(d, &s.name, r);
+                }
+                let _ = d.store.clear_suite_red(&p.id, &s.name);
+                part(WholeState::Green, notes.join("; "), vec![])
+            }
+            SuiteRun::Done {
+                outcome: SuiteOutcome::Flaky,
+                notes,
+                ..
+            } => part(WholeState::Flaky, notes.join("; "), vec![]),
+            SuiteRun::Done {
+                outcome: SuiteOutcome::Excused | SuiteOutcome::NotSelected | SuiteOutcome::Skipped,
+                notes,
+                ..
+            } => part(WholeState::Excused, notes.join("; "), vec![]),
+            SuiteRun::Done { notes, .. } => part(WholeState::Red, notes.join("; "), vec![]),
+            SuiteRun::Product {
+                feedback, failing, ..
+            } => part(WholeState::Red, feedback, failing),
+            SuiteRun::Gone => part(WholeState::Red, format!("{}: went away", s.name), vec![]),
+        };
+        if part.state == WholeState::Red {
+            let _ = d
+                .store
+                .put_suite_red(&p.id, &s.name, &tip, &part.failing, now_ms());
+        }
+        out.suites.push(part);
+    }
+    {
+        let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+        git::remove_worktree(&p.path, &wt);
+    }
+    // Every green recorded at the tip closes the debts it covers.
+    settle_debts(d);
+    Ok(out)
 }
 
 /// The name a CI debt's scope carries: the workflow when the CI system names one, else `ci`.
