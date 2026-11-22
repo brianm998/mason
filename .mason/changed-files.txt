@@ -1,0 +1,3 @@
+.mason/run.json
+crates/daemon/src/hostedcheck.rs
+crates/daemon/src/jobs.rs
