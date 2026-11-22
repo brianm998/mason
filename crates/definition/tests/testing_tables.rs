@@ -719,3 +719,26 @@ fn shards_parse_and_need_a_shard_command() {
         assert!(p.iter().any(|x| x.contains(want)), "{extra}: {p:?}");
     }
 }
+
+#[test]
+fn a_pytest_suite_narrowed_by_dotted_names_warns_and_file_does_not() {
+    // #924: pytest takes paths, so `{}` alone (a dotted name) names a file that is not there.
+    let warn = |each: &str| {
+        let keys = format!(
+            "rerun = \"cargo nextest run {{tests}}\"\nnarrow_command = \"uv run pytest -v {{tests}}\"\nnarrow_tests = \"pipeline/tests/*.py\"\nnarrow_root = \"pipeline/\"\nnarrow_each = \"{each}\""
+        );
+        let d = parse(&with(r#"rerun = "cargo nextest run {tests}""#, &keys)).unwrap();
+        assert!(validate(&d, &Capabilities::now()).is_empty());
+        mason_definition::validate::warnings(&d, &Capabilities::now())
+            .iter()
+            .map(|w| w.to_string())
+            .collect::<Vec<_>>()
+    };
+    let w = warn("{}");
+    assert!(w.iter().any(|x| x.contains("use {file}")), "{w:?}");
+    assert!(!warn("{file}").iter().any(|x| x.contains("pytest takes")));
+    assert!(!warn("{path}").iter().any(|x| x.contains("pytest takes")));
+    assert!(!warn("{file}::{}")
+        .iter()
+        .any(|x| x.contains("pytest takes")));
+}
