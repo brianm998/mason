@@ -10,8 +10,8 @@ for n in s09 s40 s422 s546 s669 s777; do
   if bash "scripts/exit/$n.sh" >"$log" 2>&1; then
     echo "s914: $n ok"
   else
-    echo "s914: $n FAILED (exit $?), full output:" >&2
-    cat "$log" >&2
+    echo "s914: $n FAILED, last 30 lines:" >&2
+    tail -30 "$log" >&2
     bad="$bad $n"
   fi
   rm -f "$log"
