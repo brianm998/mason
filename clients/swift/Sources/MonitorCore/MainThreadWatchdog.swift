@@ -1,6 +1,21 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import Foundation
+#if canImport(AppKit)
+import AppKit
+#endif
+
+/// Whether the owner could see the app when a ping was answered.
+public enum AppVisibility: Equatable, Sendable {
+    /// The app is frontmost.
+    case frontmost
+    /// On screen but not frontmost: drawing is still seen.
+    case visible
+    /// Hidden, minimised or occluded: macOS may nap it, so lateness here is not slow drawing.
+    case hidden
+
+    public var isBackground: Bool { self == .hidden }
+}
 
 /// The numbers for one window of the watchdog's pings.
 public struct LatenessWindow: Equatable, Sendable {
@@ -17,6 +32,12 @@ public struct LatenessWindow: Equatable, Sendable {
         let span = windowMinutes.map { "in the last \($0) minutes" } ?? "since launch"
         return "UI thread: worst \(Int(worstMs)) ms late \(span), \(late) late ping\(late == 1 ? "" : "s")"
     }
+
+    /// The smaller line for stalls taken while the app was in the background. The Compose monitor prints the same text.
+    public func backgroundLine(windowMinutes: Int?) -> String {
+        let span = windowMinutes.map { "in the last \($0) minutes" } ?? "since launch"
+        return "In the background: worst \(Int(worstMs)) ms late \(span), \(late) late ping\(late == 1 ? "" : "s")"
+    }
 }
 
 /// How late the main run loop was, collected from the watchdog's pings. Pure, so it can be tested:
@@ -28,7 +49,11 @@ public struct LatenessStats: Equatable, Sendable {
     public private(set) var totalLateMs = 0.0
     public let thresholdMs: Double
     public let windowMs: Double
-    private var recent: [(at: Double, ms: Double)] = []
+    private var recent: [(at: Double, ms: Double, background: Bool)] = []
+    private var bgSamples = 0
+    private var bgLate = 0
+    private var bgWorstMs = 0.0
+    private var bgTotalLateMs = 0.0
 
     public static let defaultWindowMs = 10 * 60_000.0
 
@@ -38,17 +63,27 @@ public struct LatenessStats: Equatable, Sendable {
     }
 
     public static func == (a: LatenessStats, b: LatenessStats) -> Bool {
-        a.samples == b.samples && a.late == b.late && a.worstMs == b.worstMs
+        a.samples == b.samples && a.bgSamples == b.bgSamples && a.late == b.late && a.worstMs == b.worstMs
             && a.totalLateMs == b.totalLateMs && a.thresholdMs == b.thresholdMs && a.windowMs == b.windowMs
     }
 
     /// Record one ping that came back `ms` later than it was due, at clock time `atMs`; true when it was over the threshold.
+    /// Samples taken while the app was hidden count in the background numbers, not the visible ones.
     @discardableResult
-    public mutating func record(lateMs ms: Double, atMs: Double = 0) -> Bool {
+    public mutating func record(lateMs ms: Double, atMs: Double = 0, app: AppVisibility = .frontmost) -> Bool {
+        let bg = app.isBackground
+        recent.append((atMs, ms, bg))
+        prune(now: atMs)
+        if bg {
+            bgSamples += 1
+            bgWorstMs = max(bgWorstMs, ms)
+            guard ms > thresholdMs else { return false }
+            bgLate += 1
+            bgTotalLateMs += ms
+            return true
+        }
         samples += 1
         worstMs = max(worstMs, ms)
-        recent.append((atMs, ms))
-        prune(now: atMs)
         guard ms > thresholdMs else { return false }
         late += 1
         totalLateMs += ms
@@ -65,10 +100,20 @@ public struct LatenessStats: Equatable, Sendable {
         LatenessWindow(pings: samples, late: late, worstMs: worstMs, totalLateMs: totalLateMs)
     }
 
-    /// The pings in the last `windowMs` before `now`.
-    public func window(now: Double) -> LatenessWindow {
+    /// Everything taken in the background since the stats were made.
+    public var backgroundSinceLaunch: LatenessWindow {
+        LatenessWindow(pings: bgSamples, late: bgLate, worstMs: bgWorstMs, totalLateMs: bgTotalLateMs)
+    }
+
+    /// The visible pings in the last `windowMs` before `now`.
+    public func window(now: Double) -> LatenessWindow { window(now: now, background: false) }
+
+    /// The background pings in the last `windowMs` before `now`.
+    public func backgroundWindow(now: Double) -> LatenessWindow { window(now: now, background: true) }
+
+    private func window(now: Double, background: Bool) -> LatenessWindow {
         var w = LatenessWindow()
-        for r in recent where now - r.at <= windowMs {
+        for r in recent where now - r.at <= windowMs && r.background == background {
             w.pings += 1
             w.worstMs = max(w.worstMs, r.ms)
             if r.ms > thresholdMs { w.late += 1; w.totalLateMs += r.ms }
@@ -107,8 +152,9 @@ public struct WatchdogConfig: Sendable, Equatable {
 }
 
 /// A background timer on a utility queue asks the main queue to answer every `intervalMs`, and keeps how
-/// late the answers were (since launch and over the last 10 minutes). It runs in every build; the
-/// numbers are shown on the Health page, and a ping more than a second late is logged to stderr.
+/// late the answers were (since launch and over the last 10 minutes). Only one ping is in flight at a time,
+/// so one blocked main queue is one sample, not one per tick. It runs in every build; the numbers are
+/// shown on the Health page, and a stall of more than a second is logged to stderr.
 public final class MainThreadWatchdog: @unchecked Sendable {
     public static let shared = MainThreadWatchdog()
 
@@ -116,11 +162,35 @@ public final class MainThreadWatchdog: @unchecked Sendable {
     private var stats = LatenessStats(thresholdMs: 100)
     private var config = WatchdogConfig.release
     private var timer: DispatchSourceTimer?
+    private var inFlight = false
     private let clock: @Sendable () -> Double
+    private let post: @Sendable (@escaping @Sendable () -> Void) -> Void
+    private let appState: @Sendable () -> AppVisibility
     private var log: @Sendable (String) -> Void = { FileHandle.standardError.write(Data(("[watchdog] " + $0 + "\n").utf8)) }
 
-    public init(clock: @escaping @Sendable () -> Double = { Double(DispatchTime.now().uptimeNanoseconds) / 1e6 }) {
+    /// `post` runs a block on the main queue and `appState` is read on the main queue when a ping is answered;
+    /// tests pass a fake queue and state.
+    public init(
+        clock: @escaping @Sendable () -> Double = { Double(DispatchTime.now().uptimeNanoseconds) / 1e6 },
+        post: @escaping @Sendable (@escaping @Sendable () -> Void) -> Void = { DispatchQueue.main.async(execute: $0) },
+        appState: @escaping @Sendable () -> AppVisibility = MainThreadWatchdog.currentAppVisibility
+    ) {
         self.clock = clock
+        self.post = post
+        self.appState = appState
+    }
+
+    /// The real app's state. Call on the main thread.
+    public static func currentAppVisibility() -> AppVisibility {
+        #if canImport(AppKit)
+        return MainActor.assumeIsolated {
+            if NSApp == nil { return .frontmost }
+            if !NSApp.occlusionState.contains(.visible) { return .hidden }
+            return NSApp.isActive ? .frontmost : .visible
+        }
+        #else
+        return .frontmost
+        #endif
     }
 
     public var isRunning: Bool {
@@ -136,17 +206,12 @@ public final class MainThreadWatchdog: @unchecked Sendable {
         guard timer == nil else { return }
         self.config = config
         stats = LatenessStats(thresholdMs: config.thresholdMs)
+        inFlight = false
         if let log { self.log = log }
         let t = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "mason.watchdog", qos: .utility))
         let every = DispatchTimeInterval.milliseconds(Int(config.intervalMs))
         t.schedule(deadline: .now() + every, repeating: every)
-        t.setEventHandler { [weak self] in
-            let sent = DispatchTime.now().uptimeNanoseconds
-            DispatchQueue.main.async {
-                let ms = Double(DispatchTime.now().uptimeNanoseconds - sent) / 1e6
-                self?.note(lateMs: ms)
-            }
-        }
+        t.setEventHandler { [weak self] in self?.tick() }
         t.resume()
         timer = t
     }
@@ -158,6 +223,24 @@ public final class MainThreadWatchdog: @unchecked Sendable {
         lock.unlock()
     }
 
+    /// One timer tick: send a ping unless the last one has not come back yet.
+    func tick() {
+        lock.lock()
+        if inFlight { lock.unlock(); return }
+        inFlight = true
+        let sent = clock()
+        lock.unlock()
+        post { [weak self] in
+            guard let self else { return }
+            let ms = self.clock() - sent
+            let state = self.appState()
+            self.lock.lock()
+            self.inFlight = false
+            self.lock.unlock()
+            self.note(lateMs: ms, app: state)
+        }
+    }
+
     /// The numbers so far.
     public var report: String {
         lock.lock()
@@ -165,17 +248,24 @@ public final class MainThreadWatchdog: @unchecked Sendable {
         return stats.summary
     }
 
-    /// The last 10 minutes.
+    /// The last 10 minutes, while the app was visible.
     public func recent() -> LatenessWindow {
         lock.lock()
         defer { lock.unlock() }
         return stats.window(now: clock())
     }
 
-    func note(lateMs ms: Double) {
+    /// The last 10 minutes, while the app was in the background.
+    public func recentBackground() -> LatenessWindow {
         lock.lock()
-        stats.record(lateMs: ms, atMs: clock())
-        let line = "main thread late by \(Int(ms)) ms"
+        defer { lock.unlock() }
+        return stats.backgroundWindow(now: clock())
+    }
+
+    func note(lateMs ms: Double, app: AppVisibility = .frontmost) {
+        lock.lock()
+        stats.record(lateMs: ms, atMs: clock(), app: app)
+        let line = "main thread blocked for \(Int(ms)) ms" + (app.isBackground ? " (app in background)" : "")
         let out = log
         let over = ms > config.logAboveMs
         lock.unlock()

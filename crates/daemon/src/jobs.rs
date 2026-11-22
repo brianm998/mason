@@ -4111,6 +4111,10 @@ fn transcript_gone(detail: &str) -> bool {
 
 /// The CLI was stopped from outside (SIGTERM, status 143; or SIGKILL, 137) before it
 /// gave a result: a restart or a reaper, not something the agent did.
+/// How many times one step run is started again after its CLI was signaled. A daemon
+/// restart or a reaper can hit the same step more than once in a row.
+const MAX_SIGNALED_RETRIES: usize = 3;
+
 fn cli_was_signaled(detail: &str) -> bool {
     detail.contains("the CLI exited with status 143 and no result")
         || detail.contains("the CLI exited with status 137 and no result")
@@ -4147,7 +4151,7 @@ fn settle_all(
     let mut resumed = false;
     let mut fresh_after_gone = false;
     let mut silent = false;
-    let mut signaled_retried = false;
+    let mut signaled_retries = 0usize;
     // Lost invocations before a resumed session that reached its own end: they are
     // not counted toward the restart budget again (s399).
     let mut forgiven = 0usize;
@@ -4209,9 +4213,9 @@ fn settle_all(
                 true
             }
             StepEnd::Failed(FailReason::Crash { detail })
-                if !signaled_retried && cli_was_signaled(detail) =>
+                if signaled_retries < MAX_SIGNALED_RETRIES && cli_was_signaled(detail) =>
             {
-                signaled_retried = true;
+                signaled_retries += 1;
                 report.session_id.is_none()
             }
             _ => return Some(report),
