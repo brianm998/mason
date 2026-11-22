@@ -1213,13 +1213,36 @@ impl GitHub {
         }
     }
 
-    /// Delete the Actions caches saved by `git_ref` (`DELETE /actions/caches?ref=`), so a deleted
-    /// run branch leaves none behind. Returns how many GitHub says it deleted.
+    /// Delete the Actions caches saved by `git_ref`, so a deleted run branch leaves none behind:
+    /// list them (`GET /actions/caches?ref=`) and delete each by id
+    /// (`DELETE /actions/caches/{id}`). GitHub's bulk `DELETE /actions/caches` needs a cache
+    /// `key` as well as the ref, and refused every call without one (HTTP 422). A cache that is
+    /// already gone (404) counts as deleted. Returns how many were deleted.
     pub fn delete_caches_for_ref(&self, git_ref: &str) -> Result<u64, ApiError> {
-        let v = self.json(
-            Request::get(&self.url(&format!("/actions/caches?ref={git_ref}"))).method("DELETE"),
-        )?;
-        Ok(v["total_count"].as_u64().unwrap_or(0))
+        // A run ref saves a few caches; the cap keeps a misbehaving listing from looping.
+        const PAGES: u32 = 10;
+        let mut ids: Vec<u64> = vec![];
+        for page in 1..=PAGES {
+            let v = self.json(Request::get(&self.url(&format!(
+                "/actions/caches?ref={git_ref}&per_page=100&page={page}"
+            ))))?;
+            let caches = v["actions_caches"].as_array().cloned().unwrap_or_default();
+            ids.extend(caches.iter().filter_map(|c| c["id"].as_u64()));
+            if caches.len() < 100 {
+                break;
+            }
+        }
+        let mut deleted = 0;
+        for id in ids {
+            match self
+                .send(Request::get(&self.url(&format!("/actions/caches/{id}"))).method("DELETE"))
+            {
+                Ok(_) => deleted += 1,
+                Err(e) if e.kind == ErrorKind::NotFound => deleted += 1,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(deleted)
     }
 
     /// The bytes the repository's Actions caches use (`GET /actions/cache/usage`).

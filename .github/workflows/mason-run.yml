@@ -194,8 +194,16 @@ jobs:
           path: ${{ runner.temp }}/mason-out
           if-no-files-found: error
 
-      # The job is red when the command was, so the run reads the same in the Actions UI.
-      - name: exit
+      # The verdict is result.json, which MASON reads from the artifact. A red suite
+      # does not fail the run (GitHub emails the owner for every failed run); only a
+      # run that never produced a result.json does.
+      - name: verdict
         if: always()
         shell: bash
-        run: exit "$(jq -r '.code // 1' "$RUNNER_TEMP/mason-out/result.json" 2>/dev/null || echo 1)"
+        run: |
+          f="$RUNNER_TEMP/mason-out/result.json"
+          if ! jq -e '.code | numbers' "$f" >/dev/null 2>&1; then
+            echo "no result.json" >&2
+            exit 1
+          fi
+          echo "verdict: code $(jq -r .code "$f"), phase $(jq -r '.phase // "?"' "$f"), run $(jq -r '.run_s // 0' "$f")s" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"

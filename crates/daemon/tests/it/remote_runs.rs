@@ -31,6 +31,9 @@ fn the_home_lists_each_run_with_its_owner_state_and_jobs() {
         "[remote_runs]\nkind = \"github-actions\"\nrepo = \"o/r\"\ntoken = \"env:MASON_T767_TOKEN\"\n",
     );
     let d = s.start();
+    // A fresh store numbers tasks from 0, and task 0 is how a run says "no task" (a landing
+    // batch): file one first so the tasks below have real ids.
+    let _zero = file_task_as(&d, "Zero", "Do nothing.", true, TrustSource::Owner, false);
     let a = file_task_as(&d, "Check me", "Do a.", true, TrustSource::Owner, false);
     let b = file_task_as(&d, "Pay me", "Do b.", true, TrustSource::Owner, false);
     let c = file_task_as(&d, "Wait for me", "Do c.", true, TrustSource::Owner, false);

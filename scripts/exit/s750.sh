@@ -23,7 +23,7 @@ bin=$PWD/target/debug
 owner=${USER:-owner}
 m() { "$bin/mason" --data-dir "$root/d" --config-dir "$root/c" "$@"; }
 jq_state() { sed -n 's/^  "state": "\(.*\)",$/\1/p'; }
-fail() { echo "FAILED: $*" >&2; set +e; m task show 0 >&2 2>&1; tail -30 "$root/masond.log" >&2; cat "$root/pushes.log" >&2 2>/dev/null; exit 1; }
+fail() { echo "FAILED: $*" >&2; set +e; echo "hold exit status: $(cat "$root/hold.rc" 2>/dev/null || echo running)" >&2; echo "hold stderr:" >&2; cat "$root/hold.err" >&2 2>/dev/null; echo "hold stdout:" >&2; cat "$root/hold.out" >&2 2>/dev/null; ps -o pid,stat,command -p "${holder:-0}" >&2 2>&1; m task show 0 >&2 2>&1; tail -30 "$root/masond.log" >&2; cat "$root/pushes.log" >&2 2>/dev/null; exit 1; }
 wait_state() {  # TASK STATE SECONDS
   local end=$((SECONDS + $3))
   until [ "$(m task show "$1" --json 2>/dev/null | jq_state)" = "$2" ]; do
@@ -144,7 +144,8 @@ start_daemon() {  # FORCE (1 or empty)
 hold_slots() {
   # stdin is a fifo kept open on fd 3 (a background job's own stdin is /dev/null, which ends the hold at once)
   rm -f "$root/hold.in" "$root/hold.out"; mkfifo "$root/hold.in"
-  m hold --needs compile,test-suite --pipeline other --label "other work" <"$root/hold.in" >"$root/hold.out" &
+  rm -f "$root/hold.err" "$root/hold.rc"
+  ( m hold --needs compile,test-suite --pipeline other --label "other work" <"$root/hold.in" >"$root/hold.out" 2>"$root/hold.err"; echo $? > "$root/hold.rc" ) &
   holder=$!
   exec 3>"$root/hold.in"
   until grep -q granted "$root/hold.out" 2>/dev/null; do kill -0 "$holder" || fail "the hold ended"; sleep 0.1; done

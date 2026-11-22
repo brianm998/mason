@@ -115,7 +115,15 @@ fn the_test_step_has_a_fast_fmt_suite_that_holds_no_slot() {
     assert!(suite.contains("cargo fmt --all -- --check"));
     assert!(suite.contains("level = \"unit\"") && suite.contains("uses = {}"));
     assert!(!suite.contains("build ="), "no build step");
-    assert!(text.contains("\"crates/**\" = [\"cargo-workspace\", \"fmt\"]"));
+    // The crates line must select both suites; other suites (clippy) may sit beside them.
+    let line = text
+        .lines()
+        .find(|l| l.starts_with("\"crates/**\" ="))
+        .expect("a crates impact line");
+    assert!(
+        line.contains("\"cargo-workspace\"") && line.contains("\"fmt\""),
+        "{line}"
+    );
 }
 
 /// s800: a push to develop runs only the fast jobs; the full matrix is `workflow_dispatch`

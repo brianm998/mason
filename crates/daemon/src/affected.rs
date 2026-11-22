@@ -958,6 +958,11 @@ mod tests {
             "crates/top/tests/tpl.rs".into(),
             "write(\"mason.toml\");".into(),
         );
+        // A file alone is not a target: `top` must list `tpl` among its tests too.
+        fx.pkgs[1].tests.push(TestTarget {
+            name: "tpl".into(),
+            src: "crates/top/tests/tpl.rs".into(),
+        });
         assert!(fx
             .rendered(&["templates/x/mason.toml"])
             .iter()

@@ -69,10 +69,13 @@ fn post(d: &Arc<mason_daemon::Daemon>, who: &str, path: String, body: Value) -> 
         })
 }
 
-fn started() -> Arc<mason_daemon::Daemon> {
+/// The scratch comes back with the daemon: dropping it deletes the directory the daemon's
+/// config and data live in, and every later write there fails with "No such file".
+fn started() -> (Scratch, Arc<mason_daemon::Daemon>) {
     let s = Scratch::new("true", happy_script());
     s.write_project("scratch", "true", REMOTE_RUNS);
-    s.start()
+    let d = s.start();
+    (s, d)
 }
 
 fn project_file(d: &Arc<mason_daemon::Daemon>) -> String {
@@ -82,7 +85,7 @@ fn project_file(d: &Arc<mason_daemon::Daemon>) -> String {
 #[test]
 fn the_task_project_and_home_views_carry_the_mode_and_its_source() {
     use mason_daemon::place::{set_global, set_project_mode, Mode};
-    let d = started();
+    let (_s, d) = started();
     let t = file(&d, "one");
     let other = file(&d, "two");
     let now = mason_daemon::daemon::now_ms();
@@ -168,7 +171,7 @@ fn the_task_project_and_home_views_carry_the_mode_and_its_source() {
 
 #[test]
 fn a_non_owners_set_is_refused_and_the_owners_project_set_shows_source_project() {
-    let d = started();
+    let (_s, d) = started();
     let t = file(&d, "one");
     let owner = d.cfg.owner_names[0].clone();
     let before = project_file(&d);

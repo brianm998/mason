@@ -32,7 +32,7 @@ use mason_landing::git;
 use mason_step_host::registry::{read_kv, write_kv};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// The artifact a run uploads.
@@ -298,6 +298,13 @@ pub struct Site {
     pub workflow: String,
     pub pickup_timeout: Duration,
     pub fallback_local: bool,
+    /// `favor-remote` (#833): a run still unpicked after this long comes back here when
+    /// `local_room` says this machine has room. `None`: it waits out `pickup_timeout`.
+    pub spill_after: Option<Duration>,
+    /// With `fallback_local`: a run that would come back here (at `spill_after` or when
+    /// `pickup_timeout` has passed) does so only when this says there is room. Without one the
+    /// run comes back at the timeout whatever this machine is doing.
+    pub local_room: Option<RoomFn>,
     /// `[remote_runs] test_env`, added to every run's environment.
     pub test_env: Vec<(String, String)>,
     pub gh: GitHub,
@@ -309,11 +316,50 @@ pub struct Site {
     pub on_phase: Option<PhaseFn>,
 }
 
+/// Why this machine has no room for the run now (a hold is active, a slot it needs has no free
+/// unit), or `None` when it has room. Polled by the wait loop: it must be cheap.
+pub type RoomFn = Arc<dyn Fn() -> Option<String> + Send + Sync>;
+
+/// A run waiting for pickup for `waited_ms` comes back here (#833): the spill time is set, it
+/// has passed, and `room` says this machine has room. Pure.
+pub fn spill_due(waited_ms: u64, spill_after: Option<Duration>, room: bool) -> bool {
+    room && spill_after.is_some_and(|a| waited_ms >= a.as_millis() as u64)
+}
+
+/// The median of the last few pickup times (s), `None` without any. Pure.
+pub fn median_pickup(v: &[u64]) -> Option<u64> {
+    let mut v = v.to_vec();
+    v.sort_unstable();
+    (!v.is_empty()).then(|| v[v.len() / 2])
+}
+
+static RECENT_PICKUPS: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+const RECENT_PICKUPS_KEPT: usize = 5;
+
+fn note_pickup(s: u64) {
+    let mut v = RECENT_PICKUPS.lock().unwrap_or_else(|e| e.into_inner());
+    v.push(s);
+    if v.len() > RECENT_PICKUPS_KEPT {
+        v.remove(0);
+    }
+}
+
+/// The median pickup time of the last few runs this daemon saw picked up (what each run's
+/// record keeps as `pickup_s`).
+pub fn recent_pickup_s() -> Option<u64> {
+    median_pickup(&RECENT_PICKUPS.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
 /// A sink for the text of a run's current phase.
 pub type PhaseFn = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// What a project's `[remote_runs]` gives, for one worktree. `None`: the project has no `[remote_runs]`.
 pub fn site_for(d: &Daemon, project: &str, cwd: &Path) -> Option<Site> {
+    site_for_task(d, project, cwd, None)
+}
+
+/// [`site_for`] for a run of `task`, whose own `run_on` can make it `favor-remote`.
+pub fn site_for_task(d: &Daemon, project: &str, cwd: &Path, task: Option<u64>) -> Option<Site> {
     let p = project_cfg(d, project)?;
     let r = p.services.remote.clone()?;
     let token = TokenRef::parse(&r.token).ok()?;
@@ -330,15 +376,75 @@ pub fn site_for(d: &Daemon, project: &str, cwd: &Path) -> Option<Site> {
         workflow: r.workflow,
         pickup_timeout: Duration::from_secs(r.pickup_timeout_s),
         // `favor-remote` spills over to this machine after the pickup timeout (s812), whether the
-        // project sets it or follows the global mode.
-        fallback_local: r.fallback_local
-            || crate::place::project_effective(d, project).0 == crate::place::Mode::FavorRemote,
+        // task or project sets it or follows the global mode. Plain `remote` does not (#833).
+        fallback_local: crate::place::task_choice(d, task)
+            .unwrap_or_else(|| crate::place::project_effective(d, project).0)
+            == crate::place::Mode::FavorRemote,
+        spill_after: None,
+        local_room: None,
         test_env: r.test_env,
         gh: GitHub::new(http, &r.api, &r.repo, token),
         clock: Arc::new(SystemClock),
         poll_s: 10,
         on_phase: None,
     })
+}
+
+/// [`site_for_task`] with this machine's room wired in: a run that falls back to this machine
+/// (`fallback_local`) does so only when [`crate::place::no_room_for`] finds none of `uses`
+/// blocked here, so a run GitHub has not picked up is not sent to a machine that would hold it in
+/// its own queue (2026-11-22: 16 runs fell back at once behind a heat hold). A `favor-remote` run
+/// also comes back after `spill_after` instead of at the timeout, on the same condition.
+/// `covered`: the caller already holds those slots for this run (a landing batch, s911), so
+/// their use is not counted against it.
+pub fn site_for_run(
+    d: &Arc<Daemon>,
+    project: &str,
+    cwd: &Path,
+    task: Option<u64>,
+    uses: &std::collections::BTreeMap<String, u32>,
+    covered: bool,
+) -> Option<Site> {
+    let mut site = site_for_task(d, project, cwd, task)?;
+    if site.fallback_local {
+        let after = project_cfg(d, project)?
+            .services
+            .remote
+            .as_ref()?
+            .spill_after_s;
+        let uses = uses.clone();
+        let d = d.clone();
+        site.spill_after = Some(Duration::from_secs(after));
+        site.local_room = Some(Arc::new(move || {
+            crate::place::no_room_for(&d.broker.load_reading(now_ms()), &uses, covered)
+        }));
+    }
+    Some(site)
+}
+
+/// The last answer of a [`RoomFn`], asked again only after [`ROOM_EVERY_MS`]: the wait loop looks
+/// twice a second, and the answer reads the broker's state.
+#[derive(Default)]
+struct RoomCache {
+    at: Option<u64>,
+    why: Option<String>,
+}
+
+const ROOM_EVERY_MS: u64 = 2_000;
+
+impl RoomCache {
+    /// Why there is no room now; `None` with room, and when the site has no room function.
+    fn no_room(&mut self, site: &Site, now: u64) -> Option<String> {
+        let f = site.local_room.as_ref()?;
+        if self
+            .at
+            .is_none_or(|a| now.saturating_sub(a) >= ROOM_EVERY_MS)
+        {
+            self.why = f();
+            self.at = Some(now);
+        }
+        self.why.clone()
+    }
 }
 
 /// `<remote>/<base>` when the repository has it, else the local branch.
@@ -1303,6 +1409,8 @@ pub fn execute(
     let mut outage_since: Option<u64> = None;
     let mut artifact_misses = 0u32;
     let mut live = Live::default();
+    let mut room = RoomCache::default();
+    let mut held_back = false;
     let scratch = dir.join(format!("{}.remote-artifact", spec.id));
     loop {
         if let Some(why) = stop() {
@@ -1328,14 +1436,57 @@ pub fn execute(
                 delete_ref(site, &mut st, &rec);
                 return Ok(Outcome::Done(finished_from(&st, &log)));
             }
-        } else if now.saturating_sub(st.pushed_ms) >= site.pickup_timeout.as_millis() as u64 {
-            cancel(site, &st);
-            abandon(&mut st);
-            return Err(Fail::Environmental(format!(
-                "no runner picked up {} within {} s",
-                st.ref_name,
-                site.pickup_timeout.as_secs()
-            )));
+        } else {
+            // Not picked up yet. A run that is due to come back here (favor-remote's
+            // `spill_after`, or `pickup_timeout`) does so only with room for it here when the site
+            // can say (`local_room`); otherwise it stays on GitHub, where a runner may still take
+            // it. A site without a room function falls back at the timeout as it always did.
+            let waited = now.saturating_sub(st.pushed_ms);
+            let timed_out = waited >= site.pickup_timeout.as_millis() as u64;
+            let gated = site.fallback_local && site.local_room.is_some();
+            let spill = gated && spill_due(waited, site.spill_after, true);
+            if timed_out || spill {
+                let why = if gated { room.no_room(site, now) } else { None };
+                match why {
+                    Some(why) => {
+                        if !held_back {
+                            held_back = true;
+                            tracing::info!(
+                                run = %spec.id,
+                                "no runner has picked up {} after {} s; not running it here yet, still waiting on GitHub: {why}",
+                                st.ref_name,
+                                waited / 1000
+                            );
+                        }
+                    }
+                    None if !timed_out => {
+                        // Favor-remote (#833): GitHub has not picked it up and this machine has
+                        // room, so it comes back now instead of waiting out the pickup timeout.
+                        // The run is cancelled, its ref deleted and its units freed, as for a
+                        // timeout.
+                        cancel(site, &st);
+                        abandon(&mut st);
+                        return Err(Fail::Environmental(format!(
+                            "no runner picked up {} within {} s (favor-remote: this machine has room, so it runs here)",
+                            st.ref_name,
+                            waited / 1000
+                        )));
+                    }
+                    None => {
+                        cancel(site, &st);
+                        abandon(&mut st);
+                        return Err(Fail::Environmental(format!(
+                            "no runner picked up {} within {} s",
+                            st.ref_name,
+                            if gated {
+                                waited / 1000
+                            } else {
+                                site.pickup_timeout.as_secs()
+                            }
+                        )));
+                    }
+                }
+            }
         }
         if !poller.due(now / 1000) {
             site.clock.sleep(500);
@@ -1658,6 +1809,7 @@ fn poll(
                 };
                 st.pickup_s =
                     Some(from_github.unwrap_or_else(|| now.saturating_sub(st.pushed_ms) / 1000));
+                note_pickup(st.pickup_s.unwrap_or(0));
                 st.save(rec);
             }
         }
@@ -1970,6 +2122,96 @@ pub fn pool_needs(
     Some(out)
 }
 
+/// Does `suite`, run for `task` (`None`: no task owns the run, a landing batch's), go to GitHub?
+/// This is [`executor_for`] asked of a suite, the very call a run makes when it starts
+/// (`suites::run_hosted_resuming`), so what a landing batch decides before it holds slots and
+/// what the run then does come from one function (s943).
+pub fn suite_goes_remote(
+    d: &Daemon,
+    project: &str,
+    task: Option<mason_core::TaskId>,
+    suite: &mason_testing::Suite,
+) -> bool {
+    matches!(
+        executor_for(d, project, Kind::Suite, Some((task, suite))),
+        Executor::GitHub { .. }
+    )
+}
+
+/// A landing batch as the owner of broker requests it makes during its run (s943): the first
+/// task's rank, which is how `Landing::hold` ranks the batch's own lease, and what ends a wait
+/// (every member has left the landing step).
+#[derive(Clone, Debug)]
+pub struct BatchOwner {
+    /// The batch's first task: the owner of its requests.
+    pub task: mason_core::TaskId,
+    pub rank: mason_scheduler::Rank,
+    pub tasks: Vec<mason_core::TaskId>,
+    pub runs: Vec<mason_core::StepRunId>,
+    /// A wait ends when no member has an open run among `runs` (not for the post-land tier,
+    /// whose tasks have left landing already).
+    pub watch: bool,
+}
+
+impl BatchOwner {
+    /// Is anything still waiting for this batch's request?
+    pub fn alive(&self, d: &Daemon) -> bool {
+        if !self.watch || self.runs.is_empty() {
+            return true;
+        }
+        d.world().map_or(true, |w| {
+            self.tasks
+                .iter()
+                .any(|t| w.open_run(*t).is_some_and(|r| self.runs.contains(&r)))
+        })
+    }
+}
+
+/// `needs` of this machine, taken for a landing batch's own run that its lease does not cover
+/// (s943): ranked as the batch's first task, beside the batch's own lease, under the same
+/// limits and CPU and thermal holds as any local run. Nothing to take gives `Ok(None)`.
+pub fn batch_lease(
+    d: &Arc<Daemon>,
+    project: &str,
+    owner: &BatchOwner,
+    needs: mason_scheduler::Needs,
+    label: &str,
+) -> Result<Option<crate::sched::Lease>, String> {
+    if !needs.exclusive && needs.amounts.is_empty() {
+        return Ok(None);
+    }
+    let def = d.project_id_by_name(project).map(|p| d.current_def(p));
+    for name in needs.amounts.keys() {
+        if !name.starts_with("llm:") && !name.starts_with("device:") {
+            let units = def
+                .as_ref()
+                .and_then(|def| def.resources.get(name).copied())
+                .unwrap_or(1);
+            d.broker.declare(name, units);
+        }
+    }
+    let alive = || owner.alive(d);
+    tracing::info!(project, %label, "a batch's run takes this machine's slots as the batch");
+    d.broker
+        .acquire_beside(owner.task, label, owner.rank, needs, &alive, &mut |_| {})
+        .map(Some)
+        .map_err(|_| format!("{label}: the wait for this machine's slots was ended"))
+}
+
+/// [`fallback_lease`] for a suite of a landing batch (s943): the batch holds nothing for a suite
+/// bound for GitHub, so when it comes back here it takes what it holds when placed here, ranked
+/// as the batch's own work and not behind everything.
+pub fn fallback_lease_for_batch(
+    d: &Arc<Daemon>,
+    project: &str,
+    owner: &BatchOwner,
+    uses: &std::collections::BTreeMap<String, u32>,
+    label: &str,
+) -> Result<Option<crate::sched::Lease>, String> {
+    tracing::info!(project, %label, ?uses, "no GitHub runner: queueing for this machine's slots as the batch (fallback = local)");
+    batch_lease(d, project, owner, crate::sched::needs_of(uses, None), label)
+}
+
 /// The rank of a fallback run: its task's own when the task is in a step, else the debts band
 /// (a landed, failed or canceled task, or none: owed work, never the landing band, #835).
 pub fn fallback_rank(
@@ -2032,6 +2274,26 @@ pub fn fallback_lease(
         .acquire_beside(who, label, rank, needs, &alive, &mut |_| {})
         .map(Some)
         .map_err(|_| format!("{label}: the wait for this machine's slots was ended"))
+}
+
+/// [`fallback_lease`], unless `covered`: the caller (a landing batch) already holds this
+/// machine's slots for this very run, so the run goes on under that hold. Asking the broker
+/// again would queue it behind everything, an exclusive request included, and that request waits
+/// for the machine to drain, that is for the caller's own hold: a cycle that froze the local
+/// queue on 2026-11-22 (s911, decision 0904).
+pub fn fallback_lease_unless_covered(
+    d: &Arc<Daemon>,
+    project: &str,
+    task: Option<mason_core::TaskId>,
+    uses: &std::collections::BTreeMap<String, u32>,
+    label: &str,
+    covered: bool,
+) -> Result<Option<crate::sched::Lease>, String> {
+    if covered {
+        tracing::info!(project, %label, "no GitHub runner: running here under the caller's hold of this machine's slots (fallback = local)");
+        return Ok(None);
+    }
+    fallback_lease(d, project, task, uses, label)
 }
 
 /// What a remote run holds, written when it starts and removed when it ends, so a daemon that
@@ -2658,11 +2920,15 @@ mod tests {
 
     impl FakeGh {
         fn new(r: &Repo, zip: &Path, mode: Mode) -> Arc<FakeGh> {
+            Self::picked_after(r, zip, mode, 1)
+        }
+        /// `Normal`, but a runner takes the job only after `queued` looks at the run.
+        fn picked_after(r: &Repo, zip: &Path, mode: Mode, queued: u32) -> Arc<FakeGh> {
             Arc::new(FakeGh {
                 bare: r.bare.clone(),
                 zip: zip.to_path_buf(),
                 mode,
-                queued: 1,
+                queued,
                 running: 1,
                 looks: Mutex::new(0),
                 log: Mutex::new(vec![]),
@@ -2746,8 +3012,15 @@ mod tests {
                     body: String::new(),
                 });
             }
-            if r.method == "DELETE" && u.contains("/actions/caches?ref=") {
-                return ok(serde_json::json!({"total_count": 1, "actions_caches": []}));
+            if r.method == "GET" && u.contains("/actions/caches?ref=") {
+                return ok(serde_json::json!({"total_count": 1, "actions_caches": [{"id": 77}]}));
+            }
+            if r.method == "DELETE" && u.ends_with("/actions/caches/77") {
+                return Ok(Response {
+                    status: 204,
+                    headers: vec![],
+                    body: String::new(),
+                });
             }
             if u.contains("/actions/runs?head_sha=") {
                 let sha = u
@@ -2913,6 +3186,8 @@ mod tests {
             workflow: "mason-run.yml".into(),
             pickup_timeout: Duration::from_secs(1200),
             fallback_local: fallback,
+            spill_after: None,
+            local_room: None,
             test_env: vec![],
             gh: GitHub::new(
                 gh,
@@ -2959,8 +3234,12 @@ mod tests {
             ),
         )
         .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Executable bits are Unix-only; the Windows CI job builds these tests but does not run them.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
     }
 
     fn pushes(bare: &Path) -> usize {
@@ -3243,18 +3522,22 @@ mod tests {
         assert_eq!(kv["sha"].len(), 40);
         assert_eq!(kv["collected"], "1");
         assert!(gh.requests().iter().any(|q| q.contains("head_sha=")));
-        let deletes: Vec<String> = gh
-            .requests()
-            .into_iter()
-            .filter(|q| {
-                q.starts_with("DELETE ") && q.contains("/actions/caches?ref=refs/heads/mason/run/")
-            })
+        let q = gh.requests();
+        assert!(
+            q.iter().any(|q| q.starts_with("GET ")
+                && q.contains("/actions/caches?ref=refs/heads/mason/run/")),
+            "the deleted ref's caches are listed: {q:?}"
+        );
+        let deletes: Vec<&String> = q
+            .iter()
+            .filter(|q| q.starts_with("DELETE ") && q.contains("/actions/caches"))
             .collect();
         assert_eq!(
             deletes.len(),
             1,
-            "one cache DELETE for the ref deleted: {deletes:?}"
+            "one DELETE, by the listed cache's id: {deletes:?}"
         );
+        assert!(deletes[0].ends_with("/actions/caches/77"), "{deletes:?}");
     }
 
     #[test]
@@ -3577,6 +3860,138 @@ mod tests {
         let s2 = site(&r2, gh2, clock(), true);
         let out = run_or_fallback(&s2, &spec("x7"), logs.path(), &|| None).unwrap();
         assert!(out.is_none());
+    }
+
+    /// A room function that says no (with a reason) for its first `no_for` asks and room after,
+    /// and counts the asks.
+    fn room_after(no_for: usize) -> (RoomFn, Arc<std::sync::atomic::AtomicUsize>) {
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let a = asked.clone();
+        let f: RoomFn = Arc::new(move || {
+            (a.fetch_add(1, Ordering::SeqCst) < no_for)
+                .then(|| "this machine held for heat (die 94 C)".to_string())
+        });
+        (f, asked)
+    }
+
+    /// A stop that ends a wait that a bug would make endless (it is asked twice a second of the
+    /// fake clock, so this is far more than any of these runs needs).
+    fn give_up_after_many_looks() -> impl Fn() -> Option<StopWhy> {
+        let n = std::sync::atomic::AtomicUsize::new(0);
+        move || (n.fetch_add(1, Ordering::SeqCst) > 200_000).then_some(StopWhy::Gone)
+    }
+
+    /// #833: a favor-remote run unpicked past `spill_after` comes back at once when this machine
+    /// has room (cancelled on GitHub, ref deleted), not after the pickup timeout; without room it
+    /// keeps waiting on GitHub and comes back when room appears (it is no longer sent back at the
+    /// timeout into a held queue); under plain `remote` it is not spilled. The fake clock drives
+    /// time; only outcomes are asserted.
+    #[test]
+    fn an_unpicked_favor_remote_run_comes_back_early_when_this_machine_has_room() {
+        token();
+        let t = tempfile::tempdir().unwrap();
+        let zip = artifact(t.path(), GREEN, 0, None);
+        // (fallback, asks answered "no room" before room appears, comes back before the timeout?)
+        for (fallback, no_for, early, local) in [
+            (true, 0, true, true),
+            (true, 1000, false, true),
+            (false, 0, false, false),
+        ] {
+            let r = repo();
+            let gh = FakeGh::new(&r, &zip, Mode::NeverPicked);
+            let clk = clock();
+            let mut s = site(&r, gh.clone(), clk.clone(), fallback);
+            s.spill_after = Some(Duration::from_secs(30));
+            s.local_room = Some(room_after(no_for).0);
+            let logs = tempfile::tempdir().unwrap();
+            let start = clk.now_ms();
+            // Plain `remote` is not spilled and, with no fallback, ends at the timeout.
+            let out = run_or_fallback(&s, &spec("x9"), logs.path(), &give_up_after_many_looks());
+            assert_eq!(matches!(out, Ok(None)), local, "{fallback} {no_for}");
+            let waited = clk.now_ms() - start;
+            assert_eq!(
+                waited < s.pickup_timeout.as_millis() as u64,
+                early,
+                "{fallback} {no_for}: {waited}"
+            );
+            assert_eq!(gh.cancels.lock().unwrap().len(), 1);
+            assert_eq!(refs(&r.bare), "");
+        }
+    }
+
+    /// The pickup timeout has passed and this machine has no room: the run is not cancelled and
+    /// keeps waiting on GitHub; it comes back the first time there is room. The room function
+    /// was asked after the timeout, not only before it.
+    #[test]
+    fn a_run_past_the_pickup_timeout_waits_on_github_until_this_machine_has_room() {
+        token();
+        let t = tempfile::tempdir().unwrap();
+        let zip = artifact(t.path(), GREEN, 0, None);
+        let r = repo();
+        let gh = FakeGh::new(&r, &zip, Mode::NeverPicked);
+        let clk = clock();
+        let mut s = site(&r, gh.clone(), clk.clone(), true);
+        s.pickup_timeout = Duration::from_secs(60);
+        let (room, asked) = room_after(40);
+        s.local_room = Some(room);
+        let logs = tempfile::tempdir().unwrap();
+        let out = run_or_fallback(&s, &spec("x10"), logs.path(), &give_up_after_many_looks());
+        assert!(matches!(out, Ok(None)), "it came back to this machine");
+        assert!(
+            asked.load(Ordering::SeqCst) > 40,
+            "asked until there was room"
+        );
+        // Cancelled once, at the end, not when the timeout passed.
+        assert_eq!(gh.cancels.lock().unwrap().len(), 1);
+        assert_eq!(refs(&r.bare), "");
+    }
+
+    /// No room at the timeout, then a runner takes the job: it runs on GitHub, with no fallback.
+    #[test]
+    fn a_run_held_back_for_room_that_gets_a_runner_runs_on_github() {
+        token();
+        let t = tempfile::tempdir().unwrap();
+        let zip = artifact(t.path(), GREEN, 0, None);
+        let r = repo();
+        // Picked up on the 20th look, well after the (shortened) timeout.
+        let gh = FakeGh::picked_after(&r, &zip, Mode::Normal, 20);
+        let clk = clock();
+        let mut s = site(&r, gh.clone(), clk.clone(), true);
+        s.pickup_timeout = Duration::from_secs(30);
+        let (room, asked) = room_after(usize::MAX);
+        s.local_room = Some(room);
+        let logs = tempfile::tempdir().unwrap();
+        let out = run_or_fallback(&s, &spec("x11"), logs.path(), &give_up_after_many_looks());
+        assert!(matches!(out, Ok(Some(Outcome::Done(_)))), "ran on GitHub");
+        assert!(
+            asked.load(Ordering::SeqCst) > 0,
+            "it was held back, not skipped"
+        );
+        assert!(gh.cancels.lock().unwrap().is_empty());
+        assert_eq!(refs(&r.bare), "");
+    }
+
+    /// Without a room function the run comes back at the timeout as it always did, whatever this
+    /// machine is doing.
+    #[test]
+    fn a_run_with_no_room_function_falls_back_at_the_pickup_timeout() {
+        token();
+        let t = tempfile::tempdir().unwrap();
+        let zip = artifact(t.path(), GREEN, 0, None);
+        let r = repo();
+        let gh = FakeGh::new(&r, &zip, Mode::NeverPicked);
+        let clk = clock();
+        let mut s = site(&r, gh.clone(), clk.clone(), true);
+        s.spill_after = Some(Duration::from_secs(30));
+        assert!(s.local_room.is_none());
+        let logs = tempfile::tempdir().unwrap();
+        let start = clk.now_ms();
+        let out = run_or_fallback(&s, &spec("x12"), logs.path(), &give_up_after_many_looks());
+        assert!(matches!(out, Ok(None)));
+        // Not before the timeout: spill needs a room function to say yes.
+        assert!(clk.now_ms() - start >= s.pickup_timeout.as_millis() as u64);
+        assert_eq!(gh.cancels.lock().unwrap().len(), 1);
+        assert_eq!(refs(&r.bare), "");
     }
 
     #[test]
@@ -4181,6 +4596,8 @@ mod tests {
             workflow: "mason-run.yml".into(),
             pickup_timeout: Duration::from_secs(1200),
             fallback_local: false,
+            spill_after: None,
+            local_room: None,
             test_env: vec![],
             gh: GitHub::new(
                 gh.clone(),

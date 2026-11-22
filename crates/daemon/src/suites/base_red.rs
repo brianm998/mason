@@ -137,6 +137,7 @@ fn profile(
                 who.thresholds(),
                 who.env.clone(),
                 None,
+                &who.cover,
             )
             .ok()?;
             if ran.stop != Stop::No {

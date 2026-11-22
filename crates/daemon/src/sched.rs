@@ -4572,10 +4572,16 @@ mod tests {
         // The other workflow's jobs finish.
         b.set_other_workflows(0, "");
         assert!(held(&b, second));
-        let rest: Vec<u64> = (3..=5)
+        // The ceiling caps MASON at 4 units with no other jobs: first and
+        // second are two, so 3 and 4 fill it and a fifth must wait.
+        let rest: Vec<u64> = (3..=4)
             .map(|t| queue_ranked(&b, t, false, &gha(1)))
             .collect();
         assert!(rest.iter().all(|id| held(&b, *id)), "MASON can take all 4");
+        assert!(
+            !held(&b, queue_ranked(&b, 5, false, &gha(1))),
+            "a fifth job waits at the ceiling"
+        );
         assert!(!held(&b, queue_ranked(&b, 6, false, &gha(1))));
     }
 }

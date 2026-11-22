@@ -120,6 +120,8 @@ pub struct Facts {
     pub setup_failed: Option<String>,
     /// What `favor-local` weighs (#832); `None` reads as "this machine has room".
     pub spill: Option<Spill>,
+    /// What `favor-remote` weighs (#833); `None` reads as "GitHub had room".
+    pub remote_spill: Option<RemoteSpill>,
 }
 
 /// A reading of this machine's load, built from the scheduler's state (#832). Only the slots a
@@ -186,6 +188,32 @@ impl LocalLoad {
         None
     }
 
+    /// Whether a run can start here now (#833): no hold is active and, when slots are named, one
+    /// of them is free.
+    pub fn has_room(&self) -> bool {
+        self.held.is_none() && (self.free.is_empty() || self.free.values().any(|n| *n > 0))
+    }
+
+    /// Why a run that would hold the slots in `free` cannot start here now, or `None` when it
+    /// can: a hold is active, or one of those slots has no free unit. `covered`: the caller
+    /// already holds those slots for this very run (a landing batch, s911), so their use is not
+    /// counted against it; a hold still is, since new work is not welcome while it lasts. Pure.
+    pub fn no_room(&self, covered: bool) -> Option<String> {
+        if let Some(h) = &self.held {
+            return Some(format!("this machine {h}"));
+        }
+        if covered {
+            return None;
+        }
+        let full: Vec<&str> = self
+            .free
+            .iter()
+            .filter(|(_, n)| **n == 0)
+            .map(|(k, _)| k.as_str())
+            .collect();
+        (!full.is_empty()).then(|| format!("no {} slot free here", full.join("/")))
+    }
+
     /// "2 compile slots free" for the local reason.
     pub fn room_text(&self) -> String {
         let free: Vec<String> = self
@@ -200,6 +228,79 @@ impl LocalLoad {
             free.join(", ")
         }
     }
+}
+
+/// A reading of GitHub's load (#833). Pure data, so a table test covers the decision.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RemoteLoad {
+    /// Free units of the `gha` pool (and `gha-macos` for a macOS runner).
+    pub pool_free: u32,
+    /// Requests waiting for those units.
+    pub pool_waiting: u32,
+    /// Jobs queued on the whole account; `None` until something counts them (#819).
+    pub account_queued: Option<u32>,
+    /// The median pickup time of the last few runs, in seconds.
+    pub recent_pickup_s: Option<u64>,
+}
+
+impl RemoteLoad {
+    /// Why GitHub is overloaded, or `None`: no free pool unit with others already waiting; more
+    /// than `queue_max` jobs queued on the account; or recent pickups slower than `spill_after_s`.
+    pub fn overloaded(&self, queue_max: u32, spill_after_s: u64) -> Option<String> {
+        if self.pool_free == 0 && self.pool_waiting > 0 {
+            return Some(format!(
+                "the runner pool is full with {} waiting",
+                self.pool_waiting
+            ));
+        }
+        if let Some(q) = self.account_queued.filter(|q| *q > queue_max) {
+            return Some(format!("GitHub had {q} queued"));
+        }
+        if let Some(p) = self.recent_pickup_s.filter(|p| *p > spill_after_s) {
+            return Some(format!("recent pickups took {p} s, over {spill_after_s} s"));
+        }
+        None
+    }
+}
+
+/// The inputs of the `favor-remote` rules (#833).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RemoteSpill {
+    pub local: LocalLoad,
+    pub remote: RemoteLoad,
+    pub queue_max: u32,
+    pub spill_after_s: u64,
+}
+
+/// Why a run bound for GitHub cannot be taken back by this machine now, or `None` when it can
+/// (a room check for `remote::fallback_lease`): no CPU or thermal hold is active, and each slot
+/// the fallback would hold for `uses` has a free unit. The same slots that lease asks for, so
+/// "room" here means the lease would be granted at once. `covered`: see
+/// [`LocalLoad::no_room`]. `exclusive` is not looked at. Pure.
+pub fn no_room_for(
+    r: &crate::sched::LoadReading,
+    uses: &BTreeMap<String, u32>,
+    covered: bool,
+) -> Option<String> {
+    let needs: Vec<String> = uses
+        .iter()
+        .filter(|(k, n)| **n > 0 && k.as_str() != "exclusive")
+        .map(|(k, _)| k.clone())
+        .collect();
+    LocalLoad::from_reading(r, &needs).no_room(covered)
+}
+
+/// The slots a local run of a suite needs: compile and what the suite `uses`.
+pub fn local_needs(uses: &BTreeMap<String, u32>) -> Vec<String> {
+    let mut needs = vec![mason_scheduler::COMPILE.to_string()];
+    needs.extend(
+        uses.iter()
+            .filter(|(k, n)| {
+                **n > 0 && k.as_str() != mason_scheduler::COMPILE && k.as_str() != "exclusive"
+            })
+            .map(|(k, _)| k.clone()),
+    );
+    needs
 }
 
 /// The inputs of the `favor-local` rules besides the mode itself.
@@ -239,6 +340,7 @@ impl Facts {
             exclusive: false,
             setup_failed: None,
             spill: None,
+            remote_spill: None,
         }
     }
 
@@ -318,18 +420,38 @@ pub fn balance(mode: Mode, f: &Facts, runs_on: &str, from: Source) -> Place {
                 Some(why) => local(format!("{why}, and GitHub is full too, so it queues here")),
             }
         }
-        _ => Place::GitHub {
-            runs_on: runs_on.to_string(),
-            from,
-            why: format!(
-                "favor-remote, GitHub had room{}",
-                if f.suite_runs_on.is_some() {
-                    " (suite runner)"
-                } else {
-                    ""
+        _ => {
+            let github = |why: String| Place::GitHub {
+                runs_on: runs_on.to_string(),
+                from,
+                why,
+            };
+            let suffix = if f.suite_runs_on.is_some() {
+                " (suite runner)"
+            } else {
+                ""
+            };
+            let Some(sp) = &f.remote_spill else {
+                return github(format!("favor-remote, GitHub had room{suffix}"));
+            };
+            match sp.remote.overloaded(sp.queue_max, sp.spill_after_s) {
+                None => github(format!("favor-remote, GitHub had room{suffix}")),
+                Some(why) if sp.local.has_room() => Place::Local {
+                    why: format!("favor-remote, {why}; this machine had room"),
+                    from,
+                },
+                Some(why) => {
+                    let busy = sp
+                        .local
+                        .held
+                        .clone()
+                        .unwrap_or_else(|| "has no slot free".into());
+                    github(format!(
+                        "favor-remote, {why}, but this machine {busy}, so it waits on GitHub{suffix}"
+                    ))
                 }
-            ),
-        },
+            }
+        }
     }
 }
 
@@ -750,9 +872,12 @@ pub fn facts_for(
         exclusive: suite.uses.get("exclusive").is_some_and(|n| *n > 0),
         setup_failed: None,
         spill: None,
+        remote_spill: None,
     };
-    if f.effective().0 == Mode::FavorLocal {
-        f.spill = spill_for(d, project, suite);
+    match f.effective().0 {
+        Mode::FavorLocal => f.spill = spill_for(d, project, suite),
+        Mode::FavorRemote => f.remote_spill = remote_spill_for(d, project, suite),
+        _ => {}
     }
     f
 }
@@ -763,16 +888,7 @@ fn spill_for(d: &Daemon, project: &str, suite: &mason_testing::Suite) -> Option<
         .project_id_by_name(project)
         .and_then(|p| d.project(p))
         .and_then(|p| p.services.remote.clone())?;
-    let mut needs = vec![mason_scheduler::COMPILE.to_string()];
-    needs.extend(
-        suite
-            .uses
-            .iter()
-            .filter(|(k, n)| {
-                **n > 0 && k.as_str() != mason_scheduler::COMPILE && k.as_str() != "exclusive"
-            })
-            .map(|(k, _)| k.clone()),
-    );
+    let needs = local_needs(&suite.uses);
     let runs_on = suite.runs_on.clone().unwrap_or(cfg.runs_on);
     let room = |name: &str| d.broker.limit(name).is_none_or(|l| d.broker.used(name) < l);
     Some(Spill {
@@ -780,6 +896,48 @@ fn spill_for(d: &Daemon, project: &str, suite: &mason_testing::Suite) -> Option<
         github_room: room(mason_scheduler::GHA)
             && (!runs_on.contains("macos") || room(mason_scheduler::GHA_MACOS)),
         spill_after_ms: cfg.spill_after_s.saturating_mul(1000),
+    })
+}
+
+/// GitHub's load and this machine's, for a `favor-remote` suite of `project` (#833).
+fn remote_spill_for(
+    d: &Daemon,
+    project: &str,
+    suite: &mason_testing::Suite,
+) -> Option<RemoteSpill> {
+    let cfg = d
+        .project_id_by_name(project)
+        .and_then(|p| d.project(p))
+        .and_then(|p| p.services.remote.clone())?;
+    let runs_on = suite.runs_on.clone().unwrap_or(cfg.runs_on);
+    let mut pools = vec![mason_scheduler::GHA];
+    if runs_on.contains("macos") {
+        pools.push(mason_scheduler::GHA_MACOS);
+    }
+    let reading = d.broker.load_reading(now_ms());
+    let pool_free = pools
+        .iter()
+        .map(|n| match d.broker.limit(n) {
+            Some(l) => l.saturating_sub(d.broker.used(n)),
+            None => u32::MAX,
+        })
+        .min()
+        .unwrap_or(u32::MAX);
+    let pool_waiting = reading
+        .waiting
+        .iter()
+        .filter(|(names, _)| names.iter().any(|n| pools.contains(&n.as_str())))
+        .count() as u32;
+    Some(RemoteSpill {
+        local: LocalLoad::from_reading(&reading, &local_needs(&suite.uses)),
+        remote: RemoteLoad {
+            pool_free,
+            pool_waiting,
+            account_queued: None,
+            recent_pickup_s: crate::remote::recent_pickup_s(),
+        },
+        queue_max: cfg.remote_queue_max,
+        spill_after_s: cfg.spill_after_s,
     })
 }
 
@@ -940,7 +1098,7 @@ pub fn place_of(
         suite.name.clone(),
         kind,
     );
-    let balanced = f.spill.is_some();
+    let balanced = f.spill.is_some() || f.remote_spill.is_some();
     let now = now_ms();
     if balanced {
         let prev = STICKY
@@ -1017,6 +1175,132 @@ mod tests {
             }),
             ..Facts::plain(Mode::Local)
         }
+    }
+
+    fn favor_remote(local: LocalLoad, remote: RemoteLoad) -> Facts {
+        Facts {
+            task: Some(Mode::FavorRemote),
+            remote_spill: Some(RemoteSpill {
+                local,
+                remote,
+                queue_max: 4,
+                spill_after_s: 120,
+            }),
+            ..Facts::plain(Mode::Local)
+        }
+    }
+
+    fn remote_load(
+        free: u32,
+        waiting: u32,
+        queued: Option<u32>,
+        pickup: Option<u64>,
+    ) -> RemoteLoad {
+        RemoteLoad {
+            pool_free: free,
+            pool_waiting: waiting,
+            account_queued: queued,
+            recent_pickup_s: pickup,
+        }
+    }
+
+    /// #833: the pure favor-remote table.
+    #[test]
+    fn favor_remote_spills_only_when_github_is_overloaded_and_this_machine_has_room() {
+        let heat = Some("held for heat (die 99 °C)");
+        let rows: Vec<(&str, LocalLoad, RemoteLoad, bool)> = vec![
+            (
+                "GitHub room",
+                load(None, 2, 0, 0),
+                remote_load(3, 0, Some(1), Some(10)),
+                false,
+            ),
+            (
+                "pool full, waiters, local room",
+                load(None, 2, 0, 0),
+                remote_load(0, 2, None, None),
+                true,
+            ),
+            (
+                "pool full, no waiters",
+                load(None, 2, 0, 0),
+                remote_load(0, 0, None, None),
+                false,
+            ),
+            (
+                "pool full, local hold",
+                load(heat, 2, 0, 0),
+                remote_load(0, 2, None, None),
+                false,
+            ),
+            (
+                "pool full, local slot taken",
+                load(None, 0, 0, 0),
+                remote_load(0, 2, None, None),
+                false,
+            ),
+            (
+                "account queue over max, local room",
+                load(None, 1, 0, 0),
+                remote_load(2, 0, Some(5), None),
+                true,
+            ),
+            (
+                "account queue at max",
+                load(None, 1, 0, 0),
+                remote_load(2, 0, Some(4), None),
+                false,
+            ),
+            (
+                "slow pickups, local room",
+                load(None, 1, 0, 0),
+                remote_load(2, 0, None, Some(300)),
+                true,
+            ),
+            (
+                "slow pickups, local hold",
+                load(heat, 1, 0, 0),
+                remote_load(2, 0, None, Some(300)),
+                false,
+            ),
+        ];
+        for (name, l, r, local) in rows {
+            let got = decide(&favor_remote(l, r));
+            assert_eq!(!got.is_github(), local, "{name}: {}", got.text());
+        }
+    }
+
+    #[test]
+    fn a_favor_remote_placement_says_why() {
+        let t = decide(&favor_remote(
+            load(None, 1, 0, 0),
+            remote_load(0, 19, None, None),
+        ))
+        .text();
+        assert!(
+            t.contains(
+                "favor-remote, the runner pool is full with 19 waiting; this machine had room"
+            ),
+            "{t}"
+        );
+        let t = decide(&favor_remote(
+            load(None, 1, 0, 0),
+            remote_load(2, 0, Some(19), None),
+        ))
+        .text();
+        assert!(t.contains("GitHub had 19 queued"), "{t}");
+        let t = decide(&favor_remote(
+            load(None, 1, 0, 0),
+            remote_load(2, 0, None, None),
+        ))
+        .text();
+        assert!(t.contains("favor-remote, GitHub had room"), "{t}");
+    }
+
+    #[test]
+    fn pickup_median_of_the_last_runs() {
+        assert_eq!(crate::remote::median_pickup(&[]), None);
+        assert_eq!(crate::remote::median_pickup(&[500, 10, 30]), Some(30));
     }
 
     /// #832: the pure favor-local table.
@@ -1399,5 +1683,45 @@ mod tests {
         let t = doc.to_string();
         assert!(t.contains("# my note") && t.contains("extra = 1 # keep"));
         assert_eq!(parse_default(&t), Ok(Mode::Remote));
+    }
+
+    /// A run that would hold slots here has room only with no hold active and a free unit of each
+    /// slot; a covered run (its caller holds the slots) is not counted against its own use.
+    #[test]
+    fn room_needs_no_hold_and_a_free_unit_of_each_slot() {
+        use crate::sched::LoadReading;
+        let uses = BTreeMap::from([("compile".to_string(), 1u32), ("test-suite".to_string(), 1)]);
+        let reading = |held: Option<&str>, compile: u32, suite: u32| LoadReading {
+            used: BTreeMap::from([
+                ("compile".to_string(), compile),
+                ("test-suite".to_string(), suite),
+            ]),
+            limits: BTreeMap::from([("compile".to_string(), 2), ("test-suite".to_string(), 1)]),
+            waiting: vec![],
+            held: held.map(String::from),
+        };
+        // Free and no hold: room.
+        assert_eq!(no_room_for(&reading(None, 1, 0), &uses, false), None);
+        // A heat hold: no room, and the reason names it.
+        let why = no_room_for(
+            &reading(Some("held for heat (die 94 C)"), 0, 0),
+            &uses,
+            false,
+        )
+        .expect("no room");
+        assert!(why.contains("held for heat"), "{why}");
+        // One of the slots full (the other free): no room, naming it.
+        let why = no_room_for(&reading(None, 0, 1), &uses, false).expect("no room");
+        assert!(why.contains("test-suite"), "{why}");
+        // A slot the run does not need being full does not matter.
+        let only = BTreeMap::from([("compile".to_string(), 1u32)]);
+        assert_eq!(no_room_for(&reading(None, 1, 1), &only, false), None);
+        // Nothing to hold: only a hold can say no.
+        let none = BTreeMap::new();
+        assert_eq!(no_room_for(&reading(None, 2, 1), &none, false), None);
+        assert!(no_room_for(&reading(Some("held for CPU"), 0, 0), &none, false).is_some());
+        // Covered: the batch's own full slot is not counted, a hold still is.
+        assert_eq!(no_room_for(&reading(None, 1, 1), &uses, true), None);
+        assert!(no_room_for(&reading(Some("held for heat"), 1, 1), &uses, true).is_some());
     }
 }

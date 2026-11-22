@@ -30,7 +30,9 @@ suites = ["cargo-workspace"]
 # full-test schedule (`kind = "ci"` with `at` or `when_quiet`, s782), and batches go back to the whole
 # suite while the last full test is red or older than `full_test_max_age` (default 36h) with untested
 # commits since. The registration has `[schedule.full-ci]` (01:00, or after 30 quiet minutes).
-# narrow = true  (re-enabled once masond runs a build with #785; the old daemon refuses the key)
+# Off for a while (#938) because the daemon then running predated #785; back on 2026-11-22, owner
+# approved, once masond (323ec5f) parsed the key.
+narrow = true
 
 # The exit scripts the batch can have broken, once on the merged tree (s669).
 [[tier]]

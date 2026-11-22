@@ -169,9 +169,16 @@ fn a_due_schedule_with_remote_off_runs_each_listed_suite_once_on_the_tip_and_a_g
             0,
         )
         .unwrap();
+    // The landing records the commit a debt's task landed as; this debt comes after the
+    // landing, whose task branch is already deleted, so record it here (the tip holds it).
+    let debt = d.store.debts(Some(t.0), true).unwrap()[0].id;
+    d.store.set_debt_landed(debt, &tip(&d)).unwrap();
     d.store
         .write(|c| {
             c.execute("DELETE FROM suite_green", [])?;
+            // Skipped tests leave no evidence for the tree either; the world's own test step
+            // did, and the schedule would reuse it instead of running the suite.
+            c.execute("DELETE FROM evidence", [])?;
             c.execute("DELETE FROM suite_skip_green", []).map(|_| ())
         })
         .unwrap();
@@ -266,6 +273,11 @@ fn the_default_runs_the_test_steps_suites_and_the_run_waits_behind_every_task() 
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("ran");
     let (_s, d, _t) = world("", &log);
+    // The world's test step left green evidence for the tip's tree, which the schedule would
+    // reuse without running anything: this test is about a run that does run.
+    d.store
+        .write(|c| c.execute("DELETE FROM evidence", []).map(|_| ()))
+        .unwrap();
     d.broker.declare("compile", 1);
     let before = runs_of(&log);
     // Something holds the only compile slot.

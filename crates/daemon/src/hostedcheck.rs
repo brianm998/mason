@@ -652,6 +652,26 @@ fn dir_has_host(d: &Arc<Daemon>, id: &str) -> bool {
     d.cfg.hosts_dir().join(id).join("host.kv").exists()
 }
 
+/// The run spec of a check placed on GitHub. It names the suite the check runs for, so that the
+/// workflow sets up that suite's toolchains (Java and Gradle for `compose*`, Xcode for `swift*`):
+/// without the name every check got Rust alone, and each compose check failed to compile on the
+/// runner's default JDK. Only the name is taken: the command is the check's own, so the suite's
+/// rerun and results file stay out of it.
+fn check_run_spec(
+    project: &str,
+    id: &str,
+    spec: &CheckSpec,
+    runs_on: &str,
+) -> crate::remote::RunSpec {
+    let mut rs = crate::remote::spec_for(
+        project, id, None, &spec.cmd, spec.limit, &spec.env, runs_on, &spec.tree,
+    );
+    if let Some((_, suite)) = spec.place.as_ref() {
+        rs.suite = suite.name.clone();
+    }
+    rs
+}
+
 fn remote_check(d: &Arc<Daemon>, spec: &CheckSpec, id: &str) -> Option<Shared> {
     use crate::remote as rm;
     let runs_on = runs_on_github(d, spec)?;
@@ -661,14 +681,16 @@ fn remote_check(d: &Arc<Daemon>, spec: &CheckSpec, id: &str) -> Option<Shared> {
     // It goes in `RunSpec.build`, a separate process, not joined with `&&` (two `cd`s break).
     let build = build_choice(place.map(|(_, s)| s), &spec.cmd);
     let build = spec.build.as_deref().or(build);
-    let site = rm::site_for(d, &project, &spec.cwd)?;
+    let site = rm::site_for_run(
+        d,
+        &project,
+        &spec.cwd,
+        place.and_then(|(t, _)| t).map(|t| t.0),
+        &spec.holds,
+        false,
+    )?;
     let rs = rm::with_site_env(
-        rm::with_build(
-            rm::spec_for(
-                &project, id, None, &spec.cmd, spec.limit, &spec.env, &runs_on, &spec.tree,
-            ),
-            build,
-        ),
+        rm::with_build(check_run_spec(&project, id, spec, &runs_on), build),
         &site,
     );
     // The units it holds, on record until it ends, for a daemon that restarts (#700).
@@ -919,5 +941,47 @@ mod build_choice_tests {
         assert_eq!(build_choice(Some(&s), "cargo test"), Some("cargo build"));
         assert_eq!(build_choice(None, "x"), None);
         assert_eq!(build_choice(Some(&without_build(&s)), "x"), None);
+    }
+
+    fn check(place: Option<&str>) -> CheckSpec {
+        CheckSpec {
+            id_prefix: "t1r1-check".into(),
+            log_dir: PathBuf::from("/nonexistent"),
+            cmd: "./gradlew build".into(),
+            build: None,
+            cwd: PathBuf::from("/nonexistent"),
+            env: vec![],
+            limit: Duration::from_secs(60),
+            tree: String::new(),
+            stop: None,
+            holds: Default::default(),
+            label: "#1 check".into(),
+            place: place.map(|n| {
+                let mut s = mason_testing::Suite::new(n, "x", mason_testing::ParserKind::Junit);
+                s.rerun = Some("rerun {tests}".into());
+                (Some(mason_core::TaskId(1)), Box::new(s))
+            }),
+            global: false,
+        }
+    }
+
+    #[test]
+    fn a_check_on_github_names_its_suite_so_the_runner_sets_up_its_toolchains() {
+        for (suite, want) in [
+            ("compose-clients", "java"),
+            ("swift-clients", "swift"),
+            ("cargo-workspace", "rust"),
+        ] {
+            let rs = check_run_spec("mason", "t1r1-check0", &check(Some(suite)), "ubuntu-latest");
+            assert_eq!(rs.suite, suite);
+            assert_eq!(crate::remote::toolchains(&rs.suite), vec![want], "{suite}");
+            assert_eq!(
+                rs.command, "./gradlew build",
+                "the check's own command runs"
+            );
+            assert_eq!(rs.rerun, None, "the suite's rerun is not taken");
+        }
+        let rs = check_run_spec("mason", "t1r1-check0", &check(None), "ubuntu-latest");
+        assert_eq!(rs.suite, "");
     }
 }

@@ -416,9 +416,10 @@ fn run_hosted(
     th: Thresholds,
     env: Vec<(String, String)>,
     place: Option<(Option<TaskId>, &Suite)>,
+    cover: &Cover,
 ) -> Result<Ran, String> {
     run_hosted_resuming(
-        d, project, id, cmd, cwd, limit, log_dir, check, run, watch, th, env, None, place,
+        d, project, id, cmd, cwd, limit, log_dir, check, run, watch, th, env, None, place, cover,
     )
 }
 
@@ -441,8 +442,10 @@ fn run_hosted_resuming(
     env: Vec<(String, String)>,
     resume: Option<&str>,
     place: Option<(Option<TaskId>, &Suite)>,
+    cover: &Cover,
 ) -> Result<Ran, String> {
     use crate::hostloss as hl;
+    let covered = cover.covered;
     // Where the run goes (#697, #698). Only a task's test step asks (`place`); a landing
     // batch, a base run and a debt stay here until #702. A remote run is returned as the same
     // `Ran`, so it is judged by the code below this call, not by it. A suite whose build runs
@@ -455,6 +458,7 @@ fn run_hosted_resuming(
         let build = place.and_then(|(_, s)| s.build.as_deref());
         if let Some(ran) = run_remote(
             d, project, id, build, cmd, cwd, limit, log_dir, &check, run, watch, &env, &runs_on,
+            covered,
         )? {
             return Ok(ran);
         }
@@ -473,15 +477,34 @@ fn run_hosted_resuming(
                 })
                 .unwrap_or_default();
             let task = place.and_then(|(t, _)| t);
-            fallback = crate::remote::fallback_lease(
+            let label = format!(
+                "{} {id} (no GitHub runner, run here)",
+                task.map_or_else(|| "suite".to_string(), |t| format!("#{}", t.0))
+            );
+            fallback = match (&cover.batch, covered) {
+                // A landing batch's suite whose slots its lease does not hold takes them now,
+                // ranked as the batch's own work (s943).
+                (Some((owner, _)), false) => {
+                    crate::remote::fallback_lease_for_batch(d, project, owner, &uses, &label)?
+                }
+                // `covered`: a landing batch holds this machine's slots for this very run, so
+                // it does not ask again (s911, decision 0904).
+                _ => crate::remote::fallback_lease_unless_covered(
+                    d, project, task, &uses, &label, covered,
+                )?,
+            };
+        }
+    } else if let (Some((owner, needs)), false) = (&cover.batch, covered) {
+        // Placed here, though the batch's lease holds nothing for this suite (it was bound for
+        // GitHub when the batch took its slots, or the run is a baseline or a build that never
+        // goes there): it takes its slots as the batch before it starts (s943).
+        if !d.cfg.hosts_dir().join(id).join("host.kv").exists() {
+            fallback = crate::remote::batch_lease(
                 d,
                 project,
-                task,
-                &uses,
-                &format!(
-                    "{} {id} (no GitHub runner, run here)",
-                    task.map_or_else(|| "suite".to_string(), |t| format!("#{}", t.0))
-                ),
+                owner,
+                needs.clone(),
+                &format!("{id} (batch, run here)"),
             )?;
         }
     }
@@ -552,8 +575,9 @@ fn run_hosted_resuming(
     }
 }
 
-/// A suite command run on GitHub Actions. `Ok(None)`: it could not go remote and the project's
-/// `fallback` is `local`, so the caller runs it here. An outage or a missing runner is an `Err`
+/// A suite command run on GitHub Actions. `covered`: the caller holds this machine's slots for
+/// the run, so a fallback's room check does not count them against it. `Ok(None)`: it could not
+/// go remote and the project's `fallback` is `local`, so the caller runs it here. An outage or a missing runner is an `Err`
 /// that [`crate::remote::environmental`] recognizes.
 #[allow(clippy::too_many_arguments)]
 fn run_remote(
@@ -570,9 +594,12 @@ fn run_remote(
     watch: Option<&Suite>,
     env: &[(String, String)],
     runs_on: &str,
+    covered: bool,
 ) -> Result<Option<Ran>, String> {
     use crate::remote as rm;
-    let Some(site) = rm::site_for(d, project, cwd) else {
+    let task = run.and_then(|r| d.world().ok().and_then(|w| w.task_of_open_run(r)));
+    let uses = watch.map(|s| s.uses.clone()).unwrap_or_default();
+    let Some(site) = rm::site_for_run(d, project, cwd, task.map(|t| t.0), &uses, covered) else {
         return Err(rm::env_err("the project has no [remote_runs] section"));
     };
     // A suite whose build runs as its own step here goes in `RunSpec.build`, which the runner
@@ -601,7 +628,6 @@ fn run_remote(
         Stop::Gone => Some(rm::StopWhy::Gone),
     };
     // The units the run holds, on record until it ends, for a daemon that restarts (#700).
-    let task = run.and_then(|r| d.world().ok().and_then(|w| w.task_of_open_run(r)));
     let (key, label) = match task {
         Some(t) => (format!("task {}", t.0), format!("#{}", t.0)),
         None => (id.to_string(), id.to_string()),
@@ -1003,6 +1029,55 @@ struct Who {
     /// The reuse plan of the suite now running (s707): what it ran is recorded as green or red
     /// against its input keys.
     reuse: Option<Arc<crate::reuse::Plan>>,
+    /// What a landing batch's lease holds of this machine for the suite now running (s911,
+    /// s943); nothing for a task's or a debt's run.
+    cover: Cover,
+}
+
+/// What the caller holds of this machine for a run, so that `run_hosted_resuming` takes only
+/// what is not held already (s911, decision 0904; s943, decision 0936).
+#[derive(Clone, Default)]
+pub struct Cover {
+    /// The caller holds this machine's slots for this run (a landing batch's lease,
+    /// `Runner::hold`): a run sent back here from GitHub runs under that hold and does not ask
+    /// the broker for them again.
+    covered: bool,
+    /// A landing batch's own run that its lease does not hold: the batch, and what the suite
+    /// needs here. Such a run takes its slots, as the batch, when it comes to run here.
+    batch: Option<(Arc<crate::remote::BatchOwner>, Needs)>,
+}
+
+/// What a landing batch holds, for the suites it runs: the batch (to rank what its runs take
+/// beside the lease) and the slots of the lease it took, if it took one (s943).
+#[derive(Clone, Default)]
+pub struct BatchCover {
+    pub owner: Option<Arc<crate::remote::BatchOwner>>,
+    /// What the batch's lease holds; `None` when it holds nothing.
+    pub held: Option<Needs>,
+}
+
+impl BatchCover {
+    /// `needs` is within what the lease holds, so a run of it needs nothing more of this
+    /// machine. Never true without a lease.
+    pub fn holds(&self, needs: &Needs) -> bool {
+        self.held.as_ref().is_some_and(|h| {
+            (!needs.exclusive || h.exclusive)
+                && needs
+                    .amounts
+                    .iter()
+                    .all(|(k, v)| h.amounts.get(k).is_some_and(|x| x >= v))
+        })
+    }
+
+    /// The cover of a run of `suite` of this batch.
+    fn of(&self, def: &Definition, suite: &str) -> Cover {
+        let needs = crate::landing::suites_needs(def, &[suite.to_string()]);
+        let covered = self.holds(&needs);
+        Cover {
+            covered,
+            batch: self.owner.clone().map(|o| (o, needs)),
+        }
+    }
 }
 
 /// The tasks of a landing batch, and the name of the definition's Test step. A batch's
@@ -1726,6 +1801,7 @@ fn run_on_base(
             who.thresholds(),
             who.env.clone(),
             None,
+            &who.cover,
         )
         .ok()?;
         if ran.stop != Stop::No {
@@ -1960,6 +2036,7 @@ fn run_suite(
             who.env.clone(),
             resume.as_deref(),
             who.place(suite),
+            &who.cover,
         ) {
             Ok(r) => r,
             Err(e) if crate::remote::environmental(&e).is_some() => {
@@ -2539,6 +2616,7 @@ fn run_tests_alone(
         who.thresholds(),
         who.env.clone(),
         who.place(suite),
+        &who.cover,
     )
     .ok()?;
     if ran.stop != Stop::No {
@@ -2586,6 +2664,7 @@ pub fn run_alone(
     sink: Option<StepRunId>,
     build: bool,
     serial: bool,
+    cover: &BatchCover,
 ) -> OverRun {
     let who = Who {
         d: d.clone(),
@@ -2599,6 +2678,7 @@ pub fn run_alone(
         trust_base: true,
         members: Members::default(),
         reuse: None,
+        cover: Cover::default(),
     };
     let _ = std::fs::create_dir_all(log_dir);
     let project_test = d
@@ -2613,6 +2693,9 @@ pub fn run_alone(
         unfinished: Default::default(),
     };
     for (name, tests) in failing {
+        let mut who = who.clone();
+        who.cover = cover.of(def, name);
+        let who = &who;
         let red = |out: &mut OverRun, note: String| {
             out.green = false;
             out.failed.insert(name.clone());
@@ -2631,7 +2714,7 @@ pub fn run_alone(
         };
         if build {
             if let Some(b) = suite.build.as_deref() {
-                match run_build(&who, &suite, b, 0, wt) {
+                match run_build(who, &suite, b, 0, wt) {
                     Built::Ok => {}
                     Built::Gone => {
                         red(&mut out, format!("{name}: stopped"));
@@ -2645,7 +2728,7 @@ pub fn run_alone(
             }
         }
         let id = format!("{id_prefix}-n-{name}");
-        match run_tests_alone(&who, &suite, wt, tests, &id, serial, None) {
+        match run_tests_alone(who, &suite, wt, tests, &id, serial, None) {
             Some(still) if still.is_empty() => out.notes.push(format!(
                 "{name}: {} failing test(s) green on their own",
                 tests.len()
@@ -3143,6 +3226,7 @@ fn run_build(who: &Who, suite: &Suite, build: &str, n: usize, cwd: &Path) -> Bui
         who.thresholds(),
         who.env.clone(),
         None,
+        &who.cover,
     ) {
         Ok(r) => r,
         Err(e) => return Built::Red(format!("Building `{}` could not run: {e}", suite.name)),
@@ -3224,6 +3308,7 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
         trust_base: true,
         members: Members::default(),
         reuse: None,
+        cover: Cover::default(),
     };
     let head = |rev: &str| git::run(&c.wt, &["rev-parse", rev]).map(|s| s.trim().to_string());
     let (Ok(tree_hash), Ok(head_sha)) = (head("HEAD^{tree}"), head("HEAD")) else {
@@ -3897,6 +3982,7 @@ fn run_new_tests_at_base(
             who.thresholds(),
             who.env.clone(),
             None,
+            &who.cover,
         )
         .ok()?;
         Some(judge_ran_with(suite, &ran, &wt, who.plugin_parser(suite).as_deref()).results)
@@ -4736,6 +4822,7 @@ fn pay_with(d: &Arc<Daemon>, debt: u64, only: Option<&str>) -> Result<String, St
         trust_base: true,
         members: Members::default(),
         reuse: None,
+        cover: Cover::default(),
     };
     let tree_hash = git::run(&wt, &["rev-parse", "HEAD^{tree}"])
         .map(|s| s.trim().to_string())
@@ -5046,6 +5133,7 @@ pub fn run_whole(
         trust_base: false,
         members: Members::default(),
         reuse: None,
+        cover: Cover::default(),
     };
     let tree_hash = git::run(&wt, &["rev-parse", "HEAD^{tree}"])
         .map(|s| s.trim().to_string())
@@ -5338,6 +5426,7 @@ pub fn ledger_run(d: &Arc<Daemon>, task: TaskId) -> Result<String, String> {
         trust_base: true,
         members: Members::default(),
         reuse: None,
+        cover: Cover::default(),
     };
     let tree = Tree {
         tree: git::run(&wt, &["rev-parse", "HEAD^{tree}"])
@@ -5582,6 +5671,9 @@ fn batch_reuse(
 /// batch started (baselines are taken there). A suite whose only reds are excused (also red
 /// at `base`, or known red) is green for the batch, with a note naming them; `base_excuses`
 /// false (post-land, where `base` is the tree itself) lets only known-red tests excuse.
+/// `cover`: what the batch's lease holds of this machine. A suite whose slots it holds, and that
+/// falls back from GitHub, runs under that hold (s911); one it does not hold takes its slots as
+/// the batch when it runs here (s943).
 #[allow(clippy::too_many_arguments)]
 pub fn run_over(
     d: &Arc<Daemon>,
@@ -5596,6 +5688,7 @@ pub fn run_over(
     base_excuses: bool,
     members: &Members,
     reuse: bool,
+    cover: &BatchCover,
 ) -> OverRun {
     let lock = d.repo_lock(d.project_id_by_name(&p.id).unwrap_or(ProjectId(0)));
     let tree_hash = git::run(wt, &["rev-parse", "HEAD^{tree}"])
@@ -5617,6 +5710,7 @@ pub fn run_over(
         trust_base: base_excuses,
         members: members.clone(),
         reuse: None,
+        cover: Cover::default(),
     };
     let _ = std::fs::create_dir_all(log_dir);
     let mut out = OverRun {
@@ -5638,6 +5732,7 @@ pub fn run_over(
         // Targets green on the same inputs are left out, except on the periodic full run that
         // checks the keys (s707).
         let mut who = who.clone();
+        who.cover = cover.of(def, name);
         let mut left_out: Option<Suite> = None;
         let full = reuse && p.reuse_green && full_run_due(&p.id, p.reuse_full_hours);
         if reuse && p.reuse_green {
@@ -6466,5 +6561,38 @@ mod narrow_batch_tests {
         let mut s = suite();
         s.dev_command = None;
         assert!(narrow_for_batch(&Definition::empty(), &s, d.path(), &b).is_err());
+    }
+}
+
+#[cfg(test)]
+mod batch_cover_tests {
+    use super::*;
+
+    fn needs(items: &[(&str, u32)]) -> Needs {
+        Needs::of(items)
+    }
+
+    /// s943: a run is covered only when the batch's lease really holds its slots.
+    #[test]
+    fn a_batch_cover_holds_only_what_the_lease_holds() {
+        let none = BatchCover::default();
+        assert!(
+            !none.holds(&needs(&[("test-suite", 1)])),
+            "no lease, no cover"
+        );
+        assert!(!none.holds(&Needs::default()), "no lease: not even nothing");
+
+        let lease = BatchCover {
+            owner: None,
+            held: Some(needs(&[("test-suite", 2), ("compile", 1)])),
+        };
+        assert!(lease.holds(&needs(&[("test-suite", 1)])));
+        assert!(lease.holds(&needs(&[("test-suite", 2), ("compile", 1)])));
+        assert!(!lease.holds(&needs(&[("test-suite", 3)])), "more than held");
+        assert!(!lease.holds(&needs(&[("test-small", 1)])), "another slot");
+        assert!(!lease.holds(&Needs {
+            exclusive: true,
+            ..Default::default()
+        }));
     }
 }

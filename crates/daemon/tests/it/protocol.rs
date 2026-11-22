@@ -721,7 +721,11 @@ fn garbage_and_early_commands_get_an_error_not_a_crash() {
         Some(ServerMessage {
             body: Some(server_message::Body::Error(e)),
         }) => assert!(
-            e.message.contains("serves protocols 1 to 1"),
+            e.message.contains(&format!(
+                "serves protocols {} to {}",
+                mason_protocol::MIN_PROTOCOL,
+                mason_protocol::PROTOCOL
+            )),
             "{}",
             e.message
         ),

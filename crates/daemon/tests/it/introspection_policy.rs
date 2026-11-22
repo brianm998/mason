@@ -8,6 +8,7 @@ use crate::support;
 use mason_core::introspect::{Finding, Stats};
 use mason_core::proposal::{Cost, Impact};
 use mason_core::*;
+use mason_daemon::daemon::now_ms;
 use mason_daemon::{introspect, Daemon};
 use std::sync::Arc;
 use support::lw::*;
@@ -124,4 +125,95 @@ fn a_renamed_analyst_task_is_still_read_and_another_task_with_its_title_is_not()
     std::fs::write(wt.path().join(introspect::ANALYST_FILE), result).unwrap();
     introspect::ingest_analyst(d, other, "scratch", wt.path(), dir.path());
     assert!(wt.path().join(introspect::ANALYST_FILE).exists());
+}
+
+fn result_json(title: &str) -> String {
+    format!(
+        r#"{{"findings":[{{"title":"{title}","body":"Review steps queue behind develop.","evidence":"crates/daemon/src/sched.rs:120 ranks review below develop","metric":"wait_share","severity":"low","cost":"small"}}]}}"#
+    )
+}
+
+#[test]
+fn an_analyst_result_is_read_once_kept_in_the_log_dir_and_ends_the_develop_step() {
+    let w = world_with(LANDING, &|_| SPLIT.into(), &[]);
+    let d = &w.d;
+    let pid = d.project_id_by_name("scratch").unwrap();
+    let analyst = introspect::file_analyst_task(d, pid).unwrap();
+    let wt = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+
+    // No file yet: the develop step goes back, nothing is filed.
+    let r = introspect::ingest_analyst(d, analyst, "scratch", wt.path(), dir.path());
+    assert_eq!(r, introspect::Ingest::Missing);
+    // An unreadable one goes back with the parse error.
+    std::fs::write(wt.path().join(introspect::ANALYST_FILE), "not json").unwrap();
+    let r = introspect::ingest_analyst(d, analyst, "scratch", wt.path(), dir.path());
+    assert!(matches!(r, introspect::Ingest::Unreadable(_)));
+    assert!(d.store.proposals().unwrap().is_empty());
+
+    std::fs::write(
+        wt.path().join(introspect::ANALYST_FILE),
+        result_json("Reviews wait for a slot"),
+    )
+    .unwrap();
+    let r = introspect::ingest_analyst(d, analyst, "scratch", wt.path(), dir.path());
+    assert_eq!(r, introspect::Ingest::Done);
+    assert_eq!(d.store.proposals().unwrap().len(), 1);
+    // The worktree holds neither the file nor a `.read` copy; the log dir has the copy.
+    assert!(!wt.path().join(introspect::ANALYST_FILE).exists());
+    assert!(!wt
+        .path()
+        .join(format!("{}.read", introspect::ANALYST_FILE))
+        .exists());
+    assert!(dir.path().join(introspect::ANALYST_FILE).exists());
+
+    // A later step of the same task, with the same or a reworded finding, files nothing.
+    for title in [
+        "Reviews wait for a slot",
+        "Review steps wait for a free slot",
+    ] {
+        std::fs::write(wt.path().join(introspect::ANALYST_FILE), result_json(title)).unwrap();
+        let r = introspect::ingest_analyst(d, analyst, "scratch", wt.path(), dir.path());
+        assert_eq!(r, introspect::Ingest::Done);
+        assert_eq!(d.store.proposals().unwrap().len(), 1);
+        assert!(!wt.path().join(introspect::ANALYST_FILE).exists());
+    }
+}
+
+#[test]
+fn the_digest_counts_only_the_projects_own_flaky_suites() {
+    let w = world_with(LANDING, &|_| String::new(), &[]);
+    let d = &w.d;
+    let pid = d.project_id_by_name("scratch").unwrap();
+    let mine = d
+        .emit(EventKind::TaskFiled {
+            project: pid,
+            title: "A task".into(),
+            body: "x".into(),
+            priority: Priority::Normal,
+            trust: TrustSource::Owner,
+            explored: true,
+            proposed: false,
+            blockers: vec![],
+            not_before: None,
+        })
+        .unwrap()
+        .effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::TaskCreated { task } => Some(*task),
+            _ => None,
+        })
+        .unwrap();
+    d.store
+        .record_flaky("own-suite", "a", mine.0, now_ms())
+        .unwrap();
+    // A flake from a task that belongs to no project of this name.
+    d.store
+        .record_flaky("cargo-workspace", "b", 999_999, now_ms())
+        .unwrap();
+    let dg = introspect::digest(d, Some("scratch"), 0, now_ms() + 1000);
+    let text = dg.to_string();
+    assert!(text.contains("own-suite::a"), "{text}");
+    assert!(!text.contains("cargo-workspace::b"), "{text}");
 }

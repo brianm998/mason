@@ -49,9 +49,12 @@ pub struct CoverageMap {
     pub modules: BTreeMap<String, BTreeSet<String>>,
 }
 
-/// FNV-1a, enough to see a changed `main.rs`.
+/// FNV-1a, enough to see a changed `main.rs`. Trailing whitespace is left out: the daemon reads
+/// the file through `git show`, whose output `git::run` trims, while the job that makes the map
+/// reads it from disk. Hashing both as they came made every map from GitHub "not the one the
+/// daemon saw".
 pub fn hash_text(t: &str) -> u64 {
-    t.bytes().fold(0xcbf29ce484222325u64, |h, b| {
+    t.trim_end().bytes().fold(0xcbf29ce484222325u64, |h, b| {
         (h ^ b as u64).wrapping_mul(0x100000001b3)
     })
 }
@@ -741,6 +744,20 @@ mod tests {
         let m = map();
         assert_eq!(CoverageMap::decode(&m.encode()), Some(m));
         assert_eq!(CoverageMap::decode("junk"), None);
+    }
+
+    #[test]
+    fn a_map_made_from_the_file_is_accepted_for_the_text_git_show_gave() {
+        // The job hashes main.rs as read from disk (with its final newline); the daemon hashes
+        // the trimmed `git show` output it got through `git::run`.
+        let on_disk = "mod holds;\nmod sched;\n";
+        let from_git = on_disk.trim();
+        let mut m = map();
+        m.main_hash = hash_text(on_disk);
+        assert!(accept(&m.encode(), &m.commit, hash_text(from_git)).is_ok());
+        assert!(!due(Some(&m), m.made_at, false, hash_text(from_git)));
+        // A real change to main.rs is still seen.
+        assert!(accept(&m.encode(), &m.commit, hash_text("mod holds;\n")).is_err());
     }
 
     #[test]
