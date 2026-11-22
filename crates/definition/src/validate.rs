@@ -127,7 +127,26 @@ pub fn warnings(def: &Definition, caps: &Capabilities) -> Vec<Problem> {
     }
     unlisted_suites(def, &mut w);
     dead_empty_impact_entries(def, &mut w);
+    pytest_names(def, &mut w);
     w
+}
+
+/// A suite that narrows a `pytest` run by `{}` alone names its tests as dotted names, which
+/// pytest takes for a missing file (#924).
+fn pytest_names(def: &Definition, w: &mut Vec<Problem>) {
+    for s in &def.testing.suites {
+        let Some(n) = &s.narrow else { continue };
+        if n.command.contains("pytest")
+            && n.each.contains("{}")
+            && !n.each.contains("{file}")
+            && !n.each.contains("{path}")
+        {
+            w.push(Problem::new(
+                format!("suite.{}.narrow_each", s.name),
+                "pytest takes paths, not dotted names; use {file} (or {path})",
+            ));
+        }
+    }
 }
 
 /// A plain `= []` impact entry that a broader non-empty entry always covers
