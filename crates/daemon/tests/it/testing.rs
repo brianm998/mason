@@ -1361,6 +1361,13 @@ fn three_debts_of_different_scopes_on_one_tip_run_the_suite_once_and_one_green_s
         0
     );
     mason_daemon::suites::run_idle_debts(&d);
+    for x in d.store.debts(Some(t.0), false).unwrap() {
+        eprintln!(
+            "PROBE pay {} -> {:?}",
+            x.id,
+            mason_daemon::suites::pay(&d, x.id)
+        );
+    }
     eprintln!(
         "PROBE debts={:?}",
         d.store
