@@ -2407,6 +2407,26 @@ impl Store {
         })
     }
 
+    /// `(suite, test, at_ms, task)` for every flake since `since_ms`.
+    pub fn flaky_since_by_task(
+        &self,
+        since_ms: u64,
+    ) -> Result<Vec<(String, String, u64, u64)>, StoreError> {
+        self.read(move |c| {
+            let mut st =
+                c.prepare("SELECT suite, test, at, task FROM flaky WHERE at >= ?1 ORDER BY id")?;
+            let rows = st.query_map(params![since_ms as i64], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get::<_, i64>(2)? as u64,
+                    r.get::<_, i64>(3)? as u64,
+                ))
+            })?;
+            rows.collect()
+        })
+    }
+
     /// Record a debt: something skipped by force. `scope` is `suite:NAME` or
     /// `step:NAME`. Returns its id.
     #[allow(clippy::too_many_arguments)]
