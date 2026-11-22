@@ -1,0 +1,5 @@
+.mason/run.json
+crates/daemon/src/jobs.rs
+docs/decisions/0906-source-free-note-outside-the-tree.md
+docs/stages/s913.md
+scripts/exit/s913.sh
