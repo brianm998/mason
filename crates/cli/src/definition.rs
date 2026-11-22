@@ -160,6 +160,41 @@ pub fn check(path: &Path, plugins: &[PluginType]) -> i32 {
     status
 }
 
+/// `narrow = true` in the `.mason/landing.toml` beside `path` needs a full-test schedule with a
+/// trigger (s804). `full_test` says whether the project has one; `None` when no `--project` was
+/// given, which can only be said in a note. 1 for a refused or unreadable file.
+pub fn check_narrow(path: &Path, full_test: Option<bool>) -> i32 {
+    let landing = path.parent().unwrap_or(Path::new(".")).join("landing.toml");
+    let Ok(text) = std::fs::read_to_string(&landing) else {
+        return 0;
+    };
+    let cfg = match mason_landing::config::parse(&text) {
+        Ok(c) => c,
+        Err(ps) => {
+            ps.iter()
+                .for_each(|p| println!("error  {}: {p}", landing.display()));
+            return 1;
+        }
+    };
+    if !cfg.narrows() {
+        return 0;
+    }
+    match full_test {
+        None => {
+            println!(
+                "note  {}: the batch tier narrows; pass --project P to check that P has the full-test schedule it needs",
+                landing.display()
+            );
+            0
+        }
+        Some(has) => {
+            let problems = mason_landing::config::narrow_problems(&cfg, has);
+            problems.iter().for_each(|p| println!("error  {p}"));
+            i32::from(!problems.is_empty())
+        }
+    }
+}
+
 /// Walk scripted tasks through a definition. With `scenarios`, those from the
 /// file; otherwise the default ones.
 pub fn dry(path: &Path, scenarios: Option<&Path>) -> i32 {
