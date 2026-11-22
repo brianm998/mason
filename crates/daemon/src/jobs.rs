@@ -1763,6 +1763,11 @@ fn both_commands(rerun: &str, dev: &str) -> String {
     )
 }
 
+/// How often a check's wait is credited to the step's deadline. Not `sched::CREDIT_EVERY`
+/// (30 s): the develop watchdog kills the agent at the deadline plus the credit, so a wait
+/// credited only every 30 s is killed at the budget with nothing credited yet (#813).
+const CHECK_CREDIT_EVERY: Duration = Duration::from_secs(1);
+
 impl TestChecks {
     /// `wait`, a check queueing for its slots, with its time credited to the deadline (see
     /// [`credit_wait`]). While it waits the agent is idle, so when a known-red test the last
@@ -1782,7 +1787,7 @@ impl TestChecks {
                     }
                 }
             });
-            let out = credit_wait(&self.extra, crate::sched::CREDIT_EVERY, wait);
+            let out = credit_wait(&self.extra, CHECK_CREDIT_EVERY, wait);
             done.store(true, std::sync::atomic::Ordering::SeqCst);
             let _ = poll.join();
             out
@@ -1802,7 +1807,7 @@ impl TestChecks {
             return run();
         }
         self.edit_check(|c, _| c.github = true);
-        credit_remote_wait(&self.extra, crate::sched::CREDIT_EVERY, run)
+        credit_remote_wait(&self.extra, CHECK_CREDIT_EVERY, run)
     }
 
     /// Merge the base into the worktree if a test the last check failed has left the ledger.
@@ -5463,6 +5468,23 @@ mod tests {
         });
         assert_eq!(extra.remote(), before);
         assert!(extra.waited() > extra.remote());
+    }
+
+    #[test]
+    fn a_check_wait_is_credited_before_it_ends() {
+        // #813: credit reaches the deadline while the wait is still going. The wait blocks
+        // until the credit has been added; a regressed cadence fails the guard, not hangs.
+        let extra = mason_adapter_api::DeadlineExtra::default();
+        let seen = credit_remote_wait(&extra, CHECK_CREDIT_EVERY, || {
+            for _ in 0..6000 {
+                if !extra.waited().is_zero() {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            false
+        });
+        assert!(seen, "no credit reached the deadline while the wait ran");
     }
 
     #[test]

@@ -30,7 +30,9 @@ wait_state() {  # TASK STATE SECONDS
     sleep 0.2
   done
 }
-steps_of() { m task show "$1" --json | grep '"name":' | sed 's/.*"name": "\(.*\)".*/\1/' | tr '\n' ' ' | sed 's/ $//'; }
+steps_of() {  # only the names inside the "steps" array, not other "name" keys
+  m task show "$1" --json | python3 -I -c 'import json,sys; print(" ".join(s["name"] for s in json.load(sys.stdin)["steps"]))'
+}
 first_start() { m task show "$1" --json | grep -m1 '"started_at"' | sed 's/[^0-9]//g'; }
 pusher() {  # BRANCH PATH MESSAGE: commit stdin to a branch of origin as someone else would
   [ -d "$root/pusher" ] || git clone -q "$root/origin.git" "$root/pusher" 2>/dev/null
