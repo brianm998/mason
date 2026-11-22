@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! The step host through its transport on every platform: connect, reattach
-//! after the controller is gone, and stop the child's tree. (`host.rs` has the
-//! rest of the host's behaviour and is Unix-only: it scripts `sh`.)
+#![cfg(unix)]
+// Unix-only until the Windows IPC transport lands: mason-platform net.rs is a stub there, so the host cannot bind.
+//! The step host through its transport: connect, reattach after the controller
+//! is gone, and stop the child's tree.
 
 use mason_step_host::client::{Event, HostClient};
 use mason_step_host::launcher::{spawn_host, SpawnOptions};
@@ -14,19 +15,11 @@ const HOST: &str = env!("CARGO_BIN_EXE_step-host");
 
 /// A command that prints `first` and then stays alive for a minute.
 fn print_then_wait() -> Vec<&'static str> {
-    if cfg!(windows) {
-        vec!["cmd", "/C", "echo first & ping -n 60 127.0.0.1 >NUL"]
-    } else {
-        vec!["sh", "-c", "echo first; sleep 60"]
-    }
+    vec!["sh", "-c", "echo first; sleep 60"]
 }
 
 fn echo_and_exit() -> Vec<&'static str> {
-    if cfg!(windows) {
-        vec!["cmd", "/C", "echo out"]
-    } else {
-        vec!["sh", "-c", "echo out"]
-    }
+    vec!["sh", "-c", "echo out"]
 }
 
 fn start(root: &Path, id: &str, cmd: &[&str]) -> HostInfo {
