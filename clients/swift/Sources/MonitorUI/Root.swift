@@ -42,6 +42,7 @@ public struct RootView: View {
         .foregroundStyle(theme.text)
         .background(theme.background)
         .onOpenURL { model.open(url: $0) }
+        .onAppear { SharedTick.shared.model = model }
         #if !canImport(AppKit)
         .onChange(of: scenePhase, initial: true) { _, phase in SharedTick.shared.setVisible(phase == .active) }
         #endif

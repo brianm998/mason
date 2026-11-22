@@ -79,7 +79,7 @@ private fun Banners(model: MonitorModel) {
     val texts = buildList {
         if (!model.connected) add(if (model.reconnecting) "Connection lost. Reconnecting…" else "Connecting…")
         else {
-            model.header?.banners?.forEach { add(it.text) }
+            model.header?.banners?.filter { it.level != "info" }?.forEach { add(it.text) }
         }
     }
     for (t in texts) {
