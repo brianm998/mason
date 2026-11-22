@@ -665,6 +665,9 @@ pub struct ProjectCfg {
     /// Seconds a queued task is held back for an in-flight task that changes the same files
     /// (`hold_back_secs`, default 7200; 0 turns the hold off) (s398).
     pub hold_back_secs: u64,
+    /// How many tasks beyond the LLM limit may be in agent steps at once while their agents are
+    /// parked on checks (`park_extra`; default: the limit) (#765, decision 0749).
+    pub park_extra: Option<u32>,
     /// A narrowed test-step suite whose selected targets' recorded run times sum to less than
     /// this many seconds takes the `test-small` lane (`small_run_s`, default 180; 0 turns it
     /// off) (s649).
@@ -1491,6 +1494,10 @@ pub fn parse_project(id: &str, text: &str) -> Result<ProjectCfg, String> {
             .get("hold_back_secs")
             .and_then(|v| v.as_integer())
             .map_or(7200, |n| n.max(0) as u64),
+        park_extra: doc
+            .get("park_extra")
+            .and_then(|v| v.as_integer())
+            .map(|n| n.clamp(0, u32::MAX as i64) as u32),
         hold_back_ignore: doc
             .get("hold_back_ignore")
             .and_then(|v| v.as_array())

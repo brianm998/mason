@@ -88,6 +88,7 @@ mod stall;
 mod stop;
 mod stuck;
 mod suite_builds;
+mod suites_schedule;
 mod sweep;
 mod takeover_drain;
 mod targets;

@@ -3000,6 +3000,8 @@ impl CheckSlots {
     ) -> Result<Option<crate::sched::Lease>, crate::sched::Cancelled> {
         let held = self.lease.lock().unwrap_or_else(|e| e.into_inner()).take();
         if held.is_some() {
+            // Parked on a check: the session is free for others while it waits (#765).
+            self.d.set_parked(self.task, true);
             drop(held);
             self.d.admit();
         }
@@ -3028,6 +3030,9 @@ impl CheckSlots {
 
     /// Queue for the agent's slot again, before the agent is told the result.
     fn take_agent_slot_back(&self) {
+        // No longer parked: from here the task counts as waiting for its session, which
+        // keeps a new admission from taking it.
+        self.d.set_parked(self.task, false);
         self.d.admit();
         let needs = crate::sched::needs_of(&self.agent_uses, Some(&self.account));
         if let Ok(l) = self.acquire(needs, &self.step, false, None) {
@@ -3520,6 +3525,8 @@ fn agent_job(c: &Ctx) {
         fn drop(&mut self) {
             self.0.d.broker.stop_crediting_waits(self.0.task);
             end_run_leases(&self.0.d, self.0.task);
+            // A check that ended without handing the session back leaves no parked mark (#765).
+            self.0.d.set_parked(self.0.task, false);
             crate::hostedcheck::cancel_task(&self.0.d, self.0.task.0);
         }
     }
