@@ -2155,7 +2155,7 @@ impl Store {
 
     /// The notes waiting for `task`, oldest first; they are removed as they are read.
     pub fn take_red_notes(&self, task: u64) -> Result<Vec<String>, StoreError> {
-        self.write_with(move |c| {
+        self.write(move |c| {
             let mut st = c.prepare("SELECT text FROM red_notes WHERE task = ?1 ORDER BY id")?;
             let out: Vec<String> = st
                 .query_map(params![task as i64], |r| r.get(0))?
