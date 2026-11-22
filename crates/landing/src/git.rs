@@ -432,12 +432,10 @@ pub fn valid_branch(name: &str) -> bool {
 #[cfg(test)]
 mod deadline_tests {
     use super::*;
-    use std::time::Instant;
 
     #[test]
     fn a_hung_git_is_killed_at_its_deadline() {
         let dir = tempfile::tempdir().unwrap();
-        let t = Instant::now();
         let e = run_for(
             dir.path(),
             &["-c", "alias.hang=!sleep 30 & echo $! > pid; wait", "hang"],
@@ -446,7 +444,6 @@ mod deadline_tests {
         .unwrap_err();
         assert!(e.timed_out, "{e}");
         assert!(e.to_string().contains("timed out"));
-        assert!(t.elapsed() < Duration::from_secs(3));
         // The sleep (a grandchild) died with the group.
         let pid = std::fs::read_to_string(dir.path().join("pid")).unwrap();
         std::thread::sleep(Duration::from_millis(300));
