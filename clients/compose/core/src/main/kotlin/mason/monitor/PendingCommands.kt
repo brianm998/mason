@@ -64,6 +64,7 @@ data class PendingCommand(
             "unblock" -> "Releasing…" to "Released"
             "pause" -> "Pausing…" to "Paused"
             "resume" -> "Resuming…" to "Resumed"
+            "set_placement" -> "Changing where runs go…" to "Changed"
             "set_limit" -> "Saving…" to "Saved"
             "add_task" -> "Filing…" to "Filed"
             else -> action.replace('_', ' ').let { "$it…" to it }
@@ -87,6 +88,9 @@ data class PendingCommand(
             c.revive != null -> "revive" to c.revive!!.task
             c.defer != null -> "defer" to c.defer!!.task
             c.undefer != null -> "undefer" to c.undefer!!.task
+            c.set_placement != null -> "set_placement" to c.set_placement!!.let { p ->
+                placementKey(when (p.scope) { "task" -> PlacementScope.Task(p.task); "project" -> PlacementScope.Project(p.project); else -> PlacementScope.Global })
+            }
             else -> null
         }
     }
