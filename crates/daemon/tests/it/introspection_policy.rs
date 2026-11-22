@@ -8,6 +8,7 @@ use crate::support;
 use mason_core::introspect::{Finding, Stats};
 use mason_core::proposal::{Cost, Impact};
 use mason_core::*;
+use mason_daemon::daemon::now_ms;
 use mason_daemon::{introspect, Daemon};
 use std::sync::Arc;
 use support::lw::*;
@@ -167,7 +168,10 @@ fn an_analyst_result_is_read_once_kept_in_the_log_dir_and_ends_the_develop_step(
     assert!(dir.path().join(introspect::ANALYST_FILE).exists());
 
     // A later step of the same task, with the same or a reworded finding, files nothing.
-    for title in ["Reviews wait for a slot", "Review steps wait for a free slot"] {
+    for title in [
+        "Reviews wait for a slot",
+        "Review steps wait for a free slot",
+    ] {
         std::fs::write(wt.path().join(introspect::ANALYST_FILE), result_json(title)).unwrap();
         let r = introspect::ingest_analyst(d, analyst, "scratch", wt.path(), dir.path());
         assert_eq!(r, introspect::Ingest::Done);
