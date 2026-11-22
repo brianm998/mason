@@ -778,6 +778,34 @@ pub struct RetryAsk {
     pub auto: bool,
     /// A note for the next round's prompt, shown once (s250).
     pub message: Option<String>,
+    /// The owner asked for this retry: a landing run that was red for this task is run again
+    /// instead of reused (decision 0962). Off for every retry the daemon makes by itself.
+    pub forget_red: bool,
+}
+
+/// Forget the cached red landing runs that include `task`, because the owner asked for it to
+/// land again (a retry, Land now). Greens stay. Says how many went.
+pub fn forget_red_runs(d: &Daemon, task: TaskId) {
+    let Ok(w) = d.world() else { return };
+    let Some(project) = w
+        .tasks
+        .get(&task)
+        .and_then(|t| d.project(t.project))
+        .map(|p| p.id.clone())
+    else {
+        return;
+    };
+    drop(w);
+    match d.store.forget_red_batch_runs(&project, task.0) {
+        Ok(n) => tracing::info!(
+            task = task.0,
+            project,
+            forgotten = n,
+            "the owner asked for task #{} to land again: forgot {n} cached red landing run(s)",
+            task.0
+        ),
+        Err(e) => tracing::warn!(task = task.0, "could not forget cached red runs: {e}"),
+    }
 }
 
 /// Re-enter a step of a task. The one place a `Retried` event is made: the HTTP endpoint and the
@@ -852,6 +880,10 @@ pub fn retry_task(
         let _ = std::fs::create_dir_all(&dir);
         let _ = std::fs::write(dir.join(crate::jobs::RETRY_NOTE), m);
     }
+    // Before the task can join a batch again, so the batch cannot find the old red.
+    if ask.forget_red && !ask.auto {
+        forget_red_runs(d, TaskId(id));
+    }
     d.emit(EventKind::Retried {
         task: TaskId(id),
         to,
@@ -882,6 +914,7 @@ async fn retry(
             .as_ref()
             .and_then(|b| b["message"].as_str())
             .map(String::from),
+        forget_red: true,
     };
     let d2 = d.clone();
     let (to, step) = d
@@ -2531,6 +2564,10 @@ async fn land_override(
                 ("land-now", true) => crate::suites::LAND_NOW_RUNNING,
                 _ => "now",
             };
+            // Land now runs the suites again: a red an earlier batch left is not reused.
+            if kind == "land-now" && !matches!(t.state, State::Landed | State::Canceled) {
+                forget_red_runs(&d2, TaskId(id));
+            }
             // A mark is for a task that has yet to land.
             if !matches!(t.state, State::Landed | State::Canceled) {
                 d2.store
@@ -2628,6 +2665,7 @@ async fn land_now_batch(
                 } else {
                     "now"
                 };
+                forget_red_runs(&d2, TaskId(t));
                 d2.store
                     .set_landing_flag(t, flag, &who, now_ms())
                     .map_err(store_err)?;
