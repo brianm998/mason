@@ -129,6 +129,9 @@ pub struct Tier {
     /// `where = "local" | "github"`: where the tier's checks run. `None`: the tier's default
     /// (the lint tier runs on this Mac, #806).
     pub place: Option<String>,
+    /// `narrow = true` on the `batch` tier (s804): the batch runs each suite's narrowed selection
+    /// over its union, not the whole suite, while the scheduled full test backs it.
+    pub narrow: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -155,6 +158,9 @@ pub struct LandingConfig {
     pub ci_local: std::collections::BTreeMap<String, Vec<String>>,
     /// `floor_where = "local" | "github"` (#816): where the build floor runs. `None` is local.
     pub floor_where: Option<String>,
+    /// `full_test_max_age` (s804): how long a green full test may stand, with untested commits
+    /// since, before narrowed batches go back to the whole suite. `None`: 36 h.
+    pub full_test_max_age: Option<Duration>,
 }
 
 impl Default for LandingConfig {
@@ -176,6 +182,7 @@ impl Default for LandingConfig {
             max_fold: 3,
             ci_local: Default::default(),
             floor_where: None,
+            full_test_max_age: None,
         }
     }
 }
@@ -188,6 +195,11 @@ impl LandingConfig {
     /// Suites of the tier a batch runs over its union diff.
     pub fn batch_suites(&self) -> Option<&[String]> {
         self.tier("batch").map(|t| t.suites.as_slice())
+    }
+
+    /// Does the batch tier narrow (s804)?
+    pub fn narrows(&self) -> bool {
+        self.tier("batch").is_some_and(|t| t.narrow)
     }
 
     /// Suites run on the base after landing.
@@ -231,6 +243,7 @@ const TOP: &[&str] = &[
     "max_fold",
     "ci",
     "floor_where",
+    "full_test_max_age",
 ];
 
 /// Read a `landing.toml`. `Err` lists every problem, each naming its key.
@@ -275,6 +288,13 @@ pub fn parse(text: &str) -> Result<LandingConfig, Vec<String>> {
                 Some(w @ ("local" | "github")) => c.floor_where = Some(w.into()),
                 _ => p.push("floor_where: must be \"local\" or \"github\"".into()),
             },
+            "full_test_max_age" => match v.as_str().and_then(parse_duration) {
+                Some(d) if d >= Duration::from_secs(3600) => c.full_test_max_age = Some(d),
+                _ => p.push(
+                    "full_test_max_age: must be a duration of at least an hour, like \"36h\""
+                        .into(),
+                ),
+            },
             "resolver" => match v.as_str() {
                 Some(s) if !s.trim().is_empty() => c.resolver = Some(s.into()),
                 _ => p.push("resolver: must be a command".into()),
@@ -288,6 +308,7 @@ pub fn parse(text: &str) -> Result<LandingConfig, Vec<String>> {
                             ci: None,
                             on_red: None,
                             place: None,
+                            narrow: false,
                         };
                         for (tk, tv) in t.iter() {
                             match tk {
@@ -305,6 +326,12 @@ pub fn parse(text: &str) -> Result<LandingConfig, Vec<String>> {
                                 },
                                 "ci" => tier.ci = tv.as_str().map(String::from),
                                 "on_red" => tier.on_red = tv.as_str().map(String::from),
+                                "narrow" => match tv.as_bool() {
+                                    Some(b) => tier.narrow = b,
+                                    None => {
+                                        p.push(format!("tier[{i}].narrow: must be true or false"))
+                                    }
+                                },
                                 "where" => match tv.as_str() {
                                     Some(w @ ("local" | "github")) => tier.place = Some(w.into()),
                                     _ => p.push(format!(
@@ -410,6 +437,12 @@ pub fn validate(c: &LandingConfig) -> Vec<String> {
             ));
         }
     }
+    for t in c.tiers.iter().filter(|t| t.narrow && t.name != "batch") {
+        p.push(format!(
+            "tier `{}`.narrow: only the `batch` tier can narrow",
+            t.name
+        ));
+    }
     let mut seen = std::collections::BTreeSet::new();
     for t in &c.tiers {
         if !seen.insert(&t.name) {
@@ -438,6 +471,19 @@ pub fn service_problems(c: &LandingConfig, remote: bool, host: bool, ci: bool) -
         p.push(format!("mode `{}` needs a `[host]` section in the project file: the git host that opens the pull requests", m.name()));
     }
     p
+}
+
+/// `narrow = true` needs a full-test schedule with at least one trigger (`at` or `when_quiet`):
+/// the whole suite runs there, and nothing else would. `has_trigger` says whether the project
+/// has one.
+pub fn narrow_problems(c: &LandingConfig, has_trigger: bool) -> Vec<String> {
+    if c.narrows() && !has_trigger {
+        return vec![
+            "tier `batch` says narrow = true, but the project has no full-test schedule with a trigger: add a `[schedule.<name>]` with kind = \"ci\" and `at` or `when_quiet` to the project file, or the whole suite runs only in no place"
+                .into(),
+        ];
+    }
+    vec![]
 }
 
 /// What a suite's `whole_later` claims must hold of the landing config (#676): `batch` needs a
@@ -475,6 +521,27 @@ pub fn whole_later_problems(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn narrow_reads_only_on_the_batch_tier_and_needs_a_full_test_trigger() {
+        let c = parse(
+            "full_test_max_age = \"24h\"\n[[tier]]\nname = \"batch\"\nsuites = [\"a\"]\nnarrow = true\n",
+        )
+        .unwrap();
+        assert!(c.narrows());
+        assert_eq!(c.full_test_max_age, Some(Duration::from_secs(24 * 3600)));
+        assert_eq!(narrow_problems(&c, false).len(), 1);
+        assert!(narrow_problems(&c, true).is_empty());
+        let e = parse("[[tier]]\nname = \"lint\"\nsuites = [\"a\"]\nnarrow = true\n").unwrap_err();
+        assert!(
+            e.iter().any(|x| x.contains("only the `batch` tier")),
+            "{e:?}"
+        );
+        assert!(parse("full_test_max_age = \"5m\"\n").is_err());
+        assert!(!parse("[[tier]]\nname = \"batch\"\nsuites = [\"a\"]\n")
+            .unwrap()
+            .narrows());
+    }
 
     #[test]
     fn whole_later_batch_needs_a_tier_that_lists_the_suite() {
