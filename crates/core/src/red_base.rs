@@ -85,10 +85,11 @@ pub fn failing_tests(log: &str) -> BTreeMap<String, String> {
             if !id.is_empty() && !id.contains(' ') {
                 out.insert(id.to_string(), text.to_string());
             }
-        } else if let Some(name) = t
-            .strip_prefix("test ")
-            .and_then(|r| r.strip_suffix(" ... FAILED"))
-        {
+        } else if let Some(name) = t.strip_prefix("test ").and_then(|r| {
+            // `--report-time` (s634) ends the line in the test's time: `... FAILED <0.054s>`.
+            let r = r.rsplit_once(" <").map_or(r, |(head, _)| head);
+            r.strip_suffix(" ... FAILED")
+        }) {
             let head = format!("---- {name} stdout ----");
             let text = lines
                 .iter()
@@ -180,6 +181,12 @@ mod tests {
         );
         assert_eq!(c["a::b"], "thread 'a::b' panicked at x.rs:1:1:\nboom");
         assert_eq!(c.len(), 1);
+        // With `--report-time`, as MASON's own cargo suites run.
+        let t = failing_tests(
+            "test a::b ... FAILED <0.054s>\ntest a::c ... ok <0.001s>\n\n---- a::b stdout ----\nboom\n",
+        );
+        assert_eq!(t.keys().collect::<Vec<_>>(), vec!["a::b"]);
+        assert_eq!(t["a::b"], "boom");
     }
 
     #[test]
