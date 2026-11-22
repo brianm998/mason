@@ -808,6 +808,7 @@ fn collect(
                             full: String::new(),
                             id: id.to_string(),
                             stopped: Some(note),
+                            phase: None,
                         }),
                         None => Err(e),
                     }

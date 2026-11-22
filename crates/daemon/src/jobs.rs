@@ -1997,7 +1997,11 @@ impl TestChecks {
             let placed = |mut s: crate::hostedcheck::CheckSpec, suite: &mason_testing::Suite| {
                 s.place = Some((Some(TaskId(self.task)), Box::new(suite.clone())));
                 // A skip while it waits or runs ends it (#873).
-                s.stop = Some(self.skip_stop(&suite.name));
+                // Not for a call made under a skip: that one runs the build and the new tests
+                // by design (#812) and must not be ended by the skip it started under.
+                if !light {
+                    s.stop = Some(self.skip_stop(&suite.name));
+                }
                 s
             };
             let before = suite.command.clone();
@@ -2576,7 +2580,10 @@ impl TestChecks {
         let step = self.slots.test_step.as_deref()?;
         let debt = crate::suites::skip_for(&self.slots.d, TaskId(self.task), suite, step)?;
         self.slots.take_agent_slot_back();
-        Some(not_run_skipped(debt))
+        Some(CheckRun::Done {
+            passed: true,
+            summary: not_run_skipped(debt, true, "The skip arrived while the check ran."),
+        })
     }
 
     /// Conflict markers the agent's work adds to the base, as a failed check. Read from the
