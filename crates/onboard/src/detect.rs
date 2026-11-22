@@ -3,7 +3,7 @@
 //! Question 1 of `mason init`: look at the repository and the machine, and say what was found.
 //! Reads only; the one process it runs is `git`.
 
-use super::questions::{parse_remote, project_id, Agent, Detected};
+use crate::questions::{parse_remote, project_id, Agent, Detected};
 use mason_landing::git;
 use std::path::{Path, PathBuf};
 
