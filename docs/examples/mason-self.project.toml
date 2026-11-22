@@ -50,3 +50,16 @@ cooldown_h = 24
 # label = "mason"                    # the label that lets an outside issue in
 # interval_s = 60                    # between polls (conditional: an unchanged list costs nothing)
 # webhook_secret = "env:MASON_WEBHOOK_SECRET"   # optional: a relay delivering webhooks refreshes at once
+
+# The full CI matrix (s800, decision 0793). A push to develop runs only the fast jobs (lint,
+# windows); the rest of `ci.yml` (the test matrix, exit-scripts, the monitors, the device
+# samples, the macOS legs) runs when this schedule dispatches it: at 01:00, or after 30 quiet
+# minutes, and only when develop changed since the last full run. Add it to
+# `~/.config/mason/projects/mason.toml` and run `mason project reload --project mason`.
+# [schedule.full-ci]
+# kind = "ci"
+# workflow = "ci.yml"
+# run_name = "CI: full"
+# at = "01:00"
+# when_quiet = "30m"
+# max_tickets = 6

@@ -60,7 +60,13 @@ private fun call(model: MonitorModel, c: Command, id: String): CommandResult {
 
 private fun step(model: MonitorModel): Boolean {
     val r = call(model, Command(raw = mason.v1.Raw(method = "POST", path = "/demo/next")), "step")
-    val advanced = Codec.json(r.json)?.get("advanced") == true
+    val reply = Codec.json(r.json)
+    val advanced = reply?.get("advanced") == true
+    // The views for this step carry a sequence number at least the daemon's (from /status,
+    // read after the step): wait for them, then let any trailing view land.
+    val status = call(model, Command(raw = mason.v1.Raw(method = "GET", path = "/status")), "status")
+    val seq = (Codec.json(status.json)?.get("seq") as? Number)?.toLong()
+    if (seq != null) until("the views of seq $seq") { model.lastSeq >= seq }
     settle(model)
     return advanced
 }

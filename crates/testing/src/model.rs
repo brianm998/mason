@@ -136,6 +136,10 @@ pub struct Suite {
     /// What each shard's runner runs instead of `command`: it reads `.mason/run.json` and the
     /// `MASON_SHARD` variable, as `scripts/test-shard.py` does. Needed by `shards`.
     pub shard_command: Option<String>,
+    /// `ci_jobs = ["test (ubuntu-latest, *)"]`: the CI jobs that together cover this suite
+    /// (`*` matches any run of characters). When every one of them succeeded on one run of the
+    /// base branch, the suite is recorded green at that run's commit (#774).
+    pub ci_jobs: Vec<String>,
 }
 
 /// The `narrow_*` keys of a suite (s386): where its tests live, how one is named, and the
@@ -221,6 +225,7 @@ impl Suite {
             runs_on: None,
             shards: 0,
             shard_command: None,
+            ci_jobs: vec![],
         }
     }
 }

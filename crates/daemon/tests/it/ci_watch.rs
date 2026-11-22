@@ -36,6 +36,7 @@ impl Base {
                 url: format!("https://github.com/o/r/actions/runs/{id}"),
                 created_ms: id * 1000,
                 conclusion: Some(conclusion.into()),
+                event: "push".into(),
             },
         );
         self.jobs.lock().unwrap().insert(
