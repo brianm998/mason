@@ -337,6 +337,14 @@ fn kill_9_in_the_middle_of_an_agent_session_loses_nothing() {
     // A second death straight after a restart, before it has finished recovering.
     let mut m2 = s.masond(&[], &[]);
     s.wait_daemon(&mut m2);
+    // Recovery has begun once the restarted daemon reports the task developing again with its
+    // step host still running.
+    s.wait_task(0, "developing", 60);
+    wait_for(
+        "the step host to be running under the restarted daemon",
+        60,
+        || !running_hosts(&s).is_empty(),
+    );
     nix::sys::signal::kill(
         nix::unistd::Pid::from_raw(m2.child.id() as i32),
         nix::sys::signal::Signal::SIGKILL,
