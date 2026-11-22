@@ -130,6 +130,7 @@ private fun HomePage(model: MonitorModel, open: (Page) -> Unit) {
         Heading("Active models")
         for (m in home.active) Text("${m.display.ifEmpty { m.model }}  ·  #${m.task}", Modifier.padding(horizontal = 24.dp, vertical = 4.dp))
     }
+    model.placementText(PlacementScope.Global)?.let { Text("Runs on: $it", Modifier.padding(horizontal = 16.dp, vertical = 2.dp), style = MaterialTheme.typography.bodySmall) }
     SessionStepper(model, home)
     Heading("Stages")
     for (s in home.stages) {
