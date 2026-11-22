@@ -1,0 +1,3 @@
+# 0751: the GitHub section reads an in-process registry, fed by the run's own poll
+
+Each remote run is entered in a registry in `remote_runs.rs` when it asks for a pool unit and when its hold is written, and kept 10 minutes after it ends. The jobs come from the poll the run already makes (read when the run changed, so within the existing ETag cadence); the home view reads the registry and each run's record. The registry is lost on a daemon restart, which only forgets the finished runs. No gate, guard, budget, verdict logic or trust file changed (`http.rs`, `remote.rs` and the clients are not in `PROTECTED`).

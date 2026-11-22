@@ -706,6 +706,15 @@ fn main() {
             "on" => Some("remote".to_string()),
             "off" => Some("local".to_string()),
             "status" => None,
+            "runs" => {
+                finish(&a);
+                let r = or_die(d.call("GET", "/remote/runs", None));
+                if json_out {
+                    return println!("{r:#}");
+                }
+                remote::print_runs(&r);
+                return;
+            }
             "mode" => {
                 let m = a.pos().unwrap_or_else(|| {
                     die("which mode? local, remote, favor-local or favor-remote")

@@ -1508,6 +1508,8 @@ fn poll(
     if run.status != "completed" {
         live.refresh(site, run.id)?;
         let jobs = &live.jobs;
+        // What the monitor shows of each job (no second read: the last answer stands).
+        crate::remote_runs::set_jobs(rec, job_view(jobs));
         if st.picked_ms.is_none() {
             if let Some(j) = jobs.iter().find(|j| {
                 is_run_job(&j.name) && matches!(j.status.as_str(), "in_progress" | "completed")
@@ -1621,6 +1623,32 @@ fn poll(
         Ok(a) => Ok(Step::Got(a)),
         Err(e) => Ok(Step::Fail(format!("run {}: {e}", run.url))),
     }
+}
+
+/// The jobs of a run as the monitor lists them.
+pub fn job_view(jobs: &[mason_adapters::github::ActionJob]) -> Vec<crate::remote_runs::Job> {
+    jobs.iter()
+        .map(|j| crate::remote_runs::Job {
+            name: j.name.clone(),
+            state: match j.status.as_str() {
+                "completed" => "done",
+                "in_progress" => "running",
+                _ => "queued",
+            }
+            .into(),
+            conclusion: j.conclusion.clone().unwrap_or_default(),
+            step: if j.status == "in_progress" {
+                j.steps
+                    .iter()
+                    .find(|s| s.status == "in_progress")
+                    .or_else(|| j.steps.iter().find(|s| s.status == "queued"))
+                    .map(|s| s.name.clone())
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            },
+        })
+        .collect()
 }
 
 /// What a run still going has looked like at the last look at its jobs.
@@ -1936,6 +1964,20 @@ pub fn remove_hold(dir: &Path, id: &str) {
     let _ = std::fs::remove_file(hold_file(dir, id));
 }
 
+/// Where a run stands, for the monitor: `queued` (pushed, or on GitHub with no runner yet),
+/// `running`, or `done`; its GitHub URL, and when a runner took it.
+pub fn run_stage(record: &Path) -> Option<(String, String, Option<u64>)> {
+    let s = State::load(record)?;
+    let stage = if s.collected {
+        "done"
+    } else if s.picked_ms.is_some() {
+        "running"
+    } else {
+        "queued"
+    };
+    Some((stage.into(), s.url, s.picked_ms))
+}
+
 /// Has the run behind this record ended? A missing record is a run that was abandoned or
 /// never began; a collected one is done.
 pub fn record_ended(record: &Path) -> bool {
@@ -2152,6 +2194,8 @@ pub fn reap_adopted(d: &Arc<Daemon>) {
 pub struct HoldGuard {
     dir: PathBuf,
     id: String,
+    hosts: PathBuf,
+    record: PathBuf,
 }
 
 impl HoldGuard {
@@ -2167,6 +2211,16 @@ impl HoldGuard {
         task: u64,
     ) -> Self {
         let holds = holds_dir(hosts);
+        crate::remote_runs::started(
+            hosts,
+            &spec.id,
+            key,
+            kind,
+            &spec.suite,
+            &spec.runs_on,
+            shards,
+            &record_path(dir, &spec.id),
+        );
         write_hold(
             &holds,
             &spec.id,
@@ -2182,12 +2236,23 @@ impl HoldGuard {
         HoldGuard {
             dir: holds,
             id: spec.id.clone(),
+            hosts: hosts.to_path_buf(),
+            record: record_path(dir, &spec.id),
         }
     }
 }
 
 impl Drop for HoldGuard {
     fn drop(&mut self) {
+        // How it ended, for the monitor, before the record can go.
+        let outcome = State::load(&self.record).filter(|s| s.collected).map(|s| {
+            if s.code == 0 && s.signal == 0 {
+                "green"
+            } else {
+                "red"
+            }
+        });
+        crate::remote_runs::finished(&self.hosts, &self.id, outcome);
         remove_hold(&self.dir, &self.id);
     }
 }
@@ -3299,6 +3364,7 @@ mod tests {
             name: name.into(),
             status: status.into(),
             started_at: None,
+            conclusion: None,
             steps: steps
                 .iter()
                 .map(|(n, st, at)| mason_adapters::github::ActionStep {

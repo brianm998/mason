@@ -1048,9 +1048,17 @@ fn acquire_needs_as(
     // A project whose runs go to GitHub holds runner pool units for them, not this machine's
     // slots (#700). A daemon that restarted counted the units of its run still out: they are
     // this step's, and its lease takes them over.
+    let mut _waiting = None;
     let needs = match crate::remote::pool_needs(d, &c.project.id, &needs, Some(c.task)) {
         Some(n) => {
             d.broker.take_over_remote(&format!("task {}", c.task.0));
+            // On the monitor's GitHub section until a pool unit is granted (#767).
+            _waiting = Some(crate::remote_runs::waiting(
+                d,
+                c.task.0,
+                label.unwrap_or("test step"),
+                &format!("#{}", c.task.0),
+            ));
             n
         }
         None => needs,

@@ -1148,6 +1148,8 @@ pub struct ActionJob {
     pub name: String,
     pub status: String,
     pub started_at: Option<String>,
+    /// success, failure, cancelled... once the job is done.
+    pub conclusion: Option<String>,
     /// The job's steps, in order, as far as GitHub reports them.
     pub steps: Vec<ActionStep>,
 }
@@ -1169,6 +1171,7 @@ fn action_jobs(v: &Value) -> Vec<ActionJob> {
             name: j["name"].as_str().unwrap_or_default().to_string(),
             status: j["status"].as_str().unwrap_or_default().to_string(),
             started_at: j["started_at"].as_str().map(String::from),
+            conclusion: j["conclusion"].as_str().map(String::from),
             steps: j["steps"]
                 .as_array()
                 .into_iter()
