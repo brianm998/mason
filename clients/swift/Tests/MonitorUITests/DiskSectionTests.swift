@@ -90,8 +90,8 @@ final class DiskSectionTests: XCTestCase {
     // A red 30x20-ish box and a blue one stand for CPU and disk.
     private func row(stacked: Bool) -> some View {
         CpuDiskRow(stacked: stacked, spacing: 10) {
-            Color.red.frame(maxWidth: .infinity).frame(height: 40)
-            Color.blue.frame(maxWidth: .infinity).frame(height: 40)
+            Color(red: 1, green: 0, blue: 0).frame(maxWidth: .infinity).frame(height: 40)
+            Color(red: 0, green: 0, blue: 1).frame(maxWidth: .infinity).frame(height: 40)
         }
     }
 
