@@ -1609,6 +1609,35 @@ final class MonitorCoreTests: XCTestCase {
         liveSub.cancel()
     }
 
+    /// Decision 0851: replaces the UI-level "progress views were drawn" count. A push for one task
+    /// fires only that task's observable entry; no other entry and not the sidebar.
+    func testAProgressPushFiresOnlyItsTasksProgressEntry() {
+        let m = model()
+        var c = cell(done: 1, total: 4, totalSrc: .sourceReported)
+        c.step = "develop"
+        m.sidebar?.sections[0].rows[0].progress = [c]
+        m.sidebar?.sections[0].rows[1].progress = [c]
+        let e1 = m.progress.entry(1)
+        let e2 = m.progress.entry(2)
+        let one = ChangeCounter { _ = e1.cells }
+        let two = ChangeCounter { _ = e2.cells }
+        let side = ChangeCounter { _ = m.sidebar }
+        var p = Mason_V1_StepProgress()
+        p.task = 1
+        var n = c
+        n.done = 3
+        p.progress = n
+        p.nowMs = 5_000_000
+        m.apply(progress: p)
+        XCTAssertEqual(one.count, 1)
+        XCTAssertEqual(two.count, 0)
+        XCTAssertEqual(side.count, 0)
+        XCTAssertEqual(e1.cells?.first?.done, 3)
+        one.cancel()
+        two.cancel()
+        side.cancel()
+    }
+
     func testASidebarViewAfterProgressShowsTheViewsCellsNotStaleOnes() {
         let m = model()
         var c = cell(done: 1, total: 4, totalSrc: .sourceReported)
