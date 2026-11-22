@@ -60,6 +60,8 @@ pub struct Daemon {
     admit_again: AtomicBool,
     /// When each queued task was first held back for a shared file (s398); the hold's clock.
     pub(crate) file_held: Mutex<HashMap<TaskId, Instant>>,
+    /// Tasks whose agent gave its session back to wait on a `run_check` (#765).
+    pub(crate) parked: Mutex<std::collections::HashSet<TaskId>>,
     fetch_locks: Mutex<HashMap<PathBuf, Arc<Mutex<Option<std::time::Instant>>>>>,
     /// Per project: when its fetches began failing (ms) and the last error. A success removes it.
     fetch_failures: Mutex<HashMap<ProjectId, (u64, String)>>,
@@ -307,6 +309,7 @@ impl Daemon {
             admitting: AtomicBool::new(false),
             admit_again: AtomicBool::new(false),
             file_held: Mutex::default(),
+            parked: Mutex::default(),
             repo_locks: Mutex::default(),
             fetch_locks: Mutex::default(),
             fetch_failures: Mutex::default(),
@@ -1044,22 +1047,70 @@ impl Daemon {
         let name = crate::sched::llm_resource(account);
         // A task waiting for the owner's approval holds nothing.
         let approving = Activity::Waiting(WaitReason::On(APPROVAL_WAIT.into()));
-        let unclaimed = w
+        let parked_set = self
+            .parked
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let (mut unclaimed, mut parked) = (0u32, 0u32);
+        for t in w.tasks.values() {
+            if t.state.is_step()
+                && t.activity != approving
+                && !self.broker.has_lease(t.id)
+                && self.account_of(t.project) == account
+                && self.step_needs_session(t)
+            {
+                // An agent parked on a check holds no session; it is not reserved one.
+                if parked_set.contains(&t.id) {
+                    parked += 1;
+                } else {
+                    unclaimed += 1;
+                }
+            }
+        }
+        let limit = self.broker.limit(&name).unwrap_or(0);
+        let used = self.broker.used(&name);
+        let extra = self
+            .projects()
+            .into_iter()
+            .filter(|(_, p)| p.account == account)
+            .filter_map(|(_, p)| p.park_extra)
+            .max();
+        sessions_free(limit, used, unclaimed, parked, extra)
+    }
+
+    /// How many agents of `account` are working (hold a session) and how many are parked on
+    /// checks (#765).
+    pub fn llm_states(&self, w: &mason_engine::World, account: &str) -> (u32, u32) {
+        let parked_set = self
+            .parked
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let parked = w
             .tasks
             .values()
             .filter(|t| {
                 t.state.is_step()
-                    && t.activity != approving
+                    && parked_set.contains(&t.id)
                     && !self.broker.has_lease(t.id)
                     && self.account_of(t.project) == account
-                    && self.step_needs_session(t)
             })
             .count() as u32;
-        self.broker
-            .limit(&name)
-            .unwrap_or(0)
-            .saturating_sub(self.broker.used(&name))
-            .saturating_sub(unclaimed)
+        (
+            self.broker.used(&crate::sched::llm_resource(account)),
+            parked,
+        )
+    }
+
+    /// Mark a task's agent as parked on a check, or as no longer so.
+    pub(crate) fn set_parked(&self, task: TaskId, on: bool) {
+        let mut p = self.parked.lock().unwrap_or_else(|e| e.into_inner());
+        if on {
+            p.insert(task);
+        } else {
+            p.remove(&task);
+        }
     }
 
     /// The provider account a project's agent steps use.
@@ -1377,6 +1428,27 @@ impl Daemon {
     }
 }
 
+/// Free LLM sessions to promise (#765). A task between steps or about to launch (`unclaimed`) is
+/// reserved a session; one whose agent is parked on a check (`parked`) is not, since it holds none
+/// and a check can take an hour. Parking must not let tasks grow without bound, so at most
+/// `limit + park_extra` (default: the limit) tasks are in agent steps at once. A parked agent that
+/// comes back is `unclaimed` again, so it is served before any new admission.
+pub fn sessions_free(
+    limit: u32,
+    used: u32,
+    unclaimed: u32,
+    parked: u32,
+    park_extra: Option<u32>,
+) -> u32 {
+    let by_sessions = limit.saturating_sub(used).saturating_sub(unclaimed);
+    let cap = limit.saturating_add(park_extra.unwrap_or(limit));
+    let by_cap = cap
+        .saturating_sub(used)
+        .saturating_sub(unclaimed)
+        .saturating_sub(parked);
+    by_sessions.min(by_cap)
+}
+
 /// The limit on waiting checks: `max_check_queue` of the definition (0 turns it off), else twice
 /// the test-suite slots. A task is held when more than that many wait; `None` when it is not.
 pub fn check_hold_decision(
@@ -1497,5 +1569,40 @@ mod admission_tests {
         assert_eq!(check_hold_decision(500, Some(0), 2), None);
         // No test-suite slots at all is not a reason to hold everything.
         assert_eq!(check_hold_decision(500, None, 0), None);
+    }
+}
+
+#[cfg(test)]
+mod park_tests {
+    use super::sessions_free;
+
+    #[test]
+    fn parked_agents_do_not_hold_sessions_back() {
+        // llm = 2, two parked: a third queued task is admitted.
+        assert_eq!(sessions_free(2, 0, 0, 2, None), 2);
+    }
+
+    #[test]
+    fn returning_agents_go_before_new_admissions() {
+        // Both checks returned: one holds a session, the other waits (unclaimed): no admission.
+        assert_eq!(sessions_free(2, 1, 1, 0, None), 0);
+        // Once the first finishes its step, the waiting one is still reserved the session.
+        assert_eq!(sessions_free(2, 0, 1, 0, None), 1);
+        assert_eq!(sessions_free(2, 1, 1, 0, None), 0);
+    }
+
+    #[test]
+    fn park_extra_caps_tasks_in_agent_steps() {
+        // llm = 2, park_extra = 1: one working + two parked = 3, no fourth.
+        assert_eq!(sessions_free(2, 1, 0, 2, Some(1)), 0);
+        // Two parked and one working leaves room under the default cap of 4 (not under 3).
+        assert_eq!(sessions_free(2, 1, 0, 2, None), 1);
+        assert_eq!(sessions_free(2, 0, 0, 2, Some(1)), 1);
+    }
+
+    #[test]
+    fn a_task_between_steps_counts_as_unclaimed() {
+        assert_eq!(sessions_free(2, 0, 1, 0, None), 1);
+        assert_eq!(sessions_free(2, 0, 2, 0, None), 0);
     }
 }
