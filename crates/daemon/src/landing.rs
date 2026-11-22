@@ -2884,6 +2884,9 @@ impl Runner {
                     true,
                     &self.members(def),
                     reuse,
+                    // The batch's lease holds this machine's slots for the whole run, so a suite
+                    // that falls back from GitHub runs under it (s911).
+                    _lease.is_some(),
                 );
                 stop.store(true, std::sync::atomic::Ordering::SeqCst);
                 r
@@ -3021,6 +3024,7 @@ impl Runner {
                 self.sink(),
                 build,
                 serial,
+                _lease.is_some(),
             );
             stop.store(true, std::sync::atomic::Ordering::SeqCst);
             r
@@ -5195,6 +5199,7 @@ impl Runner {
             false,
             &crate::suites::Members::default(),
             false,
+            _lease.is_some(),
         );
         {
             let _g = lock.lock().unwrap_or_else(|e| e.into_inner());

@@ -667,6 +667,7 @@ fn remote_check(d: &Arc<Daemon>, spec: &CheckSpec, id: &str) -> Option<Shared> {
         &spec.cwd,
         place.and_then(|(t, _)| t).map(|t| t.0),
         &spec.holds,
+        false,
     )?;
     let rs = rm::with_site_env(
         rm::with_build(
