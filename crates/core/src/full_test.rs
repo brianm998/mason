@@ -115,6 +115,54 @@ pub fn decide(
     }
 }
 
+// ---- what proves a batch (s804) ---------------------------------------------------------------
+
+/// How long a green full test may stand before untested commits send batches back to the whole
+/// suite, when the project does not say (`full_test_max_age`).
+pub const DEFAULT_MAX_AGE_MS: u64 = 36 * 3_600_000;
+
+/// What a batch with `narrow = true` runs, now.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Gate {
+    /// The narrowed selection; the full test is the backstop.
+    Narrow,
+    /// The whole suite, for this reason.
+    Whole(String),
+}
+
+/// Is the backstop standing? `runs` is the record, newest first. `commits_since(sha)` counts the
+/// commits on the base after `sha` (`None`: cannot tell, taken as some). The last full test must
+/// be green, and a green one older than `max_age_ms` must have no untested commits since. With
+/// no full test on record the whole suite runs. A red stays in force until a green full test is
+/// recorded, because the newest finished test is the one that counts.
+pub fn narrow_gate(
+    runs: &[Tested],
+    now: u64,
+    max_age_ms: u64,
+    commits_since: &dyn Fn(&str) -> Option<u64>,
+    when: &dyn Fn(u64) -> String,
+) -> Gate {
+    let Some(last) = runs.iter().find(|r| r.counts()) else {
+        return Gate::Whole("no full test is on record, so nothing backs a narrowed batch".into());
+    };
+    if last.verdict == RED {
+        return Gate::Whole(format!(
+            "the last full test ({} at {}) was red; batches run the whole suite until a full test is green",
+            short(&last.commit),
+            when(last.finished_ms)
+        ));
+    }
+    if now.saturating_sub(last.finished_ms) > max_age_ms && commits_since(&last.commit) != Some(0) {
+        return Gate::Whole(format!(
+            "the last green full test ({} at {}) is older than {} h and commits have landed since; batches run the whole suite until a full test is green",
+            short(&last.commit),
+            when(last.finished_ms),
+            max_age_ms / 3_600_000
+        ));
+    }
+    Gate::Narrow
+}
+
 // ---- quiet ---------------------------------------------------------------------------------
 
 /// Does a task in this state keep the project busy? Queued, exploring, developing, testing,
@@ -360,5 +408,51 @@ mod tests {
         .map(|s| s.to_string())
         .collect();
         assert_eq!(tasks_in(&s), vec![12, 787]);
+    }
+
+    fn run(verdict: &str, finished: u64) -> Tested {
+        Tested {
+            commit: "abcdef0123456789".into(),
+            trigger: NIGHTLY.into(),
+            started_ms: 1,
+            finished_ms: finished,
+            verdict: verdict.into(),
+        }
+    }
+
+    fn gate(runs: &[Tested], now: u64, since: Option<u64>) -> Gate {
+        narrow_gate(runs, now, DEFAULT_MAX_AGE_MS, &|_| since, &|ms| {
+            ms.to_string()
+        })
+    }
+
+    #[test]
+    fn a_fresh_green_narrows_and_a_red_or_missing_one_does_not() {
+        assert_eq!(gate(&[run(GREEN, 1000)], 2000, Some(5)), Gate::Narrow);
+        assert!(matches!(gate(&[], 2000, None), Gate::Whole(w) if w.contains("no full test")));
+        let red = gate(&[run(RED, 1000)], 2000, Some(0));
+        assert!(matches!(red, Gate::Whole(w) if w.contains("was red")));
+    }
+
+    #[test]
+    fn a_red_is_in_force_until_a_green_is_newer_and_cut_off_runs_do_not_count() {
+        let runs = [run(GREEN, 3000), run(RED, 2000)];
+        assert_eq!(gate(&runs, 4000, Some(1)), Gate::Narrow);
+        let runs = [run(CUT_OFF, 3000), run(RED, 2000), run(GREEN, 1000)];
+        assert!(matches!(gate(&runs, 4000, Some(1)), Gate::Whole(_)));
+    }
+
+    #[test]
+    fn an_old_green_with_untested_commits_goes_whole() {
+        let now = DEFAULT_MAX_AGE_MS + 5000;
+        assert!(matches!(
+            gate(&[run(GREEN, 1000)], now, Some(3)),
+            Gate::Whole(w) if w.contains("older than 36 h")
+        ));
+        assert!(matches!(
+            gate(&[run(GREEN, 1000)], now, None),
+            Gate::Whole(_)
+        ));
+        assert_eq!(gate(&[run(GREEN, 1000)], now, Some(0)), Gate::Narrow);
     }
 }
