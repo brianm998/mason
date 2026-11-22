@@ -45,6 +45,9 @@ struct SidebarPane: View {
                     }
                     .frame(width: width, alignment: .leading)
                 }
+                // A new project is a new scroll view: top offset, no stale content-height estimate from the
+                // old list (#926). Later sidebar updates keep the project, so they keep the realised rows.
+                .id(model.project)
                 .onChange(of: model.scrollTarget) { _, target in
                     guard let t = target else { return }
                     model.scrollTarget = nil
