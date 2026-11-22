@@ -1851,7 +1851,7 @@ impl TestChecks {
         if self.base_fold.is_some() {
             let store = &self.slots.d.store;
             let known = crate::knownred::known_for(store, scope);
-            let (_, new) = crate::knownred::split(&crate::rerun::failing_names(&text), &known);
+            let (new, _) = crate::knownred::split(&crate::rerun::failing_names(&text), &known);
             let _ = store.put_red_sightings(self.task, scope, &new, crate::daemon::now_ms());
         }
         let known: Vec<String> = crate::knownred::known_for(&self.slots.d.store, scope)
