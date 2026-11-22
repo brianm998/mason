@@ -348,6 +348,83 @@ fn remote_base_ref(repo: &Path, remote: &str, base: &str) -> String {
     }
 }
 
+// ---- other workflows' jobs (#766) ---------------------------------------------------------
+
+/// What the repository's other workflows (not MASON's own) are running on GitHub's runners,
+/// read from the Actions API. The list of in-progress runs is asked with its last ETag, so a 304
+/// costs nothing and leaves the count as it was, with no job lookups.
+#[derive(Default)]
+pub struct OtherWorkflows {
+    etag: Option<String>,
+    /// Running jobs of other workflows.
+    pub jobs: u32,
+    /// A short label for them: `develop CI: 7 jobs`.
+    pub label: String,
+}
+
+impl OtherWorkflows {
+    /// Look once. `own` is MASON's workflow file name (`mason-run.yml`): its runs are not
+    /// counted, the pool counts them itself. Returns whether the count may have changed.
+    pub fn poll(&mut self, gh: &GitHub, own: &str) -> Result<bool, String> {
+        let found = gh
+            .in_progress_runs(self.etag.as_deref())
+            .map_err(|e| e.to_string())?;
+        let Some((runs, etag)) = found else {
+            return Ok(false);
+        };
+        let mut by_name: std::collections::BTreeMap<String, u32> = Default::default();
+        for (id, name, path) in runs {
+            if path.rsplit('/').next() == Some(own) {
+                continue;
+            }
+            let jobs = gh.remote_run_jobs(id).map_err(|e| e.to_string())?;
+            let running = jobs.iter().filter(|j| j.status == "in_progress").count() as u32;
+            if running > 0 {
+                *by_name.entry(name).or_default() += running;
+            }
+        }
+        self.etag = etag;
+        self.jobs = by_name.values().sum();
+        self.label = by_name
+            .iter()
+            .map(|(n, j)| format!("{n}: {j} job{}", if *j == 1 { "" } else { "s" }))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Ok(true)
+    }
+}
+
+/// Keep the broker told how many jobs other workflows run, every 30 seconds, for the first
+/// project with `[remote_runs]`. Nothing runs where no project has one.
+pub fn spawn_other_workflows(d: &Arc<Daemon>) {
+    if forced_for_tests() || !any_remote(d) {
+        return;
+    }
+    let mut seen = OtherWorkflows::default();
+    crate::bg::spawn_loop(d, "other-workflows", move |weak| {
+        std::thread::sleep(Duration::from_secs(30));
+        let Some(d) = weak.upgrade() else {
+            return false;
+        };
+        let Some(p) = d
+            .projects()
+            .values()
+            .find(|p| p.services.remote.is_some())
+            .cloned()
+        else {
+            return true;
+        };
+        if let Some(site) = site_for(&d, &p.id, &p.path) {
+            match seen.poll(&site.gh, &site.workflow) {
+                Ok(true) => d.broker.set_other_workflows(seen.jobs, &seen.label),
+                Ok(false) => {}
+                Err(e) => tracing::debug!("other workflows: {e}"),
+            }
+        }
+        true
+    });
+}
+
 // ---- the snapshot -----------------------------------------------------------------------------
 
 /// The toolchains a run of `suite` needs (`rust`, `java`, `swift`); the workflow sets up only
@@ -1486,6 +1563,8 @@ fn poll(
     if run.status != "completed" {
         live.refresh(site, run.id)?;
         let jobs = &live.jobs;
+        // What the monitor shows of each job (no second read: the last answer stands).
+        crate::remote_runs::set_jobs(rec, job_view(jobs));
         if st.picked_ms.is_none() {
             if let Some(j) = jobs.iter().find(|j| {
                 is_run_job(&j.name) && matches!(j.status.as_str(), "in_progress" | "completed")
@@ -1599,6 +1678,32 @@ fn poll(
         Ok(a) => Ok(Step::Got(a)),
         Err(e) => Ok(Step::Fail(format!("run {}: {e}", run.url))),
     }
+}
+
+/// The jobs of a run as the monitor lists them.
+pub fn job_view(jobs: &[mason_adapters::github::ActionJob]) -> Vec<crate::remote_runs::Job> {
+    jobs.iter()
+        .map(|j| crate::remote_runs::Job {
+            name: j.name.clone(),
+            state: match j.status.as_str() {
+                "completed" => "done",
+                "in_progress" => "running",
+                _ => "queued",
+            }
+            .into(),
+            conclusion: j.conclusion.clone().unwrap_or_default(),
+            step: if j.status == "in_progress" {
+                j.steps
+                    .iter()
+                    .find(|s| s.status == "in_progress")
+                    .or_else(|| j.steps.iter().find(|s| s.status == "queued"))
+                    .map(|s| s.name.clone())
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            },
+        })
+        .collect()
 }
 
 /// What a run still going has looked like at the last look at its jobs.
@@ -1914,6 +2019,20 @@ pub fn remove_hold(dir: &Path, id: &str) {
     let _ = std::fs::remove_file(hold_file(dir, id));
 }
 
+/// Where a run stands, for the monitor: `queued` (pushed, or on GitHub with no runner yet),
+/// `running`, or `done`; its GitHub URL, and when a runner took it.
+pub fn run_stage(record: &Path) -> Option<(String, String, Option<u64>)> {
+    let s = State::load(record)?;
+    let stage = if s.collected {
+        "done"
+    } else if s.picked_ms.is_some() {
+        "running"
+    } else {
+        "queued"
+    };
+    Some((stage.into(), s.url, s.picked_ms))
+}
+
 /// Has the run behind this record ended? A missing record is a run that was abandoned or
 /// never began; a collected one is done.
 pub fn record_ended(record: &Path) -> bool {
@@ -2130,6 +2249,8 @@ pub fn reap_adopted(d: &Arc<Daemon>) {
 pub struct HoldGuard {
     dir: PathBuf,
     id: String,
+    hosts: PathBuf,
+    record: PathBuf,
 }
 
 impl HoldGuard {
@@ -2145,6 +2266,16 @@ impl HoldGuard {
         task: u64,
     ) -> Self {
         let holds = holds_dir(hosts);
+        crate::remote_runs::started(
+            hosts,
+            &spec.id,
+            key,
+            kind,
+            &spec.suite,
+            &spec.runs_on,
+            shards,
+            &record_path(dir, &spec.id),
+        );
         write_hold(
             &holds,
             &spec.id,
@@ -2160,12 +2291,23 @@ impl HoldGuard {
         HoldGuard {
             dir: holds,
             id: spec.id.clone(),
+            hosts: hosts.to_path_buf(),
+            record: record_path(dir, &spec.id),
         }
     }
 }
 
 impl Drop for HoldGuard {
     fn drop(&mut self) {
+        // How it ended, for the monitor, before the record can go.
+        let outcome = State::load(&self.record).filter(|s| s.collected).map(|s| {
+            if s.code == 0 && s.signal == 0 {
+                "green"
+            } else {
+                "red"
+            }
+        });
+        crate::remote_runs::finished(&self.hosts, &self.id, outcome);
         remove_hold(&self.dir, &self.id);
     }
 }
@@ -2977,6 +3119,125 @@ mod tests {
         assert_eq!(refs(&r.bare), "");
     }
 
+    fn map_text(commit: &str, main_text: &str, made_at: u64) -> String {
+        crate::covmap::CoverageMap {
+            commit: commit.into(),
+            made_at,
+            target: "crates/daemon/tests/it/main.rs".into(),
+            main_hash: crate::covmap::hash_text(main_text),
+            modules: [(
+                "holds".to_string(),
+                ["crates/daemon/src/holds.rs".to_string()].into(),
+            )]
+            .into(),
+        }
+        .encode()
+    }
+
+    #[test]
+    fn a_due_map_pushes_one_covmap_run_and_returns_the_map_it_made_and_a_fresh_one_pushes_nothing()
+    {
+        use crate::covmap::{make_remote, Want, REMOTE_COMMAND};
+        token();
+        let r = repo();
+        let t = tempfile::tempdir().unwrap();
+        let (tip, main_text) = ("0123456789abcdef0123", "mod holds;\n");
+        let text = map_text(tip, main_text, 5_000);
+        let zip = artifact(t.path(), "built\n", 0, Some(("covmap.kv", &text)));
+        let gh = FakeGh::new(&r, &zip, Mode::Normal);
+        let s = site(&r, gh.clone(), clock(), false);
+        let logs = tempfile::tempdir().unwrap();
+        let want = Want {
+            old: None,
+            tip,
+            main_text,
+            changed_src: true,
+            now_secs: 5_000,
+        };
+        let m = make_remote(
+            &s,
+            &want,
+            "proj",
+            logs.path(),
+            Duration::from_secs(600),
+            &|| None,
+        )
+        .unwrap()
+        .expect("a map was due");
+        assert_eq!(m.commit, tip);
+        assert!(m.knows("crates/daemon/src/holds.rs"));
+        assert_eq!(gh.runs_seen.lock().unwrap().len(), 1, "one run was pushed");
+        // The runner was told what to run, and that it is a covmap run.
+        let rec = read_kv(&record_path(logs.path(), "covmap-0123456789ab")).unwrap();
+        assert_eq!(rec["sha"].len(), 40);
+        let run_json = git_ok(
+            &r.bare,
+            &["show", &format!("{}:.mason/run.json", rec["sha"])],
+        );
+        let j: serde_json::Value = serde_json::from_str(&run_json).unwrap();
+        assert_eq!(j["suite"], "covmap");
+        assert_eq!(j["command"], REMOTE_COMMAND);
+        assert_eq!(j["results_file"], "covmap.kv");
+        assert_eq!(j["env"]["MASON_COVMAP_COMMIT"], tip);
+
+        // A fresh map for the same main.rs: nothing is pushed.
+        let gh2 = FakeGh::new(&r, &zip, Mode::Normal);
+        let s2 = site(&r, gh2.clone(), clock(), false);
+        let fresh = Want {
+            old: Some(&m),
+            tip: "fedcba9876543210fedc",
+            main_text,
+            changed_src: true,
+            now_secs: 5_000 + 3600,
+        };
+        let none = make_remote(
+            &s2,
+            &fresh,
+            "proj",
+            logs.path(),
+            Duration::from_secs(600),
+            &|| None,
+        )
+        .unwrap();
+        assert!(none.is_none());
+        assert!(gh2.requests().is_empty(), "{:?}", gh2.requests());
+        assert_eq!(refs(&r.bare), "");
+    }
+
+    #[test]
+    fn a_map_of_another_commit_is_not_kept() {
+        use crate::covmap::{make_remote, Want};
+        token();
+        let r = repo();
+        let t = tempfile::tempdir().unwrap();
+        let zip = artifact(
+            t.path(),
+            "built\n",
+            0,
+            Some(("covmap.kv", &map_text("other", "mod x;\n", 1))),
+        );
+        let gh = FakeGh::new(&r, &zip, Mode::Normal);
+        let s = site(&r, gh, clock(), false);
+        let logs = tempfile::tempdir().unwrap();
+        let want = Want {
+            old: None,
+            tip: "0123456789abcdef0123",
+            main_text: "mod x;\n",
+            changed_src: true,
+            now_secs: 1,
+        };
+        let e = make_remote(
+            &s,
+            &want,
+            "proj",
+            logs.path(),
+            Duration::from_secs(600),
+            &|| None,
+        )
+        .unwrap_err();
+        assert!(e.contains("not of"), "{e}");
+    }
+
     #[test]
     fn a_skip_while_queued_or_running_cancels_the_run_and_deletes_the_ref() {
         token();
@@ -3343,6 +3604,7 @@ mod tests {
             name: name.into(),
             status: status.into(),
             started_at: None,
+            conclusion: None,
             steps: steps
                 .iter()
                 .map(|(n, st, at)| mason_adapters::github::ActionStep {
@@ -3650,5 +3912,88 @@ mod tests {
     fn job_names_of_a_sharded_run_are_run_jobs() {
         assert!(is_run_job("run") && is_run_job("run (3)"));
         assert!(!is_run_job("plan") && !is_run_job("running"));
+    }
+
+    /// An Actions API that lists in-progress runs with an ETag and counts the requests.
+    struct FakeActions {
+        etag: Mutex<String>,
+        running: Mutex<u32>,
+        log: Mutex<Vec<String>>,
+    }
+
+    impl Http for FakeActions {
+        fn send(
+            &self,
+            r: &mason_adapter_api::http::Request,
+        ) -> Result<mason_adapter_api::http::Response, mason_adapter_api::http::Transport> {
+            use mason_adapter_api::http::Response;
+            self.log.lock().unwrap().push(r.url.clone());
+            let ok = |body: serde_json::Value, etag: Option<String>| {
+                Ok(Response {
+                    status: 200,
+                    headers: etag.map(|e| ("etag".to_string(), e)).into_iter().collect(),
+                    body: body.to_string(),
+                })
+            };
+            if r.url.contains("/actions/runs?status=in_progress") {
+                let etag = self.etag.lock().unwrap().clone();
+                if r.headers
+                    .iter()
+                    .any(|(k, v)| k == "If-None-Match" && *v == etag)
+                {
+                    return Ok(Response {
+                        status: 304,
+                        headers: vec![],
+                        body: String::new(),
+                    });
+                }
+                return ok(
+                    serde_json::json!({"workflow_runs": [
+                        {"id": 1, "name": "CI", "path": ".github/workflows/ci.yml"},
+                        {"id": 2, "name": "MASON run", "path": ".github/workflows/mason-run.yml"}]}),
+                    Some(etag),
+                );
+            }
+            if r.url.contains("/actions/runs/1/jobs") {
+                let n = *self.running.lock().unwrap();
+                let jobs: Vec<_> = (0..n)
+                    .map(|i| serde_json::json!({"name": format!("j{i}"), "status": "in_progress"}))
+                    .collect();
+                return ok(serde_json::json!({"jobs": jobs}), None);
+            }
+            Err(mason_adapter_api::http::Transport(format!(
+                "unexpected {}",
+                r.url
+            )))
+        }
+    }
+
+    #[test]
+    fn other_workflows_are_counted_and_a_304_changes_nothing_and_asks_for_nothing_more() {
+        let api = Arc::new(FakeActions {
+            etag: Mutex::new("\"a\"".into()),
+            running: Mutex::new(3),
+            log: Mutex::new(vec![]),
+        });
+        let gh = GitHub::new(
+            api.clone(),
+            "https://api.github.com",
+            "o/r",
+            TokenRef::Env("MASON_TEST_REMOTE_TOKEN".into()),
+        );
+        let mut seen = OtherWorkflows::default();
+        assert!(seen.poll(&gh, "mason-run.yml").unwrap());
+        assert_eq!((seen.jobs, seen.label.as_str()), (3, "CI: 3 jobs"));
+        let asked = api.log.lock().unwrap().len();
+        // The jobs finish but GitHub says nothing changed: the count stays, and only the one
+        // conditional request is made.
+        *api.running.lock().unwrap() = 0;
+        assert!(!seen.poll(&gh, "mason-run.yml").unwrap());
+        assert_eq!(seen.jobs, 3);
+        assert_eq!(api.log.lock().unwrap().len(), asked + 1);
+        // A new ETag: the new count is read.
+        *api.etag.lock().unwrap() = "\"b\"".into();
+        assert!(seen.poll(&gh, "mason-run.yml").unwrap());
+        assert_eq!(seen.jobs, 0);
     }
 }

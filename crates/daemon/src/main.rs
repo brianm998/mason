@@ -30,6 +30,10 @@ fn main() {
         );
         return;
     }
+    // `masond covmap-job`: what a GitHub runner runs to make the coverage map (#780).
+    if std::env::args().nth(1).as_deref() == Some("covmap-job") {
+        std::process::exit(mason_daemon::covmap::job_main());
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
