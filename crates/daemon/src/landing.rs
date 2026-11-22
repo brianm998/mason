@@ -2576,6 +2576,12 @@ impl Runner {
                     // Red after it was green, or a conflict with the moved base: assemble again.
                     Ok(PrEnd::Red) | Ok(PrEnd::Conflict) => continue 'outer,
                     Ok(PrEnd::BaseKeptMoving) => {
+                        // Contention, not the change's fault: queue the tasks again.
+                        for t in &active {
+                            if !deferred.contains(&t.id) {
+                                deferred.push(t.id);
+                            }
+                        }
                         break Err(format!(
                             "the base moved more than {} times while landing",
                             self.cfg.max_fold
@@ -2611,6 +2617,12 @@ impl Runner {
                 Ok(Err(_red)) => continue 'outer, // red after folding: assemble on the new base, blame properly
                 Ok(Ok(Finish::Conflict(_))) => continue 'outer, // the conflict shows up as an ejection
                 Ok(Ok(Finish::BaseKeptMoving)) => {
+                    // Contention, not the change's fault: queue the tasks again.
+                    for t in &active {
+                        if !deferred.contains(&t.id) {
+                            deferred.push(t.id);
+                        }
+                    }
                     break Err(format!(
                         "the base moved more than {} times while landing",
                         self.cfg.max_fold
