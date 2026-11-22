@@ -962,6 +962,14 @@ impl Daemon {
             .unwrap_or_default()
         {
             if s.info.id.starts_with(prefix)
+                && s.state == mason_step_host::registry::HostState::Lost
+            {
+                // Gone, or its pid is another process now. Kill only what is verifiably the
+                // recorded process (nothing, for a reused pid); the sweep then moves the
+                // directory away like any closed run's.
+                tracing::warn!(host = %s.info.id, prefix, "reaping a lost host");
+                mason_step_host::registry::reap_dir_by(&s.info.dir, "daemon: reaping a lost host");
+            } else if s.info.id.starts_with(prefix)
                 && s.state == mason_step_host::registry::HostState::Running
             {
                 tracing::warn!(host = %s.info.id, prefix, "stopping a step host");
