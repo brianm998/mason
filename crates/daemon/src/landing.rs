@@ -3451,6 +3451,7 @@ impl Runner {
                 id_prefix: format!("{prefix}-new-{name}"),
                 log_dir: log_dir.to_path_buf(),
                 cmd,
+                build: None,
                 cwd: wt.to_path_buf(),
                 env: vec![],
                 limit: self.project().test_timeout,
