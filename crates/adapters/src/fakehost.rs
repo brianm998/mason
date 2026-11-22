@@ -130,15 +130,25 @@ impl FakeHost {
         let work = self.dir.join("work").join(sha);
         let _ = std::fs::remove_dir_all(&work);
         let _ = std::fs::create_dir_all(&work);
-        use mason_platform::shell::{shell_command, to_shell_path};
-        let archive = format!(
-            "git --git-dir='{}' archive {sha} | tar -x -C '{}'",
-            to_shell_path(&self.remote),
-            to_shell_path(&work)
-        );
-        let archived = shell_command(&archive)
-            .and_then(|mut c| c.status().map_err(|e| e.to_string()))
-            .is_ok_and(|s| s.success());
+        use mason_platform::shell::shell_command;
+        // Materialise the tree with git alone (no tar, no shell): a temporary index kept
+        // outside the work tree.
+        let index = self.dir.join("work").join(format!("{sha}.index"));
+        let git_in = |args: &[&str]| -> bool {
+            Command::new("git")
+                .arg("--git-dir")
+                .arg(&self.remote)
+                .arg("--work-tree")
+                .arg(&work)
+                .args(args)
+                .env("GIT_INDEX_FILE", &index)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .current_dir(&work)
+                .output()
+                .is_ok_and(|o| o.status.success())
+        };
+        let archived = git_in(&["read-tree", sha]) && git_in(&["checkout-index", "-a", "-f"]);
+        let _ = std::fs::remove_file(&index);
         let out = if archived {
             shell_command(cmd)
                 .ok()
