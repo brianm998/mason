@@ -200,6 +200,8 @@ public final class MonitorModel {
     public var confirmingDaemonUpdate = false
     /// The Land now the owner pressed and has not yet confirmed (the landing queue's one-line confirm).
     public var landNowAsk: LandNowTarget?
+    /// The placement change the owner chose and has not yet confirmed (#834).
+    public var placementAsk: PlacementAsk?
 
     /// The button was pressed: ask first if the daemon says to, else act.
     public func pressUpdateDaemon() {

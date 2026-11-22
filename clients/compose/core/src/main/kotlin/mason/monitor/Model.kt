@@ -62,6 +62,8 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     var pairOffer by mutableStateOf<PairOffer?>(null)
     var devicesNotice by mutableStateOf<String?>(null)
     var lastSeq by mutableStateOf(0L)
+    /** Highest seq of a view update actually applied; events and stale views never move it. */
+    var lastViewSeq = 0L
     /** The highest sequence number of a view applied so far; an older one is dropped. */
     private val appliedViewSeq = HashMap<String, Long>()
 
@@ -181,6 +183,8 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
 
     /** The Land now the owner pressed and has not yet confirmed (the landing queue's one-line confirm). */
     var landNowAsk by mutableStateOf<LandNowTarget?>(null)
+    /** The placement change the owner chose and has not yet confirmed (#834). */
+    var placementAsk by mutableStateOf<PlacementAsk?>(null)
 
     /** The button was pressed: ask first if the daemon says to, else act. */
     fun pressUpdateDaemon() {
@@ -967,7 +971,7 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
             reconnecting = false
             announcer.connectionRestored()
             pending = emptyMap()
-            if (w.resume == ResumeKind.SNAPSHOT) { lastSeq = 0; appliedViewSeq.clear() }
+            if (w.resume == ResumeKind.SNAPSHOT) { lastSeq = 0; lastViewSeq = 0; appliedViewSeq.clear() }
             daemonVersion = w.version
             localDaemon = w.role.isEmpty()
             // A build asked for on the connection that just went has no answer coming.
@@ -989,6 +993,7 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
             val stale = kind != null && u.seq > 0 && u.seq < (appliedViewSeq[kind] ?: 0L)
             lastSeq = max(lastSeq, u.seq)
             if (!stale) {
+                lastViewSeq = max(lastViewSeq, u.seq)
                 if (kind != null) appliedViewSeq[kind] = max(appliedViewSeq[kind] ?: 0L, u.seq)
                 u.view?.let(::apply)
             }

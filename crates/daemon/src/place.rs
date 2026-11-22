@@ -401,6 +401,16 @@ pub fn status(d: &Daemon) -> Value {
 /// reload`). The file's comments and other keys stay. A project with no `[remote_runs]` is
 /// always local, so there is nothing to set and the answer says so.
 pub fn set_project_mode(d: &Daemon, project: &str, to: Mode) -> Result<Value, (u16, String)> {
+    write_project_mode(d, project, Some(to))
+}
+
+/// Remove `[remote_runs] mode` (and the old `fallback`), so the project follows the global mode
+/// again ("Follow MASON" in the monitors).
+pub fn clear_project_mode(d: &Daemon, project: &str) -> Result<Value, (u16, String)> {
+    write_project_mode(d, project, None)
+}
+
+fn write_project_mode(d: &Daemon, project: &str, to: Option<Mode>) -> Result<Value, (u16, String)> {
     let _one = EDITING.lock().unwrap_or_else(|e| e.into_inner());
     if d.project_id_by_name(project).is_none() {
         return Err((404, format!("no project {project:?}")));
@@ -424,7 +434,15 @@ pub fn set_project_mode(d: &Daemon, project: &str, to: Mode) -> Result<Value, (u
             format!("{project} has no [remote_runs], so it always runs here; add one first"),
         ));
     };
-    t.insert("mode", value(to.name()));
+    match to {
+        Some(m) => {
+            t.insert("mode", value(m.name()));
+        }
+        None => {
+            t.remove("mode");
+            t.remove("fallback");
+        }
+    }
     let tmp = path.with_extension("toml.tmp");
     std::fs::write(&tmp, doc.to_string()).map_err(|e| (500, format!("{}: {e}", tmp.display())))?;
     std::fs::rename(&tmp, &path).map_err(|e| {
@@ -434,7 +452,62 @@ pub fn set_project_mode(d: &Daemon, project: &str, to: Mode) -> Result<Value, (u
     let changed = d
         .reload_registration(project)
         .map_err(|e| (400, e.join("; ")))?;
-    Ok(json!({"project": project, "mode": to.name(), "source": "project", "changed": changed}))
+    let (mode, source) = project_effective(d, project);
+    Ok(json!({"project": project, "mode": mode.name(), "source": source, "changed": changed}))
+}
+
+/// The placement of a task as the views carry it: the mode in force and the level that set it.
+/// `project` is the task's project name; `None` for no task.
+pub fn task_placement(d: &Daemon, project: &str, task: u64) -> mason_protocol::Placement {
+    let mut f = Facts::plain(read_global(d).0);
+    f.task = task_choice(d, Some(task));
+    f.project = project_mode(d, project);
+    let has = has_remote(d, project);
+    let (m, s) = if has {
+        f.effective()
+    } else {
+        (Mode::Local, Source::Project)
+    };
+    mason_protocol::Placement {
+        mode: m.name().into(),
+        source: s.key().into(),
+        own: f.task.is_some(),
+        settable: true,
+    }
+}
+
+/// A project's placement: its own mode, else the global one. A project with no `[remote_runs]`
+/// always runs here and cannot be set.
+pub fn project_placement(d: &Daemon, project: &str) -> mason_protocol::Placement {
+    let own = project_mode(d, project);
+    let (m, s) = project_effective(d, project);
+    let settable = has_remote(d, project);
+    mason_protocol::Placement {
+        mode: m.name().into(),
+        source: if settable {
+            s.to_string()
+        } else {
+            "project".into()
+        },
+        own: own.is_some(),
+        settable,
+    }
+}
+
+/// The global placement, for the home view.
+pub fn global_placement(d: &Daemon) -> mason_protocol::Placement {
+    mason_protocol::Placement {
+        mode: read_global(d).0.name().into(),
+        source: "global".into(),
+        own: true,
+        settable: true,
+    }
+}
+
+fn has_remote(d: &Daemon, project: &str) -> bool {
+    d.project_id_by_name(project)
+        .and_then(|p| d.project(p))
+        .is_some_and(|p| p.services.remote.is_some())
 }
 
 // ---- the facts of a real run ---------------------------------------------------------------

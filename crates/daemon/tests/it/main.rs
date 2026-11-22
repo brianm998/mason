@@ -61,6 +61,7 @@ mod outside;
 mod owner_session;
 mod panics;
 mod pause_banners;
+mod placement_monitors;
 mod plugin_adapters;
 mod plugins;
 mod port;
