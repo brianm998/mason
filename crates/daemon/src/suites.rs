@@ -457,6 +457,7 @@ fn run_hosted_resuming(
         let build = place.and_then(|(_, s)| s.build.as_deref());
         if let Some(ran) = run_remote(
             d, project, id, build, cmd, cwd, limit, log_dir, &check, run, watch, &env, &runs_on,
+            covered,
         )? {
             return Ok(ran);
         }
@@ -557,8 +558,9 @@ fn run_hosted_resuming(
     }
 }
 
-/// A suite command run on GitHub Actions. `Ok(None)`: it could not go remote and the project's
-/// `fallback` is `local`, so the caller runs it here. An outage or a missing runner is an `Err`
+/// A suite command run on GitHub Actions. `covered`: the caller holds this machine's slots for
+/// the run, so a fallback's room check does not count them against it. `Ok(None)`: it could not
+/// go remote and the project's `fallback` is `local`, so the caller runs it here. An outage or a missing runner is an `Err`
 /// that [`crate::remote::environmental`] recognizes.
 #[allow(clippy::too_many_arguments)]
 fn run_remote(
@@ -575,11 +577,12 @@ fn run_remote(
     watch: Option<&Suite>,
     env: &[(String, String)],
     runs_on: &str,
+    covered: bool,
 ) -> Result<Option<Ran>, String> {
     use crate::remote as rm;
     let task = run.and_then(|r| d.world().ok().and_then(|w| w.task_of_open_run(r)));
     let uses = watch.map(|s| s.uses.clone()).unwrap_or_default();
-    let Some(site) = rm::site_for_run(d, project, cwd, task.map(|t| t.0), &uses) else {
+    let Some(site) = rm::site_for_run(d, project, cwd, task.map(|t| t.0), &uses, covered) else {
         return Err(rm::env_err("the project has no [remote_runs] section"));
     };
     // A suite whose build runs as its own step here goes in `RunSpec.build`, which the runner
