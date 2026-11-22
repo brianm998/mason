@@ -852,6 +852,22 @@ fn home_rows(d: &Arc<Daemon>) -> (Vec<(u64, String, String)>, u32) {
     (rows, h.sessions_used)
 }
 
+fn diag(d: &Arc<Daemon>, want: &[(u64, &str)]) -> String {
+    let mut out = String::new();
+    let wv = d.broker.wait_view();
+    for (t, _) in want {
+        let id = TaskId(*t);
+        out += &format!(
+            "task {t}: {:?}; explain {:?}; wait_view {:?}; progress {:?}\n",
+            task_of(d, id).state,
+            d.broker.explain_task(id),
+            wv.tasks.get(t),
+            d.progress_of_task(id),
+        );
+    }
+    out
+}
+
 /// Poll (one generous deadline, no timing assertion) until the active list is exactly
 /// `want` (task, state), each on `llm:claude` when waiting for a slot; returns sessions_used.
 fn wait_active(d: &Arc<Daemon>, want: &[(u64, &str)]) -> u32 {
@@ -875,7 +891,8 @@ fn wait_active(d: &Arc<Daemon>, want: &[(u64, &str)]) -> u32 {
         }
         assert!(
             std::time::Instant::now() < end,
-            "active list never became {exp:?}; last {rows:?}"
+            "active list never became {exp:?}; last {rows:?}; {}",
+            diag(d, want)
         );
         std::thread::sleep(Duration::from_millis(20));
     }
