@@ -4233,9 +4233,49 @@ fn finish_agent(c: &Ctx, report: StepReport, dir: &Path) {
         StepEnd::Asked { question } => Some(question.clone()),
         _ => None,
     };
-    finish_agent_inner(c, report, dir);
-    // The analyst's findings (Part 14), read from the file it wrote in its worktree.
-    crate::introspect::ingest_analyst(&c.d, c.task, &c.project.id, &c.wt, dir);
+    // The analyst's findings (Part 14), read from the file it wrote in its worktree. Its
+    // result is the findings: a readable file ends the task here, with no test, review or
+    // land (its branch is never merged, so any commit it made is dropped); a missing or
+    // unreadable one sends it back to develop.
+    let analyst_done = c.state == State::Developing
+        && matches!(&report.end, StepEnd::Accepted { tool, .. } if tool != "submit_close")
+        && match crate::introspect::ingest_analyst(&c.d, c.task, &c.project.id, &c.wt, dir) {
+            crate::introspect::Ingest::Done => true,
+            crate::introspect::Ingest::NotAnalyst => false,
+            crate::introspect::Ingest::Missing => {
+                c.conclude(
+                    Outcome::Red,
+                    "no analyst result".into(),
+                    Some(format!(
+                        "There is no {} in the root of your worktree. Write it as the task says.",
+                        crate::introspect::ANALYST_FILE
+                    )),
+                );
+                c.release_lease();
+                return;
+            }
+            crate::introspect::Ingest::Unreadable(e) => {
+                c.conclude(
+                    Outcome::Red,
+                    "analyst result unreadable".into(),
+                    Some(format!(
+                        "{} could not be read: {e}. Write it again as the task says.",
+                        crate::introspect::ANALYST_FILE
+                    )),
+                );
+                c.release_lease();
+                return;
+            }
+        };
+    if analyst_done {
+        let _ = std::fs::remove_file(dir.join("feedback.txt"));
+        c.emit(EventKind::ClosedNoChange {
+            task: c.task,
+            reason: "analyst result ingested; the findings are filed".into(),
+        });
+    } else {
+        finish_agent_inner(c, report, dir);
+    }
     // Triage (off unless the project turns it on) only records what it would do; the
     // question is the owner's either way.
     if let Some(q) = asked {
@@ -5561,7 +5601,9 @@ mod tests {
         sh(&dir, &["add", "-A"]);
         sh(&dir, &["commit", "-qm", "tests and docs only"]);
         let head = git::rev_parse(&dir, "HEAD").unwrap();
-        let note = dir.join("source-free.txt");
+        // Outside the repository, as in production (the task dir): a note written into the
+        // worktree is an untracked file, and the next submit refuses the dirty tree.
+        let note = tempfile::tempdir().unwrap().keep().join("source-free.txt");
         let v = change_validator(
             dir.clone(),
             "main".into(),
