@@ -2346,3 +2346,72 @@ fn batch_actions(phase: &str, running: bool) -> Vec<String> {
         vec![]
     }
 }
+
+#[cfg(test)]
+mod batch_state_tests {
+    use super::*;
+
+    fn facts<'a>(
+        phase: &'a str,
+        note: &'a str,
+        round: u64,
+        phase_ms: u64,
+        typical_ms: Option<u64>,
+    ) -> BatchFacts<'a> {
+        BatchFacts {
+            phase,
+            note,
+            round,
+            total: 5,
+            landed: &[],
+            parked: &[],
+            phase_ms,
+            typical_ms,
+            frozen: false,
+        }
+    }
+
+    fn row(batch: u64, phase: &str, at: u64) -> mason_store::BatchPhaseRow {
+        mason_store::BatchPhaseRow {
+            batch,
+            phase: phase.into(),
+            at,
+        }
+    }
+
+    #[test]
+    fn a_red_batch_in_a_split_round_is_a_warning_not_running_suites() {
+        let s = batch_state(&facts("red", "lint is red in lint (3 tests)", 1, 1_000, None));
+        assert_eq!(s.severity, "warn");
+        assert!(s.text.contains("splitting (round 1, 5 tasks left)"), "{}", s.text);
+        assert!(!s.text.contains("running suites"));
+    }
+
+    #[test]
+    fn a_batch_verifying_past_stuck_after_is_stuck() {
+        let limit = stuck_after(Some(60_000));
+        assert_eq!(limit, 180_000);
+        let s = batch_state(&facts("verifying", "", 1, limit + 1, Some(60_000)));
+        assert_eq!(s.severity, "stuck");
+        let s = batch_state(&facts("verifying", "", 1, limit - 1, Some(60_000)));
+        assert_eq!(s.severity, "ok");
+        assert_eq!(stuck_after(None), 30 * 60_000);
+    }
+
+    #[test]
+    fn typical_time_is_the_median_of_three_phase_durations_and_absent_with_fewer() {
+        let rows = vec![
+            row(1, "verifying", 0),
+            row(1, "promoting", 100),
+            row(2, "verifying", 0),
+            row(2, "promoting", 300),
+            row(3, "verifying", 0),
+            row(3, "promoting", 200),
+            row(4, "verifying", 0),
+        ];
+        let finished = std::collections::HashMap::new();
+        let d = phase_durations(&rows, &finished, 4, "verifying");
+        assert_eq!(typical_from(&d), Some(200));
+        assert_eq!(typical_from(&d[..2]), None);
+    }
+}
