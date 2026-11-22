@@ -221,6 +221,10 @@ pub fn encode(k: &EventKind) -> (&'static str, String) {
             w.n(project.0).s(name);
             "project_registered"
         }
+        ProjectRenamed { project, name } => {
+            w.n(project.0).s(name);
+            "project_renamed"
+        }
         TaskFiled {
             project,
             title,
@@ -411,6 +415,10 @@ pub fn decode(kind: &str, payload: &str) -> Result<EventKind, CodecError> {
             project: ProjectId(r.n()?),
             name: r.s()?,
         },
+        "project_renamed" => ProjectRenamed {
+            project: ProjectId(r.n()?),
+            name: r.s()?,
+        },
         "task_filed" => TaskFiled {
             project: ProjectId(r.n()?),
             title: r.s()?,
@@ -559,6 +567,10 @@ mod tests {
         let t = TaskId(7);
         vec![
             ProjectRegistered {
+                project: ProjectId(1),
+                name: nasty.into(),
+            },
+            ProjectRenamed {
                 project: ProjectId(1),
                 name: nasty.into(),
             },

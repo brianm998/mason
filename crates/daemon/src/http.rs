@@ -1578,6 +1578,34 @@ async fn project_register(Shared(d): Shared<Arc<Daemon>>, Path(name): Path<Strin
     }
 }
 
+/// Rename a project and keep its history (`mason project rename`). Without `"yes": true` it
+/// answers with the plan and changes nothing.
+async fn project_rename(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Path(name): Path<String>,
+    Json(b): Json<Value>,
+) -> Res {
+    let who = who_of(&headers);
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || {
+            let yes = b["yes"].as_bool().unwrap_or(false);
+            if yes {
+                owner_only(&d2, &who, "rename a project")?;
+            }
+            let new = b["name"].as_str().unwrap_or_default().to_string();
+            Ok::<_, (StatusCode, Json<Value>)>(match d2.rename_project(&name, &new, yes) {
+                Ok(v) => v,
+                Err(errors) => json!({"result": "refused", "errors": errors}),
+            })
+        })
+        .await
+        .map_err(pool_err)??;
+    Ok(Json(v))
+}
+
 /// Every step's settings after the five layers, and where each came from.
 async fn project_config(Shared(d): Shared<Arc<Daemon>>, Path(name): Path<String>) -> Res {
     let pid = project_of(&d, &name)?;
@@ -4004,6 +4032,7 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/projects/{name}/editor/{what}", post(editor_history))
         .route("/projects/{name}/reload", post(project_reload))
         .route("/projects/{name}/register", post(project_register))
+        .route("/projects/{name}/rename", post(project_rename))
         .route(
             "/projects/{name}/registration/reload",
             post(registration_reload),

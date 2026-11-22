@@ -1145,6 +1145,58 @@ impl Store {
         })
     }
 
+    /// After a project is renamed (`ProjectRenamed`): move every row that names it by text to
+    /// the new name, in one transaction. The tables are found from the schema (every table
+    /// with a TEXT `project` column), so a table added later is covered. The keys built from
+    /// the name move too: `meta` `def:<name>`, `alerts` `paused:<name>:<mode>` and
+    /// `schedules.name` `analyst:<name>`. Returns the number of rows changed.
+    pub fn rename_project(&self, old: &str, new: &str) -> Result<usize, StoreError> {
+        let (old, new) = (old.to_string(), new.to_string());
+        self.write(move |c| {
+            let tx = c.unchecked_transaction()?;
+            let quote = |n: &str| format!("\"{}\"", n.replace('"', "\"\""));
+            let names: Vec<String> = {
+                let mut st = tx.prepare(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+                )?;
+                let rows = st.query_map([], |r| r.get::<_, String>(0))?;
+                rows.collect::<rusqlite::Result<_>>()?
+            };
+            let mut changed = 0;
+            for n in names {
+                let cols: Vec<(String, String)> = {
+                    let mut ti = tx.prepare(&format!("PRAGMA table_info({})", quote(&n)))?;
+                    let rows = ti.query_map([], |r| Ok((r.get(1)?, r.get(2)?)))?;
+                    rows.collect::<rusqlite::Result<_>>()?
+                };
+                if cols
+                    .iter()
+                    .any(|(col, ty)| col == "project" && ty.eq_ignore_ascii_case("TEXT"))
+                {
+                    changed += tx.execute(
+                        &format!("UPDATE {} SET project = ?2 WHERE project = ?1", quote(&n)),
+                        params![old, new],
+                    )?;
+                }
+            }
+            changed += tx.execute(
+                "UPDATE meta SET key = ?2 WHERE key = ?1",
+                params![format!("def:{old}"), format!("def:{new}")],
+            )?;
+            let (po, pn) = (format!("paused:{old}:"), format!("paused:{new}:"));
+            changed += tx.execute(
+                "UPDATE alerts SET key = ?2 || substr(key, length(?1) + 1) WHERE substr(key, 1, length(?1)) = ?1",
+                params![po, pn],
+            )?;
+            changed += tx.execute(
+                "UPDATE schedules SET name = ?2 WHERE name = ?1",
+                params![format!("analyst:{old}"), format!("analyst:{new}")],
+            )?;
+            tx.commit()?;
+            Ok(changed)
+        })
+    }
+
     /// Lift pauses: those of `project` (empty: the global ones) in `mode`
     /// (empty: any). Returns how many.
     pub fn remove_pauses(&self, project: &str, mode: &str) -> Result<usize, StoreError> {

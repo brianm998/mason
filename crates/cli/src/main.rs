@@ -161,6 +161,7 @@ mason: command-line client for the MASON pipeline
   mason editor show|op|undo|redo|discard|simulate|apply [--project P]   the pipeline editor, without a screen
   mason definition show [--project P] | reload [--project P]
   mason project reload [--project P]      re-read ~/.config/mason/projects/P.toml, no restart
+  mason project rename OLD NEW [--yes]    rename a project and keep its history (lists first without --yes)
   mason extension list|show|approve [NAME] [--project P]   project extensions; approving is the owner's
   mason lan status                    whether LAN access is on, its port and certificate fingerprint
   mason pair [--viewer]               a one-time code (and mason://pair URL) for a phone; 120 s
@@ -1172,7 +1173,47 @@ fn main() {
             }
         }
         "project" => {
-            let sub = a.pos().unwrap_or_else(|| die("project what? reload"));
+            let sub = a.pos().unwrap_or_else(|| die("project what? reload or rename"));
+            if sub == "rename" {
+                let yes = a.flag("--yes") || a.flag("-y");
+                let old = a.pos().unwrap_or_else(|| die("rename which project? mason project rename OLD NEW"));
+                let new = a.pos().unwrap_or_else(|| die("rename it to what? mason project rename OLD NEW"));
+                finish(&a);
+                let r = or_die(d.call(
+                    "POST",
+                    &format!("/projects/{old}/rename"),
+                    Some(&json!({"name": new, "yes": yes})),
+                ));
+                if json_out {
+                    return println!("{r:#}");
+                }
+                if r["result"] == "refused" {
+                    println!("Refused; nothing was changed:");
+                    r["errors"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .for_each(|e| println!("  {e}"));
+                    exit(1);
+                }
+                let done = r["result"] == "renamed";
+                println!("{}", if done { "Renamed:" } else { "Would:" });
+                for x in r["actions"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+                    println!("  {x}");
+                }
+                let kept: Vec<&str> = r["branches_left"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                if !kept.is_empty() {
+                    println!("Branches still carrying the old name (left alone):");
+                    kept.iter().for_each(|b| println!("  {b}"));
+                }
+                if done {
+                    println!("{old} is now {new}; {} rows rewritten", r["rows"]);
+                } else {
+                    println!("Nothing was changed. Run `mason project rename {old} {new} --yes` to do it.");
+                }
+                return;
+            }
             if sub != "reload" {
                 die(&format!("unknown project command {sub:?}\n\n{HELP}"));
             }

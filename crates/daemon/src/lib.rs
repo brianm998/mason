@@ -69,6 +69,7 @@ pub mod progress;
 pub mod prompts;
 pub mod proposals;
 pub mod protect;
+pub mod rename;
 pub mod providers;
 pub mod release;
 pub mod remote;
