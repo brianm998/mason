@@ -1622,6 +1622,7 @@ impl Runner {
                 deliver(d, TaskId(pk.task), pk.verdict());
             }
             rounds += 1;
+            let _ = self.d.store.set_batch_round(batch_id, rounds as u64);
             self.stopped
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -2402,6 +2403,7 @@ impl Runner {
                             id_prefix: format!("b{batch_id}-{prefix}"),
                             log_dir: log_dir.clone(),
                             cmd: cmd.to_string(),
+                            build: None,
                             cwd: wt_for_cmd.clone(),
                             env: vec![],
                             limit: p.test_timeout,
@@ -2450,7 +2452,7 @@ impl Runner {
                                 return false;
                             }
                         };
-                        match crate::hostedcheck::run(d, &spec("rebuild", build, false)) {
+                        match self.check_through_outage(d, &spec("rebuild", build, false)) {
                             Ok(o) if o.stopped.is_some() => {
                                 tracing::info!(
                                     batch = batch_id,
@@ -2508,7 +2510,7 @@ impl Runner {
                         }
                     };
                     let spec = spec("retest", &cmds.test, true);
-                    return match crate::hostedcheck::run(d, &spec) {
+                    return match self.check_through_outage(d, &spec) {
                         Ok(o) if o.stopped.is_some() => {
                             tracing::info!(
                                 batch = batch_id,
@@ -3253,6 +3255,7 @@ impl Runner {
                 id_prefix: format!("{prefix}-fast-{name}"),
                 log_dir: log_dir.to_path_buf(),
                 cmd,
+                build: None,
                 cwd: wt.to_path_buf(),
                 env: vec![],
                 limit: self.project().test_timeout,
@@ -3266,7 +3269,7 @@ impl Runner {
                 place: Some((None, Box::new(crate::hostedcheck::without_build(suite)))),
                 global: false,
             };
-            match crate::hostedcheck::run(d, &spec) {
+            match self.check_through_outage(d, &spec) {
                 Ok(o) if o.stopped.is_some() => out.notes.push(format!(
                     "{name}: fast tier not run to the end: {}",
                     o.stopped.unwrap_or_default()
@@ -3449,6 +3452,7 @@ impl Runner {
                 id_prefix: format!("{prefix}-new-{name}"),
                 log_dir: log_dir.to_path_buf(),
                 cmd,
+                build: None,
                 cwd: wt.to_path_buf(),
                 env: vec![],
                 limit: self.project().test_timeout,
@@ -3612,6 +3616,7 @@ impl Runner {
                 id_prefix: format!("{prefix}-lint-{name}"),
                 log_dir: log_dir.to_path_buf(),
                 cmd: suite.command.clone(),
+                build: None,
                 cwd: wt.to_path_buf(),
                 env: vec![],
                 limit: self.project().test_timeout,
@@ -3658,7 +3663,7 @@ impl Runner {
                     format!("{s}s")
                 }
             };
-            match crate::hostedcheck::run(d, &spec) {
+            match self.check_through_outage(d, &spec) {
                 Ok(o) if o.stopped.is_some() => out.notes.push(format!(
                     "{name}: not run to the end: {}",
                     o.stopped.unwrap_or_default()
@@ -3840,6 +3845,7 @@ impl Runner {
                 id_prefix: format!("{prefix}-floor-{name}"),
                 log_dir: log_dir.to_path_buf(),
                 cmd: build,
+                build: None,
                 cwd: wt.to_path_buf(),
                 env: vec![],
                 limit: self.project().test_timeout,
@@ -3869,7 +3875,7 @@ impl Runner {
                     format!("{s}s")
                 }
             };
-            match crate::hostedcheck::run(d, &spec) {
+            match self.check_through_outage(d, &spec) {
                 Ok(o) if o.stopped.is_some() => out.notes.push(format!(
                     "{name}: {what} not built to the end: {}",
                     o.stopped.unwrap_or_default()
@@ -3951,6 +3957,48 @@ impl Runner {
         Ok(Some(format!(
             "{branch} does not build ({first}), so the red is not this batch's: nobody is blamed and nothing lands until it does"
         )))
+    }
+
+    /// Run a check that may go to GitHub. When GitHub, not the code, kept it from running, wait
+    /// (charged to no task) and run it again, for up to [`OUTAGE_LIMIT_S`]; only then is it an
+    /// error, which the caller raises as a service failure (#772).
+    fn check_through_outage(
+        &self,
+        d: &Arc<Daemon>,
+        spec: &crate::hostedcheck::CheckSpec,
+    ) -> Result<crate::hostedcheck::CheckOutcome, String> {
+        let key = self.alert_key("service");
+        let r = retry_outage(
+            || {
+                if let Some(note) = spec.stop.as_ref().and_then(|f| f()) {
+                    return Ok(crate::hostedcheck::CheckOutcome {
+                        passed: false,
+                        timed_out: false,
+                        output: String::new(),
+                        full: String::new(),
+                        id: String::new(),
+                        stopped: Some(note),
+                        phase: None,
+                    });
+                }
+                crate::hostedcheck::run(d, spec)
+            },
+            |waited, why| {
+                self.d.landing.raise(
+                    self.pid,
+                    &key,
+                    "landing",
+                    &format!(
+                        "{}: waiting for GitHub: {why} (waited {waited} s)",
+                        self.project().id
+                    ),
+                );
+                self.alive(OUTAGE_STEP_S);
+            },
+            |s| self.nap(s),
+        );
+        self.d.landing.clear(self.pid, &key);
+        r
     }
 
     /// Note why the batch cannot go on; it ends with this reason.
@@ -5395,6 +5443,95 @@ fn lint_places(output: &str) -> String {
         String::new()
     } else {
         format!(" (at {})", seen.join(", "))
+    }
+}
+
+/// How long a landing waits out a GitHub outage, and the first and longest pause between tries.
+const OUTAGE_LIMIT_S: u64 = 30 * 60;
+const OUTAGE_STEP_S: u64 = 30;
+const OUTAGE_STEP_MAX_S: u64 = 300;
+
+/// Run `f`; while it fails with GitHub's outage (not the code's fault), `waiting(total, why)` is
+/// told and, after `sleep`, `f` runs again, until [`OUTAGE_LIMIT_S`] has passed. Any other
+/// result, or the last outage error, is returned.
+fn retry_outage<T>(
+    mut f: impl FnMut() -> Result<T, String>,
+    mut waiting: impl FnMut(u64, &str),
+    sleep: impl Fn(u64),
+) -> Result<T, String> {
+    let (mut waited, mut step) = (0u64, OUTAGE_STEP_S);
+    loop {
+        match f() {
+            Err(e) if crate::hostedcheck::is_outage(&e) && waited < OUTAGE_LIMIT_S => {
+                waiting(
+                    waited,
+                    e.trim_start_matches(crate::hostedcheck::OUTAGE_PREFIX),
+                );
+                sleep(step);
+                waited += step;
+                step = (step * 2).min(OUTAGE_STEP_MAX_S);
+            }
+            r => return r,
+        }
+    }
+}
+
+#[cfg(test)]
+mod outage_tests {
+    use super::*;
+
+    fn outage() -> String {
+        format!(
+            "{}push rejected; run it again",
+            crate::hostedcheck::OUTAGE_PREFIX
+        )
+    }
+
+    #[test]
+    fn an_outage_waits_and_retries_and_fails_no_task() {
+        let mut calls = 0;
+        let (mut waits, slept) = (vec![], std::cell::RefCell::new(vec![]));
+        let r = retry_outage(
+            || {
+                calls += 1;
+                if calls <= 2 {
+                    Err(outage())
+                } else {
+                    Ok("clean")
+                }
+            },
+            |_, why| waits.push(why.to_string()),
+            |s| slept.borrow_mut().push(s),
+        );
+        assert_eq!(r, Ok("clean"));
+        assert_eq!(calls, 3);
+        assert_eq!(waits.len(), 2);
+        assert!(waits[0].starts_with("push rejected"));
+        assert_eq!(*slept.borrow(), vec![30, 60]);
+    }
+
+    #[test]
+    fn an_outage_that_does_not_end_is_an_error_after_the_limit() {
+        let slept = std::cell::Cell::new(0u64);
+        let r: Result<(), String> =
+            retry_outage(|| Err(outage()), |_, _| {}, |s| slept.set(slept.get() + s));
+        assert_eq!(r, Err(outage()));
+        assert!(slept.get() >= OUTAGE_LIMIT_S);
+    }
+
+    #[test]
+    fn another_error_is_not_waited_for() {
+        let mut calls = 0;
+        let r: Result<(), String> = retry_outage(
+            || {
+                calls += 1;
+                Err("git broke".into())
+            },
+            |_, _| panic!("no wait"),
+            |_| panic!("no sleep"),
+        );
+        assert_eq!(r, Err("git broke".into()));
+        assert_eq!(calls, 1);
     }
 }
 

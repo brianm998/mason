@@ -94,7 +94,7 @@ class MonitorConnection(
             override fun onOpen() {
                 ready.await()  // the session's socket is registered before the hello goes out
                 say(ClientMessage(hello = Hello(
-                    protocol = 1,
+                    protocol = 2,
                     last_seq = model.lastSeq,
                     client = "mason-monitor-compose",
                     client_version = model.ownVersion,

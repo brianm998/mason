@@ -12,7 +12,7 @@ root=$(mktemp -d /tmp/mason-s103.XXXXXX); pids=()
 cleanup() { for p in "${pids[@]:-}"; do [ -n "$p" ] && kill -9 "$p" 2>/dev/null || true; done; rm -rf "$root"; }
 trap cleanup EXIT
 bash scripts/tests/watchdog.sh >/dev/null
-cargo build -q -p mason-daemon --bins -p mason-step-host --bins -p mason-mcp 2>/dev/null || cargo build -q --workspace --bins
+cargo build -q -p mason-daemon --bins -p mason-step-host --bins -p mason-adapters 2>/dev/null || cargo build -q --workspace --bins
 bin=$PWD/target/debug
 d=$root/d; c=$root/c; mkdir -p "$c" "$d"
 args=(--port 0 --data-dir "$d" --config-dir "$c" --host-bin "$bin/step-host" --mcp-bin "$bin/mason-mcp" --heartbeat-ms 100 --sweep-ms 3600000)
