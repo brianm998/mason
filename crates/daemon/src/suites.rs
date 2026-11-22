@@ -274,6 +274,7 @@ fn uses_project_test(s: &Suite) -> bool {
         || s.rerun.as_deref().is_some_and(uses)
         || s.skip.as_deref().is_some_and(uses)
         || s.shard_command.as_deref().is_some_and(uses)
+        || s.dev_shard_command.as_deref().is_some_and(uses)
         || s.dev_command.as_deref().is_some_and(uses)
         || s.dev_build.as_deref().is_some_and(uses)
 }
@@ -303,6 +304,7 @@ pub(crate) fn with_project_test(suite: &Suite, test: Option<&str>) -> Result<Sui
     // owner's CARGO_TARGET_DIR, stays).
     let narrow = t.replace(" --workspace", "");
     s.dev_command = s.dev_command.map(|b| b.replace(KEY, &narrow));
+    s.dev_shard_command = s.dev_shard_command.map(|b| b.replace(KEY, &narrow));
     s.dev_build = s.dev_build.map(|b| b.replace(KEY, &narrow));
     Ok(s)
 }
@@ -617,6 +619,13 @@ fn run_remote(
         let sc = s.shard_command.as_deref()?;
         (s.shards > 1 && !s.narrowed && cmd == s.command).then_some((s, sc))
     });
+    // A narrowed run split the same way (#880): its `dev_shard_command` was filled in with the
+    // same pick as `command` (`dev_shard_for`); one still holding a `{...}` was not, and runs whole.
+    let sharded = sharded.or_else(|| {
+        let s = watch?;
+        let sc = s.dev_shard_command.as_deref()?;
+        (s.shards > 1 && s.narrowed && cmd == s.command && !sc.contains('{')).then_some((s, sc))
+    });
     if let Some((s, sc)) = sharded {
         spec.shards = s.shards;
         spec.shard_command = Some(sc.to_string());
@@ -677,6 +686,18 @@ fn shard_lists(d: &Arc<Daemon>, project: &str, suite: &Suite) -> Vec<Vec<String>
     let mut names: std::collections::BTreeSet<String> = weights.keys().cloned().collect();
     names.extend(d.store.passing_names(&suite.name).unwrap_or_default());
     crate::shards::assign(&names, &weights, suite.shards)
+}
+
+/// `suite`'s `dev_shard_command` filled in with the pick `n`, when one runner's share of it can be
+/// run by scripts/test-shard.py: the packages, or one whole test target. A pick of several groups
+/// (a compound shell command) or one filtered by name stays on one runner, so `None` (#880).
+pub fn dev_shard_for(suite: &Suite, n: &crate::scope::Narrow) -> Option<String> {
+    use crate::scope::Narrow;
+    let t = suite.dev_shard_command.as_deref()?;
+    match n {
+        Narrow::Targets(g) if g.len() != 1 || g[0].contains(" -- ") => None,
+        _ => Some(crate::scope::expand(t, n, false)),
+    }
 }
 
 /// A finished remote run as the `Ran` a step host would have given.
@@ -2972,6 +2993,7 @@ fn narrow_packages_for_step(
     };
     let mut s = suite.clone();
     s.command = crate::scope::expand(dc, &n, false);
+    s.dev_shard_command = dev_shard_for(suite, &n);
     if let Some(db) = &suite.dev_build {
         s.build = Some(crate::scope::expand(db, &n, true));
     }
@@ -3033,6 +3055,7 @@ pub fn narrow_for_batch(
     let n = crate::scope::narrow_for(wt, &paths, crate::scope::wants_tests(dc), true, &named)?;
     let mut s = suite.clone();
     s.command = crate::scope::expand(dc, &n, false);
+    s.dev_shard_command = dev_shard_for(suite, &n);
     if let Some(db) = &suite.dev_build {
         s.build = Some(crate::scope::expand(db, &n, true));
     }
@@ -4268,6 +4291,12 @@ fn suite_proof(
     None
 }
 
+/// Whether `name` is a suite the definition no longer has. A definition with no suites at all
+/// is taken as unloaded, not as proof that the suite is gone.
+fn suite_gone(def: &Definition, name: &str) -> bool {
+    !def.testing.suites.is_empty() && def.testing.suite(name).is_none()
+}
+
 /// Close every open debt whose suites (all of its step's, for a step) have been recorded
 /// green at a base that contains the commit its task landed. A green with known-red tests
 /// skipped counts too, unless the debt's own task touched a skipped test; the skipped tests
@@ -4284,7 +4313,19 @@ pub fn settle_debts(d: &Arc<Daemon>) -> usize {
         let Some(p) = d.project(pid).cloned() else {
             continue;
         };
-        let suites = debt_suites(&d.current_def(pid), &landing_tier(d, pid), &row.scope);
+        let def = d.current_def(pid);
+        if let Some(name) = row.scope.strip_prefix("suite:") {
+            if suite_gone(&def, name) {
+                let how = format!(
+                    "suite `{name}` is no longer in the project's definition, so nothing can pay this debt"
+                );
+                if d.store.pay_debt(row.id, now_ms(), &how).unwrap_or(false) {
+                    closed += 1;
+                }
+                continue;
+            }
+        }
+        let suites = debt_suites(&def, &landing_tier(d, pid), &row.scope);
         if suites.is_empty() {
             continue;
         }

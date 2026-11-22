@@ -90,6 +90,10 @@ shard_command = '''RUSTDOC="$PWD/scripts/rustdoc-bootstrap.sh" python3 -I script
 # `: {packages}` is a no-op that a daemon older than s546 needs to accept the key.
 dev_command = ''': {packages}; RUSTDOC="$PWD/scripts/rustdoc-bootstrap.sh" {project_test} {tests_for_change} --config 'target."cfg(unix)".runner=["env","RUSTC_BOOTSTRAP=1"]' -- -Z unstable-options --report-time'''
 dev_build = ": {packages}; {project_test} {tests_for_change} --no-run"
+# A narrowed run that picks the packages or one whole test target is split like the whole run, with
+# the same script, so a change that selects the daemon's `it` binary is not one runner's 90 minutes
+# (#880, decision 0836). Several groups or a name filter stay on one runner.
+dev_shard_command = '''RUSTDOC="$PWD/scripts/rustdoc-bootstrap.sh" python3 -I scripts/test-shard.py -- {project_test} {tests_for_change} --config 'target."cfg(unix)".runner=["env","RUSTC_BOOTSTRAP=1"]' -- -Z unstable-options --report-time'''
 narrow_packages = true
 parser = "regex"
 pass_regex = '^test (.+) \.\.\. ok(?: <[0-9.]+s>)?$'
@@ -125,6 +129,11 @@ uses = { test-suite = 1 }
 # `FAIL sNNN` line per script; CI runs all of them, this runs the ones the change can have broken.
 [suite.exit-scripts]
 command = "bash scripts/run-changed-exit-scripts.sh"
+# On GitHub the selected scripts are split four ways (#880, decision 0836): every runner selects the
+# same scripts and keeps those scripts/run-exit-scripts.sh plans for its shard; each script is also
+# held to MASON_EXIT_SCRIPT_LIMIT_S (900 s), so one hang does not use the whole run.
+shards = 4
+shard_command = "MASON_EXIT_SHARD=$MASON_SHARD/$MASON_SHARDS bash scripts/run-changed-exit-scripts.sh"
 parser = "regex"
 pass_regex = '^PASS (.+)$'
 fail_regex = '^FAIL (.+)$'
@@ -138,6 +147,30 @@ uses = { test-suite = 1 }
 # runs the same check again over the union.
 [suite.fmt]
 command = '''if cargo fmt --all -- --check; then echo "test fmt_clean ... ok"; else echo "test fmt_clean ... FAILED"; exit 1; fi'''
+parser = "regex"
+pass_regex = '^test (.+) \.\.\. ok$'
+fail_regex = '^test (.+) \.\.\. FAILED$'
+min_tests = 1
+level = "unit"
+uses = {}
+
+# The landing `lint` tier's shell guards, in the test step too (2026-11-22): a batch whose lint went
+# red on one task's file (`scripts/exit/s960.sh: runs swift without testing MASON_SKIP_SWIFT`, batches
+# #631/#634) bisected for an hour, while the same guard in the task's own test step takes seconds and
+# sends it back to its own developer. No build, no slot, like `fmt`. The landing tier still runs them
+# over the union. `guards` reads the whole tree (SPDX headers, workflow YAML); `exit-guards` reads
+# scripts/exit/ only (about 50 s for ~900 scripts), so only an exit-script change selects it.
+[suite.guards]
+command = '''if { bash scripts/check-spdx.sh && bash scripts/check-workflows.sh; } 2>&1; then echo "test guards_clean ... ok"; else echo "test guards_clean ... FAILED"; exit 1; fi'''
+parser = "regex"
+pass_regex = '^test (.+) \.\.\. ok$'
+fail_regex = '^test (.+) \.\.\. FAILED$'
+min_tests = 1
+level = "unit"
+uses = {}
+
+[suite.exit-guards]
+command = '''if { bash scripts/check-exit-guards.sh && bash scripts/check-exit-portability.sh; } 2>&1; then echo "test exit_guards_clean ... ok"; else echo "test exit_guards_clean ... FAILED"; exit 1; fi'''
 parser = "regex"
 pass_regex = '^test (.+) \.\.\. ok$'
 fail_regex = '^test (.+) \.\.\. FAILED$'
@@ -191,12 +224,12 @@ when = ["development", "test_step"]
 # select the cargo suite, which then runs only the smoke set per task (decisions 0173, 0539); the
 # landing batch runs it whole.
 [impact]
-"crates/**" = ["cargo-workspace", "fmt", "clippy"]
+"crates/**" = ["cargo-workspace", "fmt", "clippy", "guards"]
 "Cargo.*" = ["cargo-workspace"]
 "rust-toolchain.toml" = ["cargo-workspace"]
-"scripts/exit/**" = ["cargo-workspace", "exit-scripts"]
-"clients/swift/**" = ["swift-clients"]
-"clients/compose/**" = ["compose-clients"]
+"scripts/exit/**" = ["cargo-workspace", "exit-scripts", "guards", "exit-guards"]
+"clients/swift/**" = ["swift-clients", "guards"]
+"clients/compose/**" = ["compose-clients", "guards"]
 "clients/features.toml" = ["cargo-workspace", "swift-clients", "compose-clients"]
 "clients/tokens.toml" = ["cargo-workspace", "swift-clients", "compose-clients"]
 "schemas/**" = ["cargo-workspace", "swift-clients", "compose-clients"]
@@ -205,8 +238,8 @@ when = ["development", "test_step"]
 # Paths that used to run every suite whole (s685, decision 0678). Each choice follows what reads the
 # file; `.mason/mason.toml` is left unmapped on purpose, so a definition change tests everything.
 # CI runs the workflows itself and the CI watch checks them; only ci.yml is read by a cargo test.
-".github/**" = []
-".github/workflows/ci.yml" = ["cargo-workspace"]
+".github/**" = ["guards"]
+".github/workflows/ci.yml" = ["cargo-workspace", "guards"]
 ".cargo/**" = ["cargo-workspace"]
 ".gitignore" = []
 ".claude/**" = []
@@ -217,15 +250,15 @@ when = ["development", "test_step"]
 "spikes/**" = []
 "prompts/**" = []
 # `mason init` embeds the templates and the cli tests parse them.
-"templates/**" = ["cargo-workspace"]
+"templates/**" = ["cargo-workspace", "guards"]
 ".mason/landing.toml" = []
 ".mason/smoke-tests.txt" = ["cargo-workspace"]
 ".mason/serial-tests.txt" = ["cargo-workspace"]
 # The conformance crate reads the mascot art list.
 "clients/mascot.toml" = ["cargo-workspace", "swift-clients", "compose-clients"]
-"scripts/*.sh" = ["exit-scripts"]
-"scripts/lib/**" = ["exit-scripts"]
-"scripts/tests/**" = ["exit-scripts"]
+"scripts/*.sh" = ["exit-scripts", "guards"]
+"scripts/lib/**" = ["exit-scripts", "guards"]
+"scripts/tests/**" = ["exit-scripts", "guards"]
 "scripts/package/**" = ["swift-clients"]
 "scripts/bundle-monitor.sh" = ["swift-clients"]
 "scripts/gen-app-icon-macos.swift" = ["swift-clients"]
