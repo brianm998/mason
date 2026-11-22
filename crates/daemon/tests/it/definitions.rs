@@ -1064,3 +1064,71 @@ fn favor_local_spills_to_github_only_while_this_machine_is_full() {
     mason_daemon::place::forget("scratch", Some(t.0), "unit", "check");
     assert_eq!(at(&d), Executor::Local);
 }
+
+/// #833: `favor-remote` goes to GitHub while it has room, and runs here (no run ref is pushed:
+/// only the placement is asked) when the `gha` pool is full with a waiter and this machine has a
+/// free slot. With this machine full too, it waits on GitHub. No duration is asserted.
+#[test]
+fn favor_remote_runs_here_only_while_github_is_full_and_this_machine_has_room() {
+    use mason_daemon::remote::{executor_for, Executor, Kind};
+    use mason_daemon::sched::LeaseState;
+    let s = scratch_with(Some(DEF_SKIP), happy_script());
+    s.write_project(
+        "scratch",
+        "test -f hello.txt",
+        "[remote_runs]\nkind = \"github-actions\"\nrepo = \"o/r\"\ntoken = \"env:MASON_T833_TOKEN\"\nmode = \"favor-remote\"\nspill_after = 1\n",
+    );
+    let d = s.start();
+    let t = flagged(&d, "Favors GitHub");
+    let suite = mason_testing::Suite::new("unit", "true", mason_testing::ParserKind::Tap);
+    let at = |d: &std::sync::Arc<mason_daemon::Daemon>| {
+        executor_for(d, "scratch", Kind::Check, Some((Some(t), &suite)))
+    };
+    let forget = || mason_daemon::place::forget("scratch", Some(t.0), "unit", "check");
+    let one = |n: &str| std::collections::BTreeMap::from([(n.to_string(), 1u32)]);
+    let why = || {
+        mason_daemon::place::seen(Some(t.0))
+            .last()
+            .map(|v| v["why"].as_str().unwrap_or("").to_string())
+            .unwrap_or_default()
+    };
+    d.broker.set_limit("gha", 1).unwrap();
+    d.broker.set_limit("compile", 1).unwrap();
+
+    // GitHub has room: there.
+    assert!(matches!(at(&d), Executor::GitHub { .. }));
+    assert!(why().contains("favor-remote, GitHub had room"), "{}", why());
+    forget();
+
+    // The pool is used and another run waits for it; this machine's slot is free: here.
+    let held = d.broker.lease_open_as("gha-hold", &one("gha"), None);
+    crate::support::wait_for("the pool hold to be granted", 60, || {
+        matches!(d.broker.lease_poll(held), LeaseState::Granted { .. })
+    });
+    let waiter = d.broker.lease_open_as("gha-waiter", &one("gha"), None);
+    assert!(!matches!(
+        d.broker.lease_poll(waiter),
+        LeaseState::Granted { .. }
+    ));
+    assert_eq!(at(&d), Executor::Local);
+    assert!(
+        why().contains(
+            "favor-remote, the runner pool is full with 1 waiting; this machine had room"
+        ),
+        "{}",
+        why()
+    );
+    forget();
+
+    // This machine's slot is taken too: it waits on GitHub.
+    let busy = d.broker.lease_open_as("busy", &one("compile"), None);
+    crate::support::wait_for("the compile hold to be granted", 60, || {
+        matches!(d.broker.lease_poll(busy), LeaseState::Granted { .. })
+    });
+    assert!(matches!(at(&d), Executor::GitHub { .. }));
+    assert!(why().contains("so it waits on GitHub"), "{}", why());
+    for l in [busy, waiter, held] {
+        d.broker.lease_close(l);
+    }
+    forget();
+}
