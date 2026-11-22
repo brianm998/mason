@@ -689,4 +689,5 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s875**: The cargo-workspace force-skip count (18 of 81) comes from owner and Land-now skips, not suite failures, so the suite is unchanged and the detector's counting is filed as a proposal.
 - **s883**: The active-models scheduling test failure recorded at b9d4aa3ef5 was fixed by 0831 (lease opened first); this records it and pins the fix with an exit script.
 - **s885**: The floor-on-GitHub test world now carries `.github/workflows/mason-run.yml` on its base, as the real repo does, so `a_floor_set_to_github_goes_there` reaches the fake GitHub.
+- **s886**: The test other_workflows_jobs_and_the_ceiling_limit_what_mason_can_take now queues four MASON jobs under gha_ceiling 4 and asserts the fifth waits, instead of expecting five to be held.
 <!-- status:end -->
