@@ -63,3 +63,12 @@ cooldown_h = 24
 # at = "01:00"
 # when_quiet = "30m"
 # max_tickets = 6
+
+# A full test without a CI workflow (#783, decision 0799): every listed suite, whole, on the base
+# tip, here or on GitHub (as the remote switch says), as work below every task. Omit `suites` for
+# every suite of the Test step and the landing tiers. Use it instead of `full-ci` above, not beside it.
+# [schedule.full-suites]
+# kind = "suites"
+# suites = ["cargo-workspace", "exit-scripts"]
+# at = "01:00"
+# when_quiet = "30m"

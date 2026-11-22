@@ -852,6 +852,20 @@ fn call_for(c: &Command) -> Result<Call, String> {
             Some(json!({"reason": c.reason, "as": c.actor})),
             Some((t.task, "land_now")),
         ),
+        Cmd::SetPlacement(p) => match p.scope.as_str() {
+            "global" => post("/remote".into(), Some(json!({"mode": p.mode})), None),
+            "project" => post(
+                "/remote".into(),
+                Some(json!({"mode": p.mode, "project": p.project})),
+                None,
+            ),
+            "task" => post(
+                format!("/tasks/{}/run_on", p.task),
+                Some(json!({"to": p.mode})),
+                None,
+            ),
+            other => return Err(format!("unknown placement scope {other:?}")),
+        },
         Cmd::LandNowBatch(b) => post(
             format!("/batches/{}/land-now", b.batch),
             Some(json!({"as": c.actor})),
