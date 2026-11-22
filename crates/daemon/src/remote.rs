@@ -4451,6 +4451,7 @@ mod tests {
 
     #[test]
     fn other_workflows_are_counted_and_a_304_changes_nothing_and_asks_for_nothing_more() {
+        token();
         let api = Arc::new(FakeActions {
             etag: Mutex::new("\"a\"".into()),
             running: Mutex::new(3),
