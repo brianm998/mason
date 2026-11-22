@@ -5601,7 +5601,9 @@ mod tests {
         sh(&dir, &["add", "-A"]);
         sh(&dir, &["commit", "-qm", "tests and docs only"]);
         let head = git::rev_parse(&dir, "HEAD").unwrap();
-        let note = dir.join("source-free.txt");
+        // Outside the repository, as in production (the task dir): a note written into the
+        // worktree is an untracked file, and the next submit refuses the dirty tree.
+        let note = tempfile::tempdir().unwrap().keep().join("source-free.txt");
         let v = change_validator(
             dir.clone(),
             "main".into(),
