@@ -421,6 +421,8 @@ mod tests {
     #[test]
     fn run_on_takes_github_or_local_and_nothing_else() {
         let d = builtin();
+        assert!(check_override(&d, "run_on", "github").is_ok());
+        assert!(check_override(&d, "run_on", "local").is_ok());
         for v in RUN_ON_VALUES {
             assert!(check_override(&d, "run_on", v).is_ok(), "{v}");
         }
