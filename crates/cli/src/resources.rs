@@ -469,6 +469,11 @@ pub fn show(d: &Daemon, json_out: bool) -> Result<(), String> {
             r["used"],
             r["limit"]
         );
+        if r["name"].as_str() == Some("gha") {
+            if let Some(l) = gha_line(&v["gha"]) {
+                println!("      {l}");
+            }
+        }
         for (i, s) in r["slots"].as_array().into_iter().flatten().enumerate() {
             if let Some(by) = s["held_by"].as_str() {
                 println!(
@@ -508,6 +513,22 @@ pub fn show(d: &Daemon, json_out: bool) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// The `gha` pool's split (#766): `MASON 7, other workflows 7 (develop CI: 7 jobs), ceiling 20`.
+pub fn gha_line(g: &Value) -> Option<String> {
+    let mason = g["mason"].as_u64()?;
+    let other = g["other"].as_u64().unwrap_or(0);
+    let label = g["other_label"].as_str().unwrap_or("");
+    let label = if label.is_empty() || other == 0 {
+        String::new()
+    } else {
+        format!(" ({label})")
+    };
+    Some(format!(
+        "MASON {mason}, other workflows {other}{label}, ceiling {}",
+        g["ceiling"].as_u64().unwrap_or(0)
+    ))
 }
 
 /// One waiter of `mason resources`: an outside pipeline's reads

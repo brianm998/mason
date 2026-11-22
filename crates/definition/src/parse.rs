@@ -597,6 +597,24 @@ mod tests {
     }
 
     #[test]
+    fn watch_ci_auto_approve_is_off_by_default_and_takes_only_confirmed() {
+        let r = parse(&format!("{OK}\n[watch.ci]\nenabled = true\n"))
+            .unwrap()
+            .watch_ci
+            .unwrap();
+        assert!(!r.auto_approve);
+        assert_eq!(r.auto_approve_max, 5);
+        let on = format!(
+            "{OK}\n[watch.ci]\nenabled = true\nauto_approve = \"confirmed\"\nauto_approve_max = 3\n"
+        );
+        let r = parse(&on).unwrap().watch_ci.unwrap();
+        assert!(r.auto_approve);
+        assert_eq!(r.auto_approve_max, 3);
+        let bad = format!("{OK}\n[watch.ci]\nenabled = true\nauto_approve = \"always\"\n");
+        assert!(parse(&bad).is_err());
+    }
+
+    #[test]
     fn a_prompt_file_is_for_agent_steps_and_stays_under_the_prompts_directory() {
         let with = |old: &str, new: &str| OK.replacen(old, new, 1);
         let ok = with(
