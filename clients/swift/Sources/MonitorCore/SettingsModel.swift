@@ -59,6 +59,64 @@ public struct SettingsSnapshot: Equatable, Sendable {
     }
 }
 
+/// `GET /remote`: where runs go (#831). The global mode, and for each project whether it has
+/// `[remote_runs]`, where it runs, its effective mode and why (`source`).
+public struct RemoteSettings: Equatable, Sendable {
+    public struct Project: Equatable, Sendable {
+        public var project: String
+        public var remote: Bool
+        public var runsOn: String
+        public var mode: String
+        /// `project`, `global` or `no [remote_runs]`.
+        public var source: String
+
+        /// The source in words, as the page shows it.
+        public var sourceText: String {
+            switch source {
+            case "project": return "set for this project"
+            case "global": return "follows the global mode"
+            default: return "always runs here: the project file has no [remote_runs]"
+            }
+        }
+        /// A project with no `[remote_runs]` cannot be changed.
+        public var canChange: Bool { remote && source != "no [remote_runs]" }
+    }
+
+    public static let modes = ["local", "remote", "favor-local", "favor-remote"]
+    public static let explanation = "local: this machine. remote: GitHub. favor-local / favor-remote: prefer one, spill to the other."
+
+    public var mode = "local"
+    public var problem: String? = nil
+    public var changedBy: String? = nil
+    public var changedAt: String? = nil
+    public var projects: [Project] = []
+
+    public init() {}
+
+    public init(json: String) {
+        guard let data = json.data(using: .utf8),
+              let v = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        mode = v["mode"] as? String ?? "local"
+        if let p = v["problem"] as? String, !p.isEmpty { problem = p }
+        if let c = v["changed_by"] as? String, !c.isEmpty { changedBy = c }
+        if let c = v["changed_at"] as? String, !c.isEmpty { changedAt = c }
+        else if let n = v["changed_at"] as? NSNumber { changedAt = n.stringValue }
+        projects = (v["projects"] as? [[String: Any]] ?? []).map {
+            Project(project: $0["project"] as? String ?? "?", remote: $0["remote"] as? Bool ?? false,
+                    runsOn: $0["runs_on"] as? String ?? "", mode: $0["mode"] as? String ?? "local",
+                    source: $0["source"] as? String ?? "")
+        }
+    }
+
+    public func project(_ name: String) -> Project? { projects.first { $0.project == name } }
+
+    /// "changed by owner at ..." or nil.
+    public var changedText: String? {
+        guard let by = changedBy else { return nil }
+        return changedAt.map { "Changed by \(by) at \($0)" } ?? "Changed by \(by)"
+    }
+}
+
 /// `GET /notify/settings`: where each alert goes.
 public struct NotifySettings: Equatable, Sendable {
     public struct Route: Equatable, Sendable {
@@ -139,6 +197,13 @@ public enum SettingsPayload {
     public static func testNotification(channel: String) -> String { encode(["channel": channel]) }
     public static func runSchedule(project: String, name: String) -> String {
         encode(["name": "\(project)/\(name)"])
+    }
+
+    /// `POST /remote`: the global mode, or one project's when `project` is given.
+    public static func remoteMode(_ mode: String, project: String? = nil) -> String {
+        var o: [String: Any] = ["mode": mode]
+        if let project { o["project"] = project }
+        return encode(o)
     }
 
     public static func settingsPath(project: String) -> String { "/projects/\(project)/settings" }

@@ -22,6 +22,7 @@ struct SettingsPage: View {
                     proposals(s)
                     schedules(s)
                     tracker(s)
+                    placement(s)
                 } else {
                     Text("Loading the project's settings.").font(theme.body()).foregroundStyle(theme.muted)
                 }
@@ -86,6 +87,18 @@ struct SettingsPage: View {
         }
     }
 
+    func placement(_ s: SettingsSnapshot) -> some View {
+        section("Where runs go", theme: theme) {
+            if let r = model.remoteSettings {
+                RemotePlacementBody(remote: r, project: s.project,
+                                    pickGlobal: { model.changeGlobalMode($0) },
+                                    pickProject: { model.changeProjectMode($0) })
+            } else {
+                Text("Loading where runs go.").font(theme.body()).foregroundStyle(theme.muted)
+            }
+        }
+    }
+
     func routes(_ n: NotifySettings) -> some View {
         section("Notifications", theme: theme) {
             ForEach(n.routes, id: \.condition) { r in
@@ -129,5 +142,37 @@ struct ScheduleRow: View {
                 .accessibilityIdentifier("settings:run:\(job.name)")
         }
         .onAppear { every = job.every }
+    }
+}
+
+/// The body of the "Where runs go" section (#891): the global mode and the project's.
+struct RemotePlacementBody: View {
+    @Environment(\.theme) var theme
+    let remote: RemoteSettings
+    let project: String
+    let pickGlobal: (String) -> Void
+    let pickProject: (String) -> Void
+
+    private func choice(_ title: String, _ id: String, value: String, enabled: Bool, _ pick: @escaping (String) -> Void) -> some View {
+        Picker(title, selection: Binding(get: { value }, set: pick)) {
+            ForEach(RemoteSettings.modes, id: \.self) { Text($0).tag($0) }
+        }
+        .font(theme.body())
+        .disabled(!enabled)
+        .accessibilityIdentifier(id)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: theme.spacingSmall) {
+            choice("All of MASON", "settings:remote:global", value: remote.mode, enabled: true, pickGlobal)
+            if let p = remote.problem { Text(p).font(theme.small()).foregroundStyle(theme.muted) }
+            if let c = remote.changedText { Text(c).font(theme.small()).foregroundStyle(theme.muted) }
+            if let p = remote.project(project) {
+                choice(project, "settings:remote:project", value: p.mode, enabled: p.canChange, pickProject)
+                Text(p.sourceText).font(theme.small()).foregroundStyle(theme.muted)
+                if !p.runsOn.isEmpty { Text("GitHub runner: \(p.runsOn)").font(theme.small()).foregroundStyle(theme.muted) }
+            }
+            Text(RemoteSettings.explanation).font(theme.small()).foregroundStyle(theme.muted)
+        }
     }
 }

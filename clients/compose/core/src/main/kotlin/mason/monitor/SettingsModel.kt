@@ -2,7 +2,7 @@
 package mason.monitor
 
 /** The ids of the commands whose answer the Settings page reports. */
-internal val SETTINGS_RESULTS = setOf("settings-save", "notify-save", "notify-test", "schedule-run")
+internal val SETTINGS_RESULTS = setOf("settings-save", "notify-save", "notify-test", "schedule-run", "remote-save")
 
 /**
  * The Settings page's data (s430): a project's proposal policy, schedules and tracker, as the
@@ -57,6 +57,63 @@ data class SettingsSnapshot(
     }
 }
 
+/**
+ * `GET /remote`: where runs go (#831). The global mode, and for each project whether it has
+ * `[remote_runs]`, where it runs, its effective mode and why ([Project.source]).
+ */
+data class RemoteSettings(
+    val mode: String = "local",
+    val problem: String? = null,
+    val changedBy: String? = null,
+    val changedAt: String? = null,
+    val projects: List<Project> = emptyList(),
+) {
+    /** [source] is `project`, `global` or `no [remote_runs]`. */
+    data class Project(val project: String, val remote: Boolean, val runsOn: String, val mode: String, val source: String) {
+        val sourceText: String
+            get() = when (source) {
+                "project" -> "set for this project"
+                "global" -> "follows the global mode"
+                else -> "always runs here: the project file has no [remote_runs]"
+            }
+
+        /** A project with no `[remote_runs]` cannot be changed. */
+        val canChange: Boolean get() = remote && source != "no [remote_runs]"
+    }
+
+    fun project(name: String): Project? = projects.firstOrNull { it.project == name }
+
+    val changedText: String?
+        get() = changedBy?.let { by -> changedAt?.let { "Changed by $by at $it" } ?: "Changed by $by" }
+
+    companion object {
+        val MODES = listOf("local", "remote", "favor-local", "favor-remote")
+        const val EXPLANATION = "local: this machine. remote: GitHub. favor-local / favor-remote: prefer one, spill to the other."
+
+        @Suppress("UNCHECKED_CAST")
+        fun parse(json: String): RemoteSettings {
+            val v = Codec.json(json) ?: return RemoteSettings()
+            fun text(k: String): String? = when (val x = v[k]) {
+                is String -> x.ifEmpty { null }
+                is Number -> x.toLong().toString()
+                else -> null
+            }
+            return RemoteSettings(
+                mode = v["mode"] as? String ?: "local",
+                problem = text("problem"),
+                changedBy = text("changed_by"),
+                changedAt = text("changed_at"),
+                projects = (v["projects"] as? List<Map<String, Any?>> ?: emptyList()).map {
+                    Project(
+                        it["project"] as? String ?: "?", it["remote"] as? Boolean ?: false,
+                        it["runs_on"] as? String ?: "", it["mode"] as? String ?: "local", it["source"] as? String ?: "",
+                    )
+                },
+            )
+        }
+    }
+}
+
 /** `GET /notify/settings`: where each alert goes. */
 data class NotifySettings(
     val routes: List<Route> = emptyList(),
@@ -101,6 +158,10 @@ data class NotifySettings(
 /** The request bodies the page sends. Each is the smallest change: one key. */
 object SettingsPayload {
     fun path(project: String) = "/projects/$project/settings"
+
+    /** `POST /remote`: the global mode, or one project's when [project] is given. */
+    fun remoteMode(mode: String, project: String? = null) =
+        Codec.body(if (project == null) mapOf("mode" to mode) else mapOf("mode" to mode, "project" to project))
 
     fun disposition(key: String, value: String) = Codec.body(mapOf("proposals" to mapOf(key to value)))
     fun introspection(key: String, value: String) = Codec.body(mapOf("proposals" to mapOf("introspection" to mapOf(key to value))))

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 package mason.monitor
 
+import mason.v1.*
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -45,6 +46,45 @@ class SettingsModelTest {
         assertTrue(off.contains("\"email\":null"), off)
         assertEquals(mapOf("name" to "web/nightly"), Codec.json(SettingsPayload.runSchedule("web", "nightly")))
         assertEquals("/projects/web/settings", SettingsPayload.path("web"))
+    }
+
+    private val remoteBody = """{"mode":"favor-remote","default":"local","problem":"unknown mode `x`, treated as local","changed_by":"owner","changed_at":"2026-11-21T10:00:00Z","projects":[{"project":"web","remote":true,"runs_on":"macos-latest","mode":"remote","source":"project"},{"project":"api","remote":true,"runs_on":"ubuntu-latest","mode":"favor-remote","source":"global"},{"project":"local-only","remote":false,"runs_on":"","mode":"local","source":"no [remote_runs]"}]}"""
+
+    @Test fun theRemoteStatusParsesInThreeSourceStates() {
+        val r = RemoteSettings.parse(remoteBody)
+        assertEquals("favor-remote", r.mode)
+        assertEquals("unknown mode `x`, treated as local", r.problem)
+        assertEquals("Changed by owner at 2026-11-21T10:00:00Z", r.changedText)
+        assertEquals(3, r.projects.size)
+        assertEquals(RemoteSettings.Project("web", true, "macos-latest", "remote", "project"), r.project("web"))
+        assertEquals("set for this project", r.project("web")?.sourceText)
+        assertTrue(r.project("web")!!.canChange)
+        assertEquals("follows the global mode", r.project("api")?.sourceText)
+        val none = r.project("local-only")!!
+        assertFalse(none.remote)
+        assertEquals("always runs here: the project file has no [remote_runs]", none.sourceText)
+        assertFalse(none.canChange)
+        assertEquals(RemoteSettings(), RemoteSettings.parse("not json"))
+    }
+
+    @Test fun theModeChangesBuildTheirBodiesAndARefusalIsTheNotice() {
+        val m = MonitorModel(MemoryPreferences())
+        m.project = "web"
+        val sent = mutableListOf<Command>()
+        m.sender = { sent += it }
+        m.loadSettings()
+        assertTrue(sent.any { it.id == "remote" && it.raw?.method == "GET" && it.raw?.path == "/remote" })
+        sent.clear()
+        m.changeGlobalMode("remote")
+        m.changeProjectMode("favor-local")
+        assertEquals(listOf("remote-save", "remote-save"), sent.map { it.id })
+        assertEquals(mapOf("mode" to "remote"), Codec.json(sent[0].raw!!.json))
+        assertEquals(mapOf("mode" to "favor-local", "project" to "web"), Codec.json(sent[1].raw!!.json))
+        m.apply(ServerMessage(result = CommandResult(id = "remote-save", ok = false, error = "project `web` has no [remote_runs]")))
+        assertEquals("project `web` has no [remote_runs]", m.settingsNotice)
+        sent.clear()
+        m.apply(ServerMessage(result = CommandResult(id = "remote-save", ok = true)))
+        assertEquals(listOf("/remote"), sent.map { it.raw?.path })
     }
 
     @Test fun thePageIsAnAddress() {
