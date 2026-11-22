@@ -113,12 +113,14 @@ final class RowRedrawTests: XCTestCase {
         let rows = RowView.evaluations
         let live = LiveProgressCounter.n
         let pane = SidebarPane.evaluations
+        let watch7 = ChangeCounter { _ = m.progress.entry(7).cells }
         m.apply(progress: progress(task: 7, done: 5))
         settle(h)
         XCTAssertEqual(RowView.evaluations, rows, "no row body runs")
         XCTAssertEqual(SidebarPane.evaluations, pane)
         let used = LiveProgressCounter.n - live
-        XCTAssertGreaterThan(used, 0)
+        XCTAssertGreaterThan(watch7.count, 0, "task 7's progress entry fired (decision 0851: observed, not a render count)")
+        watch7.cancel()
         XCTAssertLessThanOrEqual(used, 4, "only task 7's progress views")
     }
 
@@ -144,6 +146,7 @@ final class RowRedrawTests: XCTestCase {
         let rows = RowView.evaluations
         let pane = SidebarPane.evaluations
         let bar = TopBar.evaluations
+        let watches = (1...25).map { t in ChangeCounter { _ = m.progress.entry(UInt64(t)).cells } }
         let live = LiveProgressCounter.n
         for round in 1...5 {
             for t in 1...25 { m.apply(progress: progress(task: UInt64(t), done: UInt32(1 + round))) }
@@ -155,7 +158,8 @@ final class RowRedrawTests: XCTestCase {
         XCTAssertEqual(SidebarPane.evaluations, pane)
         XCTAssertEqual(TopBar.evaluations, bar)
         let used = LiveProgressCounter.n - live
-        XCTAssertGreaterThan(used, 0)
+        XCTAssertTrue(watches.allSatisfy { $0.count > 0 }, "every touched task's progress entry fired (decision 0851)")
+        watches.forEach { $0.cancel() }
         XCTAssertLessThanOrEqual(used, 5 * 25 * 4, "progress views of touched rows only")
     }
 
@@ -165,6 +169,7 @@ final class RowRedrawTests: XCTestCase {
         let h = host(m)
         settle(h)
         let before = RowView.evaluations
+        let watch1 = ChangeCounter { _ = m.progress.entry(1).cells }
         let live = LiveProgressCounter.n
         var rowChanging = 0
         var done = [UInt32](repeating: 1, count: Int(Self.tasks) + 1)
@@ -190,7 +195,8 @@ final class RowRedrawTests: XCTestCase {
         let progressViews = LiveProgressCounter.n - live
         print("s237: \(used) RowView body evaluations for \(rowChanging) row-changing messages; \(before) rows drawn before, \(progressViews) progress views")
         XCTAssertGreaterThan(before, 0, "the rows were drawn")
-        XCTAssertGreaterThan(progressViews, 0, "the progress views were drawn")
+        XCTAssertGreaterThan(watch1.count, 0, "the progress entry was fired (decision 0851)")
+        watch1.cancel()
         XCTAssertLessThanOrEqual(used, 2 * rowChanging)
     }
 }

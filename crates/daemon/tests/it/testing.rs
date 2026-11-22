@@ -1309,23 +1309,22 @@ fn base_tip(d: &Arc<mason_daemon::Daemon>) -> String {
 
 /// The task landed; its debts are put back as owed with no green on record.
 fn owe(d: &Arc<mason_daemon::Daemon>, t: TaskId, scopes: &[&str]) {
-    // The landing recorded the commit the task landed as on its debts; a debt added by hand
-    // after it must say so too, as the task's branch is gone (s882).
-    let landed = base_tip(d);
     for sc in scopes {
         let id = d
             .store
             .add_debt(t.0, "scratch", sc, "owner skipped", "brian", false, 0)
             .unwrap();
-        d.store.set_debt_landed(id, &landed).unwrap();
+        // The task's branch is deleted some time after it lands, so the commit it landed as is
+        // pinned now: the base tip holds it.
+        d.store.set_debt_landed(id, &base_tip(d)).unwrap();
     }
     d.store
         .write(|c| {
             c.execute("DELETE FROM suite_green", [])?;
-            // The task's own run left evidence for this exact tree; with it the suite is
-            // `Reused` and its script never runs again (s882).
-            c.execute("DELETE FROM evidence", [])?;
-            c.execute("DELETE FROM suite_skip_green", []).map(|_| ())
+            c.execute("DELETE FROM suite_skip_green", [])?;
+            // The landing recorded the tip's tree as tested; the debt is for a run that has not
+            // been made, so that record would pay it without one.
+            c.execute("DELETE FROM evidence", []).map(|_| ())
         })
         .unwrap();
 }
