@@ -4475,6 +4475,10 @@ pub fn run_idle_debts(d: &Arc<Daemon>) {
         if !c.pending.is_empty() || (c.limit > 0 && c.used >= c.limit) {
             return;
         }
+        // Debt payments go to GitHub only when nothing else waits for a runner (#766).
+        if d.broker.gha_waiting() > 0 {
+            return;
+        }
         let Some(Ok(pick)) = next_pick(d, &ran) else {
             return;
         };
