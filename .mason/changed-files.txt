@@ -1,0 +1,5 @@
+.mason/run.json
+crates/daemon/src/remote.rs
+docs/decisions/0866-cut-off-runs-keep-output.md
+docs/stages/s873.md
+scripts/exit/s873.sh
