@@ -260,3 +260,22 @@ fn xctest_reads_what_xcodebuild_prints_for_an_app_hosted_bundle() {
     assert_eq!(r.failed_names(), vec!["AppTests/divides()"]);
     assert!(r.names().contains(&"LegacyTests.testAdd()".to_string()));
 }
+
+// s778: the clippy suite prints warnings, then one `test clippy_clean` line; the regex parser reads
+// only that line, so a clean run passes and one with warnings fails.
+fn clippy_suite() -> Suite {
+    let mut s = Suite::new("clippy", "x", ParserKind::Regex);
+    s.pass_regex = Some(r"^test (.+) \.\.\. ok$".into());
+    s.fail_regex = Some(r"^test (.+) \.\.\. FAILED$".into());
+    s
+}
+
+#[test]
+fn the_clippy_suite_output_is_one_pass_or_one_named_failure() {
+    let s = clippy_suite();
+    let clean = parse(ParserKind::Regex, "test clippy_clean ... ok\n", &s).unwrap();
+    assert_eq!((clean.executed(), clean.passed()), (1, 1));
+    let warned = "warning: unused import: `std::fmt`\n --> src/a.rs:1:5\nerror: could not compile `a`\ntest clippy_clean ... FAILED\n";
+    let r = parse(ParserKind::Regex, warned, &s).unwrap();
+    assert_eq!((r.executed(), r.passed()), (1, 0));
+}
