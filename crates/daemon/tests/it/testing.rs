@@ -1474,3 +1474,4 @@ fn a_ci_run_with_every_mapped_job_green_records_the_suite_and_settles_a_debt_one
     assert!(how.contains("checks green on"), "{how}");
     assert_eq!(runs_of(&log), before, "the suite was not run");
 }
+// probe
