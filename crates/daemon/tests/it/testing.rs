@@ -1309,10 +1309,15 @@ fn base_tip(d: &Arc<mason_daemon::Daemon>) -> String {
 
 /// The task landed; its debts are put back as owed with no green on record.
 fn owe(d: &Arc<mason_daemon::Daemon>, t: TaskId, scopes: &[&str]) {
+    // The landing recorded the commit the task landed as on its debts; a debt added by hand
+    // after it must say so too, as the task's branch is gone (s882).
+    let landed = base_tip(d);
     for sc in scopes {
-        d.store
+        let id = d
+            .store
             .add_debt(t.0, "scratch", sc, "owner skipped", "brian", false, 0)
             .unwrap();
+        d.store.set_debt_landed(id, &landed).unwrap();
     }
     d.store
         .write(|c| {
