@@ -108,6 +108,172 @@ pub fn reap_stale_zombies(seen: &mut std::collections::HashMap<u32, Instant>, ag
     }
 }
 
+/// `t<task>r<run>-<n>` or `t<task>r<run>-test` -> (task, run).
+pub fn parse_host_id(id: &str) -> Option<(u64, u64)> {
+    let rest = id.strip_prefix('t')?;
+    let (task, rest) = rest.split_once('r')?;
+    let run = rest.split('-').next()?;
+    Some((task.parse().ok()?, run.parse().ok()?))
+}
+
+/// `b<batch>-<rest>` -> batch.
+pub fn parse_batch_host_id(id: &str) -> Option<u64> {
+    let rest = id.strip_prefix('b')?;
+    let (batch, _) = rest.split_once('-')?;
+    batch.parse().ok()
+}
+
+/// Run one pass. Returns the kinds of bugs it filed.
+pub fn sweep_once(d: &Arc<Daemon>) -> Vec<String> {
+    let mut filed = vec![];
+    crate::autoquarantine::lift_landed(d);
+    let Ok(w) = d.world() else { return filed };
+    let mut st = d.sweep.lock().unwrap_or_else(|e| e.into_inner());
+    st.passes += 1;
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut confirmed = |st: &SweepState, key: String| {
+        seen.insert(key.clone());
+        st.suspects.contains(&key)
+    };
+
+    // 1. A step run with no job working on it.
+    for r in w.step_runs.values().filter(|r| r.outcome.is_none()) {
+        if !d.has_job(r.id) && confirmed(&st, format!("job:{}", r.id)) {
+            d.record_bug(
+                "missed_job",
+                &format!(
+                    "task {} had an open {:?} step with no job; started one",
+                    r.task, r.step
+                ),
+            );
+            filed.push("missed_job".to_string());
+            d.start_job(r.task, r.step, r.id);
+        }
+    }
+
+    // 2. A queued task that could start but wasn't admitted (not while admission is held on
+    // purpose, waiting for the first definitions pass).
+    if let Some(id) = (!d.admission_held())
+        .then(|| d.next_admission(&w))
+        .flatten()
+    {
+        {
+            let t = &w.tasks[&id];
+            if confirmed(&st, format!("admit:{}", t.id)) {
+                d.record_bug(
+                    "missed_admit",
+                    &format!(
+                        "task {} was claimable with a free slot but was not admitted; admitted it",
+                        t.id
+                    ),
+                );
+                filed.push("missed_admit".to_string());
+                d.admit();
+            }
+        }
+    }
+
+    // 3. A running step host whose step run is no longer open (a stop that never happened).
+    let reg = Registry::new(d.cfg.hosts_dir());
+    for h in reg.scan().unwrap_or_default() {
+        if h.state != HostState::Running {
+            continue;
+        }
+        let batch = parse_batch_host_id(&h.info.id);
+        let open = if let Some(b) = batch {
+            // A batch host is wanted only while its batch is unfinished in this daemon.
+            d.store
+                .batches(None, 200)
+                .unwrap_or_default()
+                .iter()
+                .any(|r| r.id == b && r.finished_at.is_none())
+        } else if let Some((task, run)) = parse_host_id(&h.info.id) {
+            w.open_run(TaskId(task)) == Some(StepRunId(run))
+        } else {
+            continue;
+        };
+        let now = Instant::now();
+        let stopping = {
+            let mut log = d.stop_log.lock().unwrap_or_else(|e| e.into_inner());
+            log.forget_expired(now);
+            log.in_flight(&h.info.id, now)
+        };
+        if !open && !stopping && confirmed(&st, format!("host:{}", h.info.id)) {
+            if st.first_orphan_report(&h.info.id) {
+                d.record_bug(
+                    "orphan_host",
+                    &format!(
+                        "step host {} was running for a closed step run; stopped it",
+                        h.info.id
+                    ),
+                );
+                filed.push("orphan_host".to_string());
+            }
+            d.stop_hosts(&h.info.id);
+        }
+    }
+
+    // 4. A cancelled task whose branch was to be deleted but is still there.
+    for t in w
+        .tasks
+        .values()
+        .filter(|t| t.state == State::Canceled && !t.cancel_keeps_branch)
+    {
+        let Some(p) = d.project(t.project) else {
+            continue;
+        };
+        if git::branch_exists(&p.path, &p.branch(t.id.0))
+            && confirmed(&st, format!("branch:{}", t.id))
+        {
+            d.record_bug(
+                "leftover_branch",
+                &format!(
+                    "task {} is finished but its branch remained; deleted it",
+                    t.id
+                ),
+            );
+            filed.push("leftover_branch".to_string());
+            crate::jobs::cleanup(d, t.id, true);
+        }
+    }
+
+    // 4b. A landed task's build directory that is still there (a restart, or a miss). Removing
+    // it is housekeeping, not a missed event, so it files nothing.
+    crate::taskcache::sweep(d, &w);
+    crate::taskcache::sweep_own(d, &w);
+
+    // 4c. Host directories of closed step runs move out of the registry, old ones are deleted,
+    // and the config directories of ended sessions go. Housekeeping: it files nothing, and a
+    // failure is logged and retried next pass.
+    crate::hostarchive::pass(&d.cfg, &w, crate::daemon::now_ms());
+
+    // 4d. Overrides past their expiry are inert (reads ignore them) but the introspection
+    // detector reports them, so delete them. Housekeeping: files nothing, retried next pass.
+    let _ = d.store.expire_overrides(crate::daemon::now_ms());
+
+    // 4e. Run refs left on a remote by a crash or a killed run: older than 24 h with no live run
+    // record. Housekeeping: logs each deletion, files nothing, tried again later.
+    crate::remote::sweep_stale_refs(d);
+
+    // 5. Projections that no longer match the log (every tenth pass; it replays everything).
+    if st.passes.is_multiple_of(10) {
+        if let Err(e) = d.store.verify() {
+            d.record_bug(
+                "projection_drift",
+                &format!("projections disagreed with the log ({e}); rebuilt them"),
+            );
+            filed.push("projection_drift".to_string());
+            let _ = d.store.rebuild_projections();
+        }
+    }
+
+    // 6. Exited children nobody waited for. Housekeeping: files nothing.
+    reap_stale_zombies(&mut st.zombies, ZOMBIE_AGE);
+
+    st.suspects = seen;
+    filed
+}
+
 #[cfg(test)]
 mod tests {
     use super::{parse_host_id, StopLog, STOP_WINDOW};
