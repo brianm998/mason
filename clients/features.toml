@@ -219,6 +219,14 @@ ios = "done"
 android = "todo"
 android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
+[feature.placement-control]
+description = "Where runs go (#834): a Runs on control for all of MASON on home, for a project on home when one is selected, and for a task on its page, each with the effective mode and where it came from, the four modes, Follow MASON / Follow project, a one-line confirm and the pending command; a small marker on a task row that overrides its project; owner devices that can act only"
+swift = "done"
+compose = "done"
+ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the phone shows the global mode as a line but has no control to change it"
+
 [feature.overrides]
 description = "Cancel, retry, skip test, land now, force, pause, open session, from the allowed actions"
 swift = "done"

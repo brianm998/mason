@@ -115,7 +115,7 @@ public final class MonitorModel {
 
     // About versions (Part 15).
     /// The protocol this monitor speaks.
-    public static let protocolVersion: UInt32 = 1
+    public static let protocolVersion: UInt32 = 2
     /// This monitor's own build: a commit, or "dev" for a build nobody versioned.
     /// The commit comes from the environment, else from `BuildStamp`, which every build made by
     /// the daemon or `make` stamps; a build nobody stamped stays "dev" and does not nag.
@@ -200,6 +200,8 @@ public final class MonitorModel {
     public var confirmingDaemonUpdate = false
     /// The Land now the owner pressed and has not yet confirmed (the landing queue's one-line confirm).
     public var landNowAsk: LandNowTarget?
+    /// The placement change the owner chose and has not yet confirmed (#834).
+    public var placementAsk: PlacementAsk?
 
     /// The button was pressed: ask first if the daemon says to, else act.
     public func pressUpdateDaemon() {

@@ -40,6 +40,30 @@ class LandingItemsTest {
         assertEquals("#3 t3: queued #1, behind 1 batch", landingItemText(item(3, position = 1, why = "behind 1 batch")))
     }
 
+    @Test
+    fun batchGroupsUnderOneHeaderAndMembersCarryNoBatchText() {
+        fun member(t: Long, b: Long) = item(t, batch = b).copy(standing = "verifying")
+        val h = BatchLine(
+            id = 7, running = true, phase = "red", state_text = "red in lint, splitting (round 1, 2 tasks left)",
+            severity = "warn", phase_ms = 17 * 60_000, typical_ms = 6 * 60_000,
+            members = listOf(1L, 2L).map { mason.v1.BatchMember(task = it, standing = "verifying") },
+            allowed_actions = listOf("land_now"),
+        )
+        val loose = item(9, batch = 0).copy(status = "in_batch")
+        val l = landingLayout(listOf(loose, member(1, 7), member(2, 7)), listOf(h))
+        assertEquals(listOf(7L), l.groups.map { it.batch })
+        assertEquals(listOf(1L, 2L), l.groups[0].members.map { it.task })
+        assertEquals(listOf(9L), l.loose.map { it.task })
+        assertEquals(
+            "Batch #7 · 2 tasks · red in lint, splitting (round 1, 2 tasks left) · 17 min (usually ~6 min)",
+            batchHeaderText(l.groups[0]),
+        )
+        l.groups[0].members.forEach { assertFalse(landingItemText(it).contains("batch #"), landingItemText(it)) }
+        assertEquals("#1 t1: verifying", landingItemText(member(1, 7)))
+        assertFalse(batchHeaderText(LandingBatchGroup(7, h.copy(typical_ms = 0), emptyList())).contains("usually"))
+        assertEquals(listOf(7L), landNowBatches(listOf(h)).map { it.id })
+    }
+
     private fun owner(): MonitorModel {
         val m = MonitorModel()
         m.connected = true
