@@ -4208,13 +4208,17 @@ pub fn settle_debts(d: &Arc<Daemon>) -> usize {
         };
         let tip = tip.trim().to_string();
         let Some(landed) = debt_landed(d, &p, &row, &tip) else {
+            eprintln!("DBG no landed row={:?} branch={}", row.landed, p.branch(row.task));
             continue;
         };
         let mut proofs = vec![];
         for s in &suites {
             match suite_proof(d, &p, &row, &s.name, &landed, &tip) {
                 Some(x) => proofs.push(x),
-                None => break,
+                None => {
+                    eprintln!("DBG no proof {} landed={landed} tip={tip}", s.name);
+                    break;
+                }
             }
         }
         if proofs.len() == suites.len() {
