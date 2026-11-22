@@ -5561,7 +5561,7 @@ mod tests {
         sh(&dir, &["add", "-A"]);
         sh(&dir, &["commit", "-qm", "tests and docs only"]);
         let head = git::rev_parse(&dir, "HEAD").unwrap();
-        let note = dir.join("source-free.txt");
+        let note = tempfile::tempdir().unwrap().keep().join("source-free.txt");
         let v = change_validator(
             dir.clone(),
             "main".into(),
