@@ -1,0 +1,13 @@
+.mason/run.json
+crates/cli/src/resources.rs
+crates/daemon/src/covmap.rs
+crates/daemon/src/hostedcheck.rs
+crates/daemon/src/jobs.rs
+crates/daemon/src/landing.rs
+crates/daemon/src/remote.rs
+crates/daemon/src/sched.rs
+crates/daemon/src/suites.rs
+crates/daemon/tests/it/hosted_check.rs
+docs/decisions/0862-remote-runs-ask-the-broker-for-runner-units.md
+docs/stages/s869.md
+scripts/exit/s869.sh
