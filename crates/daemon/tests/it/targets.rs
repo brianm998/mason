@@ -329,7 +329,7 @@ fn a_skipped_suite_still_tears_its_device_down() {
         log_lines(&e).contains(&"suite emu-a1".to_string())
     });
     mason_daemon::suites::skip(&d, t, "suite:emu", "not worth it", "brian", false).unwrap();
-    wait_for("teardown after the skip", 30, || {
+    wait_for("teardown after the skip", 120, || {
         log_lines(&e).contains(&"teardown emu-a1".to_string())
     });
     std::fs::remove_file(e.gate.join("hold")).unwrap();

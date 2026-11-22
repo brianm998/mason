@@ -2059,6 +2059,96 @@ pub fn pool_needs(
     Some(out)
 }
 
+/// Does `suite`, run for `task` (`None`: no task owns the run, a landing batch's), go to GitHub?
+/// This is [`executor_for`] asked of a suite, the very call a run makes when it starts
+/// (`suites::run_hosted_resuming`), so what a landing batch decides before it holds slots and
+/// what the run then does come from one function (s943).
+pub fn suite_goes_remote(
+    d: &Daemon,
+    project: &str,
+    task: Option<mason_core::TaskId>,
+    suite: &mason_testing::Suite,
+) -> bool {
+    matches!(
+        executor_for(d, project, Kind::Suite, Some((task, suite))),
+        Executor::GitHub { .. }
+    )
+}
+
+/// A landing batch as the owner of broker requests it makes during its run (s943): the first
+/// task's rank, which is how `Landing::hold` ranks the batch's own lease, and what ends a wait
+/// (every member has left the landing step).
+#[derive(Clone, Debug)]
+pub struct BatchOwner {
+    /// The batch's first task: the owner of its requests.
+    pub task: mason_core::TaskId,
+    pub rank: mason_scheduler::Rank,
+    pub tasks: Vec<mason_core::TaskId>,
+    pub runs: Vec<mason_core::StepRunId>,
+    /// A wait ends when no member has an open run among `runs` (not for the post-land tier,
+    /// whose tasks have left landing already).
+    pub watch: bool,
+}
+
+impl BatchOwner {
+    /// Is anything still waiting for this batch's request?
+    pub fn alive(&self, d: &Daemon) -> bool {
+        if !self.watch || self.runs.is_empty() {
+            return true;
+        }
+        d.world().map_or(true, |w| {
+            self.tasks
+                .iter()
+                .any(|t| w.open_run(*t).is_some_and(|r| self.runs.contains(&r)))
+        })
+    }
+}
+
+/// `needs` of this machine, taken for a landing batch's own run that its lease does not cover
+/// (s943): ranked as the batch's first task, beside the batch's own lease, under the same
+/// limits and CPU and thermal holds as any local run. Nothing to take gives `Ok(None)`.
+pub fn batch_lease(
+    d: &Arc<Daemon>,
+    project: &str,
+    owner: &BatchOwner,
+    needs: mason_scheduler::Needs,
+    label: &str,
+) -> Result<Option<crate::sched::Lease>, String> {
+    if !needs.exclusive && needs.amounts.is_empty() {
+        return Ok(None);
+    }
+    let def = d.project_id_by_name(project).map(|p| d.current_def(p));
+    for name in needs.amounts.keys() {
+        if !name.starts_with("llm:") && !name.starts_with("device:") {
+            let units = def
+                .as_ref()
+                .and_then(|def| def.resources.get(name).copied())
+                .unwrap_or(1);
+            d.broker.declare(name, units);
+        }
+    }
+    let alive = || owner.alive(d);
+    tracing::info!(project, %label, "a batch's run takes this machine's slots as the batch");
+    d.broker
+        .acquire_beside(owner.task, label, owner.rank, needs, &alive, &mut |_| {})
+        .map(Some)
+        .map_err(|_| format!("{label}: the wait for this machine's slots was ended"))
+}
+
+/// [`fallback_lease`] for a suite of a landing batch (s943): the batch holds nothing for a suite
+/// bound for GitHub, so when it comes back here it takes what it holds when placed here, ranked
+/// as the batch's own work and not behind everything.
+pub fn fallback_lease_for_batch(
+    d: &Arc<Daemon>,
+    project: &str,
+    owner: &BatchOwner,
+    uses: &std::collections::BTreeMap<String, u32>,
+    label: &str,
+) -> Result<Option<crate::sched::Lease>, String> {
+    tracing::info!(project, %label, ?uses, "no GitHub runner: queueing for this machine's slots as the batch (fallback = local)");
+    batch_lease(d, project, owner, crate::sched::needs_of(uses, None), label)
+}
+
 /// The rank of a fallback run: its task's own when the task is in a step, else the debts band
 /// (a landed, failed or canceled task, or none: owed work, never the landing band, #835).
 pub fn fallback_rank(
@@ -4361,6 +4451,7 @@ mod tests {
 
     #[test]
     fn other_workflows_are_counted_and_a_304_changes_nothing_and_asks_for_nothing_more() {
+        token();
         let api = Arc::new(FakeActions {
             etag: Mutex::new("\"a\"".into()),
             running: Mutex::new(3),
