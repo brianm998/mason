@@ -9,3 +9,5 @@ behaviour.
 Tests: `the_lint_tier_runs_here_while_the_switch_says_github`,
 `a_lint_tier_set_to_github_goes_there_and_holds_no_local_compile_slot_while_queued`,
 `a_red_lint_run_here_parks_the_task_with_file_and_line`.
+
+Status: superseded by 0830 (two of the three tests were still red).
