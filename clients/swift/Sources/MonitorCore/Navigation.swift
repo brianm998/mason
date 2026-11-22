@@ -16,7 +16,7 @@ public enum Page: Hashable, Sendable {
 
     /// The sections that have a page of their own (`mason://section/<name>`). `landing` is the
     /// existing Landing page, so it parses to `.landing`, not to `.section`.
-    public static let sectionNames = ["active_models", "landing", "queued", "cpu", "disk", "compilation",
+    public static let sectionNames = ["active_models", "landing", "queued", "cpu", "disk", "github", "compilation",
                                       "exploring", "developing", "testing", "review", "needs_attention", "proposed"]
 
     /// The page for a section of home, by name.

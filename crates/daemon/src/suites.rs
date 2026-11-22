@@ -4291,7 +4291,19 @@ fn hold_for_debt(
         return Ok(None);
     }
     // A payment that runs on GitHub holds runner pool units, not this machine's slots (#761).
-    let needs = crate::remote::pool_needs(d, project, &needs, Some(task)).unwrap_or(needs);
+    let mut _waiting = None;
+    let needs = match crate::remote::pool_needs(d, project, &needs, Some(task)) {
+        Some(n) => {
+            _waiting = Some(crate::remote_runs::waiting(
+                d,
+                task.0,
+                "debt payment",
+                &format!("debt #{}", task.0),
+            ));
+            n
+        }
+        None => needs,
+    };
     if needs.amounts.keys().any(|n| n.starts_with("device:")) {
         d.targets.declare_all(d);
     }
@@ -4496,6 +4508,10 @@ pub fn run_idle_debts(d: &Arc<Daemon>) {
         let c = d.broker.compilation();
         // A limit of 0 means no `compile` pool is declared: nothing to wait for.
         if !c.pending.is_empty() || (c.limit > 0 && c.used >= c.limit) {
+            return;
+        }
+        // Debt payments go to GitHub only when nothing else waits for a runner (#766).
+        if d.broker.gha_waiting() > 0 {
             return;
         }
         let Some(Ok(pick)) = next_pick(d, &ran) else {

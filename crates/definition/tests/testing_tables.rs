@@ -460,7 +460,11 @@ fn masons_own_impact_map_selects_suites_by_path() {
             "Cargo.lock",
             "rust-toolchain.toml"
         ]),
-        Selection::Some(["cargo-workspace", "fmt"].map(String::from).to_vec())
+        Selection::Some(
+            ["cargo-workspace", "fmt", "clippy"]
+                .map(String::from)
+                .to_vec()
+        )
     );
     assert_eq!(pick(&["Cargo.lock"]), one("cargo-workspace"));
     // Shared client inputs run the three build suites; `exit-scripts` (s249) runs only for a
@@ -483,10 +487,18 @@ fn masons_own_impact_map_selects_suites_by_path() {
     // `scripts/*.sh` maps to exit-scripts (s249), so the probe sits under no glob.
     assert_eq!(pick(&["scripts/unmapped/tool.rs"]), Selection::All);
     assert_eq!(pick(&["docs/x.md"]), one("cargo-workspace"));
-    // All five (with `fmt`, s691) are bound to run_check and the test step.
-    assert_eq!(all.len(), 5);
-    assert_eq!(d.testing.bound(When::Development).len(), 5);
-    assert_eq!(d.testing.bound(When::TestStep).len(), 5);
+    // `clippy` (s778) is picked for Rust paths only, not for client or docs changes.
+    let picked = |paths: &[&str]| match pick(paths) {
+        Selection::Some(v) => v.contains(&"clippy".to_string()),
+        Selection::All => true,
+    };
+    assert!(picked(&["crates/daemon/src/a.rs"]));
+    assert!(!picked(&["clients/swift/Sources/A.swift"]));
+    assert!(!picked(&["docs/x.md"]));
+    // All six (with `fmt`, s691, and `clippy`, s778) are bound to run_check and the test step.
+    assert_eq!(all.len(), 6);
+    assert_eq!(d.testing.bound(When::Development).len(), 6);
+    assert_eq!(d.testing.bound(When::TestStep).len(), 6);
 }
 
 #[test]
