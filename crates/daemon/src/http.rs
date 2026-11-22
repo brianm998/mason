@@ -1192,7 +1192,7 @@ async fn task_override(
             if key == mason_definition::layers::RUN_ON {
                 return Err(fail(
                     StatusCode::BAD_REQUEST,
-                    "run_on is the owner's choice: use `mason task run-on <id> github|local|default`",
+                    "run_on is the owner's choice: use `mason task run-on <id> <mode>|default`",
                 ));
             }
             mason_definition::layers::check_override(&def, key, value)
@@ -1213,9 +1213,9 @@ async fn task_override(
     Ok(Json(json!({"ok": true})))
 }
 
-/// `mason task run-on <id> github|local|default` (owner only): where the task's compiles and
+/// `mason task run-on <id> local|remote|favor-local|favor-remote|default` (owner only): where the task's compiles and
 /// tests run from the next suite or check on (#699). `default` removes the choice, so the task
-/// follows the global switch. A run already in progress is not moved.
+/// follows its project's mode, else the global one. A run already in progress is not moved.
 async fn task_run_on(
     Shared(d): Shared<Arc<Daemon>>,
     headers: axum::http::HeaderMap,
@@ -1669,7 +1669,7 @@ async fn overrides_add(
             if key == mason_definition::layers::RUN_ON {
                 return Err(fail(
                     StatusCode::BAD_REQUEST,
-                    "run_on belongs to one task: use `mason task run-on <id> github|local|default`",
+                    "run_on belongs to one task: use `mason task run-on <id> <mode>|default`",
                 ));
             }
             mason_definition::layers::check_override(&d2.current_def(pid), key, value)
@@ -1829,6 +1829,14 @@ async fn landing_status(Shared(d): Shared<Arc<Daemon>>) -> Res {
                                 "parallel": c.parallel,
                             }),
                             Err(e) => json!({"error": e}),
+                        },
+                        "batch_tests": match crate::landing::load_config(&d2, *pid)
+                            .ok()
+                            .and_then(|c| crate::landing::batch_gate(&d2, p, &c))
+                        {
+                            None => json!("whole suite"),
+                            Some(mason_core::full_test::Gate::Narrow) => json!("narrowed to the batch's tests; the scheduled full test is the backstop"),
+                            Some(mason_core::full_test::Gate::Whole(why)) => json!(format!("whole suite: {why}")),
                         },
                         "queued": d2.landing().queued(*pid).iter().map(|t| t.0).collect::<Vec<_>>(),
                         "running_batches": d2.landing().running_batches(*pid),
@@ -3075,8 +3083,10 @@ async fn remote_get(Shared(d): Shared<Arc<Daemon>>) -> Res {
     Ok(Json(v))
 }
 
-/// Switch every run that can go to GitHub Actions on or off (`{"default": "github"|"local"}`).
-/// Owner only; read live by the next run, with no restart.
+/// Set the placement mode for all of MASON (`{"mode": "<mode>"}`; the old
+/// `{"default": "github"|"local"}` still works) or, with `"project": "P"`, for one project (its
+/// registration file is written and re-read). Owner only; read live by the next run, with no
+/// restart.
 async fn remote_set(
     Shared(d): Shared<Arc<Daemon>>,
     headers: axum::http::HeaderMap,
@@ -3084,20 +3094,24 @@ async fn remote_set(
 ) -> Res {
     let who = who_of(&headers);
     owner_only(&d, &who, "change where runs go")?;
-    let to = match b["default"].as_str() {
-        Some("github") => crate::place::Global::GitHub,
-        Some("local") => crate::place::Global::Local,
-        _ => {
-            return Err(fail(
+    let to = b["mode"]
+        .as_str()
+        .or_else(|| b["default"].as_str())
+        .and_then(crate::place::Mode::parse)
+        .ok_or_else(|| {
+            fail(
                 StatusCode::BAD_REQUEST,
-                "`default` must be \"github\" or \"local\"",
-            ))
-        }
-    };
+                "`mode` must be local, remote, favor-local or favor-remote",
+            )
+        })?;
+    let project = b["project"].as_str().map(str::to_string);
     let d2 = d.clone();
     let r = d
         .pool
-        .run(move || crate::place::set_global(&d2, to, &who))
+        .run(move || match project {
+            Some(p) => crate::place::set_project_mode(&d2, &p, to),
+            None => crate::place::set_global(&d2, to, &who),
+        })
         .await
         .map_err(pool_err)?;
     r.map(Json).map_err(|(c, m)| fail(code(c), m))

@@ -447,6 +447,8 @@ fn run_hosted_resuming(
     // batch, a base run and a debt stay here until #702. A remote run is returned as the same
     // `Ran`, so it is judged by the code below this call, not by it. A suite whose build runs
     // as its own step here has none when it goes remote: the build comes first in the command.
+    // Held until this function returns, so for the whole local run.
+    let mut fallback: Option<crate::sched::Lease> = None;
     if let crate::remote::Executor::GitHub { runs_on } =
         crate::remote::executor_for(d, project, crate::remote::Kind::Suite, place)
     {
@@ -456,7 +458,34 @@ fn run_hosted_resuming(
         )? {
             return Ok(ran);
         }
+        // `fallback = "local"` sent it here. Its step holds runner pool units, not this
+        // machine's slots (#761), so it takes what the definition's test step `uses` before it
+        // starts, under the same limits and CPU and thermal holds as a local test step.
+        if !d.cfg.hosts_dir().join(id).join("host.kv").exists() {
+            let uses = d
+                .project_id_by_name(project)
+                .map(|p| d.current_def(p))
+                .and_then(|def| {
+                    def.steps
+                        .iter()
+                        .find(|s| s.kind == mason_definition::StepType::Test)
+                        .map(|s| s.uses.clone())
+                })
+                .unwrap_or_default();
+            let task = place.and_then(|(t, _)| t);
+            fallback = crate::remote::fallback_lease(
+                d,
+                project,
+                task,
+                &uses,
+                &format!(
+                    "{} {id} (no GitHub runner, run here)",
+                    task.map_or_else(|| "suite".to_string(), |t| format!("#{}", t.0))
+                ),
+            )?;
+        }
     }
+    let _fallback = fallback;
     let hosts = d.cfg.hosts_dir();
     let again_id = hl::rerun_id(id);
     let mut first = None;
@@ -2883,6 +2912,64 @@ fn narrow_packages_for_step(
     Some((s, note, groups))
 }
 
+/// A batch suite narrowed to the union diff `base..HEAD` in `wt` (s804): its `dev_command` (and
+/// `dev_build`) over the affected tests plus the smoke set, the pick a task's test step makes.
+/// `Err` says why it runs whole: no `dev_command`, an empty union, or a path that reaches every
+/// target (`Cargo.lock`, `Cargo.toml`, `build.rs`, `tests/support/**`, ...). The copy is marked
+/// narrowed, so it records no evidence.
+pub fn narrow_for_batch(
+    def: &Definition,
+    suite: &Suite,
+    wt: &Path,
+    base: &str,
+) -> Result<(Suite, String), String> {
+    let dc = suite
+        .dev_command
+        .as_ref()
+        .ok_or_else(|| "it has no dev_command".to_string())?;
+    let diff = git::run(wt, &["diff", "--name-only", base, "HEAD"]).map_err(|e| e.to_string())?;
+    let all: Vec<String> = diff
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .collect();
+    if all.is_empty() {
+        return Err("the union changes nothing".into());
+    }
+    let (paths, dropped) = split_for_suite(def, suite, &all);
+    let named = [
+        Some(suite.command.as_str()),
+        suite.build.as_deref(),
+        suite.dev_command.as_deref(),
+        suite.dev_build.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join("\n");
+    let n = crate::scope::narrow_for(wt, &paths, crate::scope::wants_tests(dc), true, &named)?;
+    let mut s = suite.clone();
+    s.command = crate::scope::expand(dc, &n, false);
+    if let Some(db) = &suite.dev_build {
+        s.build = Some(crate::scope::expand(db, &n, true));
+    }
+    s.min_tests = 1;
+    s.narrowed = true;
+    let left = left_out_note(&dropped);
+    let note = format!(
+        "{}: narrowed to {} over the batch's {} changed file(s){}; the scheduled full test runs it whole",
+        suite.name,
+        n.describe(),
+        all.len(),
+        if left.is_empty() {
+            String::new()
+        } else {
+            format!(" ({left})")
+        }
+    );
+    Ok((s, note))
+}
+
 /// The new-file line numbers a `git diff -U0` adds or changes (`@@ -a,b +c,d @@`).
 fn added_lines(diff: &str) -> Vec<u32> {
     let mut out = vec![];
@@ -4159,14 +4246,15 @@ fn debt_wait_goes_on(d: &Daemon, debt: u64) -> bool {
 }
 
 /// Hold what the definition's test step `uses` (`compile` and `test-suite` for MASON) while a
-/// debt runs, ranked behind the task's own work, so a payment queues like any test step and
-/// never runs beside a full set of them. Nothing to hold gives `Ok(None)`.
+/// debt runs, ranked in the debts band (behind all task work), so a payment queues like a
+/// test step and never runs beside a full set of them, nor ahead of any task (#835). Nothing to hold gives `Ok(None)`.
 fn hold_for_debt(
     d: &Arc<Daemon>,
     def: &Definition,
     project: &str,
     task: TaskId,
     debt: u64,
+    at: u64,
 ) -> Result<Option<crate::sched::Lease>, String> {
     let Some(step) = def
         .steps
@@ -4190,16 +4278,13 @@ fn hold_for_debt(
                 .declare(name, def.resources.get(name).copied().unwrap_or(1));
         }
     }
-    let rank = match d.world().ok().and_then(|w| w.tasks.get(&task).cloned()) {
-        Some(t) => d.rank_for(&t, def, &step.name),
-        // A task the world no longer holds: behind everything, at low priority.
-        None => mason_scheduler::Rank::new(false, 100, 3, now_ms(), task.0, false),
-    };
+    // The debts band: behind all task work, the landing band and every step, oldest first.
+    let rank = mason_scheduler::Rank::new(false, 0, 0, at, debt, false).debt();
     // Beside: the task may still hold a step's own request (a debt paid by hand).
     d.broker
         .acquire_beside(
             task,
-            &format!("debt #{debt}"),
+            &format!("debt #{debt} (behind task work)"),
             rank,
             needs,
             &|| debt_wait_goes_on(d, debt),
@@ -4209,9 +4294,167 @@ fn hold_for_debt(
         .map_err(|_| PAY_CANCELLED.to_string())
 }
 
-/// Run the debts still open, one at a time, as work below every task: only while the compile
-/// queue is empty and a slot is free, and each debt once (a debt a run found red keeps
-/// `tried_at` and waits for the owner). Only debts whose task landed are run.
+/// The path-and-module words of red tests: every `::`, `.` or `/` segment but the last of each
+/// name, with `-` read as `_`, three characters or more.
+fn red_modules(tests: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    for t in tests {
+        let segs: Vec<&str> = t.split(['/', '.']).flat_map(|x| x.split("::")).collect();
+        for seg in segs.iter().take(segs.len().saturating_sub(1)) {
+            let seg = seg.trim().replace('-', "_");
+            if seg.len() >= 3 && !out.contains(&seg) {
+                out.push(seg);
+            }
+        }
+    }
+    out
+}
+
+/// Whether a file in `files` (one path per line) has a path component, extension off, named
+/// like one of the `modules`.
+fn touches_modules(files: &str, modules: &[String]) -> bool {
+    files.lines().any(|f| {
+        f.split(['/', '.'])
+            .map(|c| c.replace('-', "_"))
+            .any(|c| modules.contains(&c))
+    })
+}
+
+/// Whether the suite's last red record keeps it from running for debts at `tip`: yes at the
+/// base it was red at; at a later one only until a landing touched a module of the red tests or
+/// `debt_red_backoff` has passed (#774).
+fn red_blocks(
+    d: &Arc<Daemon>,
+    p: &crate::config::ProjectCfg,
+    suite: &str,
+    tip: &str,
+    now: u64,
+) -> bool {
+    let Ok(Some((base, tests, at))) = d.store.suite_red(&p.id, suite) else {
+        return false;
+    };
+    if now.saturating_sub(at) >= d.cfg.debt_red_backoff.as_millis() as u64 {
+        return false;
+    }
+    if base == tip {
+        return true;
+    }
+    let modules = red_modules(&tests);
+    if modules.is_empty() {
+        return true;
+    }
+    match git::run(&p.path, &["diff", "--name-only", &base, tip]) {
+        Ok(files) => !touches_modules(&files, &modules),
+        // A base that cannot be compared with is no reason to hold the suite back.
+        Err(_) => false,
+    }
+}
+
+/// Mark every open debt of the project that needs `suite` as tried: the suite was red.
+fn mark_tried_covering(d: &Arc<Daemon>, project: &str, suite: &str) {
+    let Some(pid) = d.project_id_by_name(project) else {
+        return;
+    };
+    let (def, tier) = (d.current_def(pid), landing_tier(d, pid));
+    for row in d.store.debts(None, true).unwrap_or_default() {
+        if row.project == project
+            && !row.scope.starts_with("ci:")
+            && debt_suites(&def, &tier, &row.scope)
+                .iter()
+                .any(|s| s.name == suite)
+        {
+            let _ = d.store.debt_tried(row.id, now_ms());
+        }
+    }
+}
+
+/// Whether the project's runs go to GitHub and the `gha` pool has no idle unit: a debt run
+/// then waits for the next pass instead of queueing behind every task.
+fn gha_full(d: &Arc<Daemon>, project: &str) -> bool {
+    matches!(
+        crate::remote::executor_global(d, project),
+        crate::remote::Executor::GitHub { .. }
+    ) && d
+        .broker
+        .limit("gha")
+        .is_some_and(|l| d.broker.used("gha") >= l)
+}
+
+/// One thing the idle pass may run: a debt to run it for, and which suite of its scope (`None`
+/// for a CI debt, which runs as a whole).
+struct Pick {
+    row: mason_store::DebtRow,
+    suite: Option<String>,
+    tip: String,
+}
+
+/// The next suite some open debt needs and that may run now, or `None`. A suite is needed when
+/// a landed debt's scope names it and no proof of it is recorded; it may run when it has not run
+/// in this pass at this tip and its red record (if any) does not hold it back.
+fn next_pick(d: &Arc<Daemon>, ran: &[(String, String, String)]) -> Option<Result<Pick, ()>> {
+    let rows = d.store.debts(None, true).ok()?;
+    let now = now_ms();
+    for row in rows {
+        let Some(pid) = d.project_id_by_name(&row.project) else {
+            continue;
+        };
+        let Some(p) = d.project(pid).cloned() else {
+            continue;
+        };
+        let Ok(tip) = git::run(&p.path, &["rev-parse", &p.base_ref()]) else {
+            continue;
+        };
+        let tip = tip.trim().to_string();
+        let Some(landed) = debt_landed(d, &p, &row, &tip) else {
+            continue;
+        };
+        if row.scope.starts_with("ci:") {
+            let key = (row.project.clone(), tip.clone(), row.scope.clone());
+            if row.tried_at == 0 && !ran.contains(&key) {
+                return Some(Ok(Pick {
+                    row,
+                    suite: None,
+                    tip,
+                }));
+            }
+            continue;
+        }
+        let backoff = d.cfg.debt_red_backoff.as_millis() as u64;
+        for s in debt_suites(&d.current_def(pid), &landing_tier(d, pid), &row.scope) {
+            if suite_proof(d, &p, &row, &s.name, &landed, &tip).is_some() {
+                continue;
+            }
+            let key = (row.project.clone(), tip.clone(), s.name.clone());
+            if ran.contains(&key) {
+                continue;
+            }
+            let allowed = match d.store.suite_red(&p.id, &s.name) {
+                Ok(Some(_)) => !red_blocks(d, &p, &s.name, &tip, now),
+                // No red on record: a debt that was tried waits out the backoff.
+                _ => row.tried_at == 0 || now.saturating_sub(row.tried_at) >= backoff,
+            };
+            if !allowed {
+                continue;
+            }
+            if gha_full(d, &row.project) {
+                return Some(Err(()));
+            }
+            return Some(Ok(Pick {
+                suite: Some(s.name.clone()),
+                row,
+                tip,
+            }));
+        }
+    }
+    None
+}
+
+/// Run the suites that open debts need, one at a time, as work below every task: only while the
+/// compile queue is empty and a slot is free (and, with remote on, the `gha` pool has an idle
+/// unit). The pass picks suites, not debts (#774): each suite runs at most once per base tip
+/// however many debts of whatever scope need it, [`settle_debts`] then closes every debt the
+/// recorded green covers, and a suite that was red is not run again until a landing touched a
+/// module of its red tests or `debt_red_backoff` passed. Only debts whose task landed count.
 pub fn run_idle_debts(d: &Arc<Daemon>) {
     if d.idle_run.swap(true, Ordering::SeqCst) {
         return;
@@ -4223,8 +4466,7 @@ pub fn run_idle_debts(d: &Arc<Daemon>) {
         }
     }
     let _reset = Reset(d.clone());
-    // (project, scope, tip) already run in this pass: the same suites never run twice on one
-    // tip. The result is settled onto every debt the tip holds before another is chosen (s476).
+    // (project, tip, suite or CI scope) already run in this pass.
     let mut ran: Vec<(String, String, String)> = vec![];
     loop {
         settle_debts(d);
@@ -4233,32 +4475,13 @@ pub fn run_idle_debts(d: &Arc<Daemon>) {
         if !c.pending.is_empty() || (c.limit > 0 && c.used >= c.limit) {
             return;
         }
-        let Ok(rows) = d.store.debts(None, true) else {
+        let Some(Ok(pick)) = next_pick(d, &ran) else {
             return;
         };
-        let next = rows.into_iter().find(|row| {
-            row.tried_at == 0
-                && d.project_id_by_name(&row.project)
-                    .and_then(|pid| d.project(pid).cloned())
-                    .and_then(|p| {
-                        let tip = git::run(&p.path, &["rev-parse", &p.base_ref()]).ok()?;
-                        let tip = tip.trim().to_string();
-                        debt_landed(d, &p, row, &tip)?;
-                        let key = (row.project.clone(), row.scope.clone(), tip);
-                        (!ran.contains(&key)).then_some(())
-                    })
-                    .is_some()
-        });
-        let Some(row) = next else { return };
-        let key = d
-            .project_id_by_name(&row.project)
-            .and_then(|pid| d.project(pid).cloned())
-            .and_then(|p| git::run(&p.path, &["rev-parse", &p.base_ref()]).ok())
-            .map(|t| (row.project.clone(), row.scope.clone(), t.trim().to_string()));
-        if let Some(k) = key {
-            ran.push(k);
-        }
-        match pay(d, row.id) {
+        let (row, tip) = (pick.row, pick.tip);
+        let unit = pick.suite.clone().unwrap_or_else(|| row.scope.clone());
+        ran.push((row.project.clone(), tip, unit.clone()));
+        match pay_with(d, row.id, pick.suite.as_deref()) {
             Ok(m) => tracing::info!(debt = row.id, "idle run: {m}"),
             Err(e) if e == PAY_CANCELLED => {
                 tracing::info!(debt = row.id, "idle run: {e}");
@@ -4267,11 +4490,109 @@ pub fn run_idle_debts(d: &Arc<Daemon>) {
                 }
             }
             Err(e) => {
-                let _ = d.store.debt_tried(row.id, now_ms());
+                if pick.suite.is_some() {
+                    mark_tried_covering(d, &row.project, &unit);
+                } else {
+                    let _ = d.store.debt_tried(row.id, now_ms());
+                }
                 tracing::warn!(debt = row.id, "idle run: {e}");
             }
         }
     }
+}
+
+/// `*` matches any run of characters; everything else matches itself.
+fn glob_match(pat: &str, text: &str) -> bool {
+    let parts: Vec<&str> = pat.split('*').collect();
+    if parts.len() == 1 {
+        return pat == text;
+    }
+    let (first, last) = (parts[0], parts[parts.len() - 1]);
+    if !text.starts_with(first) || text.len() < first.len() + last.len() || !text.ends_with(last) {
+        return false;
+    }
+    let mut at = first.len();
+    let end = text.len() - last.len();
+    for mid in &parts[1..parts.len() - 1] {
+        match text[at..end].find(mid) {
+            Some(i) => at += i + mid.len(),
+            None => return false,
+        }
+    }
+    true
+}
+
+/// Record suites green from the base branch's own CI runs (#774). A suite with `ci_jobs` is
+/// green at a finished run's commit when every listed job pattern matches at least one job of
+/// that run and every job it matches succeeded. Looks at the newest ten finished runs, skips a
+/// commit already recorded, and settles the debts the new greens cover. Returns how many greens
+/// it recorded.
+pub fn record_ci_greens(
+    d: &Arc<Daemon>,
+    pid: ProjectId,
+    src: &dyn crate::ci_watch::Source,
+) -> usize {
+    let Some(p) = d.project(pid).cloned() else {
+        return 0;
+    };
+    let def = d.current_def(pid);
+    let mapped: Vec<&Suite> = def
+        .testing
+        .suites
+        .iter()
+        .filter(|s| !s.ci_jobs.is_empty())
+        .collect();
+    if mapped.is_empty() {
+        return 0;
+    }
+    let Ok(runs) = src.runs(&p.base) else {
+        return 0;
+    };
+    let mut recorded = 0;
+    for run in runs.iter().filter(|r| r.conclusion.is_some()).take(10) {
+        let mut jobs = None;
+        for s in &mapped {
+            let known = d
+                .store
+                .suite_green_bases(&p.id, &s.name)
+                .unwrap_or_default();
+            if known.iter().any(|(b, _)| *b == run.sha) {
+                continue;
+            }
+            if jobs.is_none() {
+                match src.jobs(run.id) {
+                    Ok(j) => jobs = Some(j),
+                    Err(_) => break,
+                }
+            }
+            let jobs = jobs.as_deref().unwrap_or_default();
+            let covered = s.ci_jobs.iter().all(|pat| {
+                let hit: Vec<_> = jobs.iter().filter(|j| glob_match(pat, &j.name)).collect();
+                !hit.is_empty()
+                    && hit
+                        .iter()
+                        .all(|j| j.conclusion.as_deref() == Some("success"))
+            });
+            if covered {
+                let executed = d
+                    .store
+                    .suite_green(&p.id, &s.name, &run.sha)
+                    .ok()
+                    .flatten()
+                    .unwrap_or(0);
+                if d.store
+                    .put_suite_green(&p.id, &s.name, &run.sha, executed, now_ms())
+                    .is_ok()
+                {
+                    recorded += 1;
+                }
+            }
+        }
+    }
+    if recorded > 0 {
+        settle_debts(d);
+    }
+    recorded
 }
 
 /// Look at the open debts once an hour (`debt_interval`), the first time soon after start.
@@ -4300,6 +4621,13 @@ pub fn spawn_debts(d: &Arc<Daemon>) {
 /// Pay a debt by running the skipped suite on the base branch's tip. Green
 /// pays it; red leaves it open and says why.
 pub fn pay(d: &Arc<Daemon>, debt: u64) -> Result<String, String> {
+    pay_with(d, debt, None)
+}
+
+/// [`pay`], or with `only` set, run just that one suite of the debt's scope on the tip: what the
+/// idle pass does, so a suite runs once however many debts need it. A green is recorded for the
+/// base and closes the debts it covers through [`settle_debts`]; a red is recorded in `suite_red`.
+fn pay_with(d: &Arc<Daemon>, debt: u64, only: Option<&str>) -> Result<String, String> {
     let row = d
         .store
         .debts(None, false)
@@ -4318,7 +4646,10 @@ pub fn pay(d: &Arc<Daemon>, debt: u64) -> Result<String, String> {
     if row.scope.starts_with("ci:") {
         return pay_ci(d, &row, &p);
     }
-    let suites = debt_suites(&def, &landing_tier(d, pid), &row.scope);
+    let mut suites = debt_suites(&def, &landing_tier(d, pid), &row.scope);
+    if let Some(name) = only {
+        suites.retain(|s| s.name == name);
+    }
     if suites.is_empty() {
         return Err("the debt's suite no longer exists in the definition".into());
     }
@@ -4354,7 +4685,7 @@ pub fn pay(d: &Arc<Daemon>, debt: u64) -> Result<String, String> {
     {
         return Ok("already paid".into());
     }
-    let _lease = hold_for_debt(d, &def, &row.project, TaskId(row.task), debt)?;
+    let _lease = hold_for_debt(d, &def, &row.project, TaskId(row.task), debt, row.at)?;
     if p.remote.is_some() {
         let _ = d.fetch_remote(pid);
     }
@@ -4399,6 +4730,9 @@ pub fn pay(d: &Arc<Daemon>, debt: u64) -> Result<String, String> {
     };
     let mut verdicts = vec![];
     let mut all_green = true;
+    // The tests a red run named, for the backoff (#774).
+    let mut red_tests: Vec<String> = vec![];
+    let mut red_suite: Option<String> = None;
     for s in &suites {
         let r = run_suite(&who, &p.path, &lock, &def, s, &wt, &tree, &mut |_| {});
         match r {
@@ -4415,10 +4749,15 @@ pub fn pay(d: &Arc<Daemon>, debt: u64) -> Result<String, String> {
             }
             SuiteRun::Done { notes, .. } => {
                 all_green = false;
+                red_suite.get_or_insert(s.name.clone());
                 verdicts.push(notes.join("; "));
             }
-            SuiteRun::Product { feedback, .. } => {
+            SuiteRun::Product {
+                feedback, failing, ..
+            } => {
                 all_green = false;
+                red_suite.get_or_insert(s.name.clone());
+                red_tests.extend(failing);
                 verdicts.push(feedback.lines().next().unwrap_or("red").to_string());
             }
             SuiteRun::Gone => all_green = false,
@@ -4427,6 +4766,16 @@ pub fn pay(d: &Arc<Daemon>, debt: u64) -> Result<String, String> {
     {
         let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
         git::remove_worktree(&p.path, &wt);
+    }
+    if let Some(name) = &red_suite {
+        let _ = d
+            .store
+            .put_suite_red(&row.project, name, &tip, &red_tests, now_ms());
+    }
+    if all_green {
+        for s in &suites {
+            let _ = d.store.clear_suite_red(&row.project, &s.name);
+        }
     }
     let _ = who.project;
     // Tests a green run skipped as known red at this tip. A debt whose own task touched one of
@@ -4450,6 +4799,10 @@ pub fn pay(d: &Arc<Daemon>, debt: u64) -> Result<String, String> {
                 ));
             }
         }
+    }
+    if all_green && only.is_some() {
+        // The green is recorded for the tip; every debt it covers closes in `settle_debts`.
+        return Ok(format!("suite green at {}", &tip[..tip.len().min(10)]));
     }
     if all_green {
         let mut how = format!(
@@ -5728,5 +6081,111 @@ mod timeout_tests {
         let none = format!("`s` is red ({RAN_OUT_OF_TIME}).\nLast output of `s`:\n");
         assert_eq!(timeout_names(&none), Some(vec![]));
         assert_eq!(timeout_names("`s` is red (3 tests failed).\n"), None);
+    }
+}
+
+#[cfg(test)]
+mod narrow_batch_tests {
+    use super::*;
+    use mason_testing::ParserKind;
+
+    fn git_in(d: &Path, args: &[&str]) {
+        let ok = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .current_dir(d)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git {args:?}");
+    }
+
+    fn put(d: &Path, p: &str, s: &str) {
+        let f = d.join(p);
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        std::fs::write(f, s).unwrap();
+    }
+
+    /// Two crates, `a` and `b`, one commit: the base.
+    fn repo() -> tempfile::TempDir {
+        let d = tempfile::tempdir().unwrap();
+        let r = d.path();
+        put(
+            r,
+            "Cargo.toml",
+            "[workspace]\nresolver = \"2\"\nmembers = [\"crates/*\"]\n",
+        );
+        for n in ["a", "b"] {
+            put(
+                r,
+                &format!("crates/{n}/Cargo.toml"),
+                &format!("[package]\nname = \"{n}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
+            );
+            put(r, &format!("crates/{n}/src/lib.rs"), "");
+        }
+        git_in(r, &["init", "-q"]);
+        git_in(r, &["add", "-A"]);
+        git_in(r, &["commit", "-q", "-m", "base"]);
+        d
+    }
+
+    fn base(d: &Path) -> String {
+        git::run(d, &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_string()
+    }
+
+    fn commit(d: &Path, file: &str) {
+        put(d, file, "// changed\n");
+        git_in(d, &["add", "-A"]);
+        git_in(d, &["commit", "-q", "-m", "change"]);
+    }
+
+    fn suite() -> Suite {
+        let mut s = Suite::new("cw", "cargo test --workspace", ParserKind::Tap);
+        s.dev_command = Some("cargo test {tests_for_change}".into());
+        s
+    }
+
+    #[test]
+    fn a_batch_touching_one_crate_runs_the_narrowed_command_over_the_union() {
+        let d = repo();
+        let b = base(d.path());
+        commit(d.path(), "crates/a/src/lib.rs");
+        let (s, note) = narrow_for_batch(&Definition::empty(), &suite(), d.path(), &b).unwrap();
+        assert!(s.narrowed);
+        assert!(s.command.starts_with("cargo test "), "{}", s.command);
+        assert!(s.command.contains("-p a"), "{}", s.command);
+        assert!(!s.command.contains("-p b"), "{}", s.command);
+        assert!(note.contains("scheduled full test"), "{note}");
+        // A second commit in the other crate joins the union.
+        commit(d.path(), "crates/b/src/lib.rs");
+        let (s, _) = narrow_for_batch(&Definition::empty(), &suite(), d.path(), &b).unwrap();
+        assert!(
+            s.command.contains("-p a") && s.command.contains("-p b"),
+            "{}",
+            s.command
+        );
+    }
+
+    #[test]
+    fn a_batch_touching_cargo_lock_runs_whole() {
+        let d = repo();
+        let b = base(d.path());
+        commit(d.path(), "Cargo.lock");
+        let why = narrow_for_batch(&Definition::empty(), &suite(), d.path(), &b).unwrap_err();
+        assert!(why.contains("Cargo.lock"), "{why}");
+    }
+
+    #[test]
+    fn an_empty_union_and_a_suite_without_a_dev_command_run_whole() {
+        let d = repo();
+        let b = base(d.path());
+        assert!(narrow_for_batch(&Definition::empty(), &suite(), d.path(), &b).is_err());
+        commit(d.path(), "crates/a/src/lib.rs");
+        let mut s = suite();
+        s.dev_command = None;
+        assert!(narrow_for_batch(&Definition::empty(), &s, d.path(), &b).is_err());
     }
 }

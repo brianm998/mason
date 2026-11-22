@@ -24,6 +24,9 @@ pub struct DaemonConfig {
     /// How often open debts are looked at: closed when their suite has been green since, the
     /// rest run when the machine is idle (s393).
     pub debt_interval: Duration,
+    /// After a suite was red on the base for a debt, the idle pass does not run it again for
+    /// debts until a landing touched a module of the red tests or this long has passed (#774).
+    pub debt_red_backoff: Duration,
     /// How long after a step run closes (and its hosts exited) the sweep leaves its host
     /// directories in `h/` before moving them to `t/<task>/hosts/` (default a day;
     /// `MASON_HOST_GRACE_MS` sets it for the exit script).
@@ -507,6 +510,7 @@ impl DaemonConfig {
             disk_every: crate::disk::DEFAULT_EVERY,
             sweep_interval: Duration::from_secs(120),
             debt_interval: Duration::from_secs(3600),
+            debt_red_backoff: Duration::from_secs(24 * 3600),
             host_grace: std::env::var("MASON_HOST_GRACE_MS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -895,6 +899,9 @@ pub struct RemoteCfg {
     pub pickup_timeout_s: u64,
     /// With `fallback = "local"` a run that cannot go remote runs here instead.
     pub fallback_local: bool,
+    /// The project's placement mode (#831): `[remote_runs] mode`, else the old `fallback` (`local`
+    /// is `favor-remote`, `none` is `remote`). `None`: the project follows the global mode.
+    pub mode: Option<String>,
     /// `test_env = { MASON_X = "v" }`: variables every run's `run.json` carries to the runner
     /// (only `MASON_*` names reach it). The owner's configuration.
     pub test_env: Vec<(String, String)>,
@@ -1187,15 +1194,30 @@ fn parse_services(id: &str, doc: &DocumentMut) -> Result<ServicesCfg, String> {
                 .map(|c| c.2.clone())
                 .ok_or_else(|| format!("{id}: `[remote_runs] token` is required"))?,
         };
-        let fallback_local = match get(t, "fallback").as_deref() {
-            None | Some("none") => false,
-            Some("local") => true,
+        let fallback = match get(t, "fallback").as_deref() {
+            None => None,
+            Some(o @ ("none" | "local")) => Some(o.to_string()),
             Some(o) => {
                 return Err(format!(
                     "{id}: `[remote_runs] fallback` is `local` or `none`, not {o:?}"
                 ))
             }
         };
+        let mode = match get(t, "mode").as_deref() {
+            Some(m @ ("local" | "remote" | "favor-local" | "favor-remote")) => Some(m.to_string()),
+            Some(o) => {
+                return Err(format!(
+                    "{id}: `[remote_runs] mode` is `local`, `remote`, `favor-local` or `favor-remote`, not {o:?}"
+                ))
+            }
+            None => match fallback.as_deref() {
+                Some("local") => Some("favor-remote".to_string()),
+                Some(_) => Some("remote".to_string()),
+                None => None,
+            },
+        };
+        let fallback_local =
+            fallback.as_deref() == Some("local") || mode.as_deref() == Some("favor-remote");
         out.remote = Some(RemoteCfg {
             api: get(t, "api")
                 .or_else(|| ci_gh.map(|c| c.0))
@@ -1206,6 +1228,7 @@ fn parse_services(id: &str, doc: &DocumentMut) -> Result<ServicesCfg, String> {
             runs_on: get(t, "runs_on").unwrap_or_else(|| "ubuntu-latest".into()),
             pickup_timeout_s: int(t, "pickup_timeout", 1200),
             fallback_local,
+            mode,
             test_env: match t.get("test_env") {
                 None => vec![],
                 Some(v) => {

@@ -79,6 +79,16 @@ class MonitorCoreTest {
 
     private fun sidebarOf(vararg s: SidebarSection) = View(sidebar = SidebarView(sections = s.toList()))
 
+    @Test fun aStaleViewArrivingAfterANewerOneIsDropped() {
+        val m = MonitorModel()
+        val newer = section("needs_attention", rows = listOf(row(1, "developing")))
+        val older = section("needs_attention", rows = listOf(row(1, "developing"), row(2, "testing")))
+        m.apply(ServerMessage(view = ViewUpdate(seq = 8, view = sidebarOf(newer))))
+        m.apply(ServerMessage(view = ViewUpdate(seq = 7, view = sidebarOf(older))))
+        assertEquals(1, m.sidebar?.sections?.single()?.rows?.size, "the older view did not replace the newer")
+        assertEquals(8L, m.lastSeq)
+    }
+
     @Test fun somethingNewNeedingYouChimesOnceAndTheFirstUpdateIsSilent() {
         val m = MonitorModel()
         var chimes = 0

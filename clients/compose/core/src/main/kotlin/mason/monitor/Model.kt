@@ -62,6 +62,16 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     var pairOffer by mutableStateOf<PairOffer?>(null)
     var devicesNotice by mutableStateOf<String?>(null)
     var lastSeq by mutableStateOf(0L)
+    /** The highest sequence number of a view applied so far; an older one is dropped. */
+    private val appliedViewSeq = HashMap<String, Long>()
+
+    private fun viewKind(v: View): String = when {
+        v.sidebar != null -> "sidebar"
+        v.home != null -> "home"
+        v.header_ != null -> "header"
+        v.task_detail != null -> "task"
+        else -> "other"
+    }
     var connected by mutableStateOf(false)
     /** Down and being retried: the daemon is restarting or has not answered. Shown as "reconnecting", never as an error. */
     var reconnecting by mutableStateOf(false)
@@ -957,7 +967,7 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
             reconnecting = false
             announcer.connectionRestored()
             pending = emptyMap()
-            if (w.resume == ResumeKind.SNAPSHOT) lastSeq = 0
+            if (w.resume == ResumeKind.SNAPSHOT) { lastSeq = 0; appliedViewSeq.clear() }
             daemonVersion = w.version
             localDaemon = w.role.isEmpty()
             // A build asked for on the connection that just went has no answer coming.
@@ -974,8 +984,14 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         }
         m.events?.let { e -> e.events.lastOrNull()?.let { lastSeq = max(lastSeq, it.seq) } }
         m.view?.let { u ->
+            // A view older than one already applied (out-of-order arrival) is stale: drop it.
+            val kind = u.view?.let(::viewKind)
+            val stale = kind != null && u.seq > 0 && u.seq < (appliedViewSeq[kind] ?: 0L)
             lastSeq = max(lastSeq, u.seq)
-            u.view?.let(::apply)
+            if (!stale) {
+                if (kind != null) appliedViewSeq[kind] = max(appliedViewSeq[kind] ?: 0L, u.seq)
+                u.view?.let(::apply)
+            }
         }
         m.result?.let { r ->
             lastResult = if (r.ok) null else r.error

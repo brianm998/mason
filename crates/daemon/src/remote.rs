@@ -101,6 +101,20 @@ pub fn executor_global(d: &Daemon, project: &str) -> Executor {
     }
 }
 
+/// Where a whole step of `task` goes (`pool_needs`): the task's mode, else the project's, else
+/// the global one, with no suite's rules.
+pub fn executor_task(d: &Daemon, project: &str, task: Option<u64>) -> Executor {
+    if forced_for_tests() {
+        if let Some(r) = remote_cfg(d, project) {
+            return Executor::GitHub { runs_on: r.runs_on };
+        }
+    }
+    match crate::place::plain_place(d, project, task) {
+        crate::place::Place::GitHub { runs_on, .. } => Executor::GitHub { runs_on },
+        crate::place::Place::Local { .. } => Executor::Local,
+    }
+}
+
 fn forced_for_tests() -> bool {
     std::env::var("MASON_TEST_FORCE_REMOTE").is_ok_and(|v| v == "1")
 }
@@ -312,7 +326,10 @@ pub fn site_for(d: &Daemon, project: &str, cwd: &Path) -> Option<Site> {
         base_ref,
         workflow: r.workflow,
         pickup_timeout: Duration::from_secs(r.pickup_timeout_s),
-        fallback_local: r.fallback_local,
+        // `favor-remote` spills over to this machine after the pickup timeout (s812), whether the
+        // project sets it or follows the global mode.
+        fallback_local: r.fallback_local
+            || crate::place::project_effective(d, project).0 == crate::place::Mode::FavorRemote,
         test_env: r.test_env,
         gh: GitHub::new(http, &r.api, &r.repo, token),
         clock: Arc::new(SystemClock),
@@ -332,6 +349,19 @@ fn remote_base_ref(repo: &Path, remote: &str, base: &str) -> String {
 }
 
 // ---- the snapshot -----------------------------------------------------------------------------
+
+/// The toolchains a run of `suite` needs (`rust`, `java`, `swift`); the workflow sets up only
+/// these. MASON's own suites: `swift*` needs Xcode and `compose*` needs Java and Gradle; every
+/// other suite, and a check with no suite, is Rust.
+pub fn toolchains(suite: &str) -> Vec<&'static str> {
+    if suite.starts_with("swift") {
+        vec!["swift"]
+    } else if suite.starts_with("compose") {
+        vec!["java"]
+    } else {
+        vec!["rust"]
+    }
+}
 
 /// The Xcode version a command asks for (`DEVELOPER_DIR=/Applications/Xcode_16.4.app`): `16.4`.
 /// The runner prefers it and falls back to the image's default Xcode when it is not installed.
@@ -369,6 +399,7 @@ pub fn run_json(spec: &RunSpec) -> String {
     env.insert("NO_COLOR".into(), "1".into());
     let timeout_min = spec.limit.as_secs().div_ceil(60).max(1);
     serde_json::json!({
+        "toolchains": toolchains(&spec.suite),
         "run": spec.id,
         "project": spec.project,
         "suite": spec.suite,
@@ -866,11 +897,15 @@ fn sweep_stale_refs_now(d: &Daemon, now: u64) {
             now / 1000,
             &|sha| site.gh.commit_time(sha),
             &mut |r| {
-                git::run(
+                let gone = git::run(
                     &site.cwd,
                     &["push", &site.remote, "--delete", &format!("refs/heads/{r}")],
                 )
-                .is_ok()
+                .is_ok();
+                if gone {
+                    delete_ref_caches(&site, &format!("refs/heads/{r}"));
+                }
+                gone
             },
         );
         if !gone.is_empty() {
@@ -891,6 +926,14 @@ fn record_path(dir: &Path, id: &str) -> PathBuf {
     dir.join(format!("{id}.remote"))
 }
 
+/// Delete the Actions caches a deleted run ref saved (best effort: they would only crowd the
+/// repository's 10 GB limit, and GitHub evicts them after 7 days anyway).
+fn delete_ref_caches(site: &Site, git_ref: &str) {
+    if let Err(e) = site.gh.delete_caches_for_ref(git_ref) {
+        tracing::warn!(ref_name = %git_ref, "could not delete the run ref's caches: {e}");
+    }
+}
+
 /// Delete the run's ref (best effort, remembered in the record).
 fn delete_ref(site: &Site, st: &mut State, rec: &Path) {
     if st.ref_deleted {
@@ -904,6 +947,7 @@ fn delete_ref(site: &Site, st: &mut State, rec: &Path) {
             .is_err_and(|e| e.stderr.contains("does not exist"))
     {
         st.ref_deleted = true;
+        delete_ref_caches(site, &target);
     } else if let Err(e) = r {
         tracing::warn!(ref_name = %st.ref_name, "could not delete the run ref: {e}");
     }
@@ -1665,15 +1709,12 @@ pub fn pool_needs(
     if !needs.exclusive && !MACHINE.iter().any(|m| needs.amounts.contains_key(*m)) {
         return None;
     }
-    // The task's own choice when it has one, else the global switch (#761): never
+    // The effective mode of the task (task, then project, then global; #761, #831): never
     // `executor_for(.., None)`, which is always local. A step whose suites are split between
-    // here and GitHub by their own rules is not looked into: it follows this choice.
-    let choice = task.and_then(|t| crate::place::task_choice(d, Some(t.0)));
-    let runs_on = match (choice, executor_global(d, project)) {
-        (Some(crate::place::Choice::Local), _) => return None,
-        (_, Executor::GitHub { runs_on }) => runs_on,
-        (Some(crate::place::Choice::GitHub), Executor::Local) => remote_cfg(d, project)?.runs_on,
-        (None, Executor::Local) => return None,
+    // here and GitHub by their own rules is not looked into: it follows this mode.
+    let runs_on = match executor_task(d, project, task.map(|t| t.0)) {
+        Executor::GitHub { runs_on } => runs_on,
+        Executor::Local => return None,
     };
     let mut out = mason_scheduler::Needs {
         exclusive: false,
@@ -1688,6 +1729,70 @@ pub fn pool_needs(
         out.amounts.insert(k, v);
     }
     Some(out)
+}
+
+/// The rank of a fallback run: its task's own when the task is in a step, else the debts band
+/// (a landed, failed or canceled task, or none: owed work, never the landing band, #835).
+pub fn fallback_rank(
+    d: &Daemon,
+    task: Option<mason_core::TaskId>,
+    owner: Option<&mason_core::Task>,
+    def: Option<&mason_definition::Definition>,
+) -> mason_scheduler::Rank {
+    match (owner, def) {
+        (Some(t), Some(def)) if t.state.is_step() => d.rank_for(t, def, &t.step),
+        (Some(t), _) => {
+            mason_scheduler::Rank::new(false, 0, 0, t.enqueued_at.0, t.id.0, false).debt()
+        }
+        _ => {
+            mason_scheduler::Rank::new(false, 0, 0, now_ms(), task.map_or(0, |t| t.0), false).debt()
+        }
+    }
+}
+
+/// The machine slots a run takes when it was meant for GitHub but `fallback = "local"` sends it
+/// here (no runner picked it up, or GitHub was down). A run bound for GitHub skips this
+/// machine's queue (#759, #761), so without this it would start here at once, beside everything
+/// else, past the slot limits and the CPU and thermal holds. `uses` is what the same run holds
+/// when it is placed here; it is asked of the broker like any local run's, so those limits and
+/// holds apply. Ranked as `task`'s own work, or behind everything when no task owns the run.
+/// Beside: the task's step may still hold its own request. Nothing to take gives `Ok(None)`.
+pub fn fallback_lease(
+    d: &Arc<Daemon>,
+    project: &str,
+    task: Option<mason_core::TaskId>,
+    uses: &std::collections::BTreeMap<String, u32>,
+    label: &str,
+) -> Result<Option<crate::sched::Lease>, String> {
+    let needs = crate::sched::needs_of(uses, None);
+    if !needs.exclusive && needs.amounts.is_empty() {
+        return Ok(None);
+    }
+    let def = d.project_id_by_name(project).map(|p| d.current_def(p));
+    for name in needs.amounts.keys() {
+        if !name.starts_with("llm:") && !name.starts_with("device:") {
+            let units = def
+                .as_ref()
+                .and_then(|def| def.resources.get(name).copied())
+                .unwrap_or(1);
+            d.broker.declare(name, units);
+        }
+    }
+    let owner = task.and_then(|t| d.world().ok().and_then(|w| w.tasks.get(&t).cloned()));
+    let rank = fallback_rank(d, task, owner.as_ref(), def.as_deref());
+    let who = task.unwrap_or(mason_core::TaskId(0));
+    let alive = || match task {
+        Some(t) => d
+            .world()
+            .map(|w| w.tasks.get(&t).is_some_and(|x| x.state.is_step()))
+            .unwrap_or(true),
+        None => true,
+    };
+    tracing::info!(project, %label, ?uses, "no GitHub runner: queueing for this machine's slots (fallback = local)");
+    d.broker
+        .acquire_beside(who, label, rank, needs, &alive, &mut |_| {})
+        .map(Some)
+        .map_err(|_| format!("{label}: the wait for this machine's slots was ended"))
 }
 
 /// What a remote run holds, written when it starts and removed when it ends, so a daemon that
@@ -2350,6 +2455,9 @@ mod tests {
                     body: "{}".into(),
                 });
             }
+            if r.method == "DELETE" && u.contains("/actions/caches?ref=") {
+                return ok(serde_json::json!({"total_count": 1, "actions_caches": []}));
+            }
             if u.contains("/actions/runs?head_sha=") {
                 let sha = u
                     .split("head_sha=")
@@ -2641,6 +2749,39 @@ mod tests {
     }
 
     #[test]
+    fn run_json_names_the_toolchains_each_of_masons_suites_needs() {
+        for (suite, want) in [
+            ("cargo-workspace", "rust"),
+            ("exit-scripts", "rust"),
+            ("exit-scripts-landing", "rust"),
+            ("fmt", "rust"),
+            ("lint", "rust"),
+            ("", "rust"),
+            ("swift-clients", "swift"),
+            ("compose-clients", "java"),
+        ] {
+            let mut sp = spec("tc");
+            sp.suite = suite.into();
+            let v: serde_json::Value = serde_json::from_str(&run_json(&sp)).unwrap();
+            assert_eq!(v["toolchains"], serde_json::json!([want]), "{suite}");
+        }
+    }
+
+    #[test]
+    fn the_workflows_restore_one_shared_key_and_only_the_base_branch_saves_it() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows");
+        let run = std::fs::read_to_string(root.join("mason-run.yml")).unwrap();
+        assert!(run.contains("shared-key: mason-run"));
+        assert!(run.contains("save-if: ${{ github.ref == 'refs/heads/develop' }}"));
+        assert!(run.contains("toolchains"));
+        let warm = std::fs::read_to_string(root.join("mason-cache.yml")).unwrap();
+        assert!(warm.contains("shared-key: mason-run"));
+        assert!(warm.contains("cancel-in-progress: true"));
+        assert!(warm.contains("--no-run"));
+        assert!(!warm.contains("save-if"), "the warm-up always saves");
+    }
+
+    #[test]
     fn a_green_run_gives_its_output_and_the_ref_is_deleted() {
         token();
         let r = repo();
@@ -2677,6 +2818,18 @@ mod tests {
         assert_eq!(kv["sha"].len(), 40);
         assert_eq!(kv["collected"], "1");
         assert!(gh.requests().iter().any(|q| q.contains("head_sha=")));
+        let deletes: Vec<String> = gh
+            .requests()
+            .into_iter()
+            .filter(|q| {
+                q.starts_with("DELETE ") && q.contains("/actions/caches?ref=refs/heads/mason/run/")
+            })
+            .collect();
+        assert_eq!(
+            deletes.len(),
+            1,
+            "one cache DELETE for the ref deleted: {deletes:?}"
+        );
     }
 
     #[test]
