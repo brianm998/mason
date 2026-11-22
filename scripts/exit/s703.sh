@@ -24,9 +24,9 @@ r=$(cd "$repo" && MASON_NARROW_PROBE_ROOT="$scratch" MASON_NARROW_PROBE_PATHS="c
 echo "$r"
 case $r in *"-p a --test it -- m1::"*) ;; *) echo "FAIL: m1 not selected as a filtered group"; exit 1;; esac
 case $r in *m2*|*m3*) echo "FAIL: other modules selected"; exit 1;; esac
-build=$(cargo test -q --offline -p a --test it --no-run 2>&1)
+build=$(cargo test -q --offline -p a --test it --no-run 2>&1) # guard-ok: fixture package
 case $build in *"running "*) echo "FAIL: the build ran tests"; exit 1;; esac
-out=$(cargo test --offline -p a --test it -- m1:: 2>&1)
+out=$(cargo test --offline -p a --test it -- m1:: 2>&1) # guard-ok: fixture package
 echo "$out" | grep 'test result'
 echo "$out" | grep -q 'test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out' \
   || { echo "FAIL: expected exactly m1's 2 tests to run"; exit 1; }
