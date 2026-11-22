@@ -919,6 +919,20 @@ fn a_proposed_task_raises_an_alert_that_clears_on_approve_and_on_reject() {
     assert!(!keys.contains(&format!("proposed:{}", b.0)), "{keys:?}");
 }
 
+/// `place` keeps its standing placements and its notes in process-wide maps keyed by project
+/// name and task id, and every scratch daemon in this binary has project `scratch` and task 1.
+/// `favor_local_…` ends with a `Local` placement that stands for ten minutes, and
+/// `favor_remote_…` used to read it back as its first answer, but only when the two shared a
+/// process in that order: red in whole runs, green alone. The tests that place checks hold this
+/// lock and clear their key first.
+static PLACEMENT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn placement_alone(t: TaskId) -> std::sync::MutexGuard<'static, ()> {
+    let g = PLACEMENT.lock().unwrap_or_else(|e| e.into_inner());
+    mason_daemon::place::forget("scratch", Some(t.0), "unit", "check");
+    g
+}
+
 #[test]
 fn a_develop_checks_suite_is_placed_by_the_switch_and_the_tasks_choice() {
     use mason_daemon::place::{set_global, Mode};
@@ -931,6 +945,7 @@ fn a_develop_checks_suite_is_placed_by_the_switch_and_the_tasks_choice() {
     );
     let d = s.start();
     let t = flagged(&d, "Checks");
+    let _alone = placement_alone(t);
     let suite = mason_testing::Suite::new("unit", "true", mason_testing::ParserKind::Tap);
     let now = mason_daemon::daemon::now_ms();
     let at = |d: &std::sync::Arc<mason_daemon::Daemon>| {
@@ -1019,6 +1034,7 @@ fn favor_local_spills_to_github_only_while_this_machine_is_full() {
     );
     let d = s.start();
     let t = flagged(&d, "Favors this Mac");
+    let _alone = placement_alone(t);
     let suite = mason_testing::Suite::new("unit", "true", mason_testing::ParserKind::Tap);
     let at = |d: &std::sync::Arc<mason_daemon::Daemon>| {
         executor_for(d, "scratch", Kind::Check, Some((Some(t), &suite)))
@@ -1080,6 +1096,7 @@ fn favor_remote_runs_here_only_while_github_is_full_and_this_machine_has_room() 
     );
     let d = s.start();
     let t = flagged(&d, "Favors GitHub");
+    let _alone = placement_alone(t);
     let suite = mason_testing::Suite::new("unit", "true", mason_testing::ParserKind::Tap);
     let at = |d: &std::sync::Arc<mason_daemon::Daemon>| {
         executor_for(d, "scratch", Kind::Check, Some((Some(t), &suite)))
