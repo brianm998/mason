@@ -111,7 +111,8 @@ fn the_task_project_and_home_views_carry_the_mode_and_its_source() {
     );
     assert_eq!(
         (project.mode.as_str(), project.source.as_str(), project.own),
-        ("local", "global", false)
+        ("local", "global", false),
+        "project placement at start: {project:?}"
     );
     let p = detail.placement.unwrap();
     assert_eq!(
