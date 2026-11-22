@@ -168,7 +168,8 @@ pub fn render(steps: &str) -> String {
 }
 
 /// Every `mason remote` subcommand, for the unknown-subcommand errors.
-pub const COMMANDS: &str = "the remote commands are `setup`, `on`, `off`, `status` and `runs`";
+pub const COMMANDS: &str =
+    "the remote commands are `setup`, `mode`, `on`, `off`, `status` and `runs`";
 
 /// The runs on GitHub, one line each, as the monitor's GitHub section lists them (#767).
 pub fn print_runs(r: &serde_json::Value) {

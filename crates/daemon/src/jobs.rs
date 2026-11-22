@@ -3364,6 +3364,7 @@ fn agent_job(c: &Ctx) {
         fn drop(&mut self) {
             self.0.d.broker.stop_crediting_waits(self.0.task);
             end_run_leases(&self.0.d, self.0.task);
+            crate::hostedcheck::cancel_task(&self.0.d, self.0.task.0);
         }
     }
     let _credit = StopCrediting(c);
