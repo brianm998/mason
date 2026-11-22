@@ -25,33 +25,54 @@ use std::collections::BTreeMap;
 use std::sync::Mutex;
 use toml_edit::{value, DocumentMut};
 
-/// The global switch.
+/// The placement mode (#831): where runs go. Set for all of MASON (`remote.toml`), per project
+/// (`[remote_runs] mode`) and per task (`run_on`); the most specific level that is set wins.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Global {
+pub enum Mode {
+    /// Everything on this machine.
     Local,
-    GitHub,
+    /// Everything on GitHub.
+    Remote,
+    /// Here until this machine is overloaded, then GitHub.
+    FavorLocal,
+    /// GitHub until it is overloaded, then here.
+    FavorRemote,
 }
 
-impl Global {
+impl Mode {
+    pub const ALL: [Mode; 4] = [
+        Mode::Local,
+        Mode::Remote,
+        Mode::FavorLocal,
+        Mode::FavorRemote,
+    ];
+
     pub fn name(self) -> &'static str {
         match self {
-            Global::Local => "local",
-            Global::GitHub => "github",
+            Mode::Local => "local",
+            Mode::Remote => "remote",
+            Mode::FavorLocal => "favor-local",
+            Mode::FavorRemote => "favor-remote",
         }
     }
-}
 
-/// A task's own choice (#699).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Choice {
-    Local,
-    GitHub,
+    /// The four names, and the old `github` (= `remote`).
+    pub fn parse(s: &str) -> Option<Mode> {
+        match s {
+            "local" => Some(Mode::Local),
+            "remote" | "github" => Some(Mode::Remote),
+            "favor-local" => Some(Mode::FavorLocal),
+            "favor-remote" => Some(Mode::FavorRemote),
+            _ => None,
+        }
+    }
 }
 
 /// Where a decision came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {
     Task,
+    Project,
     Global,
     Suite,
 }
@@ -60,8 +81,19 @@ impl Source {
     pub fn label(self) -> &'static str {
         match self {
             Source::Task => "task",
+            Source::Project => "project",
             Source::Global => "global switch",
             Source::Suite => "suite rule",
+        }
+    }
+
+    /// The level's name in JSON: `task`, `project`, `global`, `suite`.
+    pub fn key(self) -> &'static str {
+        match self {
+            Source::Task => "task",
+            Source::Project => "project",
+            Source::Global => "global",
+            Source::Suite => "suite",
         }
     }
 }
@@ -69,9 +101,12 @@ impl Source {
 /// Everything the decision reads.
 #[derive(Clone, Debug)]
 pub struct Facts {
-    /// The task's own choice (#699); `None` for a task that has none and for a run no task owns.
-    pub task: Option<Choice>,
-    pub global: Global,
+    /// The task's own mode (its `run_on` override); `None` for a task that has none and for a run
+    /// no task owns.
+    pub task: Option<Mode>,
+    /// The project's `[remote_runs]` mode (`mode`, or the old `fallback`); `None`: follows global.
+    pub project: Option<Mode>,
+    pub global: Mode,
     /// The project's `[remote_runs] runs_on`; `None` when the project has no `[remote_runs]`.
     pub project_runs_on: Option<String>,
     /// `remote = false` on the suite keeps it here.
@@ -87,9 +122,10 @@ pub struct Facts {
 
 impl Facts {
     /// A project with a `[remote_runs]` and a suite with no rules of its own.
-    pub fn plain(global: Global) -> Facts {
+    pub fn plain(global: Mode) -> Facts {
         Facts {
             task: None,
+            project: None,
             global,
             project_runs_on: Some("ubuntu-latest".into()),
             suite_remote: true,
@@ -99,12 +135,31 @@ impl Facts {
             setup_failed: None,
         }
     }
+
+    /// The mode in force and the level that set it: task, then project, then global.
+    pub fn effective(&self) -> (Mode, Source) {
+        if let Some(m) = self.task {
+            (m, Source::Task)
+        } else if let Some(m) = self.project {
+            (m, Source::Project)
+        } else {
+            (self.global, Source::Global)
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Place {
-    Local { why: String, from: Source },
-    GitHub { runs_on: String, from: Source },
+    Local {
+        why: String,
+        from: Source,
+    },
+    GitHub {
+        runs_on: String,
+        from: Source,
+        /// For a balancing mode: why GitHub ("favor-remote, GitHub had room"). Empty otherwise.
+        why: String,
+    },
 }
 
 impl Place {
@@ -116,8 +171,11 @@ impl Place {
     pub fn text(&self) -> String {
         match self {
             Place::Local { why, .. } => format!("on this Mac: {why}"),
-            Place::GitHub { runs_on, from } => {
+            Place::GitHub { runs_on, from, why } if why.is_empty() => {
                 format!("on GitHub ({runs_on}), from the {}", from.label())
+            }
+            Place::GitHub { runs_on, from, why } => {
+                format!("on GitHub ({runs_on}), from the {}: {why}", from.label())
             }
         }
     }
@@ -129,25 +187,46 @@ impl Place {
     }
 }
 
-/// The one decision. A task's choice comes first, then the global switch; a run that would go to
-/// GitHub stays here when the project has no `[remote_runs]`, the suite says `remote = false`, its
-/// environment leases a device, it uses `exclusive`, or the remote setup check failed. The
-/// reason is always given.
+/// The two balancing modes (#831). Called only for `favor-local` and `favor-remote`, after the
+/// suite's own rules have let the run go to GitHub. For now `favor-local` is `local` and
+/// `favor-remote` is `remote`; the bounded fallback to this machine after `pickup_timeout`
+/// (s812, `remote::fallback_lease`) is what spills `favor-remote` over. The load rules of the
+/// follow-up tickets replace this body.
+pub fn balance(mode: Mode, f: &Facts, runs_on: &str, from: Source) -> Place {
+    match mode {
+        Mode::FavorLocal => Place::Local {
+            why: "favor-local, this machine had room".into(),
+            from,
+        },
+        _ => Place::GitHub {
+            runs_on: runs_on.to_string(),
+            from,
+            why: format!(
+                "favor-remote, GitHub had room{}",
+                if f.suite_runs_on.is_some() {
+                    " (suite runner)"
+                } else {
+                    ""
+                }
+            ),
+        },
+    }
+}
+
+/// The one decision. The mode comes from the task, else the project, else the global switch. A
+/// run that would go to GitHub stays here when the project has no `[remote_runs]`, the suite says
+/// `remote = false`, its environment leases a device, it uses `exclusive`, or the remote setup
+/// check failed. The reason is always given.
 pub fn decide(f: &Facts) -> Place {
-    let (wants, from) = match f.task {
-        Some(Choice::Local) => {
-            return Place::Local {
-                why: "the task asked to run here".into(),
-                from: Source::Task,
-            }
-        }
-        Some(Choice::GitHub) => (true, Source::Task),
-        None => (f.global == Global::GitHub, Source::Global),
-    };
-    if !wants {
+    let (mode, from) = f.effective();
+    if mode == Mode::Local {
         return Place::Local {
-            why: "the global switch is off".into(),
-            from: Source::Global,
+            why: match from {
+                Source::Task => "the task asked to run here".into(),
+                Source::Project => "the project's mode is local".into(),
+                _ => "the global switch is off".into(),
+            },
+            from,
         };
     }
     let stay = |why: String| Place::Local {
@@ -169,15 +248,14 @@ pub fn decide(f: &Facts) -> Place {
     if let Some(why) = &f.setup_failed {
         return stay(format!("the project's remote setup check failed: {why}"));
     }
-    match &f.suite_runs_on {
-        Some(r) => Place::GitHub {
-            runs_on: r.clone(),
+    let runs_on = f.suite_runs_on.as_ref().unwrap_or(project_runs_on);
+    match mode {
+        Mode::Remote => Place::GitHub {
+            runs_on: runs_on.clone(),
             from,
+            why: String::new(),
         },
-        None => Place::GitHub {
-            runs_on: project_runs_on.clone(),
-            from,
-        },
+        _ => balance(mode, f, runs_on, from),
     }
 }
 
@@ -189,25 +267,32 @@ pub fn remote_path(d: &Daemon) -> std::path::PathBuf {
 
 /// What `remote.toml` says now. Read on every call. A missing file is local; so is one that
 /// cannot be read or says something else, with the problem in the second part.
-pub fn read_global(d: &Daemon) -> (Global, Option<String>) {
+pub fn read_global(d: &Daemon) -> (Mode, Option<String>) {
     let text = match std::fs::read_to_string(remote_path(d)) {
         Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Global::Local, None),
-        Err(e) => return (Global::Local, Some(format!("remote.toml: {e}"))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Mode::Local, None),
+        Err(e) => return (Mode::Local, Some(format!("remote.toml: {e}"))),
     };
     match parse_default(&text) {
         Ok(g) => (g, None),
-        Err(e) => (Global::Local, Some(e)),
+        Err(e) => (Mode::Local, Some(e)),
     }
 }
 
-pub fn parse_default(text: &str) -> Result<Global, String> {
+/// The mode in `remote.toml`: `mode = "<mode>"`, else the old `default = "local" | "github"`.
+pub fn parse_default(text: &str) -> Result<Mode, String> {
     let doc: DocumentMut = text.parse().map_err(|e| format!("remote.toml: {e}"))?;
+    if let Some(i) = doc.get("mode") {
+        return i.as_str().and_then(Mode::parse).ok_or_else(|| {
+            "remote.toml: `mode` must be \"local\", \"remote\", \"favor-local\" or \"favor-remote\""
+                .to_string()
+        });
+    }
     match doc.get("default") {
-        None => Ok(Global::Local),
+        None => Ok(Mode::Local),
         Some(i) => match i.as_str() {
-            Some("local") => Ok(Global::Local),
-            Some("github") => Ok(Global::GitHub),
+            Some("local") => Ok(Mode::Local),
+            Some("github") => Ok(Mode::Remote),
             _ => Err("remote.toml: `default` must be \"local\" or \"github\"".into()),
         },
     }
@@ -217,7 +302,7 @@ static EDITING: Mutex<()> = Mutex::new(());
 
 /// Change the switch. The file's comments and other keys stay; who and when are recorded in it
 /// and in `remote-changes.log`.
-pub fn set_global(d: &Daemon, to: Global, who: &str) -> Result<Value, (u16, String)> {
+pub fn set_global(d: &Daemon, to: Mode, who: &str) -> Result<Value, (u16, String)> {
     let _one = EDITING.lock().unwrap_or_else(|e| e.into_inner());
     let path = remote_path(d);
     let old = match std::fs::read_to_string(&path) {
@@ -228,9 +313,11 @@ pub fn set_global(d: &Daemon, to: Global, who: &str) -> Result<Value, (u16, Stri
     let mut doc: DocumentMut = old
         .parse()
         .map_err(|e| (400, format!("remote.toml: {e}")))?;
-    let was = parse_default(&old).unwrap_or(Global::Local);
+    let was = parse_default(&old).unwrap_or(Mode::Local);
     let now = now_ms();
-    doc["default"] = value(to.name());
+    doc["mode"] = value(to.name());
+    // The old key would be shadowed by `mode`; drop it so the file says one thing.
+    doc.remove("default");
     doc["changed_by"] = value(who);
     doc["changed_at"] = value(i64::try_from(now).unwrap_or(i64::MAX));
     let tmp = path.with_extension("toml.tmp");
@@ -247,7 +334,38 @@ pub fn set_global(d: &Daemon, to: Global, who: &str) -> Result<Value, (u16, Stri
     {
         let _ = writeln!(f, "{now} {who} {} -> {}", was.name(), to.name());
     }
-    Ok(json!({"default": to.name(), "was": was.name(), "changed_by": who, "changed_at": now}))
+    Ok(
+        json!({"mode": to.name(), "default": to.name(), "was": was.name(), "changed_by": who, "changed_at": now}),
+    )
+}
+
+/// The project's own mode, from its `[remote_runs]`: `mode`, else the old `fallback` (`local` is
+/// `favor-remote`, `none` is `remote`). `None`: it follows the global mode, or has no
+/// `[remote_runs]` at all.
+pub fn project_mode(d: &Daemon, project: &str) -> Option<Mode> {
+    let r = d
+        .project_id_by_name(project)
+        .and_then(|p| d.project(p))?
+        .services
+        .remote
+        .as_ref()?;
+    r.mode.as_deref().and_then(Mode::parse)
+}
+
+/// The project's effective mode and where it came from, before any task's choice: for
+/// `mason remote status`. A project with no `[remote_runs]` is always local.
+pub fn project_effective(d: &Daemon, project: &str) -> (Mode, &'static str) {
+    let has = d
+        .project_id_by_name(project)
+        .and_then(|p| d.project(p))
+        .is_some_and(|p| p.services.remote.is_some());
+    if !has {
+        return (Mode::Local, "no [remote_runs]");
+    }
+    match project_mode(d, project) {
+        Some(m) => (m, "project"),
+        None => (read_global(d).0, "global"),
+    }
 }
 
 /// For `mason remote status` and the Settings page.
@@ -269,69 +387,150 @@ pub fn status(d: &Daemon) -> Value {
         .projects()
         .values()
         .map(|p| {
+            let (mode, source) = project_effective(d, &p.id);
             json!({"project": p.id, "remote": p.services.remote.is_some(),
-                   "runs_on": p.services.remote.as_ref().map(|r| r.runs_on.clone())})
+                   "runs_on": p.services.remote.as_ref().map(|r| r.runs_on.clone()),
+                   "mode": mode.name(), "source": source})
         })
         .collect();
-    json!({"default": g.name(), "problem": problem, "changed_by": by, "changed_at": at,
-           "projects": projects})
+    json!({"mode": g.name(), "default": if g == Mode::Remote { "github" } else { g.name() },
+           "problem": problem, "changed_by": by, "changed_at": at, "projects": projects})
+}
+
+/// Set `[remote_runs] mode` in a project's registration file and re-read it (like `project
+/// reload`). The file's comments and other keys stay. A project with no `[remote_runs]` is
+/// always local, so there is nothing to set and the answer says so.
+pub fn set_project_mode(d: &Daemon, project: &str, to: Mode) -> Result<Value, (u16, String)> {
+    let _one = EDITING.lock().unwrap_or_else(|e| e.into_inner());
+    if d.project_id_by_name(project).is_none() {
+        return Err((404, format!("no project {project:?}")));
+    }
+    let path = d
+        .cfg
+        .config_dir
+        .join("projects")
+        .join(format!("{project}.toml"));
+    let old =
+        std::fs::read_to_string(&path).map_err(|e| (500, format!("{}: {e}", path.display())))?;
+    let mut doc: DocumentMut = old
+        .parse()
+        .map_err(|e| (400, format!("{}: {e}", path.display())))?;
+    let Some(t) = doc
+        .get_mut("remote_runs")
+        .and_then(|i| i.as_table_like_mut())
+    else {
+        return Err((
+            400,
+            format!("{project} has no [remote_runs], so it always runs here; add one first"),
+        ));
+    };
+    t.insert("mode", value(to.name()));
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, doc.to_string()).map_err(|e| (500, format!("{}: {e}", tmp.display())))?;
+    std::fs::rename(&tmp, &path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        (500, format!("{}: {e}", path.display()))
+    })?;
+    let changed = d
+        .reload_registration(project)
+        .map_err(|e| (400, e.join("; ")))?;
+    Ok(json!({"project": project, "mode": to.name(), "source": "project", "changed": changed}))
 }
 
 // ---- the facts of a real run ---------------------------------------------------------------
 
-/// The task's own choice (#699): its `run_on` override, read live so a change applies from the
-/// next suite or check. Nothing, or a value that is not `github` or `local`, is no choice.
-pub fn task_choice(d: &Daemon, task: Option<u64>) -> Option<Choice> {
+/// The task's own mode: its `run_on` override, read live so a change applies from the next suite
+/// or check. Nothing, or a value that is no mode, is no choice. The old `github` is `remote`.
+pub fn task_choice(d: &Daemon, task: Option<u64>) -> Option<Mode> {
     let v = d.store.task_overrides(task?).ok()?;
-    match v
-        .iter()
-        .find(|(k, _)| k == mason_definition::layers::RUN_ON)?
-        .1
-        .as_str()
-    {
-        "github" => Some(Choice::GitHub),
-        "local" => Some(Choice::Local),
-        _ => None,
-    }
+    Mode::parse(
+        v.iter()
+            .find(|(k, _)| k == mason_definition::layers::RUN_ON)?
+            .1
+            .as_str(),
+    )
 }
 
-/// Do the checks of `task` in `project` go to GitHub (#704)? The task's choice, else the global
-/// switch, and only for a project with a `[remote_runs]` section. Whether a suite then stays here
+/// The place of a run no suite describes (a landing check, the checks of a task's develop step,
+/// the whole step in `pool_needs`): the task's mode when `task` is given, else the project's,
+/// else the global one; the project's `[remote_runs]` and the setup check; nothing of a suite's
+/// own.
+pub fn plain_place(d: &Daemon, project: &str, task: Option<u64>) -> Place {
+    let pid = d.project_id_by_name(project);
+    let mut f = Facts::plain(read_global(d).0);
+    f.task = task_choice(d, task);
+    f.project = project_mode(d, project);
+    f.project_runs_on = pid
+        .and_then(|p| d.project(p))
+        .and_then(|p| p.services.remote.as_ref().map(|r| r.runs_on.clone()));
+    decide(&f)
+}
+
+/// Do the checks of `task` in `project` go to GitHub (#704)? Whether a suite then stays here
 /// for its own reasons does not matter: the agent is told to use `run_check` either way.
 pub fn task_checks_on_github(d: &Daemon, project: &str, task: u64) -> bool {
-    let wants = match task_choice(d, Some(task)) {
-        Some(c) => c == Choice::GitHub,
-        None => read_global(d).0 == Global::GitHub,
-    };
-    wants
-        && d.project_id_by_name(project)
-            .and_then(|p| d.project(p))
-            .is_some_and(|p| p.services.remote.is_some())
+    plain_place(d, project, Some(task)).is_github()
 }
 
 /// "runs on: GitHub (task choice)" / "runs on: this Mac (global switch)": the place a task's
 /// runs go before the suite's own rules, and where that came from. For `mason task show` and
 /// the task detail the monitors read.
 pub fn effective_line(d: &Daemon, task: u64) -> Value {
-    let (choice, global) = (task_choice(d, Some(task)), read_global(d).0);
-    let (github, source) = match choice {
-        Some(c) => (c == Choice::GitHub, Source::Task),
-        None => (global == Global::GitHub, Source::Global),
+    let project = d
+        .world()
+        .ok()
+        .and_then(|w| w.tasks.get(&mason_core::TaskId(task)).map(|t| t.project))
+        .and_then(|p| d.project(p))
+        .map(|p| p.id.clone());
+    let choice = task_choice(d, Some(task));
+    let (mode, from, has_remote) = match &project {
+        Some(p) => {
+            let has = d
+                .project_id_by_name(p)
+                .and_then(|i| d.project(i))
+                .is_some_and(|p| p.services.remote.is_some());
+            let mut f = Facts::plain(read_global(d).0);
+            f.task = choice;
+            f.project = project_mode(d, p);
+            let (m, s) = f.effective();
+            (m, s, has)
+        }
+        None => {
+            let mut f = Facts::plain(read_global(d).0);
+            f.task = choice;
+            let (m, s) = f.effective();
+            (m, s, true)
+        }
     };
-    let place = if github { "GitHub" } else { "this Mac" };
-    let from = match source {
-        Source::Task => "task choice",
-        _ => "global switch",
+    let (mode, from, why) = if has_remote {
+        (mode, from, None)
+    } else {
+        (Mode::Local, Source::Project, Some("no [remote_runs]"))
+    };
+    let label = match (from, why) {
+        (_, Some(w)) => w.to_string(),
+        (Source::Task, _) => "task choice".to_string(),
+        (s, _) => s.label().to_string(),
+    };
+    let line = match mode {
+        Mode::Local => format!("runs on: this Mac ({label})"),
+        Mode::Remote => format!("runs on: GitHub ({label})"),
+        Mode::FavorLocal => format!("runs on: favor-local, this Mac first ({label})"),
+        Mode::FavorRemote => format!("runs on: favor-remote, GitHub first ({label})"),
     };
     json!({
-        "where": if github { "github" } else { "local" },
-        "from": if choice.is_some() { "task" } else { "global" },
-        "line": format!("runs on: {place} ({from})"),
+        "mode": mode.name(),
+        "where": match mode {
+            Mode::Remote | Mode::FavorRemote => "github",
+            _ => "local",
+        },
+        "from": from.key(),
+        "line": line,
     })
 }
 
-/// The facts for a suite of a project. `task` is the task whose run it is (its own choice,
-/// #699, comes from it).
+/// The facts for a suite of a project. `task` is the task whose run it is (its own choice
+/// comes from it).
 pub fn facts_for(
     d: &Daemon,
     project: &str,
@@ -347,6 +546,7 @@ pub fn facts_for(
     });
     Facts {
         task: task_choice(d, task),
+        project: project_mode(d, project),
         global: read_global(d).0,
         project_runs_on: pid
             .and_then(|p| d.project(p))
@@ -470,15 +670,11 @@ pub fn place_of(
     p
 }
 
-/// Where a run goes that no task owns and no suite describes (a landing check, #702): the global
-/// switch, the project's `[remote_runs]` and the setup check, and nothing of a suite's own.
+/// Where a run goes that no task owns and no suite describes (a landing check, #702): the
+/// project's mode, else the global one, the project's `[remote_runs]`, and nothing of a suite's
+/// own.
 pub fn global_place(d: &Daemon, project: &str) -> Place {
-    let pid = d.project_id_by_name(project);
-    let mut f = Facts::plain(read_global(d).0);
-    f.project_runs_on = pid
-        .and_then(|p| d.project(p))
-        .and_then(|p| p.services.remote.as_ref().map(|r| r.runs_on.clone()));
-    let p = decide(&f);
+    let p = plain_place(d, project, None);
     note(project, None, "landing", "check", &p);
     p
 }
@@ -539,13 +735,14 @@ mod tests {
         Place::GitHub {
             runs_on: r.into(),
             from,
+            why: String::new(),
         }
     }
 
     #[test]
     fn the_decision_table() {
-        let on = || Facts::plain(Global::GitHub);
-        let off = || Facts::plain(Global::Local);
+        let on = || Facts::plain(Mode::Remote);
+        let off = || Facts::plain(Mode::Local);
         row("global on", on(), gh("ubuntu-latest", Source::Global));
         row(
             "global off",
@@ -553,9 +750,9 @@ mod tests {
             local("the global switch is off", Source::Global),
         );
         row(
-            "task github beats global off",
+            "task remote beats global off",
             Facts {
-                task: Some(Choice::GitHub),
+                task: Some(Mode::Remote),
                 ..off()
             },
             gh("ubuntu-latest", Source::Task),
@@ -563,7 +760,7 @@ mod tests {
         row(
             "task local beats global on",
             Facts {
-                task: Some(Choice::Local),
+                task: Some(Mode::Local),
                 ..on()
             },
             local("the task asked to run here", Source::Task),
@@ -572,6 +769,31 @@ mod tests {
             "task none follows global",
             Facts { task: None, ..on() },
             gh("ubuntu-latest", Source::Global),
+        );
+        row(
+            "project beats global",
+            Facts {
+                project: Some(Mode::Local),
+                ..on()
+            },
+            local("the project's mode is local", Source::Project),
+        );
+        row(
+            "project remote beats global local",
+            Facts {
+                project: Some(Mode::Remote),
+                ..off()
+            },
+            gh("ubuntu-latest", Source::Project),
+        );
+        row(
+            "task beats project",
+            Facts {
+                task: Some(Mode::Remote),
+                project: Some(Mode::Local),
+                ..off()
+            },
+            gh("ubuntu-latest", Source::Task),
         );
         row(
             "suite runs_on",
@@ -590,9 +812,9 @@ mod tests {
             local("the suite says remote = false", Source::Suite),
         );
         row(
-            "task github, suite remote = false",
+            "task remote, suite remote = false",
             Facts {
-                task: Some(Choice::GitHub),
+                task: Some(Mode::Remote),
                 suite_remote: false,
                 ..off()
             },
@@ -621,22 +843,6 @@ mod tests {
             ),
         );
         row(
-            "no [remote_runs]",
-            Facts {
-                project_runs_on: None,
-                ..on()
-            },
-            local("the project has no [remote_runs] section", Source::Suite),
-        );
-        row(
-            "no [remote_runs], global off says the switch",
-            Facts {
-                project_runs_on: None,
-                ..off()
-            },
-            local("the global switch is off", Source::Global),
-        );
-        row(
             "setup check failed",
             Facts {
                 setup_failed: Some("no runner".into()),
@@ -649,10 +855,90 @@ mod tests {
         );
     }
 
+    /// Every (global, project, task) combination: the most specific set level wins, a project
+    /// without `[remote_runs]` is local, and the favor modes balance (for now: favor-local here,
+    /// favor-remote on GitHub).
+    #[test]
+    fn every_combination_of_the_three_levels() {
+        let opts: Vec<Option<Mode>> = std::iter::once(None)
+            .chain(Mode::ALL.iter().map(|m| Some(*m)))
+            .collect();
+        for g in Mode::ALL {
+            for p in &opts {
+                for t in &opts {
+                    let f = Facts {
+                        task: *t,
+                        project: *p,
+                        ..Facts::plain(g)
+                    };
+                    let want = t.or(*p).unwrap_or(g);
+                    let src = if t.is_some() {
+                        Source::Task
+                    } else if p.is_some() {
+                        Source::Project
+                    } else {
+                        Source::Global
+                    };
+                    let got = decide(&f);
+                    let name = format!("global {g:?} project {p:?} task {t:?}");
+                    match want {
+                        Mode::Local | Mode::FavorLocal => {
+                            assert!(!got.is_github(), "{name}: {got:?}");
+                        }
+                        Mode::Remote | Mode::FavorRemote => {
+                            assert!(got.is_github(), "{name}: {got:?}");
+                        }
+                    }
+                    assert_eq!(got.from(), src, "{name}");
+                    // A project with no [remote_runs] is local, whatever the mode says.
+                    let none = decide(&Facts {
+                        project_runs_on: None,
+                        ..f
+                    });
+                    assert!(!none.is_github(), "{name} without [remote_runs]: {none:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_balanced_run_says_why_it_went_where_it_did() {
+        let fr = Facts {
+            task: Some(Mode::FavorRemote),
+            ..Facts::plain(Mode::Local)
+        };
+        assert!(decide(&fr).text().contains("favor-remote, GitHub had room"));
+        let fl = Facts {
+            task: Some(Mode::FavorLocal),
+            ..Facts::plain(Mode::Remote)
+        };
+        assert!(decide(&fl)
+            .text()
+            .contains("favor-local, this machine had room"));
+    }
+
+    #[test]
+    fn the_old_values_still_read() {
+        assert_eq!(Mode::parse("github"), Some(Mode::Remote));
+        assert_eq!(Mode::parse("local"), Some(Mode::Local));
+        assert_eq!(Mode::parse("favor-remote"), Some(Mode::FavorRemote));
+        assert_eq!(Mode::parse("default"), None);
+        assert_eq!(
+            parse_default("mode = \"favor-local\""),
+            Ok(Mode::FavorLocal)
+        );
+        // `mode` wins over a leftover `default`.
+        assert_eq!(
+            parse_default("default = \"github\"\nmode = \"local\"\n"),
+            Ok(Mode::Local)
+        );
+        assert!(parse_default("mode = \"sometimes\"").is_err());
+    }
+
     #[test]
     fn the_switch_file_parses() {
-        assert_eq!(parse_default(""), Ok(Global::Local));
-        assert_eq!(parse_default("default = \"github\""), Ok(Global::GitHub));
+        assert_eq!(parse_default(""), Ok(Mode::Local));
+        assert_eq!(parse_default("default = \"github\""), Ok(Mode::Remote));
         assert!(parse_default("default = \"yes\"").is_err());
     }
 
@@ -660,10 +946,10 @@ mod tests {
     fn toggling_keeps_comments_and_other_keys() {
         let old = "# my note\nextra = 1 # keep\ndefault = \"local\"\n";
         let mut doc: DocumentMut = old.parse().unwrap();
-        doc["default"] = value("github");
+        doc["mode"] = value("remote");
         doc["changed_by"] = value("me");
         let t = doc.to_string();
         assert!(t.contains("# my note") && t.contains("extra = 1 # keep"));
-        assert_eq!(parse_default(&t), Ok(Global::GitHub));
+        assert_eq!(parse_default(&t), Ok(Mode::Remote));
     }
 }

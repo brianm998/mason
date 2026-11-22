@@ -824,7 +824,7 @@ fn github_world(
         all.push(("checks.sh", s));
     }
     let w = world_with(tier, &extra, &all);
-    mason_daemon::place::set_global(&w.d, mason_daemon::place::Global::GitHub, "test").unwrap();
+    mason_daemon::place::set_global(&w.d, mason_daemon::place::Mode::Remote, "test").unwrap();
     (w, n)
 }
 
