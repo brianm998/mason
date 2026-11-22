@@ -682,5 +682,6 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s851**: The Compose conformance tool now waits for the views of each step (a new `lastViewSeq` that only applied views move) and a 1.5 s quiet window, instead of treating the events message's seq as proof the views had landed.
 - **s852**: `a_hung_git_is_killed_at_its_deadline` no longer asserts that it finished within 3 s; it checks `timed_out`, the "timed out" message and that the helper process is gone.
 - **s853**: The abandoned-run test keeps its waiting request polled through every wait and fails at once, naming the explain text, if the request is dropped instead of sitting out the 900 s floor.
+- **s858**: The RowRedrawTests progress-view render counts are replaced by a deterministic MonitorCore observation test, so CI/monitor-swift no longer depends on SwiftUI updates inside ImageRenderer.
 - **s859**: The fake git host now runs its archive and checks commands through `shell_command` and `to_shell_path` so they work on Windows, and a check run that could not happen is no longer cached as red.
 <!-- status:end -->
