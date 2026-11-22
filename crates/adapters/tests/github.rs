@@ -998,3 +998,21 @@ fn an_artifact_is_downloaded_through_the_signed_redirect_without_the_token() {
         .download_artifact(7, "mason-run", &g._d.path().join("b.zip"))
         .unwrap());
 }
+
+#[test]
+fn a_refs_caches_are_listed_and_deleted_one_by_one() {
+    // GitHub's bulk DELETE /actions/caches needs a cache key as well as the ref (HTTP 422
+    // without one), so the caches of a run ref are listed and deleted by id; one already
+    // gone (404) counts as deleted.
+    let g = gh("caches_for_ref.json");
+    assert_eq!(
+        g.gh.delete_caches_for_ref("refs/heads/mason/run/x")
+            .unwrap(),
+        2
+    );
+    assert!(
+        g.http.unused().is_empty(),
+        "the script expected more: {:?}",
+        g.http.unused()
+    );
+}

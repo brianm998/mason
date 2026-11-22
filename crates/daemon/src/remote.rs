@@ -2844,8 +2844,15 @@ mod tests {
                     body: "{}".into(),
                 });
             }
-            if r.method == "DELETE" && u.contains("/actions/caches?ref=") {
-                return ok(serde_json::json!({"total_count": 1, "actions_caches": []}));
+            if r.method == "GET" && u.contains("/actions/caches?ref=") {
+                return ok(serde_json::json!({"total_count": 1, "actions_caches": [{"id": 77}]}));
+            }
+            if r.method == "DELETE" && u.ends_with("/actions/caches/77") {
+                return Ok(Response {
+                    status: 204,
+                    headers: vec![],
+                    body: String::new(),
+                });
             }
             if u.contains("/actions/runs?head_sha=") {
                 let sha = u
@@ -3039,8 +3046,12 @@ mod tests {
             ),
         )
         .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Executable bits are Unix-only; the Windows CI job builds these tests but does not run them.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
     }
 
     fn pushes(bare: &Path) -> usize {
@@ -3323,18 +3334,22 @@ mod tests {
         assert_eq!(kv["sha"].len(), 40);
         assert_eq!(kv["collected"], "1");
         assert!(gh.requests().iter().any(|q| q.contains("head_sha=")));
-        let deletes: Vec<String> = gh
-            .requests()
-            .into_iter()
-            .filter(|q| {
-                q.starts_with("DELETE ") && q.contains("/actions/caches?ref=refs/heads/mason/run/")
-            })
+        let q = gh.requests();
+        assert!(
+            q.iter().any(|q| q.starts_with("GET ")
+                && q.contains("/actions/caches?ref=refs/heads/mason/run/")),
+            "the deleted ref's caches are listed: {q:?}"
+        );
+        let deletes: Vec<&String> = q
+            .iter()
+            .filter(|q| q.starts_with("DELETE ") && q.contains("/actions/caches"))
             .collect();
         assert_eq!(
             deletes.len(),
             1,
-            "one cache DELETE for the ref deleted: {deletes:?}"
+            "one DELETE, by the listed cache's id: {deletes:?}"
         );
+        assert!(deletes[0].ends_with("/actions/caches/77"), "{deletes:?}");
     }
 
     #[test]
