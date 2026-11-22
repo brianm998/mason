@@ -205,7 +205,8 @@ public final class MonitorConnection {
     public func sendSubscription() {
         var views: [Mason_V1_ViewKind] = [.header, .sidebar, .home, .usage]
         var taskId: UInt64 = 0
-        switch model.page {
+        if !model.visible { views = [.header, .sidebar] }
+        else { switch model.page {
         case .task(let id): views.append(.taskDetail); taskId = id
         case .landing: views.append(.landing)
         case .home, .section("cpu"), .section("disk"): views.append(contentsOf: [.cpuHistory, .diskHistory])
@@ -216,7 +217,7 @@ public final class MonitorConnection {
         case .settings:
             model.loadSettings()
         default: break
-        }
+        } }
         var s = Mason_V1_Subscribe()
         s.views = views
         s.project = model.project

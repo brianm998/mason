@@ -343,6 +343,8 @@ public final class MonitorModel {
         }
         progress.resetAll()
         sidebar = nil
+        heldSidebar = nil
+        heldHeader = nil
         home = nil
         landing = nil
     }
@@ -454,7 +456,7 @@ public final class MonitorModel {
         isKnownTaskCalls += 1
         if let c = knownTaskCache, c.revision == linkRevision { return c.ids.contains(n) }
         var ids = Set<UInt64>()
-        for sec in sidebar?.sections ?? [] { for r in sec.rows { ids.insert(r.id) } }
+        for sec in liveSidebar?.sections ?? [] { for r in sec.rows { ids.insert(r.id) } }
         if let d = taskDetail, d.hasRow {
             let r = d.row
             ids.insert(r.id)
@@ -526,7 +528,7 @@ public final class MonitorModel {
     }
 
     /// The attention indicator is shown only while something needs a look.
-    public var attention: UInt32 { connected ? (header?.attention ?? 0) : 0 }
+    public var attention: UInt32 { connected ? ((heldHeader ?? header)?.attention ?? 0) : 0 }
 
     // MARK: sidebar width
 
@@ -1050,12 +1052,63 @@ public final class MonitorModel {
     @ObservationIgnored private var pendingProgress: [Mason_V1_StepProgress] = []
     @ObservationIgnored private var flushScheduled = false
 
+    // MARK: visibility (task #973)
+
+    /// Whether the window can be seen. While it cannot, `header` and `sidebar` are held in
+    /// `held*` (side effects still run), progress is held, and the subscription names only those
+    /// two views. Becoming visible publishes the held values in one go and resubscribes.
+    @ObservationIgnored public var visible = true {
+        didSet {
+            guard visible != oldValue else { return }
+            if visible { publishHeld() }
+            subscribe?()
+        }
+    }
+    @ObservationIgnored var heldHeader: HeaderView?
+    @ObservationIgnored var heldSidebar: SidebarView?
+    /// Newest progress message per task and step, held while hidden.
+    @ObservationIgnored private var heldProgress: [UInt64: [String: Mason_V1_StepProgress]] = [:]
+    @ObservationIgnored private var heldProgressOrder: [Mason_V1_StepProgress] = []
+
+    /// The newest sidebar, published or held: what logic (not drawing) must read.
+    var liveSidebar: SidebarView? { heldSidebar ?? sidebar }
+
+    private func publishHeld() {
+        if let h = heldHeader { heldHeader = nil; if header != h { header = h } }
+        if let x = heldSidebar { heldSidebar = nil; if sidebar != x { sidebar = x } }
+        if !heldProgressOrder.isEmpty {
+            let batch = heldProgressOrder
+            heldProgressOrder = []
+            heldProgress = [:]
+            apply(progresses: batch)
+        }
+    }
+
     /// A progress message from the stream: held until the next frame, so a burst costs one sidebar publish.
     func enqueue(progress p: Mason_V1_StepProgress) {
+        if !visible {
+            holdProgress(p)
+            return
+        }
         pendingProgress.append(p)
         guard !flushScheduled else { return }
         flushScheduled = true
         scheduleProgressFlush { [weak self] in self?.flushProgress() }
+    }
+
+    private func holdProgress(_ p: Mason_V1_StepProgress) {
+        guard p.hasProgress else {
+            if p.nowMs > 0 { anchor(daemonNow: p.nowMs) }
+            return
+        }
+        // Only the newest message for each task and step is kept.
+        let step = p.progress.step
+        if let old = heldProgress[p.task]?[step], let i = heldProgressOrder.firstIndex(where: { $0.task == old.task && $0.progress.step == step }) {
+            heldProgressOrder.remove(at: i)
+        }
+        heldProgress[p.task, default: [:]][step] = p
+        heldProgressOrder.append(p)
+        if p.nowMs > 0 { anchor(daemonNow: p.nowMs) }
     }
 
     /// Apply what was held, in order, as one batch. Every other message flushes first, so order is kept.
@@ -1096,7 +1149,7 @@ public final class MonitorModel {
         // Base cells: the live entry if there is one, else the row of the last sidebar (read, never copied).
         var base: [UInt64: [ProgressCell]] = [:]
         for id in latest.keys { if let c = progress.cells(id) { base[id] = c } }
-        if base.count < latest.count, let s = sidebar {
+        if base.count < latest.count, let s = liveSidebar {
             for sec in s.sections {
                 for r in sec.rows where latest[r.id] != nil && base[r.id] == nil { base[r.id] = r.progress }
             }
@@ -1190,13 +1243,23 @@ public final class MonitorModel {
         if let p = Self.scope(of: v), p != project { return }
         switch v.body {
         case .header(let x)?:
-            if header != x { header = x }
+            if visible {
+                heldHeader = nil
+                if header != x { header = x }
+            } else {
+                heldHeader = x
+            }
             noteMonitorBuild()
             // An open dialog follows the session: a reply arrives as a new header.
             if ownerSessionDialog != nil { refreshOwnerSession() }
         case .sidebar(let x)?:
             progress.reset(tasks: x.sections.flatMap { $0.rows.map(\.id) })
-            if sidebar != x { sidebar = x }
+            if visible {
+                heldSidebar = nil
+                if sidebar != x { sidebar = x }
+            } else {
+                heldSidebar = x
+            }
             noteAttention(x)
             settleAfterView()
         case .home(let x)?:

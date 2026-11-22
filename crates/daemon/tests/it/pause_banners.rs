@@ -48,6 +48,11 @@ fn paused_banners_carry_the_project_and_mode_of_their_pause() {
     );
     let claims = paused.iter().find(|b| b.mode == "claims").unwrap();
     assert_eq!(claims.text, "Paused (claims) for star by brian");
+    assert!(
+        hv.banners.iter().all(|b| !b.level.is_empty()),
+        "every banner carries a level"
+    );
+    assert!(paused.iter().all(|b| b.level == "warning"));
     for b in hv.banners.iter().filter(|b| b.kind != "paused") {
         assert!(b.project.is_empty() && b.mode.is_empty(), "{}", b.kind);
     }

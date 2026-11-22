@@ -17,7 +17,11 @@ class HealthLineTest {
         val model = MonitorModel()
         setContent {
             CompositionLocalProvider(LocalTheme provides Theme(dark = false, scale = 1.0)) {
-                HealthPage(model) { LatenessWindow(pings = 2400, late = 31, worstMs = 640.0, totalLateMs = 9000.0) }
+                HealthPage(
+                    model,
+                    lateness = { LatenessWindow(pings = 2400, late = 31, worstMs = 640.0, totalLateMs = 9000.0) },
+                    backgroundLateness = { LatenessWindow(pings = 0, late = 0, worstMs = 0.0, totalLateMs = 0.0) },
+                )
             }
         }
         onNodeWithTag("health:ui-thread").assertTextEquals("UI thread: worst 640 ms late in the last 10 minutes, 31 late pings")
