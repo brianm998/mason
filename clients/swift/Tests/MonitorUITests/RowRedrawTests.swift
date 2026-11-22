@@ -72,7 +72,17 @@ final class RowRedrawTests: XCTestCase {
     }
 
     private func draw(_ r: ImageRenderer<AnyView>) {
+        // Observation-driven updates (TaskProgress, the sidebar) reach the graph on a run-loop
+        // pass, so drain the main run loop before and after reading the image (s811).
+        drain()
         _ = r.cgImage
+        drain()
+        _ = r.cgImage
+    }
+
+    private func drain() {
+        var passes = 0
+        while passes < 10, RunLoop.main.run(mode: .default, before: Date()) { passes += 1 }
     }
 
     private func settle(_ h: ImageRenderer<AnyView>) {

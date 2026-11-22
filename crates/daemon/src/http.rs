@@ -1830,6 +1830,14 @@ async fn landing_status(Shared(d): Shared<Arc<Daemon>>) -> Res {
                             }),
                             Err(e) => json!({"error": e}),
                         },
+                        "batch_tests": match crate::landing::load_config(&d2, *pid)
+                            .ok()
+                            .and_then(|c| crate::landing::batch_gate(&d2, p, &c))
+                        {
+                            None => json!("whole suite"),
+                            Some(mason_core::full_test::Gate::Narrow) => json!("narrowed to the batch's tests; the scheduled full test is the backstop"),
+                            Some(mason_core::full_test::Gate::Whole(why)) => json!(format!("whole suite: {why}")),
+                        },
                         "queued": d2.landing().queued(*pid).iter().map(|t| t.0).collect::<Vec<_>>(),
                         "running_batches": d2.landing().running_batches(*pid),
                         "queue_idle_ms": d2.landing().idle_ms(*pid),
