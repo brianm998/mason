@@ -49,12 +49,26 @@ final class DiskSectionTests: XCTestCase {
         return view
     }
 
+    /// The view's pixels as 8-bit sRGB RGBA, `width * 4` bytes a row. The renderer's own image
+    /// is redrawn into a context of that exact layout: its native format differs between macOS
+    /// versions (row padding, 16-bit or wide-gamut channels), and on GitHub's macOS 26 runner
+    /// reading it as packed RGBA8 sampled the wrong pixels.
     private func pixels(_ v: some View, size: CGSize) -> [UInt8] {
         let r = ImageRenderer(content: v.frame(width: size.width, height: size.height))
         r.scale = 1
         guard let cg = r.cgImage else { return [] }
-        let rep = NSBitmapImageRep(cgImage: cg)
-        return Array(UnsafeBufferPointer(start: rep.bitmapData, count: rep.bytesPerRow * rep.pixelsHigh))
+        let w = Int(size.width), h = Int(size.height)
+        var px = [UInt8](repeating: 0, count: w * h * 4)
+        let drawn = px.withUnsafeMutableBytes { buf -> Bool in
+            guard let space = CGColorSpace(name: CGColorSpace.sRGB),
+                let ctx = CGContext(
+                    data: buf.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                    space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            else { return false }
+            ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+            return true
+        }
+        return drawn ? px : []
     }
 
     func testTwoVolumesHaveACheckboxEachAndOneVolumeHasNone() {
@@ -90,8 +104,9 @@ final class DiskSectionTests: XCTestCase {
     // A red 30x20-ish box and a blue one stand for CPU and disk.
     private func row(stacked: Bool) -> some View {
         CpuDiskRow(stacked: stacked, spacing: 10) {
-            Color.red.frame(maxWidth: .infinity).frame(height: 40)
-            Color.blue.frame(maxWidth: .infinity).frame(height: 40)
+            // Exact sRGB primaries: the system red and blue are tuned per macOS release.
+            Color(.sRGB, red: 1, green: 0, blue: 0).frame(maxWidth: .infinity).frame(height: 40)
+            Color(.sRGB, red: 0, green: 0, blue: 1).frame(maxWidth: .infinity).frame(height: 40)
         }
     }
 
