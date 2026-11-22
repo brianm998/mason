@@ -103,6 +103,8 @@ pub struct Ctx<'a> {
     wait_view: std::sync::Arc<crate::waitview::WaitsView>,
     /// Tasks the owner made immune to testing (an open `tests:all` debt), read once per build.
     immune: std::collections::HashSet<u64>,
+    /// Tasks with their own placement mode (`run_on`), read once per build (#834).
+    run_on: std::collections::HashMap<u64, String>,
 }
 
 type LogCache = std::collections::HashMap<u64, (Vec<crate::http::LogStamp>, String)>;
@@ -210,6 +212,15 @@ impl<'a> Ctx<'a> {
             waits: d.broker.waits_snapshot(),
             row_bodies: true,
             wait_view: d.broker.wait_view(),
+            run_on: d
+                .store
+                .task_overrides_for_key(mason_definition::layers::RUN_ON)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|(t, v)| {
+                    crate::place::Mode::parse(&v).map(|m| (t, m.name().to_string()))
+                })
+                .collect(),
             immune: d
                 .store
                 .debts(None, true)
@@ -512,6 +523,7 @@ impl<'a> Ctx<'a> {
             // Whole minutes, so a sidebar that changed in nothing else hashes the same.
             in_state_ms: in_state / 60_000 * 60_000,
             state_since_ms: since,
+            run_on_override: self.run_on.get(&t.id.0).cloned().unwrap_or_default(),
             model,
             display: model_use
                 .as_ref()
@@ -710,6 +722,15 @@ impl<'a> Ctx<'a> {
         }
         HeaderView {
             project: project.to_string(),
+            project_placements: self
+                .d
+                .projects()
+                .values()
+                .map(|p| ProjectPlacement {
+                    project: p.id.clone(),
+                    placement: Some(crate::place::project_placement(self.d, &p.id)),
+                })
+                .collect(),
             attention,
             counts: ORDER
                 .iter()
@@ -1042,6 +1063,9 @@ impl<'a> Ctx<'a> {
             crate::remote::running_holds(&crate::remote::holds_dir(&self.d.cfg.hosts_dir()));
         HomeView {
             project: project.to_string(),
+            placement: Some(crate::place::global_placement(self.d)),
+            project_placement: (!project.is_empty())
+                .then(|| crate::place::project_placement(self.d, project)),
             status: self.header(project).status,
             attention: attention
                 .iter()
@@ -1100,6 +1124,21 @@ impl<'a> Ctx<'a> {
             compilation: Some(self.compilation_named()),
             queue_hold: self.queue_hold(project),
             cpu: Some(self.cpu_usage()),
+            github: Some(crate::remote_runs::view(
+                self.d,
+                &|id| {
+                    if id == 0 {
+                        return None;
+                    }
+                    let t = self.w.tasks.get(&TaskId(id))?;
+                    if !self.matches(t, project) {
+                        return None;
+                    }
+                    let r = self.row(t);
+                    Some((r.title, r.state, r.activity, r.project))
+                },
+                project,
+            )),
             stages: [
                 State::Exploring,
                 State::Developing,
@@ -1141,6 +1180,11 @@ impl<'a> Ctx<'a> {
         let plan_view = (!plan.is_empty()).then(|| crate::plan_view::parse_plan(&plan));
         let removes = crate::landing::removals_view(&self.d.cfg.task_dir(id));
         Some(TaskDetailView {
+            placement: Some(crate::place::task_placement(
+                self.d,
+                &self.project_name(t),
+                id,
+            )),
             step_tokens: crate::usage::step_tokens(self.d, id, self.now / 1000),
             ci_links: crate::landing::ci_links_of(&self.d.cfg.task_dir(id))
                 .into_iter()
@@ -1272,6 +1316,7 @@ impl<'a> Ctx<'a> {
             .map(|b| b.id)
             .collect();
         let ids = |s: &str| -> Vec<u64> { s.split(',').filter_map(|x| x.parse().ok()).collect() };
+        let mut histories = std::collections::HashMap::new();
         LandingView {
             project: project.to_string(),
             debts: self
@@ -1310,26 +1355,105 @@ impl<'a> Ctx<'a> {
                 .iter()
                 .filter(|b| in_scope(&b.project))
                 .take(12)
-                .map(|b| BatchLine {
-                    id: b.id,
-                    project: b.project.clone(),
-                    phase: b.phase.clone(),
-                    tasks: ids(&b.tasks),
-                    landed: ids(&b.landed),
-                    parked: ids(&b.parked),
-                    note: b.note.clone(),
-                    running: live.contains(&b.id),
-                    allowed_actions: batch_actions(&b.phase, live.contains(&b.id)),
-                    ci: self
-                        .d
-                        .landing
-                        .ci
-                        .get(b.id)
-                        .map(|c| crate::batch_ci::to_proto(&c)),
+                .map(|b| {
+                    let info = self.batch_info(b, &mut histories);
+                    BatchLine {
+                        id: b.id,
+                        project: b.project.clone(),
+                        phase: b.phase.clone(),
+                        tasks: ids(&b.tasks),
+                        landed: ids(&b.landed),
+                        parked: ids(&b.parked),
+                        note: b.note.clone(),
+                        running: live.contains(&b.id),
+                        allowed_actions: batch_actions(&b.phase, live.contains(&b.id)),
+                        ci: self
+                            .d
+                            .landing
+                            .ci
+                            .get(b.id)
+                            .map(|c| crate::batch_ci::to_proto(&c)),
+                        state_text: info.state.text,
+                        severity: info.state.severity.into(),
+                        severity_reason: info.state.reason,
+                        phase_ms: info.phase_ms,
+                        typical_ms: info.typical_ms.unwrap_or(0),
+                        split_round: b.round as u32,
+                        remaining: info.state.remaining as u32,
+                        members: info.members,
+                    }
                 })
                 .collect(),
             freezes,
             queue_idle_ms: idle,
+        }
+    }
+
+    /// The batch as one thing (s788): its state in words, severity, time in the phase and the
+    /// phase's usual time, and each member's standing. `histories` caches a project's recorded
+    /// phase entries across the batches of one view.
+    fn batch_info(
+        &self,
+        b: &mason_store::BatchRow,
+        histories: &mut std::collections::HashMap<String, PhaseHistory>,
+    ) -> BatchInfo {
+        let ids = |s: &str| -> Vec<u64> { s.split(',').filter_map(|x| x.parse().ok()).collect() };
+        let h = histories.entry(b.project.clone()).or_insert_with(|| {
+            let rows = self
+                .d
+                .store
+                .batch_phases(&b.project, 30)
+                .unwrap_or_default();
+            let finished = self
+                .d
+                .store
+                .batches(Some(&b.project), 30)
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|x| x.finished_at.map(|f| (x.id, f)))
+                .collect();
+            PhaseHistory { rows, finished }
+        });
+        let entered = h
+            .rows
+            .iter()
+            .rev()
+            .find(|r| r.batch == b.id)
+            .map_or(b.at, |r| r.at);
+        let phase_ms = self.now.saturating_sub(entered);
+        let typical_ms = typical_from(&phase_durations(&h.rows, &h.finished, b.id, &b.phase));
+        let frozen = self
+            .d
+            .store
+            .freezes()
+            .unwrap_or_default()
+            .iter()
+            .any(|f| f.project == b.project);
+        let (landed, parked) = (ids(&b.landed), ids(&b.parked));
+        let all = ids(&b.tasks);
+        let state = batch_state(&BatchFacts {
+            phase: &b.phase,
+            note: &b.note,
+            round: b.round,
+            total: all.len(),
+            landed: &landed,
+            parked: &parked,
+            phase_ms,
+            typical_ms,
+            frozen,
+        });
+        let members = all
+            .iter()
+            .map(|t| BatchMember {
+                task: *t,
+                standing: member_standing(&b.phase, *t, &landed, &parked),
+            })
+            .collect();
+        BatchInfo {
+            state,
+            phase_ms,
+            typical_ms,
+            members,
         }
     }
 
@@ -1380,6 +1504,7 @@ impl<'a> Ctx<'a> {
                         phase_index: index,
                         phase_total: LANDING_PHASES,
                         phase_ms: self.now.saturating_sub(b.at),
+                        standing: member_standing(&b.phase, id, &ids(&b.landed), &ids(&b.parked)),
                         ci_state: ci.clone(),
                         allowed_actions: batch_actions(&b.phase, true),
                         ..Default::default()
@@ -1748,6 +1873,188 @@ pub fn summarize(kind: &EventKind) -> (String, String, u64) {
     (name, summary, task)
 }
 
+/// A project's recorded phase entries and when its finished batches ended.
+struct PhaseHistory {
+    rows: Vec<mason_store::BatchPhaseRow>,
+    finished: std::collections::HashMap<u64, u64>,
+}
+
+struct BatchInfo {
+    state: BatchState,
+    phase_ms: u64,
+    typical_ms: Option<u64>,
+    members: Vec<BatchMember>,
+}
+
+/// What `batch_state` reads.
+struct BatchFacts<'a> {
+    phase: &'a str,
+    note: &'a str,
+    round: u64,
+    total: usize,
+    landed: &'a [u64],
+    parked: &'a [u64],
+    phase_ms: u64,
+    typical_ms: Option<u64>,
+    frozen: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct BatchState {
+    text: String,
+    severity: &'static str,
+    reason: String,
+    remaining: usize,
+}
+
+/// With no history, a batch is stuck after this long in one phase.
+const STUCK_NO_HISTORY_MS: u64 = 30 * 60_000;
+
+/// When a batch counts as stuck in its phase: three times the usual time there, or 30 minutes
+/// without history. (The store keeps no output times, so time in the phase stands for "no
+/// progress".)
+fn stuck_after(typical_ms: Option<u64>) -> u64 {
+    typical_ms.map_or(STUCK_NO_HISTORY_MS, |t| t.saturating_mul(3))
+}
+
+/// The durations of every finished batch's stay in `phase`, from the recorded entries: a stay
+/// ends at the batch's next entry, or at its end. `current` is left out.
+fn phase_durations(
+    rows: &[mason_store::BatchPhaseRow],
+    finished: &std::collections::HashMap<u64, u64>,
+    current: u64,
+    phase: &str,
+) -> Vec<u64> {
+    let mut out = vec![];
+    for (i, r) in rows.iter().enumerate() {
+        if r.batch == current || r.phase != phase {
+            continue;
+        }
+        let end = match rows.get(i + 1) {
+            Some(n) if n.batch == r.batch => Some(n.at),
+            _ => finished.get(&r.batch).copied(),
+        };
+        if let Some(e) = end {
+            out.push(e.saturating_sub(r.at));
+        }
+    }
+    out
+}
+
+/// The median of at least three samples; nothing with fewer.
+fn typical_from(samples: &[u64]) -> Option<u64> {
+    if samples.len() < 3 {
+        return None;
+    }
+    let mut v = samples.to_vec();
+    v.sort_unstable();
+    Some(v[v.len() / 2])
+}
+
+/// One member's own standing in its batch.
+fn member_standing(phase: &str, task: u64, landed: &[u64], parked: &[u64]) -> String {
+    if landed.contains(&task) {
+        "landed".into()
+    } else if parked.contains(&task) {
+        "parked by blame".into()
+    } else {
+        match phase {
+            "merged" => "integrating",
+            "verifying" => "verifying",
+            "red" => "verifying, red batch",
+            "promoting" => "landing",
+            "landed" => "landed",
+            _ => "forming",
+        }
+        .into()
+    }
+}
+
+/// The failing suites a red batch's note names: its first clause, up to a parenthesis.
+fn red_suites(note: &str) -> String {
+    let n = note.split(" (").next().unwrap_or(note);
+    if let Some(i) = n.find(" is red in ") {
+        let rest = &n[i + " is red in ".len()..];
+        return rest.split(" and ").next().unwrap_or(rest).to_string();
+    }
+    n.trim().to_string()
+}
+
+/// The batch's state in words, how worried to be, and why. Display only: nothing here
+/// decides a verdict.
+fn batch_state(f: &BatchFacts) -> BatchState {
+    let remaining = f
+        .total
+        .saturating_sub(f.landed.len() + f.parked.len())
+        .min(f.total);
+    let (_, words) = batch_phase(f.phase);
+    let mut warns: Vec<String> = vec![];
+    let mut stuck: Vec<String> = vec![];
+    let text = if f.phase == "red" {
+        let suite = red_suites(f.note);
+        let held = f.note.contains("held") || f.note.contains("waits for the owner");
+        if held {
+            stuck.push("held: the red was not pinned on a task".into());
+            format!("red in {suite}, held")
+        } else if !f.parked.is_empty() {
+            let blamed: Vec<String> = f.parked.iter().map(|t| format!("#{t}")).collect();
+            warns.push(format!("a task was parked: blamed {}", blamed.join(", ")));
+            format!("red in {suite}, blamed {}", blamed.join(", "))
+        } else {
+            warns.push("red: the batch is being split".into());
+            format!(
+                "red in {suite}, splitting (round {}, {remaining} tasks left)",
+                f.round.max(1)
+            )
+        }
+    } else if f.round > 1 && matches!(f.phase, "verifying" | "merged") {
+        format!("{words} (round {})", f.round)
+    } else {
+        words.to_string()
+    };
+    if f.phase != "red" && !f.parked.is_empty() {
+        warns.push(format!("{} task(s) parked from the batch", f.parked.len()));
+    }
+    if f.round > 1 && f.phase != "red" {
+        warns.push(format!("it was split: round {}", f.round));
+    }
+    for (needle, why) in [
+        ("rerun", "a check was rerun"),
+        ("timed out", "a remote run was cut off at its limit"),
+        ("known-red", "a known-red excuse applies"),
+        ("known red", "a known-red excuse applies"),
+    ] {
+        if f.note.contains(needle) && !warns.iter().any(|w| w == why) {
+            warns.push(why.into());
+        }
+    }
+    if f.frozen && !matches!(f.phase, "landed" | "parked" | "failed" | "abandoned") {
+        stuck.push("the project is frozen".into());
+    }
+    let live = !matches!(f.phase, "landed" | "parked" | "failed" | "abandoned");
+    let limit = stuck_after(f.typical_ms);
+    if live && f.phase_ms > limit {
+        stuck.push(format!(
+            "no progress for {} min in this phase (limit {} min)",
+            f.phase_ms / 60_000,
+            limit / 60_000
+        ));
+    }
+    let (severity, reason) = if !stuck.is_empty() {
+        ("stuck", stuck.join("; "))
+    } else if !warns.is_empty() {
+        ("warn", warns.join("; "))
+    } else {
+        ("ok", String::new())
+    };
+    BatchState {
+        text,
+        severity,
+        reason,
+        remaining,
+    }
+}
+
 /// Phases a batch goes through while landing: forming, integrating, running suites, landing.
 const LANDING_PHASES: u32 = 4;
 
@@ -2081,5 +2388,84 @@ fn batch_actions(phase: &str, running: bool) -> Vec<String> {
         vec!["land_now".into()]
     } else {
         vec![]
+    }
+}
+
+#[cfg(test)]
+mod batch_state_tests {
+    use super::*;
+
+    fn facts<'a>(
+        phase: &'a str,
+        note: &'a str,
+        round: u64,
+        phase_ms: u64,
+        typical_ms: Option<u64>,
+    ) -> BatchFacts<'a> {
+        BatchFacts {
+            phase,
+            note,
+            round,
+            total: 5,
+            landed: &[],
+            parked: &[],
+            phase_ms,
+            typical_ms,
+            frozen: false,
+        }
+    }
+
+    fn row(batch: u64, phase: &str, at: u64) -> mason_store::BatchPhaseRow {
+        mason_store::BatchPhaseRow {
+            batch,
+            phase: phase.into(),
+            at,
+        }
+    }
+
+    #[test]
+    fn a_red_batch_in_a_split_round_is_a_warning_not_running_suites() {
+        let s = batch_state(&facts(
+            "red",
+            "lint is red in lint (3 tests)",
+            1,
+            1_000,
+            None,
+        ));
+        assert_eq!(s.severity, "warn");
+        assert!(
+            s.text.contains("splitting (round 1, 5 tasks left)"),
+            "{}",
+            s.text
+        );
+        assert!(!s.text.contains("running suites"));
+    }
+
+    #[test]
+    fn a_batch_verifying_past_stuck_after_is_stuck() {
+        let limit = stuck_after(Some(60_000));
+        assert_eq!(limit, 180_000);
+        let s = batch_state(&facts("verifying", "", 1, limit + 1, Some(60_000)));
+        assert_eq!(s.severity, "stuck");
+        let s = batch_state(&facts("verifying", "", 1, limit - 1, Some(60_000)));
+        assert_eq!(s.severity, "ok");
+        assert_eq!(stuck_after(None), 30 * 60_000);
+    }
+
+    #[test]
+    fn typical_time_is_the_median_of_three_phase_durations_and_absent_with_fewer() {
+        let rows = vec![
+            row(1, "verifying", 0),
+            row(1, "promoting", 100),
+            row(2, "verifying", 0),
+            row(2, "promoting", 300),
+            row(3, "verifying", 0),
+            row(3, "promoting", 200),
+            row(4, "verifying", 0),
+        ];
+        let finished = std::collections::HashMap::new();
+        let d = phase_durations(&rows, &finished, 4, "verifying");
+        assert_eq!(typical_from(&d), Some(200));
+        assert_eq!(typical_from(&d[..2]), None);
     }
 }

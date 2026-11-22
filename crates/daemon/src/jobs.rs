@@ -1048,9 +1048,17 @@ fn acquire_needs_as(
     // A project whose runs go to GitHub holds runner pool units for them, not this machine's
     // slots (#700). A daemon that restarted counted the units of its run still out: they are
     // this step's, and its lease takes them over.
+    let mut _waiting = None;
     let needs = match crate::remote::pool_needs(d, &c.project.id, &needs, Some(c.task)) {
         Some(n) => {
             d.broker.take_over_remote(&format!("task {}", c.task.0));
+            // On the monitor's GitHub section until a pool unit is granted (#767).
+            _waiting = Some(crate::remote_runs::waiting(
+                d,
+                c.task.0,
+                label.unwrap_or("test step"),
+                &format!("#{}", c.task.0),
+            ));
             n
         }
         None => needs,
@@ -1897,7 +1905,9 @@ impl DevSuites {
 impl TestChecks {
     /// `run_check` on a suites step: the suites bound to `development` that the impact map
     /// selects for the worktree's changes, each after its own build, reported one by one.
-    fn run_suites(&self, dev: &DevSuites, scope: &CheckScope) -> CheckRun {
+    /// `light`: the task's testing is skipped (a fast track, #812). The suites that the change
+    /// selects are built, and only the tests the change adds run, by name; nothing else does.
+    fn run_suites(&self, dev: &DevSuites, scope: &CheckScope, light: bool) -> CheckRun {
         use std::collections::BTreeMap;
         let over = || CheckRun::Done {
             passed: false,
@@ -1911,6 +1921,10 @@ impl TestChecks {
             paths.clone(),
             mason_testing::When::Development,
         );
+        let added: Option<crate::newtests::Added> = light
+            .then(|| crate::newtests::in_worktree(&self.wt, &dev.base_ref).unwrap_or_default());
+        let mut ran_builds: Vec<String> = vec![];
+        let mut ran_tests: Vec<String> = vec![];
         // What the diff touches (whole packages, or test targets for `{tests_for_change}`),
         // found once for each kind and only if a suite asks for it.
         let mut touched: BTreeMap<(bool, String), Result<crate::scope::Narrow, String>> =
@@ -1922,13 +1936,13 @@ impl TestChecks {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
-            .filter(|r| !r.is_empty() && scope.is_empty() && !scope.full);
-        let tracks = scope.is_empty() || scope.full;
+            .filter(|r| !light && !r.is_empty() && scope.is_empty() && !scope.full);
+        let tracks = !light && (scope.is_empty() || scope.full);
         // An unscoped check runs what the change affects, not the whole workspace: on
         // 2026-11-18, 87 of 111 develop checks ran every test binary (about 15 minutes each,
         // docs-only changes too) and the queue for the test slots was hours long. `full: true`
         // runs everything; the test step and the landing batch always do.
-        let by_default = red.is_none() && scope.is_empty() && !scope.full;
+        let by_default = !light && red.is_none() && scope.is_empty() && !scope.full;
         let defaulted = CheckScope {
             changed: true,
             ..scope.clone()
@@ -1943,6 +1957,7 @@ impl TestChecks {
                 id_prefix: prefix,
                 log_dir: self.log_dir.clone(),
                 cmd: cmd.to_string(),
+                build: None,
                 cwd: self.wt.clone(),
                 env: vec![("MASON_HELD".to_string(), held_text(uses))],
                 limit,
@@ -2128,6 +2143,42 @@ impl TestChecks {
                     ));
                 }
             }
+            // A fast track runs the build, and then only the tests the change adds, by name.
+            let mut build_only = false;
+            if let Some(a) = &added {
+                let names = a.names();
+                let named_run = suite
+                    .rerun
+                    .as_deref()
+                    .filter(|t| !names.is_empty() && t.contains("{tests}"))
+                    .map(|t| {
+                        // Names from a diff are bare fn names, not full test paths.
+                        t.replace("--exact ", "").replace(
+                            "{tests}",
+                            &names
+                                .iter()
+                                .map(|n| shell_word(n))
+                                .collect::<Vec<_>>()
+                                .join(" "),
+                        )
+                    });
+                if let Some(cmd) = named_run {
+                    suite.command = cmd;
+                    small = true;
+                    ran_tests.extend(names.iter().map(|n| format!("test {n}")));
+                } else if !a.exits.is_empty() && suite.command.contains("run-changed-exit-scripts")
+                {
+                    ran_tests.extend(a.exits.iter().map(|e| format!("exit script {e}")));
+                } else if suite.build.is_some() {
+                    build_only = true;
+                } else {
+                    lines.push(format!(
+                        "{name}: not run, the fast track runs only a build and the tests \
+                         your change adds"
+                    ));
+                    continue;
+                }
+            }
             if let Some(b) = &suite.build {
                 let known = built.iter().find(|(c, _)| c == b).map(|(_, ok)| *ok);
                 let ok = match known {
@@ -2194,6 +2245,15 @@ impl TestChecks {
                     failed = true;
                     continue;
                 }
+                if light {
+                    ran_builds.push(format!("build of {name}"));
+                }
+            }
+            if build_only {
+                lines.push(format!(
+                    "{name}: built; your change adds no test of this suite to run"
+                ));
+                continue;
             }
             let mut uses = if suite.build.is_some() {
                 tests_uses(&self.slots.test_uses)
@@ -2268,6 +2328,17 @@ impl TestChecks {
                     {
                         failing.extend(crate::rerun::failing_names(&text));
                     }
+                    if let Some(a) = &added {
+                        let text = read_whole_log(&self.log_dir.join(format!("{}.log", o.id)))
+                            .unwrap_or_else(|| o.output.clone());
+                        let bad = crate::newtests::failing_among(a, &text);
+                        if !bad.is_empty() {
+                            lines.push(format!(
+                                "{name}: the test(s) your change adds failed: {}",
+                                bad.join(", ")
+                            ));
+                        }
+                    }
                     lines.push(format!(
                         "{name}: FAILED{}. Last output:\n{}",
                         if o.timed_out { " (timed out)" } else { "" },
@@ -2331,6 +2402,21 @@ impl TestChecks {
                          your change affects, so everything is rarely needed."
                     .to_string(),
             });
+        }
+        if light {
+            lines.push(format!(
+                "Fast track: ran {}; and {}. Nothing else was built or run.",
+                if ran_builds.is_empty() {
+                    "no build".to_string()
+                } else {
+                    ran_builds.join(", ")
+                },
+                if ran_tests.is_empty() {
+                    "no test (your change adds none)".to_string()
+                } else {
+                    format!("only the tests your change adds: {}", ran_tests.join(", "))
+                }
+            ));
         }
         CheckRun::Done {
             passed: !failed,
@@ -2445,10 +2531,13 @@ impl TestChecks {
             if let Some(refusal) = self.markers_refusal() {
                 return refusal;
             }
-            if let Some(debt) = self.skipped_by_owner() {
-                return not_run_skipped(debt);
-            }
         }
+        // A skip does not make the change unchecked (#812): the build and the tests the change
+        // adds still run, and a red of either is the agent's to fix before it submits.
+        let light = (name == "tests").then(|| self.skipped_by_owner()).flatten();
+        self.slots
+            .light
+            .store(light.is_some(), std::sync::atomic::Ordering::SeqCst);
         // The call is one entry of the round's check history, from the wait to the result.
         let entry = self
             .slots
@@ -2459,7 +2548,19 @@ impl TestChecks {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
-        let out = self.check_replaced(name, scope);
+        let out = self.check_replaced(name, scope, light);
+        self.slots
+            .light
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        let out = match (light, out) {
+            (Some(debt), CheckRun::Done { passed, summary }) if summary != STEP_OVER => {
+                CheckRun::Done {
+                    passed,
+                    summary: not_run_skipped(debt, passed, &summary),
+                }
+            }
+            (_, out) => out,
+        };
         *self.slots.check.lock().unwrap_or_else(|e| e.into_inner()) = None;
         let failing =
             std::mem::take(&mut *self.check_failing.lock().unwrap_or_else(|e| e.into_inner()));
@@ -2476,11 +2577,14 @@ impl TestChecks {
         out
     }
 
-    fn check_replaced(&self, name: &str, scope: &CheckScope) -> CheckRun {
-        let r = self.check_unskipped(name, scope);
+    fn check_replaced(&self, name: &str, scope: &CheckScope, light: Option<u64>) -> CheckRun {
+        let r = self.check_unskipped(name, scope, light.is_some());
         // Only a check whose wait was ended is replaced; one that ran keeps its result.
         let ended = matches!(&r, CheckRun::Done { passed: false, summary } if summary == STEP_OVER);
-        match (name == "tests" && ended, self.skipped_by_owner()) {
+        match (
+            name == "tests" && ended && light.is_none(),
+            self.skipped_by_owner(),
+        ) {
             (true, Some(debt)) => {
                 // A skip that ended the wait left the agent without its slot.
                 if self
@@ -2492,16 +2596,25 @@ impl TestChecks {
                 {
                     self.slots.take_agent_slot_back();
                 }
-                not_run_skipped(debt)
+                CheckRun::Done {
+                    passed: true,
+                    summary: not_run_skipped(
+                        debt,
+                        true,
+                        "The skip arrived while the check waited.",
+                    ),
+                }
             }
             _ => r,
         }
     }
 
-    fn check_unskipped(&self, name: &str, scope: &CheckScope) -> CheckRun {
+    fn check_unskipped(&self, name: &str, scope: &CheckScope, light: bool) -> CheckRun {
         if name == "tests" {
             if let Some(dev) = &self.suites {
-                return self.run_suites(dev, scope);
+                // Under a skip the agent's own narrowing is not used: the run is fixed.
+                let scope = if light { &CheckScope::default() } else { scope };
+                return self.run_suites(dev, scope, light);
             }
         }
         let (true, Some(cmds)) = (name == "tests", &self.cmd) else {
@@ -2540,6 +2653,7 @@ impl TestChecks {
                 id_prefix: prefix,
                 log_dir: self.log_dir.clone(),
                 cmd: cmd.to_string(),
+                build: None,
                 cwd: self.wt.clone(),
                 env: vec![("MASON_HELD".to_string(), held_text(uses))],
                 limit: self.timeout,
@@ -2552,12 +2666,26 @@ impl TestChecks {
             }
         };
         let merges = self.reds.merges();
+        // On GitHub the build is part of the same run as the tests (#771): a second runner
+        // starts from nothing and would compile everything again.
+        let mut folded: Option<String> = None;
         // A build first, holding one `compile` slot; the tests then hold the
         // rest of what the test step uses.
         let uses = match &cmds.build {
             None => self.slots.test_uses.clone(),
             Some(build) if build_reused(&self.slots.d, ctree.as_deref(), build, &self.wt) => {
                 tracing::info!(wt = %self.wt.display(), "build already passed for this tree; reused");
+                tests_uses(&self.slots.test_uses)
+            }
+            Some(build)
+                if {
+                    let t = spec(self.id_prefix.clone(), &cmds.test, &self.slots.test_uses);
+                    let b = spec(format!("{}build", self.id_prefix), build, &build_uses());
+                    !crate::hostedcheck::pending(&self.slots.d, &b)
+                        && crate::hostedcheck::goes_remote(&self.slots.d, &t)
+                } =>
+            {
+                folded = Some(build.clone());
                 tests_uses(&self.slots.test_uses)
             }
             Some(build) => {
@@ -2615,7 +2743,21 @@ impl TestChecks {
                 tests_uses(&self.slots.test_uses)
             }
         };
-        let tspec = spec(self.id_prefix.clone(), &cmds.test, &uses);
+        if light {
+            // The tests of a project without suites cannot be told apart by name here.
+            self.slots.take_agent_slot_back();
+            return CheckRun::Done {
+                passed: true,
+                summary: "Built; this project has no suites to pick the tests your change adds."
+                    .into(),
+            };
+        }
+        let with_build = |mut s: crate::hostedcheck::CheckSpec| {
+            s.build = folded.clone();
+            s
+        };
+        let tspec = with_build(spec(self.id_prefix.clone(), &cmds.test, &uses));
+
         // The same call sent again after a restart attaches to the run already
         // going (or takes its result) at once: it starts nothing, so it does not
         // queue behind other work for a slot the run it joins already took.
@@ -2629,7 +2771,7 @@ impl TestChecks {
             tspec
         } else {
             ctree = crate::cmdreuse::content_tree(&self.wt);
-            spec(self.id_prefix.clone(), &cmds.test, &uses)
+            with_build(spec(self.id_prefix.clone(), &cmds.test, &uses))
         };
         self.phase(mason_core::checks::CheckPhase::Running);
         let pr = self.check_progress("check tests", None);
@@ -2638,6 +2780,15 @@ impl TestChecks {
         });
         drop(test_lease);
         self.slots.take_agent_slot_back();
+        // The build ran inside this run: what it says of the build is recorded for the tree.
+        if let (Some(build), Ok(o), Some(t)) = (&folded, &res, &ctree) {
+            let bk = crate::cmdreuse::build_key(build);
+            if o.passed || o.phase.as_deref() == Some("run") {
+                crate::cmdreuse::record_build_green(&self.slots.d, t, &bk, &self.wt);
+            } else if o.phase.as_deref() == Some("build") {
+                crate::cmdreuse::record_build_red(&self.slots.d, t, &bk, &self.wt);
+            }
+        }
         if let (Ok(o), Some(t)) = (&res, &ctree) {
             if o.passed {
                 let src = format!("run_check of task #{}, run {}", self.task, self.run);
@@ -2649,6 +2800,23 @@ impl TestChecks {
             Ok(o) if o.passed => self.reds.passed(step),
             Ok(o) => self.remember_red(step, &o.id),
             Err(_) => {}
+        }
+        // A red build of a folded run reads as the separate build did.
+        if let (Some(_), Ok(o)) = (&folded, &res) {
+            if !o.passed && o.phase.as_deref() == Some("build") {
+                return CheckRun::Done {
+                    passed: false,
+                    summary: if o.timed_out {
+                        format!(
+                            "Building the tests did not finish within {} s and was stopped. Last output:\n{}",
+                            self.timeout.as_secs(),
+                            o.output
+                        )
+                    } else {
+                        format!("Building the tests failed. Last output:\n{}", o.output)
+                    },
+                };
+            }
         }
         let header = match &res {
             Ok(o) if !o.passed => known_header(&self.slots.d, &self.log_dir, &o.id, step)
@@ -2770,6 +2938,8 @@ struct CheckSlots {
     lease: StepLease,
     /// The entry of the check history that a queue for slots belongs to, while one is going.
     check: std::sync::Mutex<Option<usize>>,
+    /// A fast-track check is going (the testing is skipped, #812): the skip does not end its wait.
+    light: std::sync::atomic::AtomicBool,
 }
 
 impl CheckSlots {
@@ -2793,6 +2963,7 @@ impl CheckSlots {
             test_step: test.map(|s| s.name.clone()),
             lease: c.lease.clone(),
             check: Default::default(),
+            light: Default::default(),
         }
     }
 
@@ -2811,7 +2982,10 @@ impl CheckSlots {
             .ok_or(crate::sched::Cancelled)?;
         let rank = d.rank_for(&t, &self.def, as_step);
         let (d2, task, run) = (d.clone(), self.task, self.run);
-        let test_step = self.test_step.clone().filter(|_| end_on_skip);
+        let test_step = self
+            .test_step
+            .clone()
+            .filter(|_| end_on_skip && !self.light.load(std::sync::atomic::Ordering::SeqCst));
         // A skip of the task's test step ends a check's wait too: the check then says so.
         let alive = move || {
             d2.world()
@@ -2873,6 +3047,8 @@ impl CheckSlots {
     ) -> Result<Option<crate::sched::Lease>, crate::sched::Cancelled> {
         let held = self.lease.lock().unwrap_or_else(|e| e.into_inner()).take();
         if held.is_some() {
+            // Parked on a check: the session is free for others while it waits (#765).
+            self.d.set_parked(self.task, true);
             drop(held);
             self.d.admit();
         }
@@ -2901,6 +3077,9 @@ impl CheckSlots {
 
     /// Queue for the agent's slot again, before the agent is told the result.
     fn take_agent_slot_back(&self) {
+        // No longer parked: from here the task counts as waiting for its session, which
+        // keeps a new admission from taking it.
+        self.d.set_parked(self.task, false);
         self.d.admit();
         let needs = crate::sched::needs_of(&self.agent_uses, Some(&self.account));
         if let Ok(l) = self.acquire(needs, &self.step, false, None) {
@@ -2918,19 +3097,19 @@ fn check_rank_step<'a>(agent_step: &'a str, _test_step: Option<&'a str>) -> &'a 
 /// What a check says when its wait for a slot was ended.
 const STEP_OVER: &str = "The step is over; the check did not run.";
 
-/// What a `run_check` says when the owner skipped the task's testing (s264).
-fn not_run_skipped(debt: u64) -> CheckRun {
-    CheckRun::Done {
-        passed: true,
-        summary: format!(
-            "Not run: the owner skipped testing for this task (debt #{debt}). Nothing was \
-             built or tested, so this says nothing about your change, and you are the only \
-             check it gets before landing builds the batch. Reread each file where you \
-             merged or resolved a conflict (a conflict marker left in one is refused) and \
-             check that each call you touched still matches what it calls on the base. \
-             Then finish it and submit."
-        ),
-    }
+/// What a `run_check` says when the owner skipped the task's testing (s264, #812). The skip
+/// does not skip the change's own build or the tests it adds: `ran` says what those found.
+fn not_run_skipped(debt: u64, passed: bool, ran: &str) -> String {
+    format!(
+        "Not run: the owner skipped testing for this task (debt #{debt}), so the rest of the \
+         suite was not run; only the build and the tests your change adds are checked here \
+         ({}).\n{ran}\n\
+         A green says nothing about the rest, and you are the only full check your change gets \
+         before landing builds the batch. Reread each file where you merged or resolved a \
+         conflict (a conflict marker left in one is refused) and check that each call you touched \
+         still matches what it calls on the base. Then finish it and submit.",
+        if passed { "green" } else { "RED: fix it first" }
+    )
 }
 
 /// Proof before acceptance: the submitted commit really is the tip of the
@@ -2944,7 +3123,9 @@ fn change_validator(
     branch: String,
     caps: mason_definition::Capabilities,
     weakening: Option<WeakeningCheck>,
+    planned: Option<PlannedChange>,
 ) -> Validator {
+    let warned = std::sync::atomic::AtomicBool::new(false);
     Box::new(move |tool, args| {
         if tool != "submit_change" {
             return Ok(());
@@ -3036,12 +3217,47 @@ fn change_validator(
                 let _ = notes; // lines in files the change adds: not a finding
             }
         }
+        // A diff with no source in it (#812): a fast-tracked task landed twice with only tests
+        // and docs because its code edits did not apply, and nothing else compared the plan with
+        // the diff. Refused once with the files the plan names; a note saying why lets it through.
+        if let Some(pl) = &planned {
+            let files: Vec<&str> = changed.lines().collect();
+            let wanted = crate::newtests::planned_sources(&pl.plan);
+            let touched = wanted.iter().any(|w| files.contains(&w.as_str()));
+            let any_source = files.iter().any(|f| crate::newtests::is_source_path(f));
+            if !wanted.is_empty() && !touched && !any_source {
+                let note = args["notes"].as_str().unwrap_or("").trim().to_string();
+                let first = !warned.swap(true, std::sync::atomic::Ordering::SeqCst);
+                if note.is_empty() && first {
+                    problems.push(format!(
+                        "the plan names these source files, and your change touches none of them (it changes only tests, docs or scripts): {}. Check that your edits were really applied (`git diff {base_ref}...HEAD --stat`). If this is right, submit again with a note saying why.",
+                        wanted.join(", ")
+                    ));
+                } else if !note.is_empty() {
+                    tracing::warn!(branch = %branch, "submitted with no planned source file changed: {note}");
+                    let _ = std::fs::write(
+                        &pl.note_file,
+                        format!(
+                            "Submitted although none of the planned source files changed ({}).\nThe agent's note: {note}\n",
+                            wanted.join(", ")
+                        ),
+                    );
+                }
+            }
+        }
         if problems.is_empty() {
             Ok(())
         } else {
             Err(problems)
         }
     })
+}
+
+/// What `submit_change` compares the diff with: the task's plan, and where a note kept for
+/// the owner goes.
+struct PlannedChange {
+    plan: String,
+    note_file: PathBuf,
 }
 
 /// Wrap `inner` so a `submit_change` whose head tree was red on the test step for this
@@ -3356,6 +3572,8 @@ fn agent_job(c: &Ctx) {
         fn drop(&mut self) {
             self.0.d.broker.stop_crediting_waits(self.0.task);
             end_run_leases(&self.0.d, self.0.task);
+            // A check that ended without handing the session back leaves no parked mark (#765).
+            self.0.d.set_parked(self.0.task, false);
             crate::hostedcheck::cancel_task(&self.0.d, self.0.task.0);
         }
     }
@@ -3389,6 +3607,19 @@ fn agent_job(c: &Ctx) {
                 note_file: c
                     .task_dir()
                     .join(format!("weakening-note-r{}.txt", c.run.0)),
+            }),
+            Some(PlannedChange {
+                plan: {
+                    let mut text = c.body.clone();
+                    if let Some(p) = &plan {
+                        text.push('\n');
+                        text.push_str(&p.to_string().replace("\\n", "\n"));
+                    }
+                    text
+                },
+                note_file: c
+                    .task_dir()
+                    .join(format!("source-free-note-r{}.txt", c.run.0)),
             }),
         )
     });
@@ -5309,8 +5540,54 @@ mod tests {
                 holds,
                 note_file: note.clone(),
             }),
+            None,
         );
         (v("submit_change", &serde_json::json!({"head": head})), note)
+    }
+
+    #[test]
+    fn a_diff_with_none_of_the_planned_source_files_is_refused_once_and_accepted_with_a_note() {
+        let dir = tempfile::tempdir().unwrap().keep();
+        sh(&dir, &["init", "-q", "-b", "main"]);
+        std::fs::create_dir_all(dir.join("crates/x/src")).unwrap();
+        std::fs::write(dir.join("crates/x/src/a.rs"), "fn a() {}\n").unwrap();
+        sh(&dir, &["add", "-A"]);
+        sh(&dir, &["commit", "-qm", "init"]);
+        sh(&dir, &["checkout", "-q", "-b", "work"]);
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(dir.join("tests/it.rs"), "#[test]\nfn t() {}\n").unwrap();
+        std::fs::write(dir.join("docs/n.md"), "note\n").unwrap();
+        sh(&dir, &["add", "-A"]);
+        sh(&dir, &["commit", "-qm", "tests and docs only"]);
+        let head = git::rev_parse(&dir, "HEAD").unwrap();
+        let note = dir.join("source-free.txt");
+        let v = change_validator(
+            dir.clone(),
+            "main".into(),
+            "work".into(),
+            mason_definition::Capabilities::now(),
+            None,
+            Some(PlannedChange {
+                plan: "Problem.\n\n**Change**\n1. Edit `crates/x/src/a.rs`.\n".into(),
+                note_file: note.clone(),
+            }),
+        );
+        let first = v("submit_change", &serde_json::json!({"head": head}));
+        let problems = first.unwrap_err();
+        assert!(
+            problems.iter().any(|p| p.contains("crates/x/src/a.rs")),
+            "{problems:?}"
+        );
+        let with_note = v(
+            "submit_change",
+            &serde_json::json!({"head": head, "notes": "the code already did this"}),
+        );
+        assert!(with_note.is_ok(), "{with_note:?}");
+        let kept = std::fs::read_to_string(&note).unwrap();
+        assert!(kept.contains("the code already did this"), "{kept}");
+        // Refused once only: a second bare submit goes through.
+        assert!(v("submit_change", &serde_json::json!({"head": head})).is_ok());
     }
 
     #[test]

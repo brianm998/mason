@@ -5,7 +5,7 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 cargo test -q -p mason-daemon --test scheduling -- an_agent_whose_check_is_on_github
-cargo test -q -p mason-cli -- agents_and_github_lines
+cargo test -q -p mason-pipeline --bin mason -- agents_and_github_lines
 if [ -z "${MASON_SKIP_SWIFT:-}" ] && [ "$(uname)" = Darwin ] && command -v swift >/dev/null 2>&1; then
   (cd clients/swift && swift test --filter testActiveHeaderCountsWorkingAndWaiting)
 fi

@@ -22,6 +22,7 @@ pub const TIMED_OUT_TWICE: &str = "timed out twice";
 
 use crate::daemon::{now_ms, Daemon};
 use crate::jobs::Ctx;
+use crate::newtests::Added;
 use mason_adapter_api::service::{
     CheckCounts, Checks, CiJobCounts, CiRunJobs, CiState, GitHostAdapter, Observed, PollEvent,
     Poller, PrState, Review,
@@ -1621,6 +1622,7 @@ impl Runner {
                 deliver(d, TaskId(pk.task), pk.verdict());
             }
             rounds += 1;
+            let _ = self.d.store.set_batch_round(batch_id, rounds as u64);
             self.stopped
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -2401,6 +2403,7 @@ impl Runner {
                             id_prefix: format!("b{batch_id}-{prefix}"),
                             log_dir: log_dir.clone(),
                             cmd: cmd.to_string(),
+                            build: None,
                             cwd: wt_for_cmd.clone(),
                             env: vec![],
                             limit: p.test_timeout,
@@ -2449,7 +2452,7 @@ impl Runner {
                                 return false;
                             }
                         };
-                        match crate::hostedcheck::run(d, &spec("rebuild", build, false)) {
+                        match self.check_through_outage(d, &spec("rebuild", build, false)) {
                             Ok(o) if o.stopped.is_some() => {
                                 tracing::info!(
                                     batch = batch_id,
@@ -2507,7 +2510,7 @@ impl Runner {
                         }
                     };
                     let spec = spec("retest", &cmds.test, true);
-                    return match crate::hostedcheck::run(d, &spec) {
+                    return match self.check_through_outage(d, &spec) {
                         Ok(o) if o.stopped.is_some() => {
                             tracing::info!(
                                 batch = batch_id,
@@ -3135,6 +3138,9 @@ impl Runner {
                     r.failed.extend(t.failed);
                     r.notes.extend(t.notes);
                 }
+                if r.green {
+                    self.merge_new_tests(&mut r, def, wt, base, log_dir, prefix);
+                }
             }
             return r;
         };
@@ -3157,6 +3163,9 @@ impl Runner {
                     r.green = f.green;
                     r.failed.extend(f.failed);
                     r.notes.extend(f.notes);
+                    if r.green {
+                        self.merge_new_tests(&mut r, def, wt, base, log_dir, prefix);
+                    }
                 }
             }
             Ok((false, notes, failed)) => {
@@ -3246,6 +3255,7 @@ impl Runner {
                 id_prefix: format!("{prefix}-fast-{name}"),
                 log_dir: log_dir.to_path_buf(),
                 cmd,
+                build: None,
                 cwd: wt.to_path_buf(),
                 env: vec![],
                 limit: self.project().test_timeout,
@@ -3259,7 +3269,7 @@ impl Runner {
                 place: Some((None, Box::new(crate::hostedcheck::without_build(suite)))),
                 global: false,
             };
-            match crate::hostedcheck::run(d, &spec) {
+            match self.check_through_outage(d, &spec) {
                 Ok(o) if o.stopped.is_some() => out.notes.push(format!(
                     "{name}: fast tier not run to the end: {}",
                     o.stopped.unwrap_or_default()
@@ -3287,6 +3297,221 @@ impl Runner {
                 }
                 Err(e) => {
                     let why = format!("{name}: the fast tier gave no result: {e}");
+                    self.fail_service(why.clone());
+                    out.green = false;
+                    out.notes.push(why);
+                    return out;
+                }
+            }
+        }
+        out
+    }
+
+    /// [`Self::new_tests`] after a green floor, its red recorded as the floor's own so that the
+    /// ladder blames by file (the files that add the failing tests).
+    fn merge_new_tests(
+        &self,
+        r: &mut crate::suites::OverRun,
+        def: &mason_definition::Definition,
+        wt: &Path,
+        base: &str,
+        log_dir: &Path,
+        prefix: &str,
+    ) {
+        let t = self.new_tests(def, wt, base, log_dir, prefix);
+        if !t.green {
+            self.floor_red
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        r.green = t.green;
+        r.failed.extend(t.failed);
+        r.notes.extend(t.notes);
+    }
+
+    /// The tests the batch's skipped tasks add (#812). The floor only proves the merged tree
+    /// builds, so a fast-tracked task whose change adds a failing test, or whose code never got
+    /// made, used to land. The new `#[test]` fns of the tasks whose testing was skipped run here
+    /// by name (and their new exit scripts), and nothing else of the suites does. A red names the
+    /// files that add the failing tests (`lint_files`), so only the task that added them is parked.
+    fn new_tests(
+        &self,
+        def: &mason_definition::Definition,
+        wt: &Path,
+        base: &str,
+        log_dir: &Path,
+        prefix: &str,
+    ) -> crate::suites::OverRun {
+        let d = &self.d;
+        let mut out = crate::suites::OverRun {
+            green: true,
+            failed: BTreeSet::new(),
+            notes: vec![],
+            failing: Default::default(),
+            ..Default::default()
+        };
+        let Some(step) = def
+            .steps
+            .iter()
+            .find(|s| s.kind == mason_definition::StepType::Test)
+        else {
+            return out;
+        };
+        // Only the tasks whose testing the owner skipped: the others had theirs run.
+        let mut files: Vec<String> = vec![];
+        for t in &self.member_tasks {
+            if crate::suites::skip_for(d, *t, "", &step.name).is_some() {
+                if let Some(fp) = self.fps.get(&t.0) {
+                    files.extend(fp.files.iter().cloned());
+                }
+            }
+        }
+        if files.is_empty() {
+            return out;
+        }
+        let added = match crate::newtests::in_range(wt, base, "HEAD") {
+            Ok(a) => a.restricted(&files),
+            Err(e) => {
+                let why = format!("the new-tests tier could not read the batch's diff: {e}");
+                self.fail_service(why.clone());
+                out.green = false;
+                out.notes.push(why);
+                return out;
+            }
+        };
+        if added.is_empty() {
+            return out;
+        }
+        self.lint_files
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        let project_test = self.legacy_cmd(def).map(|c| c.test);
+        // (suite it counts under, command, the tests it runs)
+        let mut runs: Vec<(String, String, crate::newtests::Added)> = vec![];
+        let names = added.names();
+        if !names.is_empty() {
+            for sname in &step.suites {
+                let Some(suite) = def.testing.suite(sname) else {
+                    continue;
+                };
+                let Ok(suite) = crate::suites::with_project_test(suite, project_test.as_deref())
+                else {
+                    continue;
+                };
+                let Some(t) = suite.rerun.as_deref().filter(|t| t.contains("{tests}")) else {
+                    continue;
+                };
+                let words: Vec<String> = names
+                    .iter()
+                    .map(|n| format!("'{}'", n.replace('\'', "'\\''")))
+                    .collect();
+                let cmd = t
+                    .replace("--exact ", "")
+                    .replace("{tests}", &words.join(" "));
+                let only = Added {
+                    tests: added.tests.clone(),
+                    exits: vec![],
+                };
+                runs.push((sname.clone(), cmd, only));
+                break;
+            }
+        }
+        if !added.exits.is_empty() {
+            let list: Vec<String> = added.exits.iter().map(|e| format!("'{e}'")).collect();
+            let cmd = format!(
+                "for s in {}; do bash \"$s\" || exit 1; done",
+                list.join(" ")
+            );
+            let name = step
+                .suites
+                .iter()
+                .find(|n| n.starts_with("exit-scripts"))
+                .cloned()
+                .unwrap_or_else(|| "exit-scripts".into());
+            runs.push((
+                name,
+                cmd,
+                Added {
+                    tests: vec![],
+                    exits: added.exits.clone(),
+                },
+            ));
+        }
+        let members = self.members(def);
+        for (name, cmd, only) in runs {
+            let _lease = match self.hold(def, self.test_step_needs(def, false), true) {
+                Ok(l) => l,
+                Err(e) => {
+                    self.fail_service(e.clone());
+                    out.green = false;
+                    out.notes.push(e);
+                    return out;
+                }
+            };
+            let spec = crate::hostedcheck::CheckSpec {
+                id_prefix: format!("{prefix}-new-{name}"),
+                log_dir: log_dir.to_path_buf(),
+                cmd,
+                build: None,
+                cwd: wt.to_path_buf(),
+                env: vec![],
+                limit: self.project().test_timeout,
+                tree: crate::hostedcheck::tree_key(wt),
+                holds: Default::default(),
+                label: String::new(),
+                stop: Some({
+                    let (d, m) = (d.clone(), members.clone());
+                    Arc::new(move || m.forced(&d)) as crate::hostedcheck::StopFn
+                }),
+                place: None,
+                global: true,
+            };
+            match crate::hostedcheck::run(d, &spec) {
+                Ok(o) if o.stopped.is_some() => out.notes.push(format!(
+                    "{name}: the new tests were not run to the end: {}",
+                    o.stopped.unwrap_or_default()
+                )),
+                Ok(o) if o.passed => out.notes.push(format!(
+                    "{name}: the new tests of the skipped tasks pass ({})",
+                    only.describe()
+                )),
+                Ok(o) => {
+                    out.green = false;
+                    out.failed.insert(name.clone());
+                    let bad = crate::newtests::failing_among(&only, &o.full);
+                    // The files that add what failed; every file that adds a test when no
+                    // name can be read.
+                    let blame: Vec<String> = if bad.is_empty() {
+                        only.files()
+                    } else {
+                        only.restricted(
+                            &only
+                                .tests
+                                .iter()
+                                .filter(|(_, n)| bad.contains(n))
+                                .map(|(f, _)| f.clone())
+                                .collect::<Vec<_>>(),
+                        )
+                        .files()
+                    };
+                    let mut lf = self.lint_files.lock().unwrap_or_else(|e| e.into_inner());
+                    for f in blame {
+                        if !lf.contains(&f) {
+                            lf.push(f);
+                        }
+                    }
+                    out.notes.push(format!(
+                        "{name}: a test a skipped task adds failed{}\n{}",
+                        if bad.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" ({})", bad.join(", "))
+                        },
+                        crate::jobs::tail(&o.output, 15)
+                    ));
+                }
+                Err(e) => {
+                    let why = format!("{name}: the new tests gave no result: {e}");
                     self.fail_service(why.clone());
                     out.green = false;
                     out.notes.push(why);
@@ -3391,6 +3616,7 @@ impl Runner {
                 id_prefix: format!("{prefix}-lint-{name}"),
                 log_dir: log_dir.to_path_buf(),
                 cmd: suite.command.clone(),
+                build: None,
                 cwd: wt.to_path_buf(),
                 env: vec![],
                 limit: self.project().test_timeout,
@@ -3437,7 +3663,7 @@ impl Runner {
                     format!("{s}s")
                 }
             };
-            match crate::hostedcheck::run(d, &spec) {
+            match self.check_through_outage(d, &spec) {
                 Ok(o) if o.stopped.is_some() => out.notes.push(format!(
                     "{name}: not run to the end: {}",
                     o.stopped.unwrap_or_default()
@@ -3619,6 +3845,7 @@ impl Runner {
                 id_prefix: format!("{prefix}-floor-{name}"),
                 log_dir: log_dir.to_path_buf(),
                 cmd: build,
+                build: None,
                 cwd: wt.to_path_buf(),
                 env: vec![],
                 limit: self.project().test_timeout,
@@ -3648,7 +3875,7 @@ impl Runner {
                     format!("{s}s")
                 }
             };
-            match crate::hostedcheck::run(d, &spec) {
+            match self.check_through_outage(d, &spec) {
                 Ok(o) if o.stopped.is_some() => out.notes.push(format!(
                     "{name}: {what} not built to the end: {}",
                     o.stopped.unwrap_or_default()
@@ -3730,6 +3957,48 @@ impl Runner {
         Ok(Some(format!(
             "{branch} does not build ({first}), so the red is not this batch's: nobody is blamed and nothing lands until it does"
         )))
+    }
+
+    /// Run a check that may go to GitHub. When GitHub, not the code, kept it from running, wait
+    /// (charged to no task) and run it again, for up to [`OUTAGE_LIMIT_S`]; only then is it an
+    /// error, which the caller raises as a service failure (#772).
+    fn check_through_outage(
+        &self,
+        d: &Arc<Daemon>,
+        spec: &crate::hostedcheck::CheckSpec,
+    ) -> Result<crate::hostedcheck::CheckOutcome, String> {
+        let key = self.alert_key("service");
+        let r = retry_outage(
+            || {
+                if let Some(note) = spec.stop.as_ref().and_then(|f| f()) {
+                    return Ok(crate::hostedcheck::CheckOutcome {
+                        passed: false,
+                        timed_out: false,
+                        output: String::new(),
+                        full: String::new(),
+                        id: String::new(),
+                        stopped: Some(note),
+                        phase: None,
+                    });
+                }
+                crate::hostedcheck::run(d, spec)
+            },
+            |waited, why| {
+                self.d.landing.raise(
+                    self.pid,
+                    &key,
+                    "landing",
+                    &format!(
+                        "{}: waiting for GitHub: {why} (waited {waited} s)",
+                        self.project().id
+                    ),
+                );
+                self.alive(OUTAGE_STEP_S);
+            },
+            |s| self.nap(s),
+        );
+        self.d.landing.clear(self.pid, &key);
+        r
     }
 
     /// Note why the batch cannot go on; it ends with this reason.
@@ -5174,6 +5443,95 @@ fn lint_places(output: &str) -> String {
         String::new()
     } else {
         format!(" (at {})", seen.join(", "))
+    }
+}
+
+/// How long a landing waits out a GitHub outage, and the first and longest pause between tries.
+const OUTAGE_LIMIT_S: u64 = 30 * 60;
+const OUTAGE_STEP_S: u64 = 30;
+const OUTAGE_STEP_MAX_S: u64 = 300;
+
+/// Run `f`; while it fails with GitHub's outage (not the code's fault), `waiting(total, why)` is
+/// told and, after `sleep`, `f` runs again, until [`OUTAGE_LIMIT_S`] has passed. Any other
+/// result, or the last outage error, is returned.
+fn retry_outage<T>(
+    mut f: impl FnMut() -> Result<T, String>,
+    mut waiting: impl FnMut(u64, &str),
+    sleep: impl Fn(u64),
+) -> Result<T, String> {
+    let (mut waited, mut step) = (0u64, OUTAGE_STEP_S);
+    loop {
+        match f() {
+            Err(e) if crate::hostedcheck::is_outage(&e) && waited < OUTAGE_LIMIT_S => {
+                waiting(
+                    waited,
+                    e.trim_start_matches(crate::hostedcheck::OUTAGE_PREFIX),
+                );
+                sleep(step);
+                waited += step;
+                step = (step * 2).min(OUTAGE_STEP_MAX_S);
+            }
+            r => return r,
+        }
+    }
+}
+
+#[cfg(test)]
+mod outage_tests {
+    use super::*;
+
+    fn outage() -> String {
+        format!(
+            "{}push rejected; run it again",
+            crate::hostedcheck::OUTAGE_PREFIX
+        )
+    }
+
+    #[test]
+    fn an_outage_waits_and_retries_and_fails_no_task() {
+        let mut calls = 0;
+        let (mut waits, slept) = (vec![], std::cell::RefCell::new(vec![]));
+        let r = retry_outage(
+            || {
+                calls += 1;
+                if calls <= 2 {
+                    Err(outage())
+                } else {
+                    Ok("clean")
+                }
+            },
+            |_, why| waits.push(why.to_string()),
+            |s| slept.borrow_mut().push(s),
+        );
+        assert_eq!(r, Ok("clean"));
+        assert_eq!(calls, 3);
+        assert_eq!(waits.len(), 2);
+        assert!(waits[0].starts_with("push rejected"));
+        assert_eq!(*slept.borrow(), vec![30, 60]);
+    }
+
+    #[test]
+    fn an_outage_that_does_not_end_is_an_error_after_the_limit() {
+        let slept = std::cell::Cell::new(0u64);
+        let r: Result<(), String> =
+            retry_outage(|| Err(outage()), |_, _| {}, |s| slept.set(slept.get() + s));
+        assert_eq!(r, Err(outage()));
+        assert!(slept.get() >= OUTAGE_LIMIT_S);
+    }
+
+    #[test]
+    fn another_error_is_not_waited_for() {
+        let mut calls = 0;
+        let r: Result<(), String> = retry_outage(
+            || {
+                calls += 1;
+                Err("git broke".into())
+            },
+            |_, _| panic!("no wait"),
+            |_| panic!("no sleep"),
+        );
+        assert_eq!(r, Err("git broke".into()));
+        assert_eq!(calls, 1);
     }
 }
 
