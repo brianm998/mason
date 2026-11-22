@@ -1,0 +1,2 @@
+.mason/run.json
+crates/daemon/tests/it/placement_monitors.rs
