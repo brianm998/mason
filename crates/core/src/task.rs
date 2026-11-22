@@ -237,7 +237,11 @@ impl FailClass {
     /// submissions are about the code, as is anything this does not name.
     pub fn classify(state: State, reason: &str) -> FailClass {
         let r = reason;
-        let outside = (state == State::Landing && r.starts_with("landing failed: "))
+        // A configuration landing refuses will be refused again: that is not an outside
+        // failure to retry, so it goes back as one about the code (the file in the repository).
+        let outside = (state == State::Landing
+            && r.starts_with("landing failed: ")
+            && !r.starts_with("landing failed: landing is not configured"))
             || r.contains("the command was lost")
             || r.contains("the step host was lost")
             || r.contains("step host did not start")
@@ -263,6 +267,8 @@ mod fail_class_tests {
 
     #[test]
     fn classes() {
+        let cfg = "landing failed: landing is not configured: mason (.mason/landing.toml): tier[0]: unknown key `narrow`";
+        assert_eq!(FailClass::classify(State::Landing, cfg), FailClass::Code);
         let push = "landing failed: could not push mason/ci/x: Permission denied";
         assert_eq!(
             FailClass::classify(State::Landing, push),
