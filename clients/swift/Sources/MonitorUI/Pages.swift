@@ -177,6 +177,10 @@ struct HomePage: View {
                     DiskSection(model: model, disk: model.disk, open: { model.go(.section("disk")) })
                 }
 
+                if let g = model.home?.github, g.enabled {
+                    GitHubSection(model: model, g: g, open: { model.go(.section("github")) })
+                }
+
                 if let h = model.home, h.hasCompilation {
                     CompilationSection(model: model, c: h.compilation, open: { model.go(.section("compilation")) })
                 }
@@ -1137,6 +1141,14 @@ struct SectionPage: View {
                     CpuSection(model: model, cpu: model.cpu)
                 case "disk":
                     DiskSection(model: model, disk: model.disk)
+                case "github":
+                    if let g = model.home?.github, g.enabled {
+                        GitHubSection(model: model, g: g, detail: true)
+                    } else {
+                        section(MonitorModel.sectionTitle(name), theme: theme) {
+                            Text(GitHubRuns.empty).font(theme.body()).foregroundStyle(theme.muted)
+                        }
+                    }
                 case "compilation":
                     if let h = model.home, h.hasCompilation {
                         CompilationSection(model: model, c: h.compilation)

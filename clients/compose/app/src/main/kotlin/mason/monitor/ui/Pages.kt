@@ -240,6 +240,7 @@ fun HomePage(model: MonitorModel) {
             }
         }
         CpuDiskRow(model)
+        h?.github?.takeIf { it.enabled }?.let { GitHubSection(model, it, open = { model.go(Page.Section("github")) }) }
         h?.compilation?.let { CompilationSection(model, it, open = { model.go(Page.Section("compilation")) }) }
         h?.stages?.forEach { st ->
             Section(st.title, st.state, open = Page.sectionPage(st.state)?.let { p -> { model.go(p) } }) {
@@ -1050,6 +1051,11 @@ fun SectionPage(model: MonitorModel, name: String) {
             }
             "cpu" -> CpuSection(model)
             "disk" -> DiskSection(model)
+            "github" -> {
+                val g = model.home?.github
+                if (g != null && g.enabled) GitHubSection(model, g, detail = true)
+                else Section(SectionPages.title(name)) { Text(GitHubRuns.EMPTY, style = theme.body(color = theme.muted)) }
+            }
             "compilation" -> {
                 val c = model.home?.compilation
                 if (c != null) CompilationSection(model, c)

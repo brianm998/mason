@@ -948,10 +948,61 @@ message HomeView {
   string developing = 11;
   // Runs in flight on GitHub, by pool. Unset when none.
   RemoteSummary remote = 12;
+  // The runs MASON has on GitHub (#767). Unset from an older daemon.
+  GithubRunList github = 13;
   // The global placement mode (protocol 2, #834). Additive.
-  Placement placement = 13;
+  Placement placement = 14;
   // For a home view of one project: that project's mode. Additive.
-  Placement project_placement = 14;
+  Placement project_placement = 15;
+}
+
+// One job of a remote run, from the Actions jobs API.
+message GithubJob {
+  string name = 1;
+  // queued, running, done.
+  string state = 2;
+  // success, failure, cancelled... once done.
+  string conclusion = 3;
+  // The step it is on now ("Set up job", "run").
+  string step = 4;
+}
+
+// One run on GitHub: what owns it, where it stands and its jobs.
+message GithubRun {
+  string id = 1;
+  // The owning task (0 for a landing batch).
+  uint64 task = 2;
+  string title = 3;
+  // "#12", "b480" or the run id.
+  string owner = 4;
+  string task_state = 5;
+  string task_activity = 6;
+  // agent check, test step, landing lint, landing suite, debt payment.
+  string kind = 7;
+  string suite = 8;
+  string runs_on = 9;
+  uint32 shards = 10;
+  // waiting (for a MASON pool unit), queued (on GitHub), running, green, red, cancelled.
+  string state = 11;
+  // How long it has been in that state (0 once done).
+  uint64 elapsed_s = 12;
+  string url = 13;
+  repeated GithubJob jobs = 14;
+  // "3 of 8 jobs done, step run", or the live test progress.
+  string progress = 15;
+  uint64 updated_ago_s = 16;
+  string project = 17;
+}
+
+// The home page's GitHub section.
+message GithubRunList {
+  // Some project has [remote_runs]; the section is hidden otherwise.
+  bool enabled = 1;
+  uint32 pool_used = 2;
+  uint32 pool_limit = 3;
+  // Runs waiting for a pool unit.
+  uint32 waiting = 4;
+  repeated GithubRun runs = 5;
 }
 
 // One bucket's share of the machine's CPU.
