@@ -574,7 +574,9 @@ fn run_remote(
     runs_on: &str,
 ) -> Result<Option<Ran>, String> {
     use crate::remote as rm;
-    let Some(site) = rm::site_for(d, project, cwd) else {
+    let task = run.and_then(|r| d.world().ok().and_then(|w| w.task_of_open_run(r)));
+    let uses = watch.map(|s| s.uses.clone()).unwrap_or_default();
+    let Some(site) = rm::site_for_run(d, project, cwd, task.map(|t| t.0), &uses) else {
         return Err(rm::env_err("the project has no [remote_runs] section"));
     };
     // A suite whose build runs as its own step here goes in `RunSpec.build`, which the runner
@@ -610,7 +612,6 @@ fn run_remote(
         Stop::Gone => Some(rm::StopWhy::Gone),
     };
     // The units the run holds, on record until it ends, for a daemon that restarts (#700).
-    let task = run.and_then(|r| d.world().ok().and_then(|w| w.task_of_open_run(r)));
     let (key, label) = match task {
         Some(t) => (format!("task {}", t.0), format!("#{}", t.0)),
         None => (id.to_string(), id.to_string()),
