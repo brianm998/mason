@@ -915,7 +915,9 @@ fn form_and_start(
     }
     if d.landing.draining() {
         // A self-update is waiting for the running batches: nothing new starts, and the
-        // queue is left as it is. `set_draining(false)` wakes this again.
+        // queue is left as it is. `set_draining(false)` wakes this again. A deliberate hold
+        // is not idleness.
+        d.landing.lock().idle_ms.remove(&pid);
         return (waiting.len(), Some(Duration::from_secs(1)));
     }
     let cfg = match read_config(d, pid) {
@@ -927,6 +929,8 @@ fn form_and_start(
             // Git failed: nobody knows what the configuration says, so nothing starts and
             // nothing is failed. The queue stays as it is; look again shortly.
             note_read(d, pid, Some(&e), UNREAD_ALERT_AFTER);
+            // Held and alerted on its own: not idleness.
+            d.landing.lock().idle_ms.remove(&pid);
             return (waiting.len(), Some(Duration::from_secs(2)));
         }
         Err(ConfigError::Refused(e)) => {
@@ -978,6 +982,10 @@ fn form_and_start(
                 });
             }
         }
+    }
+    if normal.is_empty() && singles.is_empty() {
+        // Every waiting task is held behind a freeze: a deliberate hold, not idleness.
+        d.landing.lock().idle_ms.remove(&pid);
     }
     for (w, kind) in singles {
         take(d, pid, w.task);
@@ -5362,6 +5370,16 @@ mod idle_tests {
         assert_eq!(s.idle_ms.get(&p).copied(), None);
         s.note_idle(p, true, false, d);
         s.note_idle(p, false, false, d);
+        assert_eq!(s.idle_ms.get(&p).copied(), None);
+    }
+
+    #[test]
+    fn a_deliberate_hold_resets_the_idle_spell() {
+        let p = ProjectId(1);
+        let mut s = State::default();
+        s.note_idle(p, true, false, Duration::from_millis(500));
+        // What a drain, an unread configuration or a freeze does in `form_and_start`.
+        s.idle_ms.remove(&p);
         assert_eq!(s.idle_ms.get(&p).copied(), None);
     }
 }
