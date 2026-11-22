@@ -1369,11 +1369,15 @@ mod tests {
                 && pr.contains("token = \"env:GITHUB_TOKEN\"")
         );
         assert!(render_overlay(&a(Landing::DirectCi, Tracker::Local), &d, "true").contains("[ci]"));
+        // Reads as a project overlay (the daemon's own parser is checked in the CLI's tests).
+        assert!(crate::basic_validate("r", &pr).is_ok());
+        assert!(crate::basic_validate("r", &direct).is_ok());
     }
 
     #[test]
     fn notify_routing_parses() {
         let t = render_notify(&[Alert::Sound, Alert::Email]);
+        assert!(t.parse::<toml_edit::DocumentMut>().is_ok());
         assert!(t.contains("sound = 0") && !t.contains("email = 0"));
     }
 
