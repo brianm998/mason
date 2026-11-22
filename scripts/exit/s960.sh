@@ -6,7 +6,7 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 grep -q testHiddenSidebarIsHeldButStillChimes clients/swift/Tests/MonitorCoreTests/VisibilityTests.swift
-if [ "$(uname)" = Darwin ]; then
+if [ -z "${MASON_SKIP_SWIFT:-}" ] && [ "$(uname)" = Darwin ]; then
   (cd clients/swift && swift test --filter VisibilityTests)
 fi
 echo "s960: ok"
