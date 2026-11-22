@@ -1,3 +1,3 @@
-# 0876: the active-models test follows 0747 for waiting-slot tasks
+# 0876: the active-models test needs no further change after 0831
 
-Admitted tasks whose agent step waits for an llm session are listed as `waiting_slot` with resource `llm:claude`; `sessions_used` counts only sessions held. The test `active_models_lists_only_tasks_that_hold_a_session` keeps its name (pinned by s129) and expects that. See 0831 and s838.
+A task that is admitted but waits for its first llm session is still in an explore or develop-queue state with no live develop record, so `views.rs` `agent_state` does not list it (only a Developing step with a live record is listed as `waiting_slot`). The test's empty-list expectations stay right once the other session's lease is opened first (0831, commit 5eac1d1cf). The red recorded at b9d4aa3ef5 predates that fix; this task records that and changes no test.
