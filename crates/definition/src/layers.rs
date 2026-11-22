@@ -431,6 +431,19 @@ mod tests {
         }
     }
 
+    /// The name the known-red ledger filed (#896): every entry of RUN_ON_VALUES is taken.
+    #[test]
+    fn run_on_takes_github_or_local_and_nothing_else() {
+        let d = builtin();
+        for v in RUN_ON_VALUES {
+            assert!(check_override(&d, "run_on", v).is_ok(), "{v}");
+        }
+        for bad in ["", "GitHub", "default", "nowhere"] {
+            let e = check_override(&d, "run_on", bad).unwrap_err();
+            assert!(e.contains("github") && e.contains("local"), "{e}");
+        }
+    }
+
     #[test]
     fn a_test_steps_build_comes_from_the_step_the_overlay_or_an_override() {
         let text = "schema = 1\nstart = \"test\"\n[step.test]\ntype = \"test\"\ncategory = \"testing\"\nnext = \"land\"\n[step.land]\ntype = \"landing\"\ncategory = \"landing\"\n";
