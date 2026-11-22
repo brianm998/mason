@@ -768,11 +768,22 @@ fn collect(
                 &format!("{} (no GitHub runner, run here)", spec.label),
                 // A skip ends the wait for this machine's slots too (#873).
                 &|| spec.stop.as_ref().is_some_and(|f| f().is_some()),
-            )
-            .map_err(|e| match spec.stop.as_ref().and_then(|f| f()) {
-                Some(_) => return_stopped(id),
-                None => e,
-            })?,
+            ) {
+                Ok(l) => l,
+                Err(e) => {
+                    return match spec.stop.as_ref().and_then(|f| f()) {
+                        Some(note) => Ok(CheckOutcome {
+                            passed: false,
+                            timed_out: false,
+                            output: String::new(),
+                            full: String::new(),
+                            id: id.to_string(),
+                            stopped: Some(note),
+                        }),
+                        None => Err(e),
+                    }
+                }
+            },
             None => None,
         }
     } else {

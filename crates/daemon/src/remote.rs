@@ -919,6 +919,7 @@ fn sweep_stale_refs_now(d: &Daemon, now: u64) {
 
 // ---- running ----------------------------------------------------------------------------------
 
+#[derive(Debug)]
 pub enum Outcome {
     Done(Finished),
     /// The owner skipped or forced, or the task is gone: the run was cancelled.
