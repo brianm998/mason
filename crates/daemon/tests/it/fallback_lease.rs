@@ -204,3 +204,36 @@ fn a_covered_fallback_runs_under_the_batchs_hold_beside_a_waiting_exclusive_requ
     drop(h.join().unwrap());
     assert_eq!(d.broker.used("test-suite"), 0);
 }
+
+/// s924: the room check that gates a fallback reads the real broker. With the suite's slot held
+/// (by a landing batch, say) an uncovered run has no room for it; a covered run, whose caller
+/// holds that slot for it, is not counted against its own use. Free again, both have room.
+#[test]
+fn room_for_a_fallback_reads_the_broker_and_a_covered_run_is_not_blocked_by_its_own_hold() {
+    use mason_daemon::sched::LeaseState;
+    let w = world("window = \"20m\"\n", &[]);
+    let d = w.d.clone();
+    d.broker.declare("test-suite", 1);
+    d.broker.set_limit("test-suite", 1).unwrap();
+    let now = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+    };
+    let room = |covered: bool| {
+        mason_daemon::place::no_room_for(&d.broker.load_reading(now()), &suite_slot(), covered)
+    };
+    assert_eq!(room(false), None, "free: room");
+
+    let batch = d.broker.lease_open_as("batch #1", &suite_slot(), None);
+    wait_for("the batch's lease to be granted", 60, || {
+        matches!(d.broker.lease_poll(batch), LeaseState::Granted { .. })
+    });
+    let why = room(false).expect("the slot is held: no room");
+    assert!(why.contains("test-suite"), "{why}");
+    assert_eq!(room(true), None, "covered: its own hold is not counted");
+
+    d.broker.lease_close(batch);
+    assert_eq!(room(false), None, "released: room");
+}
