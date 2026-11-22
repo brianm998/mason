@@ -217,7 +217,7 @@ fn floor_github_world(landing: &str, files: &[(&str, &str)]) -> (W, Arc<AtomicUs
         "[remote_runs]\nkind = \"github-actions\"\napi = \"{url}\"\nrepo = \"o/r\"\ntoken = \"env:MASON_T816_TOKEN\"\nruns_on = \"ubuntu-latest\"\n"
     );
     let w = world_built_extra(landing, &extra, files, false);
-    mason_daemon::place::set_global(&w.d, mason_daemon::place::Global::GitHub, "test").unwrap();
+    mason_daemon::place::set_global(&w.d, mason_daemon::place::Mode::Remote, "test").unwrap();
     (w, n)
 }
 
