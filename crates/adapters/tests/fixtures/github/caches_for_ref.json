@@ -1,0 +1,10 @@
+[
+  {"method": "GET", "url": "/repos/o/r/actions/caches?ref=refs/heads/mason/run/x&per_page=100&page=1",
+   "response": {"status": 200, "body": {"total_count": 2, "actions_caches": [
+     {"id": 505, "ref": "refs/heads/mason/run/x", "key": "v0-rust-run-Linux-x64-abc", "size_in_bytes": 1024},
+     {"id": 506, "ref": "refs/heads/mason/run/x", "key": "v0-rust-run-Linux-x64-def", "size_in_bytes": 2048}
+   ]}}},
+  {"method": "DELETE", "url": "/repos/o/r/actions/caches/505", "response": {"status": 204, "body": ""}},
+  {"method": "DELETE", "url": "/repos/o/r/actions/caches/506",
+   "response": {"status": 404, "body": {"message": "Not Found"}}}
+]

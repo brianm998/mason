@@ -601,7 +601,8 @@ fn a_fast_tracked_green_check_says_it_built_and_ran_only_the_new_test() {
     );
     assert!(logs.contains("build of only"), "{logs}");
     assert!(logs.contains("test adds_one"), "{logs}");
-    assert!(logs.contains("RAN-ONLY 'adds_one'"), "{logs}");
+    // `sh -c` strips the quotes `shell_word` adds, so the journal has none.
+    assert!(logs.contains("RAN-ONLY adds_one"), "{logs}");
     assert!(!logs.contains("RAN-FULL"), "{logs}");
     assert!(!logs.contains("RED"), "{logs}");
 }

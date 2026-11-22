@@ -1008,3 +1008,21 @@ fn a_base_run_is_named_by_its_workflow_not_its_display_title() {
     // One read of the workflow list serves both runs.
     assert!(g.http.unused().is_empty());
 }
+
+#[test]
+fn a_refs_caches_are_listed_and_deleted_one_by_one() {
+    // GitHub's bulk DELETE /actions/caches needs a cache key as well as the ref (HTTP 422
+    // without one), so the caches of a run ref are listed and deleted by id; one already
+    // gone (404) counts as deleted.
+    let g = gh("caches_for_ref.json");
+    assert_eq!(
+        g.gh.delete_caches_for_ref("refs/heads/mason/run/x")
+            .unwrap(),
+        2
+    );
+    assert!(
+        g.http.unused().is_empty(),
+        "the script expected more: {:?}",
+        g.http.unused()
+    );
+}
