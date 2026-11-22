@@ -806,6 +806,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "mason-onboard"
+version = "0.1.0"
+dependencies = [
+ "mason-adapter-api",
+ "mason-adapters",
+ "mason-definition",
+ "mason-landing",
+ "mason-testing",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml_edit",
+]
+
+[[package]]
 name = "mason-pipeline"
 version = "0.1.0"
 dependencies = [
@@ -815,6 +830,7 @@ dependencies = [
  "mason-daemon",
  "mason-definition",
  "mason-landing",
+ "mason-onboard",
  "mason-platform",
  "mason-plugins",
  "mason-protocol",
