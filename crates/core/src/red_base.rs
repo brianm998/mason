@@ -60,7 +60,21 @@ pub fn failing_tests(log: &str) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     for l in &lines {
         let t = l.trim_start();
-        if let Some(rest) = t
+        if let Some(rest) = t.strip_prefix("FAILED: scripts/exit/") {
+            if let Some(n) = rest
+                .split_whitespace()
+                .next()
+                .and_then(|r| r.strip_suffix(".sh"))
+            {
+                out.insert(n.to_string(), String::new());
+            }
+        } else if let Some(n) = t
+            .strip_prefix("FAIL s")
+            .and_then(|r| r.split_whitespace().next())
+            .filter(|r| !r.is_empty() && r.bytes().all(|b| b.is_ascii_digit()))
+        {
+            out.insert(format!("s{n}"), String::new());
+        } else if let Some(rest) = t
             .strip_prefix("FAILED ")
             .or_else(|| t.strip_prefix("ERROR "))
         {
@@ -71,10 +85,11 @@ pub fn failing_tests(log: &str) -> BTreeMap<String, String> {
             if !id.is_empty() && !id.contains(' ') {
                 out.insert(id.to_string(), text.to_string());
             }
-        } else if let Some(name) = t
-            .strip_prefix("test ")
-            .and_then(|r| r.strip_suffix(" ... FAILED"))
-        {
+        } else if let Some(name) = t.strip_prefix("test ").and_then(|r| {
+            // `--report-time` (s634) ends the line in the test's time: `... FAILED <0.054s>`.
+            let r = r.rsplit_once(" <").map_or(r, |(head, _)| head);
+            r.strip_suffix(" ... FAILED")
+        }) {
             let head = format!("---- {name} stdout ----");
             let text = lines
                 .iter()
@@ -166,6 +181,12 @@ mod tests {
         );
         assert_eq!(c["a::b"], "thread 'a::b' panicked at x.rs:1:1:\nboom");
         assert_eq!(c.len(), 1);
+        // With `--report-time`, as MASON's own cargo suites run.
+        let t = failing_tests(
+            "test a::b ... FAILED <0.054s>\ntest a::c ... ok <0.001s>\n\n---- a::b stdout ----\nboom\n",
+        );
+        assert_eq!(t.keys().collect::<Vec<_>>(), vec!["a::b"]);
+        assert_eq!(t["a::b"], "boom");
     }
 
     #[test]
@@ -210,6 +231,23 @@ mod tests {
             Verdict::Blame
         );
         assert_eq!(judge(&[]), Verdict::Blame);
+    }
+
+    #[test]
+    fn exit_script_failures_are_named_and_excused_by_the_base() {
+        let log = "FAILED: scripts/exit/s07.sh\nFAILED: scripts/exit/s18.sh (exit 1)\nFAIL s09\n";
+        let t = failing_tests(log);
+        assert_eq!(
+            t.keys().cloned().collect::<Vec<_>>(),
+            vec!["s07", "s09", "s18"]
+        );
+        let base = "FAILED: scripts/exit/s07.sh\nFAILED: scripts/exit/s18.sh\nFAIL s09";
+        assert!(matches!(
+            judge(&[job(log, Base::Red(Some(base.into())))]),
+            Verdict::RedOnBase(_)
+        ));
+        assert_eq!(judge(&[job(log, Base::Green)]), Verdict::Blame);
+        assert_eq!(judge(&[job(log, Base::Unknown)]), Verdict::Blame);
     }
 
     #[test]

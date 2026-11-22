@@ -688,6 +688,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s858**: The RowRedrawTests progress-view render counts are replaced by a deterministic MonitorCore observation test, so CI/monitor-swift no longer depends on SwiftUI updates inside ImageRenderer.
 - **s859**: The fake git host now runs its archive and checks commands through `shell_command` and `to_shell_path` so they work on Windows, and a check run that could not happen is no longer cached as red.
 - **s860**: a develop agent that kept committing was never given progress time after a daemon restart, because the extender measured elapsed time from the daemon process's start while the host's limit counts from the step's launch; it now counts from the recorded launch.
+- **s863**: The setup logic of `mason init` and `mason adopt` moved from the CLI binary into the new `mason-onboard` crate, with serialisable `plan` and `apply` entry points, so the daemon can serve it; the CLI is a thin front end with unchanged output, prompts, flags and exit codes.
 - **s867**: `favor-remote` now places a run here, under local slots, when GitHub is overloaded (the pool is full with waiters, the account queue is over `remote_queue_max`, or recent pickups are slower than `spill_after`) and this machine has room; a run unpicked on GitHub for `spill_after` is cancelled and runs here instead of waiting out `pickup_timeout`. Decision 0860.
 - **s868**: An update the owner starts takes its `compile` slot ahead of all task work and past the CPU and heat holds (never past a die more than 2 °C over `thermal_max_c`); an automatic update rises the same way after `update_wait_max_s` (default 30 min).
 - **s871**: `narrow_each` accepts `{file}` (the unit's file under `narrow_root`) and `{path}` (from the repository root) beside `{}`, so a narrowed pytest suite gets `tests/test_x.py`, not `tests.test_x`, and `mason definition check` warns when a pytest suite uses `{}` alone.
@@ -708,8 +709,19 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s911**: on 2026-11-22 the local queue froze for about three hours. A landing batch holds this
 - **s912**: The red CI/monitor-compose run 45005421555 names no failing step in the supplied log tail (only post-job Gradle cache cleanup and the cache-save skip), so no code changed and decision 0905 records how to classify it from the full log.
 - **s917**: Recorded that the cause of s616, s664, s757 and s787 failing on ubuntu-latest shard 1 could not be determined because the per-script failure lines of run 45005421555 were not available to this session, so no fix was made.
+- **s918**: Remote exit-scripts runs skip the Swift and Compose builds as ci.yml does, and a red exit script that is also red on the base is excused.
 - **s924**: see decision 0917. With `fallback = "local"`, 16 runs came back from GitHub at once into a
 - **s930**: s799's grep now matches landing's current placement text and the suites_schedule tests clear the tree-keyed evidence so the schedule runs the suite; the other red scripts (s449, s50, s117, s193, s209, s219, s521, s691, s758, s77, s782, s798, s800, s808, s819, shards 4 and 5) are still unexplained, and `gh run view 45005421555 --log-failed | grep -nE 'panicked at|FAILED:|== scripts|FAILED scripts'` settles them.
+- **s934**: A narrowed or not-run test suite drops the whole suite's stored total from its sub-progress, so the line reads "N tests" instead of "0 of 2,356".
 - **s943**: see decision 0936. A batch out on GitHub held a `test-suite` slot for 48+ minutes on
+- **s945**: A "landing is not configured" verdict (for example an unknown key in .mason/landing.toml) is now classed as a failure about the code instead of an outside one, so the land step is no longer retried over and over for an error no retry can fix.
+- **s946**: The landing message "the base does not build" now carries the compiler's first error line, so repeated identical landing failures show their real cause.
+- **s947**: When no GitHub runner picks up a landing's floor build within the outage limit, the build now runs on this Mac instead of failing the batch with a service error.
+- **s948**: A batch whose base moved more than max_fold times while landing no longer fails its tasks (#798, #789, #782 and #791 failed 4 times that way); they go back in the landing queue to be assembled on the new base.
+- **s949**: A develop step whose agent CLI exits 143 or 137 with no result is started again up to three times per step run (was once) before it fails.
 - **s950**: The analyst pass found that test debts created by owner skip-all runs, and compose-clients debts already proven green, stay outstanding for a week; findings are in analyst-result.json (not committed).
+- **s958**: The Swift monitor holds one `latencyCritical` process activity (and `NSAppSleepDisabled` in the bundle) for its whole life, so its main thread is no longer throttled to priority 4 when its window is behind another app.
+- **s960**: The Swift monitor no longer publishes sidebar, header or progress to its observed model while the window is hidden or minimised, and subscribes to only header and sidebar until it is visible again.
+- **s961**: The step-host portable transport tests are Unix-only until the Windows IPC transport exists, which fixes the red Windows CI job.
+- **s969**: see decision 0962. Task #841's red landing result came from a bad batch build; three
 <!-- status:end -->

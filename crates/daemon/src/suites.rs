@@ -938,6 +938,14 @@ fn expected_total(d: &Arc<Daemon>, project: &str, suite: &Suite, base: &str) -> 
     }
 }
 
+/// A narrowed (or not-run) suite does not run the whole suite, so the whole suite's expected
+/// size is no denominator for it: the line reads "N tests" until a run reports its own total.
+fn forget_whole_total(s: &mut SubProgress) {
+    if s.total.source != Source::Reported {
+        s.total = Figure::default();
+    }
+}
+
 fn quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
@@ -3479,12 +3487,15 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
                 // Said in the closing note too: a narrowed green is not the whole suite's.
                 details.push(note.clone());
                 notes.push(note);
+                // The stored total is the whole suite's size: wrong for a narrowed pick.
+                d.progress_sub(c.run, &name, None, forget_whole_total);
                 (*narrowed, groups)
             }
             StepNarrow::NotRun(note) => {
                 // It runs whole at landing: the step has nothing to prove, and says so.
                 details.push(note.clone());
                 notes.push(note);
+                d.progress_sub(c.run, &name, None, forget_whole_total);
                 outcomes.push((name, SuiteOutcome::NotSelected));
                 continue;
             }
@@ -4291,6 +4302,12 @@ fn suite_proof(
     None
 }
 
+/// Whether `name` is a suite the definition no longer has. A definition with no suites at all
+/// is taken as unloaded, not as proof that the suite is gone.
+fn suite_gone(def: &Definition, name: &str) -> bool {
+    !def.testing.suites.is_empty() && def.testing.suite(name).is_none()
+}
+
 /// Close every open debt whose suites (all of its step's, for a step) have been recorded
 /// green at a base that contains the commit its task landed. A green with known-red tests
 /// skipped counts too, unless the debt's own task touched a skipped test; the skipped tests
@@ -4307,7 +4324,19 @@ pub fn settle_debts(d: &Arc<Daemon>) -> usize {
         let Some(p) = d.project(pid).cloned() else {
             continue;
         };
-        let suites = debt_suites(&d.current_def(pid), &landing_tier(d, pid), &row.scope);
+        let def = d.current_def(pid);
+        if let Some(name) = row.scope.strip_prefix("suite:") {
+            if suite_gone(&def, name) {
+                let how = format!(
+                    "suite `{name}` is no longer in the project's definition, so nothing can pay this debt"
+                );
+                if d.store.pay_debt(row.id, now_ms(), &how).unwrap_or(false) {
+                    closed += 1;
+                }
+                continue;
+            }
+        }
+        let suites = debt_suites(&def, &landing_tier(d, pid), &row.scope);
         if suites.is_empty() {
             continue;
         }
@@ -6584,6 +6613,26 @@ mod narrow_batch_tests {
         let mut s = suite();
         s.dev_command = None;
         assert!(narrow_for_batch(&Definition::empty(), &s, d.path(), &b).is_err());
+    }
+
+    #[test]
+    fn narrowed_suite_drops_the_whole_suites_total() {
+        let mut s = SubProgress {
+            total: Figure::expected(2356),
+            ..SubProgress::default()
+        };
+        forget_whole_total(&mut s);
+        assert_eq!(s.total, Figure::default());
+    }
+
+    #[test]
+    fn narrowed_suite_keeps_a_reported_total() {
+        let mut s = SubProgress {
+            total: Figure::reported(337),
+            ..SubProgress::default()
+        };
+        forget_whole_total(&mut s);
+        assert_eq!(s.total, Figure::reported(337));
     }
 }
 

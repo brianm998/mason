@@ -14,6 +14,8 @@ final class Session: ObservableObject {
     private var finder: Task<Void, Never>?
 
     private var pulse: Timer?
+    /// Keeps the monitor out of App Nap for the life of the app (see AppActivity).
+    private let activity = AppActivity()
 
     init() {
         // Sounds and sentences come from the daemon's announcements, spoken by this sink when this
@@ -35,6 +37,7 @@ final class Session: ObservableObject {
                 model?.sessionNotice = OpenSession.copiedNotice(line)
             }
         }
+        activity.hold()
         MainThreadWatchdog.shared.start()
         pulse = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak model] _ in
             Task { @MainActor in model?.pulse() }
