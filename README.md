@@ -712,4 +712,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s930**: s799's grep now matches landing's current placement text and the suites_schedule tests clear the tree-keyed evidence so the schedule runs the suite; the other red scripts (s449, s50, s117, s193, s209, s219, s521, s691, s758, s77, s782, s798, s800, s808, s819, shards 4 and 5) are still unexplained, and `gh run view 45005421555 --log-failed | grep -nE 'panicked at|FAILED:|== scripts|FAILED scripts'` settles them.
 - **s943**: see decision 0936. A batch out on GitHub held a `test-suite` slot for 48+ minutes on
 - **s950**: The analyst pass found that test debts created by owner skip-all runs, and compose-clients debts already proven green, stay outstanding for a week; findings are in analyst-result.json (not committed).
+- **s958**: The Swift monitor holds one `latencyCritical` process activity (and `NSAppSleepDisabled` in the bundle) for its whole life, so its main thread is no longer throttled to priority 4 when its window is behind another app.
+- **s961**: The step-host portable transport tests are Unix-only until the Windows IPC transport exists, which fixes the red Windows CI job.
+- **s969**: see decision 0962. Task #841's red landing result came from a bad batch build; three
 <!-- status:end -->

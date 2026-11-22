@@ -4318,6 +4318,12 @@ fn suite_proof(
     None
 }
 
+/// Whether `name` is a suite the definition no longer has. A definition with no suites at all
+/// is taken as unloaded, not as proof that the suite is gone.
+fn suite_gone(def: &Definition, name: &str) -> bool {
+    !def.testing.suites.is_empty() && def.testing.suite(name).is_none()
+}
+
 /// Close every open debt whose suites (all of its step's, for a step) have been recorded
 /// green at a base that contains the commit its task landed. A green with known-red tests
 /// skipped counts too, unless the debt's own task touched a skipped test; the skipped tests
@@ -4334,7 +4340,19 @@ pub fn settle_debts(d: &Arc<Daemon>) -> usize {
         let Some(p) = d.project(pid).cloned() else {
             continue;
         };
-        let suites = debt_suites(&d.current_def(pid), &landing_tier(d, pid), &row.scope);
+        let def = d.current_def(pid);
+        if let Some(name) = row.scope.strip_prefix("suite:") {
+            if suite_gone(&def, name) {
+                let how = format!(
+                    "suite `{name}` is no longer in the project's definition, so nothing can pay this debt"
+                );
+                if d.store.pay_debt(row.id, now_ms(), &how).unwrap_or(false) {
+                    closed += 1;
+                }
+                continue;
+            }
+        }
+        let suites = debt_suites(&def, &landing_tier(d, pid), &row.scope);
         if suites.is_empty() {
             continue;
         }
