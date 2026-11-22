@@ -527,6 +527,12 @@ fn check_landing(p: &ProjectCfg, base: &str, out: &mut Vec<Finding>) {
     for x in needs {
         out.push(fail(format!("project {name}: {x}")));
     }
+    for x in mason_landing::config::narrow_problems(
+        &cfg,
+        mason_daemon::schedule::has_full_test_trigger(&p.schedules()),
+    ) {
+        out.push(fail(format!("project {name}: {x}")));
+    }
     if (cfg.mode.uses_candidate_ref() || cfg.mode.uses_pr()) && cfg.batch_suites().is_none() {
         out.push(warn(format!(
             "project {name}: landing mode `{}` has no `[[tier]] name = \"batch\"`, so the batch union gets no local verification and a defect that exists only in the combination reaches CI",
