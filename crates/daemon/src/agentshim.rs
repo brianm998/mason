@@ -165,12 +165,16 @@ mod tests {
         let log = t.path().join("argv.log");
         for tool in ["cargo", "swift", "xcodebuild", "gradle"] {
             let f = real.join(tool);
+            // Write, close, then rename into place: a fork from another test thread can hold a
+            // copy of a still-open writable fd, which makes exec fail with ETXTBSY.
+            let tmp = real.join(format!(".{tool}.tmp"));
             std::fs::write(
-                &f,
+                &tmp,
                 format!("#!/bin/sh\necho \"{tool} $*\" >> '{}'\n", log.display()),
             )
             .unwrap();
-            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::rename(&tmp, &f).unwrap();
         }
         let shims = t.path().join("shims");
         let path = format!("{}:/usr/bin:/bin", real.display());
@@ -179,16 +183,31 @@ mod tests {
     }
 
     fn run(shims: &Path, tool: &str, args: &[&str], off: bool) -> (i32, String) {
-        let mut c = Command::new(shims.join(tool));
-        c.args(args);
-        if off {
-            c.env("MASON_REMOTE_SHIM", "off");
+        // Another test thread's fork can briefly hold a writable copy of a script's fd, so exec
+        // fails with "Text file busy" (here, or in the shim's own exec: exit 126). Retry that.
+        let mut tries = 0;
+        loop {
+            let mut c = Command::new(shims.join(tool));
+            c.args(args);
+            if off {
+                c.env("MASON_REMOTE_SHIM", "off");
+            }
+            tries += 1;
+            let o = match c.output() {
+                Ok(o) => o,
+                Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && tries < 100 => {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    continue;
+                }
+                Err(e) => panic!("{e}"),
+            };
+            let err = String::from_utf8_lossy(&o.stderr).into_owned();
+            if o.status.code() == Some(126) && err.contains("busy") && tries < 100 {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                continue;
+            }
+            return (o.status.code().unwrap(), err);
         }
-        let o = c.output().unwrap();
-        (
-            o.status.code().unwrap(),
-            String::from_utf8_lossy(&o.stderr).into_owned(),
-        )
     }
 
     #[test]
