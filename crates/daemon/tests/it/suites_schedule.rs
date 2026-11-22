@@ -172,6 +172,7 @@ fn a_due_schedule_with_remote_off_runs_each_listed_suite_once_on_the_tip_and_a_g
     d.store
         .write(|c| {
             c.execute("DELETE FROM suite_green", [])?;
+            c.execute("DELETE FROM evidence", [])?;
             c.execute("DELETE FROM suite_skip_green", []).map(|_| ())
         })
         .unwrap();
@@ -267,6 +268,9 @@ fn the_default_runs_the_test_steps_suites_and_the_run_waits_behind_every_task() 
     let log = dir.path().join("ran");
     let (_s, d, _t) = world("", &log);
     d.broker.declare("compile", 1);
+    d.store
+        .write(|c| c.execute("DELETE FROM evidence", []).map(|_| ()))
+        .unwrap();
     let before = runs_of(&log);
     // Something holds the only compile slot.
     let held = d
