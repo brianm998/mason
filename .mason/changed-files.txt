@@ -1,0 +1,5 @@
+.mason/run.json
+crates/daemon/src/affected.rs
+docs/decisions/0928-select-lib-unit-tests-by-module.md
+docs/stages/s935.md
+scripts/exit/s935.sh
