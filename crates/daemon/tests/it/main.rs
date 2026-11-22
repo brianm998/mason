@@ -32,6 +32,7 @@ mod disk;
 mod e2e;
 mod editor;
 mod escalate;
+mod fallback_lease;
 mod fdlimit;
 mod fetch_alert;
 mod fetch_stall;
