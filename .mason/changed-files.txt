@@ -1,0 +1,6 @@
+.mason/run.json
+crates/daemon/src/landing.rs
+crates/daemon/tests/it/landing.rs
+docs/decisions/0971-guard-lint-lines-blame-by-file.md
+docs/stages/s978.md
+scripts/exit/s978.sh
