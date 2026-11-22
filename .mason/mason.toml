@@ -90,6 +90,10 @@ shard_command = '''RUSTDOC="$PWD/scripts/rustdoc-bootstrap.sh" python3 -I script
 # `: {packages}` is a no-op that a daemon older than s546 needs to accept the key.
 dev_command = ''': {packages}; RUSTDOC="$PWD/scripts/rustdoc-bootstrap.sh" {project_test} {tests_for_change} --config 'target."cfg(unix)".runner=["env","RUSTC_BOOTSTRAP=1"]' -- -Z unstable-options --report-time'''
 dev_build = ": {packages}; {project_test} {tests_for_change} --no-run"
+# A narrowed run that picks the packages or one whole test target is split like the whole run, with
+# the same script, so a change that selects the daemon's `it` binary is not one runner's 90 minutes
+# (#880, decision 0836). Several groups or a name filter stay on one runner.
+dev_shard_command = '''RUSTDOC="$PWD/scripts/rustdoc-bootstrap.sh" python3 -I scripts/test-shard.py -- {project_test} {tests_for_change} --config 'target."cfg(unix)".runner=["env","RUSTC_BOOTSTRAP=1"]' -- -Z unstable-options --report-time'''
 narrow_packages = true
 parser = "regex"
 pass_regex = '^test (.+) \.\.\. ok(?: <[0-9.]+s>)?$'
@@ -125,6 +129,11 @@ uses = { test-suite = 1 }
 # `FAIL sNNN` line per script; CI runs all of them, this runs the ones the change can have broken.
 [suite.exit-scripts]
 command = "bash scripts/run-changed-exit-scripts.sh"
+# On GitHub the selected scripts are split four ways (#880, decision 0836): every runner selects the
+# same scripts and keeps those scripts/run-exit-scripts.sh plans for its shard; each script is also
+# held to MASON_EXIT_SCRIPT_LIMIT_S (900 s), so one hang does not use the whole run.
+shards = 4
+shard_command = "MASON_EXIT_SHARD=$MASON_SHARD/$MASON_SHARDS bash scripts/run-changed-exit-scripts.sh"
 parser = "regex"
 pass_regex = '^PASS (.+)$'
 fail_regex = '^FAIL (.+)$'

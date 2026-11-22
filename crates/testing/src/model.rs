@@ -136,6 +136,10 @@ pub struct Suite {
     /// What each shard's runner runs instead of `command`: it reads `.mason/run.json` and the
     /// `MASON_SHARD` variable, as `scripts/test-shard.py` does. Needed by `shards`.
     pub shard_command: Option<String>,
+    /// Like `shard_command`, for a narrowed run: what each runner runs for its share of the tests
+    /// `{tests_for_change}` picked, in the form of `dev_command` (#880). Without it, or when the
+    /// pick is more than one whole test target, a narrowed run stays on one runner.
+    pub dev_shard_command: Option<String>,
     /// `ci_jobs = ["test (ubuntu-latest, *)"]`: the CI jobs that together cover this suite
     /// (`*` matches any run of characters). When every one of them succeeded on one run of the
     /// base branch, the suite is recorded green at that run's commit (#774).
@@ -225,6 +229,7 @@ impl Suite {
             runs_on: None,
             shards: 0,
             shard_command: None,
+            dev_shard_command: None,
             ci_jobs: vec![],
         }
     }
