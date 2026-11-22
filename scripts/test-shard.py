@@ -25,6 +25,7 @@ import argparse
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 
@@ -136,10 +137,31 @@ def exe_env(item, env, libtest):
     return e
 
 
-def run(cmd, cwd, env):
-    p = subprocess.run(cmd, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
-                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    return p.returncode, p.stdout.decode("utf-8", "replace")
+def run(cmd, cwd, env, limit=None):
+    """(status, output). With `limit` seconds, a run that outlasts it is killed (with its
+    process group) and ends `(124, output so far + a timeout line)`."""
+    p = subprocess.Popen(cmd, cwd=cwd, env=env, stdin=subprocess.DEVNULL, start_new_session=bool(limit),
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    try:
+        out, _ = p.communicate(timeout=limit)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except OSError:
+            p.kill()
+        out, _ = p.communicate()
+        text = out.decode("utf-8", "replace")
+        return 124, text + ("" if text.endswith("\n") or not text else "\n") + f"(timed out after {limit:g} s)"
+    return p.returncode, out.decode("utf-8", "replace")
+
+
+def exe_limit():
+    """MASON_TEST_EXE_LIMIT_S as seconds, or None (no deadline) when unset or not positive."""
+    try:
+        v = float(os.environ.get("MASON_TEST_EXE_LIMIT_S", ""))
+    except ValueError:
+        return None
+    return v if v > 0 else None
 
 
 def listing(out):
@@ -207,13 +229,14 @@ def main():
                 continue
             cmd = [item["exe"]] + ["--exact"] + mine + libtest
             kept = len(mine)
-        rc, out = run(cmd, item["dir"], e)
+        rc, out = run(cmd, item["dir"], e, exe_limit())
         emit(f"     Running {item['src']} ({item['exe']})")
         emit(out)
         ran_exes += 1
         kept_total += kept or 0
         if rc != 0:
-            emit(f"error: test failed, to rerun pass `-p {item['pkg']} --test {item['name']}` (exit status {rc})")
+            emit(f"error: test failed, to rerun pass `-p {item['pkg']} --test {item['name']}` (exit status {rc})"
+                 + (f" (timed out after {exe_limit():g} s)" if rc == 124 and exe_limit() else ""))
             failed.append(item["name"])
     # Doc tests, with cargo's own run so the lines are cargo's.
     rc, out = run(flags + ["--doc"] + filters + ["--", "--list"], root, env)
@@ -226,7 +249,7 @@ def main():
         doc_cmd = flags + ["--doc"] + filters + ["--", "--exact"] + mine + libtest if mine else []
         kept_total += len(mine)
     if doc_cmd:
-        rc, out = run(doc_cmd, root, env)
+        rc, out = run(doc_cmd, root, env, exe_limit())
         emit(out)
         if rc != 0:
             failed.append("doc tests")

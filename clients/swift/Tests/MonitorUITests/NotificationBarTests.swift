@@ -98,4 +98,23 @@ final class NotificationBarTests: XCTestCase {
         XCTAssertTrue(ids.contains("collapse-pause:0"))
         XCTAssertEqual(ids.filter { $0.hasPrefix("dismiss:") }.count, 1)
     }
+
+    /// s927: a 1 pt line sits on each boundary between neighbouring rows, none above or below.
+    func testDividersSitBetweenRowsOnly() {
+        let m = model(rows: 3, text: { $0 == 1 ? "A long notification that has to wrap onto several lines. " + String(repeating: "word ", count: 30) : "Short \($0)" })
+        _ = laidOut(m, width: 400)
+        let dividers = probed.filter { $0.key.hasPrefix("divider:") }
+        XCTAssertEqual(dividers.count, 2, "ids: \(probed.keys.sorted())")
+        guard let one = probed["divider:1"], let two = probed["divider:2"],
+              let t0 = probed["banner:0-text"], let t1 = probed["banner:1-text"], let t2 = probed["banner:2-text"]
+        else { return XCTFail("frames missing: \(probed.keys.sorted())") }
+        XCTAssertEqual(one.height, 1, accuracy: 0.01)
+        XCTAssertEqual(two.height, 1, accuracy: 0.01)
+        XCTAssertGreaterThan(t1.height, t0.height, "the middle row wraps")
+        XCTAssertLessThanOrEqual(t0.maxY, one.minY + 0.5)
+        XCTAssertLessThanOrEqual(one.maxY, t1.minY + 0.5)
+        XCTAssertLessThanOrEqual(t1.maxY, two.minY + 0.5)
+        XCTAssertLessThanOrEqual(two.maxY, t2.minY + 0.5)
+        XCTAssertGreaterThan(one.minY, t0.minY, "nothing above the first row")
+    }
 }
