@@ -32,7 +32,7 @@ use mason_landing::git;
 use mason_step_host::registry::{read_kv, write_kv};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// The artifact a run uploads.
@@ -298,6 +298,10 @@ pub struct Site {
     pub workflow: String,
     pub pickup_timeout: Duration,
     pub fallback_local: bool,
+    /// `favor-remote` (#833): a run still unpicked after this long comes back here when
+    /// `local_room` says this machine has room. `None`: it waits out `pickup_timeout`.
+    pub spill_after: Option<Duration>,
+    pub local_room: Option<RoomFn>,
     /// `[remote_runs] test_env`, added to every run's environment.
     pub test_env: Vec<(String, String)>,
     pub gh: GitHub,
@@ -309,11 +313,49 @@ pub struct Site {
     pub on_phase: Option<PhaseFn>,
 }
 
+/// Whether this machine has room for the run now (no hold, a slot it needs free).
+pub type RoomFn = Arc<dyn Fn() -> bool + Send + Sync>;
+
+/// A run waiting for pickup for `waited_ms` comes back here (#833): the spill time is set, it
+/// has passed, and this machine has room. Pure.
+pub fn spill_due(waited_ms: u64, spill_after: Option<Duration>, room: bool) -> bool {
+    room && spill_after.is_some_and(|a| waited_ms >= a.as_millis() as u64)
+}
+
+/// The median of the last few pickup times (s), `None` without any. Pure.
+pub fn median_pickup(v: &[u64]) -> Option<u64> {
+    let mut v = v.to_vec();
+    v.sort_unstable();
+    (!v.is_empty()).then(|| v[v.len() / 2])
+}
+
+static RECENT_PICKUPS: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+const RECENT_PICKUPS_KEPT: usize = 5;
+
+fn note_pickup(s: u64) {
+    let mut v = RECENT_PICKUPS.lock().unwrap_or_else(|e| e.into_inner());
+    v.push(s);
+    if v.len() > RECENT_PICKUPS_KEPT {
+        v.remove(0);
+    }
+}
+
+/// The median pickup time of the last few runs this daemon saw picked up (what each run's
+/// record keeps as `pickup_s`).
+pub fn recent_pickup_s() -> Option<u64> {
+    median_pickup(&RECENT_PICKUPS.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
 /// A sink for the text of a run's current phase.
 pub type PhaseFn = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// What a project's `[remote_runs]` gives, for one worktree. `None`: the project has no `[remote_runs]`.
 pub fn site_for(d: &Daemon, project: &str, cwd: &Path) -> Option<Site> {
+    site_for_task(d, project, cwd, None)
+}
+
+/// [`site_for`] for a run of `task`, whose own `run_on` can make it `favor-remote`.
+pub fn site_for_task(d: &Daemon, project: &str, cwd: &Path, task: Option<u64>) -> Option<Site> {
     let p = project_cfg(d, project)?;
     let r = p.services.remote.clone()?;
     let token = TokenRef::parse(&r.token).ok()?;
@@ -330,15 +372,45 @@ pub fn site_for(d: &Daemon, project: &str, cwd: &Path) -> Option<Site> {
         workflow: r.workflow,
         pickup_timeout: Duration::from_secs(r.pickup_timeout_s),
         // `favor-remote` spills over to this machine after the pickup timeout (s812), whether the
-        // project sets it or follows the global mode.
-        fallback_local: r.fallback_local
-            || crate::place::project_effective(d, project).0 == crate::place::Mode::FavorRemote,
+        // task or project sets it or follows the global mode. Plain `remote` does not (#833).
+        fallback_local: crate::place::task_choice(d, task)
+            .unwrap_or_else(|| crate::place::project_effective(d, project).0)
+            == crate::place::Mode::FavorRemote,
+        spill_after: None,
+        local_room: None,
         test_env: r.test_env,
         gh: GitHub::new(http, &r.api, &r.repo, token),
         clock: Arc::new(SystemClock),
         poll_s: 10,
         on_phase: None,
     })
+}
+
+/// [`site_for_task`] with the favor-remote early return wired (#833): a run still unpicked after
+/// `spill_after` is cancelled and runs here when this machine has room for `uses`.
+pub fn site_for_run(
+    d: &Arc<Daemon>,
+    project: &str,
+    cwd: &Path,
+    task: Option<u64>,
+    uses: &std::collections::BTreeMap<String, u32>,
+) -> Option<Site> {
+    let mut site = site_for_task(d, project, cwd, task)?;
+    if site.fallback_local {
+        let after = project_cfg(d, project)?
+            .services
+            .remote
+            .as_ref()?
+            .spill_after_s;
+        let needs = crate::place::local_needs(uses);
+        let d = d.clone();
+        site.spill_after = Some(Duration::from_secs(after));
+        site.local_room = Some(Arc::new(move || {
+            crate::place::LocalLoad::from_reading(&d.broker.load_reading(now_ms()), &needs)
+                .has_room()
+        }));
+    }
+    Some(site)
 }
 
 /// `<remote>/<base>` when the repository has it, else the local branch.
@@ -1451,6 +1523,23 @@ pub fn execute(
                 delete_ref(site, &mut st, &rec);
                 return Ok(Outcome::Done(finished_from(&st, &log)));
             }
+        } else if site.fallback_local
+            && spill_due(
+                now.saturating_sub(st.pushed_ms),
+                site.spill_after,
+                site.local_room.as_ref().is_some_and(|f| f()),
+            )
+        {
+            // Favor-remote (#833): GitHub has not picked it up and this machine has room, so
+            // it comes back now instead of waiting out the pickup timeout. The run is
+            // cancelled, its ref deleted and its units freed, as for a timeout.
+            cancel(site, &st);
+            abandon(&mut st);
+            return Err(Fail::Environmental(format!(
+                "no runner picked up {} within {} s (favor-remote: this machine has room, so it runs here)",
+                st.ref_name,
+                now.saturating_sub(st.pushed_ms) / 1000
+            )));
         } else if now.saturating_sub(st.pushed_ms) >= site.pickup_timeout.as_millis() as u64 {
             cancel(site, &st);
             abandon(&mut st);
@@ -1763,6 +1852,7 @@ fn poll(
                 };
                 st.pickup_s =
                     Some(from_github.unwrap_or_else(|| now.saturating_sub(st.pushed_ms) / 1000));
+                note_pickup(st.pickup_s.unwrap_or(0));
                 st.save(rec);
             }
         }
@@ -2983,6 +3073,8 @@ mod tests {
             workflow: "mason-run.yml".into(),
             pickup_timeout: Duration::from_secs(1200),
             fallback_local: fallback,
+            spill_after: None,
+            local_room: None,
             test_env: vec![],
             gh: GitHub::new(
                 gh,
@@ -3649,6 +3741,36 @@ mod tests {
         assert!(out.is_none());
     }
 
+    /// #833: a favor-remote run unpicked past `spill_after` comes back at once when this machine
+    /// has room (cancelled on GitHub, ref deleted), not after the pickup timeout; without room it
+    /// waits out the timeout; under plain `remote` it is not spilled. The fake clock drives time.
+    #[test]
+    fn an_unpicked_favor_remote_run_comes_back_early_when_this_machine_has_room() {
+        token();
+        let t = tempfile::tempdir().unwrap();
+        let zip = artifact(t.path(), GREEN, 0, None);
+        for (fallback, room, early, local) in [
+            (true, true, true, true),
+            (true, false, false, true),
+            (false, true, false, false),
+        ] {
+            let r = repo();
+            let gh = FakeGh::new(&r, &zip, Mode::NeverPicked);
+            let clk = clock();
+            let mut s = site(&r, gh.clone(), clk.clone(), fallback);
+            s.spill_after = Some(Duration::from_secs(30));
+            s.local_room = Some(Arc::new(move || room));
+            let logs = tempfile::tempdir().unwrap();
+            let start = clk.now_ms();
+            let out = run_or_fallback(&s, &spec("x9"), logs.path(), &|| None);
+            assert_eq!(matches!(out, Ok(None)), local, "{fallback} {room}");
+            let waited = clk.now_ms() - start;
+            assert_eq!(waited < 1_200_000, early, "{fallback} {room}: {waited}");
+            assert_eq!(gh.cancels.lock().unwrap().len(), 1);
+            assert_eq!(refs(&r.bare), "");
+        }
+    }
+
     #[test]
     fn an_outage_or_a_refused_token_is_environmental() {
         token();
@@ -4056,6 +4178,8 @@ mod tests {
             workflow: "mason-run.yml".into(),
             pickup_timeout: Duration::from_secs(1200),
             fallback_local: false,
+            spill_after: None,
+            local_room: None,
             test_env: vec![],
             gh: GitHub::new(
                 gh.clone(),
