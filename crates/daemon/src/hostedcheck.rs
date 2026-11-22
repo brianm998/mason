@@ -650,10 +650,8 @@ fn remote_check(d: &Arc<Daemon>, spec: &CheckSpec, id: &str) -> Option<Shared> {
     let place = spec.place.as_ref().map(|(t, s)| (*t, &**s));
     // The suite's build is the first part of what runs there (it was not run here).
     // It goes in `RunSpec.build`, a separate process, not joined with `&&` (two `cd`s break).
-    let build = spec
-        .build
-        .as_deref()
-        .or_else(|| build_choice(place.map(|(_, s)| s), &spec.cmd));
+    let build = build_choice(place.map(|(_, s)| s), &spec.cmd);
+    let build = spec.build.as_deref().or(build);
     let site = rm::site_for(d, &project, &spec.cwd)?;
     let rs = rm::with_site_env(
         rm::with_build(
