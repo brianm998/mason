@@ -3950,10 +3950,10 @@ impl Runner {
                     .runs_on
                     .as_deref()
                     .is_none_or(|r| r.starts_with("macos"));
-            let spec = crate::hostedcheck::CheckSpec {
-                id_prefix: format!("{prefix}-floor-{name}"),
+            let mk = |id_prefix: String, github: bool| crate::hostedcheck::CheckSpec {
+                id_prefix,
                 log_dir: log_dir.to_path_buf(),
-                cmd: build,
+                cmd: build.clone(),
                 build: None,
                 cwd: wt.to_path_buf(),
                 env: vec![],
@@ -3967,9 +3967,10 @@ impl Runner {
                 }),
                 // #815: the suite's own placement (its `runs_on`, `remote = false`, device rules)
                 // decides; no task owns a batch.
-                place: (!here).then(|| (None, Box::new(crate::hostedcheck::without_build(suite)))),
+                place: github.then(|| (None, Box::new(crate::hostedcheck::without_build(suite)))),
                 global: false,
             };
+            let spec = mk(format!("{prefix}-floor-{name}"), !here);
             let ran_on = if !here && crate::hostedcheck::goes_remote(d, &spec) {
                 "on GitHub"
             } else {
@@ -3984,7 +3985,24 @@ impl Runner {
                     format!("{s}s")
                 }
             };
-            match self.check_through_outage(d, &spec) {
+            let mut ran_on = ran_on;
+            let mut result = self.check_through_outage(d, &spec);
+            // #962: no GitHub runner took the floor build within the outage limit, three times
+            // over. A build is the same anywhere, so it is built on this Mac rather than failing
+            // the batch for GitHub's queue.
+            if !here
+                && result
+                    .as_ref()
+                    .is_err_and(|e| crate::hostedcheck::is_outage(e))
+            {
+                out.notes.push(format!(
+                    "{name}: no GitHub runner took the build of {what}; building it on this Mac"
+                ));
+                ran_on = "on this Mac";
+                let local = mk(format!("{prefix}-floor-{name}-here"), false);
+                result = self.check_through_outage(d, &local);
+            }
+            match result {
                 Ok(o) if o.stopped.is_some() => out.notes.push(format!(
                     "{name}: {what} not built to the end: {}",
                     o.stopped.unwrap_or_default()
