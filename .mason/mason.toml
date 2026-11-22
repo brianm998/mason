@@ -154,6 +154,30 @@ min_tests = 1
 level = "unit"
 uses = {}
 
+# The landing `lint` tier's shell guards, in the test step too (2026-11-22): a batch whose lint went
+# red on one task's file (`scripts/exit/s960.sh: runs swift without testing MASON_SKIP_SWIFT`, batches
+# #631/#634) bisected for an hour, while the same guard in the task's own test step takes seconds and
+# sends it back to its own developer. No build, no slot, like `fmt`. The landing tier still runs them
+# over the union. `guards` reads the whole tree (SPDX headers, workflow YAML); `exit-guards` reads
+# scripts/exit/ only (about 50 s for ~900 scripts), so only an exit-script change selects it.
+[suite.guards]
+command = '''if { bash scripts/check-spdx.sh && bash scripts/check-workflows.sh; } 2>&1; then echo "test guards_clean ... ok"; else echo "test guards_clean ... FAILED"; exit 1; fi'''
+parser = "regex"
+pass_regex = '^test (.+) \.\.\. ok$'
+fail_regex = '^test (.+) \.\.\. FAILED$'
+min_tests = 1
+level = "unit"
+uses = {}
+
+[suite.exit-guards]
+command = '''if { bash scripts/check-exit-guards.sh && bash scripts/check-exit-portability.sh; } 2>&1; then echo "test exit_guards_clean ... ok"; else echo "test exit_guards_clean ... FAILED"; exit 1; fi'''
+parser = "regex"
+pass_regex = '^test (.+) \.\.\. ok$'
+fail_regex = '^test (.+) \.\.\. FAILED$'
+min_tests = 1
+level = "unit"
+uses = {}
+
 # Clippy in the test step (s778, #773): 12 lint send-backs in a week were clippy lints in a task's own
 # code that nothing ran before the landing `lint` tier. The `dev_command` takes the changed packages
 # and their dependents (`narrow_packages`, the same `{packages}` as the cargo suite); `command` is
@@ -200,12 +224,12 @@ when = ["development", "test_step"]
 # select the cargo suite, which then runs only the smoke set per task (decisions 0173, 0539); the
 # landing batch runs it whole.
 [impact]
-"crates/**" = ["cargo-workspace", "fmt", "clippy"]
+"crates/**" = ["cargo-workspace", "fmt", "clippy", "guards"]
 "Cargo.*" = ["cargo-workspace"]
 "rust-toolchain.toml" = ["cargo-workspace"]
-"scripts/exit/**" = ["cargo-workspace", "exit-scripts"]
-"clients/swift/**" = ["swift-clients"]
-"clients/compose/**" = ["compose-clients"]
+"scripts/exit/**" = ["cargo-workspace", "exit-scripts", "guards", "exit-guards"]
+"clients/swift/**" = ["swift-clients", "guards"]
+"clients/compose/**" = ["compose-clients", "guards"]
 "clients/features.toml" = ["cargo-workspace", "swift-clients", "compose-clients"]
 "clients/tokens.toml" = ["cargo-workspace", "swift-clients", "compose-clients"]
 "schemas/**" = ["cargo-workspace", "swift-clients", "compose-clients"]
@@ -214,8 +238,8 @@ when = ["development", "test_step"]
 # Paths that used to run every suite whole (s685, decision 0678). Each choice follows what reads the
 # file; `.mason/mason.toml` is left unmapped on purpose, so a definition change tests everything.
 # CI runs the workflows itself and the CI watch checks them; only ci.yml is read by a cargo test.
-".github/**" = []
-".github/workflows/ci.yml" = ["cargo-workspace"]
+".github/**" = ["guards"]
+".github/workflows/ci.yml" = ["cargo-workspace", "guards"]
 ".cargo/**" = ["cargo-workspace"]
 ".gitignore" = []
 ".claude/**" = []
@@ -226,15 +250,15 @@ when = ["development", "test_step"]
 "spikes/**" = []
 "prompts/**" = []
 # `mason init` embeds the templates and the cli tests parse them.
-"templates/**" = ["cargo-workspace"]
+"templates/**" = ["cargo-workspace", "guards"]
 ".mason/landing.toml" = []
 ".mason/smoke-tests.txt" = ["cargo-workspace"]
 ".mason/serial-tests.txt" = ["cargo-workspace"]
 # The conformance crate reads the mascot art list.
 "clients/mascot.toml" = ["cargo-workspace", "swift-clients", "compose-clients"]
-"scripts/*.sh" = ["exit-scripts"]
-"scripts/lib/**" = ["exit-scripts"]
-"scripts/tests/**" = ["exit-scripts"]
+"scripts/*.sh" = ["exit-scripts", "guards"]
+"scripts/lib/**" = ["exit-scripts", "guards"]
+"scripts/tests/**" = ["exit-scripts", "guards"]
 "scripts/package/**" = ["swift-clients"]
 "scripts/bundle-monitor.sh" = ["swift-clients"]
 "scripts/gen-app-icon-macos.swift" = ["swift-clients"]
