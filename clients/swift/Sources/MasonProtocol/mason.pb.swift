@@ -2187,6 +2187,12 @@ public nonisolated struct Mason_V1_Banner: Sendable {
   /// For kind "health": the owner session the banner's Open session button opens (s432).
   public var session: UInt64 = 0
 
+  /// Who the banner is for (s929): "action" (the owner must do or decide something), "warning"
+  /// (something is wrong that the pipeline is not handling) or "info" (progress, or something
+  /// already being handled). A client draws action and warning as bar rows and info in the top
+  /// bar's status line. Empty (an older daemon) reads as "warning". Additive.
+  public var level: String = String()
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -2336,6 +2342,10 @@ public nonisolated struct Mason_V1_UpdateInfo: Sendable {
   /// Asked before the button acts, written by the daemon so both monitors say the same
   /// words; empty when no confirmation is needed (additive).
   public var daemonConfirm: String = String()
+
+  /// "action" when the daemon text needs the owner (a button, or a failed update), "info" while
+  /// an update is only progressing (s929). Empty when daemon_text is empty. Additive.
+  public var daemonLevel: String = String()
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -8024,7 +8034,7 @@ nonisolated extension Mason_V1_StateCount: SwiftProtobuf.Message, SwiftProtobuf.
 
 nonisolated extension Mason_V1_Banner: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Banner"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}kind\0\u{1}text\0\u{1}project\0\u{1}mode\0\u{1}session\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}kind\0\u{1}text\0\u{1}project\0\u{1}mode\0\u{1}session\0\u{1}level\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -8037,6 +8047,7 @@ nonisolated extension Mason_V1_Banner: SwiftProtobuf.Message, SwiftProtobuf._Mes
       case 3: try { try decoder.decodeSingularStringField(value: &self.project) }()
       case 4: try { try decoder.decodeSingularStringField(value: &self.mode) }()
       case 5: try { try decoder.decodeSingularUInt64Field(value: &self.session) }()
+      case 6: try { try decoder.decodeSingularStringField(value: &self.level) }()
       default: break
       }
     }
@@ -8058,6 +8069,9 @@ nonisolated extension Mason_V1_Banner: SwiftProtobuf.Message, SwiftProtobuf._Mes
     if self.session != 0 {
       try visitor.visitSingularUInt64Field(value: self.session, fieldNumber: 5)
     }
+    if !self.level.isEmpty {
+      try visitor.visitSingularStringField(value: self.level, fieldNumber: 6)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -8067,6 +8081,7 @@ nonisolated extension Mason_V1_Banner: SwiftProtobuf.Message, SwiftProtobuf._Mes
     if lhs.project != rhs.project {return false}
     if lhs.mode != rhs.mode {return false}
     if lhs.session != rhs.session {return false}
+    if lhs.level != rhs.level {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -8276,7 +8291,7 @@ nonisolated extension Mason_V1_ActiveSession: SwiftProtobuf.Message, SwiftProtob
 
 nonisolated extension Mason_V1_UpdateInfo: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".UpdateInfo"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}daemon_text\0\u{3}daemon_can_update\0\u{1}monitors\0\u{3}release_version\0\u{3}download_url\0\u{3}daemon_button\0\u{3}daemon_confirm\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}daemon_text\0\u{3}daemon_can_update\0\u{1}monitors\0\u{3}release_version\0\u{3}download_url\0\u{3}daemon_button\0\u{3}daemon_confirm\0\u{3}daemon_level\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -8291,6 +8306,7 @@ nonisolated extension Mason_V1_UpdateInfo: SwiftProtobuf.Message, SwiftProtobuf.
       case 5: try { try decoder.decodeSingularStringField(value: &self.downloadURL) }()
       case 6: try { try decoder.decodeSingularStringField(value: &self.daemonButton) }()
       case 7: try { try decoder.decodeSingularStringField(value: &self.daemonConfirm) }()
+      case 8: try { try decoder.decodeSingularStringField(value: &self.daemonLevel) }()
       default: break
       }
     }
@@ -8318,6 +8334,9 @@ nonisolated extension Mason_V1_UpdateInfo: SwiftProtobuf.Message, SwiftProtobuf.
     if !self.daemonConfirm.isEmpty {
       try visitor.visitSingularStringField(value: self.daemonConfirm, fieldNumber: 7)
     }
+    if !self.daemonLevel.isEmpty {
+      try visitor.visitSingularStringField(value: self.daemonLevel, fieldNumber: 8)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -8329,6 +8348,7 @@ nonisolated extension Mason_V1_UpdateInfo: SwiftProtobuf.Message, SwiftProtobuf.
     if lhs.downloadURL != rhs.downloadURL {return false}
     if lhs.daemonButton != rhs.daemonButton {return false}
     if lhs.daemonConfirm != rhs.daemonConfirm {return false}
+    if lhs.daemonLevel != rhs.daemonLevel {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

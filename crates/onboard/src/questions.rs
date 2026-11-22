@@ -10,6 +10,7 @@
 //! write files they did not choose.
 
 use mason_definition::filing::AGENT_NOTES;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 pub const STARTING_POINT: &str = "This is only a starting point. You can change anything, any time, in the monitor or in `.mason/`.";
@@ -18,7 +19,7 @@ pub const SETUP_BRANCH: &str = "mason/setup";
 
 macro_rules! template {
     ($d:literal, $f:literal) => {
-        include_str!(concat!("../../../../templates/", $d, "/", $f))
+        include_str!(concat!("../../../templates/", $d, "/", $f))
     };
 }
 
@@ -140,7 +141,7 @@ pub enum Tracker {
     Github,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum Agent {
     Claude,
     Codex,
@@ -180,7 +181,7 @@ impl Alert {
 }
 
 /// A git host the remote points at.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Remote {
     pub host: String,
     /// `owner/name`
@@ -206,7 +207,7 @@ pub fn parse_remote(url: &str) -> Option<Remote> {
 }
 
 /// What question 1 found.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct Detected {
     pub root: PathBuf,
     pub id: String,
@@ -256,7 +257,8 @@ pub fn valid_project_id(id: &str) -> bool {
 }
 
 /// Every flag of `mason init`. A `Some` stops that question being asked.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Flags {
     pub yes: bool,
     pub force: bool,
@@ -274,6 +276,8 @@ pub struct Flags {
     pub land: Option<String>,
     pub no_prove: bool,
     pub prove_only: bool,
+    /// The test command for `adopt` (`--test` there; `init` does not take it).
+    pub test: Option<String>,
 }
 
 /// Takes the init flags out of `args`; anything left over is the caller's to refuse.
@@ -326,7 +330,7 @@ pub fn parse_flags(args: &mut Vec<String>) -> Result<Flags, String> {
 }
 
 /// One question, for a person at a terminal.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Question {
     pub id: &'static str,
     pub text: String,
@@ -1365,15 +1369,15 @@ mod tests {
                 && pr.contains("token = \"env:GITHUB_TOKEN\"")
         );
         assert!(render_overlay(&a(Landing::DirectCi, Tracker::Local), &d, "true").contains("[ci]"));
-        // Parses as a project, and a token is only ever a reference.
-        let p = mason_daemon::config::parse_project("r", &pr).unwrap();
-        assert!(p.services.host.is_some() && p.services.tracker.is_some());
+        // Reads as a project overlay (the daemon's own parser is checked in the CLI's tests).
+        assert!(crate::basic_validate("r", &pr).is_ok());
+        assert!(crate::basic_validate("r", &direct).is_ok());
     }
 
     #[test]
     fn notify_routing_parses() {
         let t = render_notify(&[Alert::Sound, Alert::Email]);
-        assert!(mason_daemon::notify::parse(&t).is_ok());
+        assert!(t.parse::<toml_edit::DocumentMut>().is_ok());
         assert!(t.contains("sound = 0") && !t.contains("email = 0"));
     }
 

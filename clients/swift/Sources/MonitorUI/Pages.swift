@@ -855,10 +855,19 @@ struct HealthPage: View {
     /// Where the UI-thread numbers come from; tests inject fixed ones.
     var lateness: @MainActor () -> LatenessWindow = { MainThreadWatchdog.shared.recent() }
 
-    init(model: MonitorModel, lateness: (@MainActor () -> LatenessWindow)? = nil) {
+    /// The same for stalls taken while the app was in the background.
+    var backgroundLateness: @MainActor () -> LatenessWindow = { MainThreadWatchdog.shared.recentBackground() }
+
+    init(
+        model: MonitorModel, lateness: (@MainActor () -> LatenessWindow)? = nil,
+        backgroundLateness: (@MainActor () -> LatenessWindow)? = nil
+    ) {
         self.model = model
         if let lateness { self.lateness = lateness }
+        if let backgroundLateness { self.backgroundLateness = backgroundLateness }
     }
+
+    static func backgroundLine(_ w: LatenessWindow) -> String { w.backgroundLine(windowMinutes: 10) }
 
     static func uiThreadLine(_ w: LatenessWindow) -> String { w.line(windowMinutes: 10) }
 
@@ -868,7 +877,10 @@ struct HealthPage: View {
                 Text("Health").font(theme.title())
                 HealthConnectionLine(model: model)
                 TimelineView(.periodic(from: .now, by: 2)) { _ in
-                    Text(Self.uiThreadLine(lateness())).font(theme.body())
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(Self.uiThreadLine(lateness())).font(theme.body())
+                        Text(Self.backgroundLine(backgroundLateness())).font(theme.small())
+                    }
                 }
                 if let h = model.health {
                     section("Resources", theme: theme) {
