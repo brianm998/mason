@@ -36,6 +36,10 @@ pub struct CheckSpec {
     /// Where the log, exit record and run record go.
     pub log_dir: PathBuf,
     pub cmd: String,
+    /// A build to run before `cmd` when the check goes to GitHub: it is sent as `RunSpec.build`
+    /// of the same run, so one runner builds and tests (#771). Where the check runs here it
+    /// is `None` (the build is its own run, holding a `compile` slot).
+    pub build: Option<String>,
     pub cwd: PathBuf,
     pub env: Vec<(String, String)>,
     pub limit: Duration,
@@ -198,6 +202,9 @@ pub struct CheckOutcome {
     /// Why it was stopped before it ended, when [`CheckSpec::stop`] stopped it. Such a run
     /// did not pass or fail; it was not finished.
     pub stopped: Option<String>,
+    /// For a run that carried a build and did not pass: which part ended it, "build" or
+    /// "run", when the runner said. `None` otherwise.
+    pub phase: Option<String>,
 }
 
 type Shared = Result<CheckOutcome, String>;
@@ -653,6 +660,7 @@ fn remote_check(d: &Arc<Daemon>, spec: &CheckSpec, id: &str) -> Option<Shared> {
     // The suite's build is the first part of what runs there (it was not run here).
     // It goes in `RunSpec.build`, a separate process, not joined with `&&` (two `cd`s break).
     let build = build_choice(place.map(|(_, s)| s), &spec.cmd);
+    let build = spec.build.as_deref().or(build);
     let site = rm::site_for(d, &project, &spec.cwd)?;
     let rs = rm::with_site_env(
         rm::with_build(
@@ -702,6 +710,7 @@ fn remote_check(d: &Arc<Daemon>, spec: &CheckSpec, id: &str) -> Option<Shared> {
                 full: String::new(),
                 id: id.to_string(),
                 stopped: note.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+                phase: None,
             }),
             Ok(Some(rm::Outcome::Done(f))) => Ok(CheckOutcome {
                 passed: f.code == 0 && f.signal == 0 && !f.timed_out,
@@ -710,6 +719,7 @@ fn remote_check(d: &Arc<Daemon>, spec: &CheckSpec, id: &str) -> Option<Shared> {
                 full: f.output.clone(),
                 id: id.to_string(),
                 stopped: None,
+                phase: f.phase.clone(),
             }),
             Err(e) => Err(match rm::environmental(&e) {
                 Some(why) => format!("{OUTAGE_PREFIX}{why}; run it again"),
@@ -761,7 +771,16 @@ fn collect(
             host_bin: d.cfg.host_bin.clone(),
             root: hosts.clone(),
             id: id.to_string(),
-            cmd: vec!["sh".into(), "-c".into(), spec.cmd.clone()],
+            cmd: vec![
+                "sh".into(),
+                "-c".into(),
+                // A build that was folded into this check and fell back to this Mac: run it
+                // first, in a subshell so that its `cd` does not leak into the command.
+                match &spec.build {
+                    Some(b) => format!("({b}) && ({})", spec.cmd),
+                    None => spec.cmd.clone(),
+                },
+            ],
             cwd: Some(spec.cwd.clone()),
             env: spec.env.clone(),
             clear_env: false,
@@ -835,6 +854,7 @@ fn collect(
         full,
         id: id.to_string(),
         stopped,
+        phase: None,
     })
 }
 

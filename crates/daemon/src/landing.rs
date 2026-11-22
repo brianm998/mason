@@ -2402,6 +2402,7 @@ impl Runner {
                             id_prefix: format!("b{batch_id}-{prefix}"),
                             log_dir: log_dir.clone(),
                             cmd: cmd.to_string(),
+                            build: None,
                             cwd: wt_for_cmd.clone(),
                             env: vec![],
                             limit: p.test_timeout,
@@ -3253,6 +3254,7 @@ impl Runner {
                 id_prefix: format!("{prefix}-fast-{name}"),
                 log_dir: log_dir.to_path_buf(),
                 cmd,
+                build: None,
                 cwd: wt.to_path_buf(),
                 env: vec![],
                 limit: self.project().test_timeout,
@@ -3449,6 +3451,7 @@ impl Runner {
                 id_prefix: format!("{prefix}-new-{name}"),
                 log_dir: log_dir.to_path_buf(),
                 cmd,
+                build: None,
                 cwd: wt.to_path_buf(),
                 env: vec![],
                 limit: self.project().test_timeout,
@@ -3612,6 +3615,7 @@ impl Runner {
                 id_prefix: format!("{prefix}-lint-{name}"),
                 log_dir: log_dir.to_path_buf(),
                 cmd: suite.command.clone(),
+                build: None,
                 cwd: wt.to_path_buf(),
                 env: vec![],
                 limit: self.project().test_timeout,
@@ -3840,6 +3844,7 @@ impl Runner {
                 id_prefix: format!("{prefix}-floor-{name}"),
                 log_dir: log_dir.to_path_buf(),
                 cmd: build,
+                build: None,
                 cwd: wt.to_path_buf(),
                 env: vec![],
                 limit: self.project().test_timeout,
@@ -3972,6 +3977,7 @@ impl Runner {
                         full: String::new(),
                         id: String::new(),
                         stopped: Some(note),
+                        phase: None,
                     });
                 }
                 crate::hostedcheck::run(d, spec)
