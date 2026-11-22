@@ -652,6 +652,7 @@ public final class MonitorModel {
     public func tileDoubleClicked(state: String) {
         guard connected else { return }
         let n = sidebar?.sections.first(where: { $0.state == state })?.rows.count ?? 0
+        if n == 0 && state == "failed" { return }
         if n == 1 { revealAndOpenIfOne(state: state) }
         else if let p = Page.sectionPage(state) { go(p) }
     }

@@ -297,6 +297,32 @@ final class MonitorCoreTests: XCTestCase {
         XCTAssertEqual(m.page, .task(3))
     }
 
+    func testDoubleClickOnFailedWithSeveralOrNoTasks() {
+        let m = model()
+        var sb = m.sidebar!
+        var f = sb.sections[1]
+        var extra = f.rows[0]; extra.id = 30
+        f.rows.append(extra); f.count = 2
+        sb.sections[1] = f
+        m.sidebar = sb
+        m.tileClicked(state: "failed", clickCount: 2)
+        XCTAssertEqual(m.scrollTarget, "failed")
+        XCTAssertEqual(m.page, .section("failed"))
+        XCTAssertEqual(MonitorModel.sectionTitle("failed"), "Failed")
+
+        let z = model()
+        var zs = z.sidebar!
+        zs.sections[1].rows = []; zs.sections[1].count = 0
+        z.sidebar = zs
+        z.tileClicked(state: "failed", clickCount: 2)
+        XCTAssertEqual(z.page, .home)
+
+        let d = model()
+        d.connected = false
+        d.tileDoubleClicked(state: "failed")
+        XCTAssertEqual(d.page, .home)
+    }
+
     func testDoubleClickWithSeveralTasksExpandsAndScrollsAndOpensTheStagePage() {
         let m = model()
         m.tileClicked(state: "queued", clickCount: 1)
