@@ -101,6 +101,20 @@ pub fn executor_global(d: &Daemon, project: &str) -> Executor {
     }
 }
 
+/// Where a whole step of `task` goes (`pool_needs`): the task's mode, else the project's, else
+/// the global one, with no suite's rules.
+pub fn executor_task(d: &Daemon, project: &str, task: Option<u64>) -> Executor {
+    if forced_for_tests() {
+        if let Some(r) = remote_cfg(d, project) {
+            return Executor::GitHub { runs_on: r.runs_on };
+        }
+    }
+    match crate::place::plain_place(d, project, task) {
+        crate::place::Place::GitHub { runs_on, .. } => Executor::GitHub { runs_on },
+        crate::place::Place::Local { .. } => Executor::Local,
+    }
+}
+
 fn forced_for_tests() -> bool {
     std::env::var("MASON_TEST_FORCE_REMOTE").is_ok_and(|v| v == "1")
 }
@@ -315,7 +329,10 @@ pub fn site_for(d: &Daemon, project: &str, cwd: &Path) -> Option<Site> {
         base_ref,
         workflow: r.workflow,
         pickup_timeout: Duration::from_secs(r.pickup_timeout_s),
-        fallback_local: r.fallback_local,
+        // `favor-remote` spills over to this machine after the pickup timeout (s812), whether the
+        // project sets it or follows the global mode.
+        fallback_local: r.fallback_local
+            || crate::place::project_effective(d, project).0 == crate::place::Mode::FavorRemote,
         test_env: r.test_env,
         gh: GitHub::new(http, &r.api, &r.repo, token),
         clock: Arc::new(SystemClock),
@@ -1708,15 +1725,12 @@ pub fn pool_needs(
     if !needs.exclusive && !MACHINE.iter().any(|m| needs.amounts.contains_key(*m)) {
         return None;
     }
-    // The task's own choice when it has one, else the global switch (#761): never
+    // The effective mode of the task (task, then project, then global; #761, #831): never
     // `executor_for(.., None)`, which is always local. A step whose suites are split between
-    // here and GitHub by their own rules is not looked into: it follows this choice.
-    let choice = task.and_then(|t| crate::place::task_choice(d, Some(t.0)));
-    let runs_on = match (choice, executor_global(d, project)) {
-        (Some(crate::place::Choice::Local), _) => return None,
-        (_, Executor::GitHub { runs_on }) => runs_on,
-        (Some(crate::place::Choice::GitHub), Executor::Local) => remote_cfg(d, project)?.runs_on,
-        (None, Executor::Local) => return None,
+    // here and GitHub by their own rules is not looked into: it follows this mode.
+    let runs_on = match executor_task(d, project, task.map(|t| t.0)) {
+        Executor::GitHub { runs_on } => runs_on,
+        Executor::Local => return None,
     };
     let mut out = mason_scheduler::Needs {
         exclusive: false,
@@ -1731,6 +1745,25 @@ pub fn pool_needs(
         out.amounts.insert(k, v);
     }
     Some(out)
+}
+
+/// The rank of a fallback run: its task's own when the task is in a step, else the debts band
+/// (a landed, failed or canceled task, or none: owed work, never the landing band, #835).
+pub fn fallback_rank(
+    d: &Daemon,
+    task: Option<mason_core::TaskId>,
+    owner: Option<&mason_core::Task>,
+    def: Option<&mason_definition::Definition>,
+) -> mason_scheduler::Rank {
+    match (owner, def) {
+        (Some(t), Some(def)) if t.state.is_step() => d.rank_for(t, def, &t.step),
+        (Some(t), _) => {
+            mason_scheduler::Rank::new(false, 0, 0, t.enqueued_at.0, t.id.0, false).debt()
+        }
+        _ => {
+            mason_scheduler::Rank::new(false, 0, 0, now_ms(), task.map_or(0, |t| t.0), false).debt()
+        }
+    }
 }
 
 /// The machine slots a run takes when it was meant for GitHub but `fallback = "local"` sends it
@@ -1762,10 +1795,7 @@ pub fn fallback_lease(
         }
     }
     let owner = task.and_then(|t| d.world().ok().and_then(|w| w.tasks.get(&t).cloned()));
-    let rank = match (&owner, &def) {
-        (Some(t), Some(def)) => d.rank_for(t, def, &t.step),
-        _ => mason_scheduler::Rank::new(false, 100, 3, now_ms(), task.map_or(0, |t| t.0), false),
-    };
+    let rank = fallback_rank(d, task, owner.as_ref(), def.as_deref());
     let who = task.unwrap_or(mason_core::TaskId(0));
     let alive = || match task {
         Some(t) => d

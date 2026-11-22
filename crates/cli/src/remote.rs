@@ -168,7 +168,7 @@ pub fn render(steps: &str) -> String {
 }
 
 /// Every `mason remote` subcommand, for the unknown-subcommand errors.
-pub const COMMANDS: &str = "the remote commands are `setup`, `on`, `off` and `status`";
+pub const COMMANDS: &str = "the remote commands are `setup`, `mode`, `on`, `off` and `status`";
 
 fn fail(msg: &str) -> i32 {
     eprintln!("error: {msg}");

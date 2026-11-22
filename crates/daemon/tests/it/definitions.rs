@@ -713,8 +713,13 @@ fn runtime_and_per_task_overrides_change_a_running_pipeline_and_runtime_ones_exp
 
 #[test]
 fn a_tasks_run_on_choice_is_read_live_and_beats_the_global_switch() {
-    use mason_daemon::place::{effective_line, set_global, task_choice, Choice, Global};
+    use mason_daemon::place::{effective_line, set_global, task_choice, Mode};
     let s = scratch_with(Some(DEF_SKIP), happy_script());
+    s.write_project(
+        "scratch",
+        "test -f hello.txt",
+        "[remote_runs]\nkind = \"github-actions\"\nrepo = \"o/r\"\ntoken = \"env:MASON_T831_TOKEN\"\n",
+    );
     let d = s.start();
     let t = flagged(&d, "Chooses");
     let other = flagged(&d, "Follows");
@@ -725,7 +730,7 @@ fn a_tasks_run_on_choice_is_read_live_and_beats_the_global_switch() {
     d.store
         .set_task_override(t.0, "run_on", "github", "brian", now)
         .unwrap();
-    assert_eq!(task_choice(&d, Some(t.0)), Some(Choice::GitHub));
+    assert_eq!(task_choice(&d, Some(t.0)), Some(Mode::Remote));
     assert_eq!(task_choice(&d, Some(other.0)), None, "only for that task");
     assert_eq!(
         effective_line(&d, t.0)["line"],
@@ -737,11 +742,11 @@ fn a_tasks_run_on_choice_is_read_live_and_beats_the_global_switch() {
     );
 
     // Both directions against the global switch.
-    set_global(&d, Global::GitHub, "brian").unwrap();
+    set_global(&d, Mode::Remote, "brian").unwrap();
     d.store
         .set_task_override(t.0, "run_on", "local", "brian", now)
         .unwrap();
-    assert_eq!(task_choice(&d, Some(t.0)), Some(Choice::Local));
+    assert_eq!(task_choice(&d, Some(t.0)), Some(Mode::Local));
     assert_eq!(
         effective_line(&d, t.0)["line"],
         "runs on: this Mac (task choice)"
@@ -916,7 +921,7 @@ fn a_proposed_task_raises_an_alert_that_clears_on_approve_and_on_reject() {
 
 #[test]
 fn a_develop_checks_suite_is_placed_by_the_switch_and_the_tasks_choice() {
-    use mason_daemon::place::{set_global, Global};
+    use mason_daemon::place::{set_global, Mode};
     use mason_daemon::remote::{executor_for, Executor, Kind};
     let s = scratch_with(Some(DEF_SKIP), happy_script());
     s.write_project(
@@ -934,11 +939,67 @@ fn a_develop_checks_suite_is_placed_by_the_switch_and_the_tasks_choice() {
     // The switch is off: here.
     assert_eq!(at(&d), Executor::Local);
     // On: GitHub.
-    set_global(&d, Global::GitHub, "brian").unwrap();
+    set_global(&d, Mode::Remote, "brian").unwrap();
     assert!(matches!(at(&d), Executor::GitHub { .. }));
     // The task's choice of here beats the switch.
     d.store
         .set_task_override(t.0, "run_on", "local", "brian", now)
         .unwrap();
     assert_eq!(at(&d), Executor::Local);
+}
+
+#[test]
+fn the_project_mode_sits_between_the_task_and_the_global_mode() {
+    use mason_daemon::place::{project_effective, set_global, set_project_mode, status, Mode};
+    let s = scratch_with(Some(DEF_SKIP), happy_script());
+    // The old `fallback = "local"` reads as favor-remote when no `mode` is given.
+    s.write_project(
+        "scratch",
+        "test -f hello.txt",
+        "[remote_runs]\nkind = \"github-actions\"\nrepo = \"o/r\"\ntoken = \"env:MASON_T831_TOKEN\"\nfallback = \"local\"\n",
+    );
+    let d = s.start();
+    let t = flagged(&d, "Follows its project");
+    assert_eq!(
+        project_effective(&d, "scratch"),
+        (Mode::FavorRemote, "project")
+    );
+    set_global(&d, Mode::Remote, "brian").unwrap();
+    assert_eq!(
+        project_effective(&d, "scratch"),
+        (Mode::FavorRemote, "project")
+    );
+
+    // The setter writes the registration file and the daemon re-reads it.
+    set_project_mode(&d, "scratch", Mode::FavorLocal).unwrap();
+    assert_eq!(
+        project_effective(&d, "scratch"),
+        (Mode::FavorLocal, "project")
+    );
+    let st = status(&d);
+    let p = &st["projects"][0];
+    assert_eq!(
+        (p["mode"].as_str(), p["source"].as_str()),
+        (Some("favor-local"), Some("project"))
+    );
+    assert_eq!(
+        mason_daemon::place::effective_line(&d, t.0)["from"],
+        "project"
+    );
+
+    // A task's own mode beats the project's, for that task only.
+    let other = flagged(&d, "Other");
+    d.store
+        .set_task_override(
+            t.0,
+            "run_on",
+            "remote",
+            "brian",
+            mason_daemon::daemon::now_ms(),
+        )
+        .unwrap();
+    let line = |id: u64| mason_daemon::place::effective_line(&d, id);
+    assert_eq!(line(t.0)["mode"], "remote");
+    assert_eq!(line(t.0)["from"], "task");
+    assert_eq!(line(other.0)["mode"], "favor-local");
 }
