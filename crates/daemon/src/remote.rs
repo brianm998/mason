@@ -2650,6 +2650,12 @@ pub fn run_retrying(
                     Err(Fail::Error(e)) => Err(e),
                 }
             }
+            // A favor-remote run that came back here on purpose (#833) is the placement mode's
+            // answer, not a miss to retry on GitHub.
+            Some(why) if n == 0 && site.fallback_local && why.contains("(favor-remote:") => {
+                said(&format!("{why}; running it on this Mac"));
+                return Ok((None, notes));
+            }
             Some(why) => whys.push(why),
         }
     }
