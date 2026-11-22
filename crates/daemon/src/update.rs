@@ -1528,8 +1528,17 @@ pub fn info(d: &Daemon) -> Option<mason_protocol::UpdateInfo> {
         })
         .collect();
     let (daemon_button, daemon_confirm) = button_for(&s, daemon_can_update);
+    let daemon_level = if daemon_text.is_empty() {
+        ""
+    } else if daemon_can_update {
+        "action"
+    } else {
+        "info"
+    }
+    .to_string();
     Some(mason_protocol::UpdateInfo {
         daemon_text,
+        daemon_level,
         daemon_can_update,
         daemon_button,
         daemon_confirm,

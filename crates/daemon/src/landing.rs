@@ -2584,10 +2584,16 @@ impl Runner {
                     // Red after it was green, or a conflict with the moved base: assemble again.
                     Ok(PrEnd::Red) | Ok(PrEnd::Conflict) => continue 'outer,
                     Ok(PrEnd::BaseKeptMoving) => {
+                        // Contention, not the change's fault: queue the tasks again.
+                        for t in &active {
+                            if !deferred.contains(&t.id) {
+                                deferred.push(t.id);
+                            }
+                        }
                         break Err(format!(
                             "the base moved more than {} times while landing",
                             self.cfg.max_fold
-                        ))
+                        ));
                     }
                     Ok(PrEnd::ChangesRequested) | Ok(PrEnd::Closed(_)) => {
                         let why = match end_reason(&end) {
@@ -2619,10 +2625,16 @@ impl Runner {
                 Ok(Err(_red)) => continue 'outer, // red after folding: assemble on the new base, blame properly
                 Ok(Ok(Finish::Conflict(_))) => continue 'outer, // the conflict shows up as an ejection
                 Ok(Ok(Finish::BaseKeptMoving)) => {
+                    // Contention, not the change's fault: queue the tasks again.
+                    for t in &active {
+                        if !deferred.contains(&t.id) {
+                            deferred.push(t.id);
+                        }
+                    }
                     break Err(format!(
                         "the base moved more than {} times while landing",
                         self.cfg.max_fold
-                    ))
+                    ));
                 }
                 Ok(Ok(Finish::LocalBaseCheckedOut(path))) => {
                     break Err(format!(
@@ -3954,10 +3966,10 @@ impl Runner {
                     .runs_on
                     .as_deref()
                     .is_none_or(|r| r.starts_with("macos"));
-            let spec = crate::hostedcheck::CheckSpec {
-                id_prefix: format!("{prefix}-floor-{name}"),
+            let mk = |id_prefix: String, github: bool| crate::hostedcheck::CheckSpec {
+                id_prefix,
                 log_dir: log_dir.to_path_buf(),
-                cmd: build,
+                cmd: build.clone(),
                 build: None,
                 cwd: wt.to_path_buf(),
                 env: vec![],
@@ -3971,9 +3983,10 @@ impl Runner {
                 }),
                 // #815: the suite's own placement (its `runs_on`, `remote = false`, device rules)
                 // decides; no task owns a batch.
-                place: (!here).then(|| (None, Box::new(crate::hostedcheck::without_build(suite)))),
+                place: github.then(|| (None, Box::new(crate::hostedcheck::without_build(suite)))),
                 global: false,
             };
+            let spec = mk(format!("{prefix}-floor-{name}"), !here);
             let ran_on = if !here && crate::hostedcheck::goes_remote(d, &spec) {
                 "on GitHub"
             } else {
@@ -3988,7 +4001,24 @@ impl Runner {
                     format!("{s}s")
                 }
             };
-            match self.check_through_outage(d, &spec) {
+            let mut ran_on = ran_on;
+            let mut result = self.check_through_outage(d, &spec);
+            // #962: no GitHub runner took the floor build within the outage limit, three times
+            // over. A build is the same anywhere, so it is built on this Mac rather than failing
+            // the batch for GitHub's queue.
+            if !here
+                && result
+                    .as_ref()
+                    .is_err_and(|e| crate::hostedcheck::is_outage(e))
+            {
+                out.notes.push(format!(
+                    "{name}: no GitHub runner took the build of {what}; building it on this Mac"
+                ));
+                ran_on = "on this Mac";
+                let local = mk(format!("{prefix}-floor-{name}-here"), false);
+                result = self.check_through_outage(d, &local);
+            }
+            match result {
                 Ok(o) if o.stopped.is_some() => out.notes.push(format!(
                     "{name}: {what} not built to the end: {}",
                     o.stopped.unwrap_or_default()
@@ -4067,8 +4097,18 @@ impl Runner {
             .find(|n| n.contains("does not build"))
             .and_then(|n| n.lines().next())
             .unwrap_or("it does not build");
+        // The first line only says which suite; the compiler's own first error says why, and
+        // without it nine identical failures cannot be told from one cause.
+        let cause = r
+            .notes
+            .iter()
+            .filter(|n| n.contains("does not build"))
+            .flat_map(|n| n.lines().skip(1))
+            .find(|l| l.contains("error"))
+            .map(|l| format!(": {}", l.trim()))
+            .unwrap_or_default();
         Ok(Some(format!(
-            "{branch} does not build ({first}), so the red is not this batch's: nobody is blamed and nothing lands until it does"
+            "{branch} does not build ({first}{cause}), so the red is not this batch's: nobody is blamed and nothing lands until it does"
         )))
     }
 

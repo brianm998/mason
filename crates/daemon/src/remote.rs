@@ -583,6 +583,13 @@ pub fn run_json(spec: &RunSpec) -> String {
     let mut env = env;
     env.insert("CARGO_TERM_COLOR".into(), "never".into());
     env.insert("NO_COLOR".into(), "1".into());
+    // ci.yml's exit-scripts job skips the Swift and Compose builds; a remote run does too.
+    if spec.suite.starts_with("exit-scripts") {
+        for k in ["MASON_SKIP_SWIFT", "MASON_SKIP_COMPOSE"] {
+            env.entry(k.to_string())
+                .or_insert_with(|| serde_json::Value::String("1".into()));
+        }
+    }
     let timeout_min = spec.limit.as_secs().div_ceil(60).max(1);
     serde_json::json!({
         "toolchains": toolchains(&spec.suite),
@@ -3520,6 +3527,23 @@ mod tests {
             sp.suite = suite.into();
             let v: serde_json::Value = serde_json::from_str(&run_json(&sp)).unwrap();
             assert_eq!(v["toolchains"], serde_json::json!([want]), "{suite}");
+        }
+    }
+
+    #[test]
+    fn exit_scripts_runs_skip_swift_and_compose_but_cargo_workspace_does_not() {
+        for (suite, skip) in [
+            ("exit-scripts", true),
+            ("exit-scripts-landing", true),
+            ("cargo-workspace", false),
+        ] {
+            let mut sp = spec("sk");
+            sp.suite = suite.into();
+            let v: serde_json::Value = serde_json::from_str(&run_json(&sp)).unwrap();
+            for k in ["MASON_SKIP_SWIFT", "MASON_SKIP_COMPOSE"] {
+                let got = v["env"].get(k).and_then(|x| x.as_str());
+                assert_eq!(got, skip.then_some("1"), "{suite} {k}");
+            }
         }
     }
 
