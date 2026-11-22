@@ -446,6 +446,7 @@ mod deadline_tests {
         assert!(e.to_string().contains("timed out"));
         // The sleep (a grandchild) died with the group.
         let pid = std::fs::read_to_string(dir.path().join("pid")).unwrap();
+        assert!(!pid.trim().is_empty(), "the helper never recorded its pid");
         std::thread::sleep(Duration::from_millis(300));
         let alive = Command::new("kill")
             .args(["-0", pid.trim()])
