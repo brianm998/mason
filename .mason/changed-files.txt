@@ -1,0 +1,16 @@
+.mason/landing.toml
+.mason/run.json
+crates/cli/src/definition.rs
+crates/cli/src/doctor.rs
+crates/cli/src/main.rs
+crates/core/src/full_test.rs
+crates/daemon/src/ci_schedule.rs
+crates/daemon/src/http.rs
+crates/daemon/src/landing.rs
+crates/daemon/src/schedule.rs
+crates/daemon/src/suites.rs
+crates/landing/src/config.rs
+docs/decisions/0797-batch-narrows-full-test-backstops.md
+docs/stages/s804.md
+scripts/exit/s804.sh
+scripts/exit/weights.txt
