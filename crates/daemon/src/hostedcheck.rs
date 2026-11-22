@@ -520,6 +520,12 @@ pub fn without_build(suite: &mason_testing::Suite) -> mason_testing::Suite {
     s
 }
 
+/// A local host for this run already exists: a restarted daemon is collecting a run that
+/// started here, so its slots were taken (and counted from `holds.kv`) when it started.
+fn dir_has_host(d: &Arc<Daemon>, id: &str) -> bool {
+    d.cfg.hosts_dir().join(id).join("host.kv").exists()
+}
+
 fn remote_check(d: &Arc<Daemon>, spec: &CheckSpec, id: &str) -> Option<Shared> {
     use crate::remote as rm;
     let runs_on = runs_on_github(d, spec)?;
@@ -600,9 +606,27 @@ fn collect(
     id: &str,
     progress: Option<&CheckProgress>,
 ) -> Shared {
+    let bound_remote = runs_on_github(d, spec).is_some();
     if let Some(r) = remote_check(d, spec, id) {
         return r;
     }
+    // Meant for GitHub but sent here (`fallback = "local"`): it skipped this machine's queue,
+    // so it takes the slots it holds when placed here before it starts, under the same limits
+    // and CPU and thermal holds as any local run. Held until the command ends.
+    let _fallback = if bound_remote && !dir_has_host(d, id) {
+        match crate::remote::project_of(d, &spec.cwd) {
+            Some(project) => crate::remote::fallback_lease(
+                d,
+                &project,
+                spec.place.as_ref().and_then(|(t, _)| *t),
+                &spec.holds,
+                &format!("{} (no GitHub runner, run here)", spec.label),
+            )?,
+            None => None,
+        }
+    } else {
+        None
+    };
     let hosts = d.cfg.hosts_dir();
     let dir = hosts.join(id);
     if !dir.join("host.kv").exists() {
