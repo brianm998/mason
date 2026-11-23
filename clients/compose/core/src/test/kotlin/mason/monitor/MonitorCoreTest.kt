@@ -285,6 +285,24 @@ class MonitorCoreTest {
         assertEquals(Page.Task(3), m.page)
     }
 
+    @Test fun doubleClickOnFailedWithSeveralOrNoTasks() {
+        val m = model()
+        m.apply(sidebarOf(section("failed", rows = listOf(row(3, "failed"), row(4, "failed")))))
+        m.tileClicked("failed", 2)
+        assertEquals("failed", m.scrollTarget)
+        assertEquals(Page.Section("failed"), m.page)
+        assertEquals("Failed", SectionPages.title("failed"))
+
+        val z = model()
+        z.apply(sidebarOf(section("failed", rows = emptyList())))
+        z.tileClicked("failed", 2)
+        assertEquals(Page.Home, z.page)
+
+        val d = model(connected = false)
+        d.tileDoubleClicked("failed")
+        assertEquals(Page.Home, d.page)
+    }
+
     @Test fun doubleClickWithSeveralTasksExpandsAndScrollsAndOpensTheStagePage() {
         val m = model()
         m.tileClicked("queued", 1)
