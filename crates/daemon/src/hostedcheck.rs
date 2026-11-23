@@ -367,9 +367,10 @@ fn deferred_owner() -> Option<(u64, u64)> {
 }
 
 /// Finished runs whose result the agent has not been answered with yet: (log dir, id, key).
-fn unanswered() -> &'static Mutex<HashMap<(u64, u64), Vec<(PathBuf, String, String)>>> {
-    static M: OnceLock<Mutex<HashMap<(u64, u64), Vec<(PathBuf, String, String)>>>> =
-        OnceLock::new();
+type Unanswered = Mutex<HashMap<(u64, u64), Vec<(PathBuf, String, String)>>>;
+
+fn unanswered() -> &'static Unanswered {
+    static M: OnceLock<Unanswered> = OnceLock::new();
     M.get_or_init(Default::default)
 }
 
