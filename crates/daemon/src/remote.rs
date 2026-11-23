@@ -4629,12 +4629,7 @@ mod tests {
             let clk = clock();
             let s = site(&r, gh, clk.clone(), false);
             let logs = tempfile::tempdir().unwrap();
-<<<<<<< HEAD
-            let start = clk.now_ms();
             let e = execute(&s, &spec("x8"), logs.path(), &|| None, &Grant::test())
-=======
-            let e = execute(&s, &spec("x8"), logs.path(), &|| None)
->>>>>>> origin/develop
                 .err()
                 .unwrap();
             assert!(matches!(e, Fail::Environmental(_)), "{code}: {e:?}");
