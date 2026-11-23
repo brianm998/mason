@@ -2325,7 +2325,7 @@ fn fallback_request(
     task: Option<mason_core::TaskId>,
     uses: &std::collections::BTreeMap<String, u32>,
 ) -> Option<(
-    crate::sched::Needs,
+    mason_scheduler::Needs,
     mason_scheduler::Rank,
     mason_core::TaskId,
 )> {
