@@ -530,28 +530,18 @@ struct TaskDetailPage: View {
                     .accessibilityIdentifier("detail:loading")
             }
 
-            if !r.blockers.isEmpty {
-                HStack(spacing: theme.spacingSmall) {
-                    Text("waiting for").font(theme.body()).foregroundStyle(theme.muted)
-                    ForEach(r.blockers, id: \.self) { b in
-                        TaskLink(title: "#\(b)", font: theme.body()) { model.go(.task(b)) }
-                    }
-                }
-                .accessibilityElement(children: .combine)
-                .accessibilityLabel("waiting for \(r.blockers.map { "#\($0)" }.joined(separator: ", "))")
-                .accessibilityIdentifier("waiting-for")
+            if !r.blockers.isEmpty && r.blockerLinks.isEmpty {
+                BlockerLine(label: "waiting for", ids: r.blockers, font: theme.body(), moreTask: r.id) { model.go(.task($0)) }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("waiting for \(r.blockers.map { "#\($0)" }.joined(separator: ", "))")
+                    .accessibilityIdentifier("waiting-for")
             }
             BlockersView(model: model, row: r)
             if !r.blocks.isEmpty {
-                HStack(spacing: theme.spacingSmall) {
-                    Text("blocks").font(theme.body()).foregroundStyle(theme.muted)
-                    ForEach(r.blocks, id: \.self) { b in
-                        TaskLink(title: "#\(b)", font: theme.body()) { model.go(.task(b)) }
-                    }
-                }
-                .accessibilityElement(children: .combine)
-                .accessibilityLabel("blocks \(r.blocks.map { "#\($0)" }.joined(separator: ", "))")
-                .accessibilityIdentifier("blocks")
+                BlockerLine(label: "blocks", ids: r.blocks, font: theme.body(), moreTask: r.id) { model.go(.task($0)) }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("blocks \(r.blocks.map { "#\($0)" }.joined(separator: ", "))")
+                    .accessibilityIdentifier("blocks")
             }
 
             if !d.route.isEmpty {
