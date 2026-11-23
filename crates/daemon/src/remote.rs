@@ -5232,11 +5232,7 @@ mod tests {
     }
 
     /// `run_retrying` against `mode`, with the pushes in `refuse_first` refused once.
-    fn retrying(
-        mode: Mode,
-        refuse_first: bool,
-        fallback: bool,
-    ) -> Retried {
+    fn retrying(mode: Mode, refuse_first: bool, fallback: bool) -> Retried {
         let r = repo();
         token();
         if refuse_first {
