@@ -16,10 +16,11 @@ use mason_landing::git;
 use mason_store::ReservationRow;
 use std::path::Path;
 
-/// Exit scripts and stage notes have two or three digits: `scripts/run-exit-scripts.sh` runs
-/// `s[0-9][0-9].sh` and `s[0-9][0-9][0-9].sh`. Widening those globs is a gate change, so the
-/// counter stops here.
-pub const EXIT_CEILING: u32 = 999;
+/// Exit scripts and stage notes have two to four digits: `scripts/run-exit-scripts.sh` runs
+/// `s[0-9][0-9].sh` through `s[0-9][0-9][0-9][0-9].sh` (the fourth digit came when the three-digit
+/// range ran out on 2026-11-22). Widening those globs again is a gate change, so the counter
+/// stops here.
+pub const EXIT_CEILING: u32 = 9999;
 /// The alert `numbers` is raised while this many stage and exit-script numbers or fewer are left.
 pub const EXIT_WARN_LEFT: u32 = 50;
 /// Decisions have four digits.
@@ -33,7 +34,7 @@ pub const KIND_EXIT: &str = "exit";
 /// A numbered file MASON hands out names for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Numbered {
-    /// A stage note or an exit script: they share one number of two or three digits.
+    /// A stage note or an exit script: they share one number of two to four digits.
     Stage(u32),
     Decision(u32),
 }
@@ -43,7 +44,12 @@ pub fn parse_path(path: &str) -> Option<Numbered> {
     let digits = |s: &str, n: usize| -> Option<u32> {
         (s.len() == n && s.bytes().all(|b| b.is_ascii_digit())).then(|| s.parse().ok())?
     };
-    let stage = |s: &str| digits(s, 2).or_else(|| digits(s, 3)).map(Numbered::Stage);
+    let stage = |s: &str| {
+        digits(s, 2)
+            .or_else(|| digits(s, 3))
+            .or_else(|| digits(s, 4))
+            .map(Numbered::Stage)
+    };
     if let Some(f) = path.strip_prefix("docs/stages/") {
         let stem = f.strip_suffix(".md")?;
         return stage(stem.strip_prefix('s')?);
@@ -145,7 +151,7 @@ pub fn exit_warning(highest: u32) -> Option<String> {
     }
     Some(format!(
         "{left} stage and exit-script numbers left: the highest handed out is {highest} and the ceiling is {EXIT_CEILING}. \
-         A fourth digit is a change to scripts/run-exit-scripts.sh and scripts/gen-status.sh; make it before the numbers run out."
+         Another digit is a change to scripts/run-exit-scripts.sh and scripts/gen-status.sh; make it before the numbers run out."
     ))
 }
 
@@ -471,7 +477,7 @@ mod tests {
             "{w}"
         );
         assert!(
-            w.contains("highest handed out is 949") && w.contains("ceiling is 999"),
+            w.contains("highest handed out is 9949") && w.contains("ceiling is 9999"),
             "{w}"
         );
         assert!(
@@ -547,6 +553,15 @@ mod tests {
     fn names_are_read_by_their_family() {
         assert_eq!(parse_path("docs/stages/s20.md"), Some(Numbered::Stage(20)));
         assert_eq!(
+            parse_path("docs/stages/s1000.md"),
+            Some(Numbered::Stage(1000))
+        );
+        assert_eq!(
+            parse_path("scripts/exit/s1042-real.sh"),
+            Some(Numbered::Stage(1042))
+        );
+        assert_eq!(parse_path("scripts/exit/s10000.sh"), None);
+        assert_eq!(
             parse_path("scripts/exit/s40-real.sh"),
             Some(Numbered::Stage(40))
         );
@@ -568,7 +583,7 @@ mod tests {
             parse_path("scripts/exit/s100-real.sh"),
             Some(Numbered::Stage(100))
         );
-        assert_eq!(parse_path("docs/stages/s1234.md"), None);
+        assert_eq!(parse_path("docs/stages/s12345.md"), None);
         assert_eq!(parse_path("docs/stages/s7.md"), None);
         assert_eq!(parse_path("docs/decisions/17-x.md"), None);
         assert_eq!(
