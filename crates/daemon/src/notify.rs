@@ -217,7 +217,19 @@ pub struct Settings {
     /// `[stall] long_wait`: a wait is long when its resource has granted nothing for this
     /// long. 0 turns the alert off.
     pub long_wait_ms: u64,
+    /// `[speech] summarize_from`: this many or more announcements with speech, taken together,
+    /// are read as one summary line. 0 turns folding off.
+    pub summarize_from: usize,
 }
+
+/// The default `[speech] summarize_from`.
+pub const DEFAULT_SUMMARIZE_FROM: usize = 3;
+
+/// The most announcements taken in one claim when they are about to be folded.
+const FOLD_TAKE: usize = 200;
+
+/// The announcements a claim takes when they are not folded.
+const PLAIN_TAKE: usize = 20;
 
 /// The default `[stall] long_wait`.
 pub const DEFAULT_LONG_WAIT_MS: u64 = 60 * n::MINUTE_MS;
@@ -237,6 +249,7 @@ impl Default for Settings {
             apns: None,
             apns_has_device: false,
             long_wait_ms: DEFAULT_LONG_WAIT_MS,
+            summarize_from: DEFAULT_SUMMARIZE_FROM,
         }
     }
 }
@@ -373,6 +386,12 @@ pub fn parse(src: &str) -> Result<Settings, String> {
                 s.preferred = text(t, "preferred_client");
                 if let Some(v) = t.get("stale") {
                     s.stale_ms = span(v, "speech.stale")?;
+                }
+                if let Some(v) = t.get("summarize_from") {
+                    s.summarize_from = v
+                        .as_integer()
+                        .and_then(|i| usize::try_from(i).ok())
+                        .ok_or("speech.summarize_from: a whole number, 0 or more")?;
                 }
             }
             "email" => {
@@ -1094,13 +1113,14 @@ fn daemon_speech(d: &Daemon, s: &Settings, now: u64) {
     if d.notify.speaking.swap(true, Ordering::SeqCst) {
         return;
     }
-    let rows = d
+    let taken = d
         .store
-        .take_announcements("daemon", now.saturating_sub(s.stale_ms), 20, now, false)
+        .take_announcements("daemon", now.saturating_sub(s.stale_ms), PLAIN_TAKE, now, false)
         .unwrap_or_default();
+    // Delivery is recorded on the original rows, whatever is said in their place.
     record_played(
         d,
-        &rows
+        &taken
             .iter()
             .filter(|r| r.speech)
             .cloned()
@@ -1108,6 +1128,7 @@ fn daemon_speech(d: &Daemon, s: &Settings, now: u64) {
         true,
         now,
     );
+    let rows = fold_for_speech(d, s, "daemon", taken, now);
     let lines: Vec<String> = rows
         .into_iter()
         .filter(|r| r.speech)
@@ -1132,6 +1153,96 @@ fn daemon_speech(d: &Daemon, s: &Settings, now: u64) {
     if spawned.is_err() {
         flag.store(false, Ordering::SeqCst);
     }
+}
+
+/// What an announcement is about, as `summary_sentence` names kinds: the alert's own kind, or
+/// "approval" / "proposal" for those two key families.
+fn spoken_kind(r: &AnnouncementRow) -> String {
+    match parse_alert_key(&r.key) {
+        Some((k, ..)) if k.starts_with("approval:") => "approval".into(),
+        Some((k, ..)) if k.starts_with("proposed:") => "proposal".into(),
+        _ => r.kind.clone(),
+    }
+}
+
+/// Three or more announcements that carry speech (`settings.summarize_from`) become one summary
+/// announcement, so a mass failure is not read out thirty times. The summary is queued and taken
+/// like any other, with the most-counted kind (ties: decision, broke, info) and sound if any
+/// folded row had it. Rows with sound only stay. The caller records delivery on the rows it
+/// passed in, not on what comes back. A backlog line among the rows is folded in.
+fn fold_for_speech(
+    d: &Daemon,
+    settings: &Settings,
+    client: &str,
+    mut rows: Vec<AnnouncementRow>,
+    now: u64,
+) -> Vec<AnnouncementRow> {
+    let from = settings.summarize_from;
+    let is_line = |r: &AnnouncementRow| r.key.starts_with("summary:");
+    let count = |rows: &[AnnouncementRow]| rows.iter().filter(|r| r.speech && !is_line(r)).count();
+    if from == 0 || count(&rows) < from {
+        return rows;
+    }
+    // The first batch was cut at PLAIN_TAKE: take the rest of the queue so the count is true.
+    if rows.len() >= PLAIN_TAKE {
+        let more = d
+            .store
+            .take_announcements(
+                client,
+                now.saturating_sub(settings.stale_ms),
+                FOLD_TAKE,
+                now,
+                false,
+            )
+            .unwrap_or_default();
+        if client != "daemon" || !more.is_empty() {
+            // Recorded as played like the first batch.
+            let spoken: Vec<_> = more.iter().filter(|r| r.speech).cloned().collect();
+            record_played(d, &spoken, client == "daemon", now);
+            rows.extend(more);
+        }
+    }
+    let folded: Vec<AnnouncementRow> = rows
+        .iter()
+        .filter(|r| r.speech && !is_line(r))
+        .cloned()
+        .collect();
+    let items: Vec<(String, String)> = folded.iter().map(|r| (spoken_kind(r), String::new())).collect();
+    let sentence = n::summary_sentence(&items);
+    let rank = |k: &str| match n::sound_for(k) {
+        n::Sound::Decision => 0,
+        n::Sound::Broke => 1,
+        n::Sound::Info => 2,
+    };
+    let mut kinds: Vec<(String, usize)> = vec![];
+    for r in &folded {
+        match kinds.iter_mut().find(|(k, _)| *k == r.kind) {
+            Some(e) => e.1 += 1,
+            None => kinds.push((r.kind.clone(), 1)),
+        }
+    }
+    kinds.sort_by_key(|(k, c)| (std::cmp::Reverse(*c), rank(k)));
+    let kind = kinds.first().map(|k| k.0.clone()).unwrap_or_default();
+    let sound = folded.iter().any(|r| r.sound);
+    let key = format!("summary:{client}:{now}");
+    let mut kept: Vec<AnnouncementRow> = rows
+        .into_iter()
+        .filter(|r| !r.speech || is_line(r) && false)
+        .collect();
+    if d
+        .store
+        .enqueue_announcement(&key, &kind, &sentence, sound, true, now)
+        .unwrap_or(false)
+    {
+        let got = d
+            .store
+            .take_announcements(client, now.saturating_sub(settings.stale_ms), 1, now, false)
+            .unwrap_or_default();
+        kept.extend(got);
+    } else {
+        kept.extend(folded);
+    }
+    kept
 }
 
 /// One sentence through the speech command; a command that outlives `limit` is killed.
@@ -1232,6 +1343,7 @@ pub fn claim_at(d: &Daemon, client: &str, muted: bool, now: u64) -> Value {
         settings.preferred.as_deref(),
     );
     let me = !muted && speaker.as_deref() == Some(client);
+    let mut played: Vec<AnnouncementRow> = vec![];
     let rows = if me {
         catch_up(d, &settings, now);
         let waiting = reminder_alerts(d);
@@ -1240,7 +1352,7 @@ pub fn claim_at(d: &Daemon, client: &str, muted: bool, now: u64) -> Value {
             .take_announcements(
                 client,
                 now.saturating_sub(settings.stale_ms),
-                20,
+                PLAIN_TAKE,
                 now,
                 backlog,
             )
@@ -1269,11 +1381,12 @@ pub fn claim_at(d: &Daemon, client: &str, muted: bool, now: u64) -> Value {
                 );
             }
         }
-        rows
+        played = rows.clone();
+        fold_for_speech(d, &settings, client, rows, now)
     } else {
         vec![]
     };
-    record_played(d, &rows, false, now);
+    record_played(d, &played, false, now);
     json!({
         "reaches_without_monitor": settings.reaches_without_monitor(),
         "speaker": me,
