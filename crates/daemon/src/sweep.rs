@@ -128,6 +128,7 @@ pub fn parse_batch_host_id(id: &str) -> Option<u64> {
 pub fn sweep_once(d: &Arc<Daemon>) -> Vec<String> {
     let mut filed = vec![];
     crate::autoquarantine::lift_landed(d);
+    crate::baselift::lift_by_baselines(d);
     let Ok(w) = d.world() else { return filed };
     let mut st = d.sweep.lock().unwrap_or_else(|e| e.into_inner());
     st.passes += 1;

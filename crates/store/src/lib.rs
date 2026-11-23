@@ -2043,6 +2043,40 @@ impl Store {
         })
     }
 
+    /// Every baseline recorded for `suite`, newest first: `(base, at_ms, profile, complete)`.
+    /// A row that is not `complete` was written by an ordinary whole-suite run and only has
+    /// `failing`, `names` and `executed`; its other fields are defaults and mean nothing.
+    pub fn baseline_profiles(
+        &self,
+        suite: &str,
+    ) -> Result<Vec<(String, u64, BaseProfile, bool)>, StoreError> {
+        let s = suite.to_string();
+        self.read(move |c| {
+            let mut st = c.prepare(
+                "SELECT base, at, failing, names, executed, build_error, vacuous, red, first_error, complete
+                 FROM baselines WHERE suite = ?1 ORDER BY at DESC",
+            )?;
+            let rows = st.query_map(params![s], |r| {
+                let build: String = r.get(5)?;
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)? as u64,
+                    BaseProfile {
+                        failing: r.get::<_, String>(2)?.lines().map(String::from).collect(),
+                        names: r.get::<_, String>(3)?.lines().map(String::from).collect(),
+                        executed: r.get::<_, i64>(4)? as usize,
+                        build_error: (!build.is_empty()).then_some(build),
+                        vacuous: r.get(6)?,
+                        red: r.get(7)?,
+                        first_error: r.get(8)?,
+                    },
+                    r.get::<_, i64>(9)? != 0,
+                ))
+            })?;
+            rows.collect()
+        })
+    }
+
     /// What a suite did at a base commit, with the facts a base-red comparison needs. Written
     /// once per (base, suite) and read back by [`Store::baseline_profile`].
     pub fn put_baseline_profile(
