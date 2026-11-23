@@ -6717,7 +6717,6 @@ mod batch_cover_tests {
 }
 
 #[cfg(test)]
-<<<<<<< HEAD
 mod raise_total_tests {
     use super::*;
 
@@ -6746,7 +6745,10 @@ mod raise_total_tests {
         let mut s = sub(100, Figure::expected(181));
         raise_total(&mut s);
         assert_eq!(s.total.value, 181);
-=======
+    }
+}
+
+#[cfg(test)]
 mod merged_branch_tests {
     use super::merged_branch_commit;
     use std::path::Path;
@@ -6797,6 +6799,5 @@ mod merged_branch_tests {
             Some(work)
         );
         assert_eq!(merged_branch_commit(d, "mason/mason/t96", "main"), None);
->>>>>>> origin/develop
     }
 }
