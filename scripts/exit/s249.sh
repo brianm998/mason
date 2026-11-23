@@ -27,7 +27,7 @@ export MARKER=$tmp/ran
 
 echo "== one passes, one fails, the real one is skipped, the untouched red one is not run"
 set +e
-out=$(MASON_BASE=main bash "$helper" 2>&1); rc=$?
+out=$(env -u MASON_EXIT_SHARD -u MASON_EXIT_PLAN MASON_BASE=main bash "$helper" 2>&1); rc=$?
 set -e
 [ "$rc" -ne 0 ] || { echo "$out" >&2; echo "FAILED: a failing script did not fail the run" >&2; exit 1; }
 for want in "PASS s001" "FAIL s002" "    | boom"; do
@@ -43,7 +43,7 @@ g checkout -q main
 g checkout -qb docs
 echo more >> README
 g commit -qam docs
-out=$(MASON_BASE=main bash "$helper" 2>&1) || { echo "$out" >&2; echo "FAILED: no scripts should pass" >&2; exit 1; }
+out=$(env -u MASON_EXIT_SHARD -u MASON_EXIT_PLAN MASON_BASE=main bash "$helper" 2>&1) || { echo "$out" >&2; echo "FAILED: no scripts should pass" >&2; exit 1; }
 [ "$out" = "PASS none" ] || { echo "$out" >&2; echo "FAILED: wanted PASS none" >&2; exit 1; }
 
 echo "== the suite and its impact line are in the definition"
