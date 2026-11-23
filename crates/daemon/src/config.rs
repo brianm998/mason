@@ -415,8 +415,9 @@ pub fn expand_home(p: &str, home: &Path) -> PathBuf {
 /// `[onboarding]`: `roots`, a list of directories (`~` expanded against `home`).
 pub fn parse_onboarding(text: &str, home: &Path) -> Result<OnboardingCfg, String> {
     let doc: toml_edit::DocumentMut = text.parse().map_err(|e| format!("daemon.toml: {e}"))?;
-    let mut c = OnboardingCfg::default();
-    c.roots = vec![expand_home("~/git", home)];
+    let mut c = OnboardingCfg {
+        roots: vec![expand_home("~/git", home)],
+    };
     let Some(t) = doc.get("onboarding") else {
         return Ok(c);
     };

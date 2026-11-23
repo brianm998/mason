@@ -10,7 +10,13 @@ use std::process::Command;
 use std::sync::Arc;
 use support::*;
 
-fn call(d: &Arc<mason_daemon::Daemon>, method: &str, who: &str, path: &str, body: Value) -> (u16, Value) {
+fn call(
+    d: &Arc<mason_daemon::Daemon>,
+    method: &str,
+    who: &str,
+    path: &str,
+    body: Value,
+) -> (u16, Value) {
     let d = d.clone();
     let (method, who, path) = (method.to_string(), who.to_string(), path.to_string());
     tokio::runtime::Builder::new_current_thread()
@@ -102,7 +108,10 @@ fn candidates_skip_registered_and_non_repos_and_report_an_unreadable_root() {
     assert_eq!(v["candidates"][0]["has_mason"], false);
     assert!(v["candidates"][0]["remote"].is_null());
     assert_eq!(v["errors"].as_array().unwrap().len(), 1, "{v}");
-    assert!(v["errors"][0]["path"].as_str().unwrap().ends_with("missing"));
+    assert!(v["errors"][0]["path"]
+        .as_str()
+        .unwrap()
+        .ends_with("missing"));
 
     // Once registered, it is gone from the list.
     let (code, v) = call(
@@ -158,7 +167,11 @@ fn plan_asks_the_first_question_then_lists_the_files_and_adopts_a_mason_folder()
 
     let adopt = repo_at(t.root.path(), "adopt");
     std::fs::create_dir_all(adopt.join(".mason")).unwrap();
-    std::fs::write(adopt.join(".mason/mason.toml"), "[step.develop]\ntype = \"agent\"\n").unwrap();
+    std::fs::write(
+        adopt.join(".mason/mason.toml"),
+        "[step.develop]\ntype = \"agent\"\n",
+    )
+    .unwrap();
     git(&adopt, &["add", "-A"]);
     git(&adopt, &["commit", "-qm", "mason"]);
     let (_, v) = call(
@@ -193,7 +206,11 @@ fn apply_registers_files_the_proof_task_and_leaves_the_base_alone() {
     assert!(t.s.config_dir.join("projects/newone.toml").is_file());
     let (_, st) = call(&t.d, "GET", &t.owner, "/status", json!(null));
     assert!(
-        st["projects"].as_array().unwrap().iter().any(|p| p == "newone"),
+        st["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p == "newone"),
         "{st}"
     );
 
