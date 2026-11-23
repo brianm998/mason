@@ -4189,7 +4189,7 @@ fn merged_branch_commit(path: &std::path::Path, branch: &str, tip: &str) -> Opti
         // The closing quote keeps `t96` from matching `t966`.
         .filter(|(_, s)| s.starts_with(&subject))
         .map(|(h, _)| h.trim().to_string())
-        .last()?;
+        .next_back()?;
     let second = git::run(path, &["rev-parse", &format!("{merge}^2")]).ok()?;
     Some(second.trim().to_string())
 }
