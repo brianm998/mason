@@ -714,6 +714,10 @@ pub struct ProjectCfg {
     /// Run a diagnosis session for a task that fails on its own code (`diagnose`, default true;
     /// s250).
     pub diagnose: bool,
+    /// The model of the diagnosis session (`diagnose_model`), if the registration names one.
+    pub diagnose_model: Option<String>,
+    /// Its effort (`diagnose_effort`), one of the provider's efforts.
+    pub diagnose_effort: Option<String>,
     /// Retry a failure outside the code by itself (`auto_retry`, default true; s247).
     pub auto_retry: bool,
     /// Test rounds before the task fails, if the overlay sets one (layer 3).
@@ -1439,6 +1443,14 @@ impl ProjectCfg {
             ("test_reruns", self.test_reruns.to_string()),
             ("auto_retry", self.auto_retry.to_string()),
             ("diagnose", self.diagnose.to_string()),
+            (
+                "diagnose_model",
+                self.diagnose_model.clone().unwrap_or_default(),
+            ),
+            (
+                "diagnose_effort",
+                self.diagnose_effort.clone().unwrap_or_default(),
+            ),
             ("priority_jump", self.priority_jump.to_string()),
             ("reuse_green", self.reuse_green.to_string()),
         ]
@@ -1493,6 +1505,30 @@ pub fn parse_project(id: &str, text: &str) -> Result<ProjectCfg, String> {
         ));
     }
     let agent = parse_agent(id, &doc)?;
+    let diagnose_model = match doc.get("diagnose_model") {
+        None => None,
+        Some(v) => match v.as_str().map(str::trim).filter(|m| !m.is_empty()) {
+            Some(m) => Some(m.to_string()),
+            None => return Err(format!("{id}: `diagnose_model` must be a non-empty string")),
+        },
+    };
+    let diagnose_effort = match doc.get("diagnose_effort") {
+        None => None,
+        Some(v) => {
+            let efforts = crate::tiermap::effort_levels(agent.provider);
+            match v.as_str() {
+                Some(e) if efforts.iter().any(|x| x == e) => Some(e.to_string()),
+                Some(e) => {
+                    return Err(mason_definition::tiers::bad_effort(
+                        &format!("{id}: `diagnose_effort`"),
+                        e,
+                        &efforts,
+                    ))
+                }
+                None => return Err(format!("{id}: `diagnose_effort` must be a string")),
+            }
+        }
+    };
     crate::proposals::parse_cfg(id, &doc)?;
     crate::introspect::parse_cfg(id, &doc)?;
     crate::schedule::parse(id, &doc)?;
@@ -1527,6 +1563,8 @@ pub fn parse_project(id: &str, text: &str) -> Result<ProjectCfg, String> {
             .get("diagnose")
             .and_then(|v| v.as_bool())
             .unwrap_or(true),
+        diagnose_model,
+        diagnose_effort,
         auto_retry: doc
             .get("auto_retry")
             .and_then(|v| v.as_bool())
