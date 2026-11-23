@@ -714,6 +714,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s924**: see decision 0917. With `fallback = "local"`, 16 runs came back from GitHub at once into a
 - **s930**: s799's grep now matches landing's current placement text and the suites_schedule tests clear the tree-keyed evidence so the schedule runs the suite; the other red scripts (s449, s50, s117, s193, s209, s219, s521, s691, s758, s77, s782, s798, s800, s808, s819, shards 4 and 5) are still unexplained, and `gh run view 45005421555 --log-failed | grep -nE 'panicked at|FAILED:|== scripts|FAILED scripts'` settles them.
 - **s934**: A narrowed or not-run test suite drops the whole suite's stored total from its sub-progress, so the line reads "N tests" instead of "0 of 2,356".
+- **s935**: see decision 0928. A change under a crate's `src/` ran the crate's lib and bins whole (about 632 tests for mason-daemon); the per-task step now runs only the changed module's unit tests and its referrers'.
 - **s943**: see decision 0936. A batch out on GitHub held a `test-suite` slot for 48+ minutes on
 - **s945**: A "landing is not configured" verdict (for example an unknown key in .mason/landing.toml) is now classed as a failure about the code instead of an outside one, so the land step is no longer retried over and over for an error no retry can fix.
 - **s946**: The landing message "the base does not build" now carries the compiler's first error line, so repeated identical landing failures show their real cause.
