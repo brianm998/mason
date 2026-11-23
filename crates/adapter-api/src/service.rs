@@ -57,6 +57,20 @@ impl std::error::Error for ApiError {}
 
 /// Classify an HTTP answer. `None` for success (2xx) and 304.
 pub fn classify(status: u16, headers: &[(String, String)], body: &str) -> Option<ApiError> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    classify_at(now, status, headers, body)
+}
+
+/// [`classify`] at a given time (epoch seconds), which a refusal's `x-ratelimit-reset` is
+/// counted from.
+pub fn classify_at(
+    now_s: u64,
+    status: u16,
+    headers: &[(String, String)],
+    body: &str,
+) -> Option<ApiError> {
     if (200..300).contains(&status) || status == 304 {
         return None;
     }
@@ -71,9 +85,16 @@ pub fn classify(status: u16, headers: &[(String, String)], body: &str) -> Option
         .and_then(|v| v["message"].as_str().map(String::from))
         .unwrap_or_else(|| body.chars().take(200).collect());
     let detail = format!("HTTP {status}: {msg}");
-    let retry = h("retry-after").and_then(|v| v.trim().parse().ok());
-    let limited = status == 429
-        || (status == 403 && (retry.is_some() || h("x-ratelimit-remaining") == Some("0")));
+    let exhausted = h("x-ratelimit-remaining") == Some("0");
+    // `Retry-After`, or for GitHub's primary limit (which sends none) the time to its reset.
+    let retry = h("retry-after")
+        .and_then(|v| v.trim().parse().ok())
+        .or_else(|| {
+            (status == 429 || exhausted)
+                .then(|| crate::github_budget::retry_after(headers, now_s))
+                .flatten()
+        });
+    let limited = status == 429 || (status == 403 && (retry.is_some() || exhausted));
     Some(if limited {
         ApiError::new(
             ErrorKind::RateLimited {
@@ -484,6 +505,46 @@ mod tests {
         v.iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    #[test]
+    fn the_primary_limit_waits_for_the_reset_header() {
+        let hs = h(&[
+            ("x-ratelimit-remaining", "0"),
+            ("x-ratelimit-reset", "1300"),
+        ]);
+        let kind = |now| classify_at(now, 403, &hs, "{\"message\":\"API rate limit exceeded\"}");
+        assert_eq!(
+            kind(1000).unwrap().kind,
+            ErrorKind::RateLimited {
+                retry_after_s: Some(300)
+            }
+        );
+        // The reset just passed: wait a second, not none.
+        assert_eq!(
+            kind(1400).unwrap().kind,
+            ErrorKind::RateLimited {
+                retry_after_s: Some(1)
+            }
+        );
+        // Retry-After still wins.
+        let mut both = hs.clone();
+        both.push(("retry-after".into(), "9".into()));
+        assert_eq!(
+            classify_at(1000, 403, &both, "").unwrap().kind,
+            ErrorKind::RateLimited {
+                retry_after_s: Some(9)
+            }
+        );
+        // A 403 with quota left is still the credential's problem.
+        let left = h(&[
+            ("x-ratelimit-remaining", "12"),
+            ("x-ratelimit-reset", "1300"),
+        ]);
+        assert_eq!(
+            classify_at(1000, 403, &left, "").unwrap().kind,
+            ErrorKind::Auth
+        );
     }
 
     #[test]
