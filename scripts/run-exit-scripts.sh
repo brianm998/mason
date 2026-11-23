@@ -26,7 +26,7 @@ shard=${MASON_EXIT_SHARD:-1/1}; si=${shard%/*}; sn=${shard#*/}
 plan() {
   local list=()
   local s
-  for s in "$dir"/s[0-9][0-9].sh "$dir"/s[0-9][0-9][0-9].sh; do
+  for s in "$dir"/s[0-9][0-9].sh "$dir"/s[0-9][0-9][0-9].sh "$dir"/s[0-9][0-9][0-9][0-9].sh; do
     [ -e "$s" ] && list+=("$s")
   done
   [ ${#list[@]} -gt 0 ] || return 0
