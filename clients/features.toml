@@ -363,6 +363,7 @@ android = "done"
 
 [feature.notification-details]
 description = "Each notification is one line; a \"?\" button on a row with more to say opens a dialog with the reason, the choices and an Open task action for each task named"
+platform_reason = "Not in the first pass (#951): the phone layout draws its own banner rows, and the Android phone app has no screen for it yet (stage 469)"
 swift = "done"
 compose = "done"
 ios = "todo"
