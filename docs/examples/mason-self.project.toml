@@ -9,6 +9,13 @@ test = "cargo test --workspace"
 # red for want of a CPU. Run a red once more before it counts: green the second time is a
 # recorded flake (test-r<N>.flaky in the task's directory), red twice is red (s61).
 test_reruns = 1
+# The diagnosis session of a failed task (s250) runs on Opus at medium effort for Claude (the
+# provider's own default model at medium for Codex). `diagnose_model` is a model name the
+# provider's CLI accepts, `diagnose_effort` one of its efforts; a bad effort refuses the file.
+# The same pair for every project: a `[diagnose]` table in `providers/<provider>.toml`,
+# `{ model = "...", effort = "..." }`. Project, then provider file, then built-in (s1000).
+# diagnose_model = "opus"
+# diagnose_effort = "medium"
 # Where a task's build directory is, if the test command puts it outside the worktree. It must
 # contain `{task}`. When the task lands the directory is removed (a canceled or failed task keeps
 # its, like its worktree), and the reconcile sweep removes those of landed tasks that were missed.

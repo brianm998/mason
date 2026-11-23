@@ -179,6 +179,10 @@ pub fn parse_table(
     let mut good = vec![];
     let mut bad = vec![];
     for (tname, tv) in table.iter() {
+        // `[diagnose]` is not a tier; `parse_diagnose` reads it.
+        if tname == "diagnose" {
+            continue;
+        }
         let Some(tier) = Tier::parse(tname).filter(|_| tname != "fast") else {
             bad.push(format!("`{tname}` is not a tier; tiers are deep, light"));
             continue;
@@ -211,10 +215,7 @@ pub fn parse_table(
                     }
                     ("effort", Some(e)) => {
                         ok = false;
-                        bad.push(format!(
-                            "{path}.effort: `{e}` is not an effort this provider has; it has {}",
-                            efforts.join(", ")
-                        ));
+                        bad.push(bad_effort(&format!("{path}.effort"), e, efforts));
                     }
                     ("model" | "effort", _) => {
                         ok = false;
@@ -236,6 +237,84 @@ pub fn parse_table(
         }
     }
     (good, bad)
+}
+
+/// The wording for an effort the provider does not have.
+pub fn bad_effort(at: &str, e: &str, efforts: &[String]) -> String {
+    format!(
+        "{at}: `{e}` is not an effort this provider has; it has {}",
+        efforts.join(", ")
+    )
+}
+
+/// The model and effort of the diagnosis session when nothing sets them: Claude uses
+/// `opus` at `medium`, Codex its CLI's model at `medium`, any other provider the `light`
+/// tier at `medium` of its mapping.
+pub fn builtin_diagnose(provider: &str, mapping: &Mapping) -> Entry {
+    match provider {
+        "claude" => Entry::of(Some("opus"), Some("medium")),
+        "codex" => Entry::of(None, Some("medium")),
+        _ => mapping.entry(Tier::Light, Level::default()),
+    }
+}
+
+/// Read a provider file's `[diagnose]` table: `{ model = "...", effort = "..." }`.
+pub fn parse_diagnose(
+    table: &dyn toml_edit::TableLike,
+    efforts: &[String],
+) -> Result<Entry, Vec<String>> {
+    let mut entry = Entry::default();
+    let mut bad = vec![];
+    for (k, v) in table.iter() {
+        match (k, v.as_str()) {
+            ("model", Some(m)) if !m.trim().is_empty() => entry.model = Some(m.into()),
+            ("effort", Some(e)) if efforts.iter().any(|x| x == e) => entry.effort = Some(e.into()),
+            ("effort", Some(e)) => bad.push(bad_effort("diagnose.effort", e, efforts)),
+            ("model" | "effort", _) => bad.push(format!("diagnose.{k} must be a non-empty string")),
+            _ => bad.push(format!(
+                "diagnose: unknown key `{k}`; keys are model, effort"
+            )),
+        }
+    }
+    if bad.is_empty() {
+        Ok(entry)
+    } else {
+        Err(bad)
+    }
+}
+
+/// Lay the project's pair over the provider file's over the built-in, field by field.
+/// The source is that of the highest layer that set either field.
+pub fn resolve_diagnose(
+    builtin: Entry,
+    provider_file: Option<Entry>,
+    project: Entry,
+) -> (Entry, MapSource) {
+    let mut out = builtin;
+    let mut src = MapSource::Builtin;
+    for (e, s) in [
+        (provider_file, MapSource::ProviderFile),
+        (Some(project), MapSource::ProjectFile),
+    ] {
+        let Some(e) = e else { continue };
+        if e == Entry::default() {
+            continue;
+        }
+        out.model = e.model.or(out.model);
+        out.effort = e.effort.or(out.effort);
+        src = s;
+    }
+    (out, src)
+}
+
+/// `opus, medium (built-in)`: what a diagnosis session ran on.
+pub fn diagnose_text(e: &Entry, src: MapSource) -> String {
+    format!(
+        "{}, {} ({})",
+        e.model.as_deref().unwrap_or("default model"),
+        e.effort.as_deref().unwrap_or("default effort"),
+        src.label()
+    )
 }
 
 /// What will be launched, and why.
