@@ -732,4 +732,5 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s978**: `lint_files` now reads the repository guards' `<path>: <message>` and `<path>:<line>: <message>` lines, for paths in the batch's union diff only, so the existing file blame parks the one task that added the file instead of bisecting.
 - **s983**: The monitor draws a task's blockers as one wrapping text of whole links (a sidebar row names three and "and N more"; the task page drops its "waiting for" line when the blocker list is shown), so 29 blockers no longer crush into one-character columns.
 - **s998**: masons_own_impact_map_selects_suites_by_path now expects the eight unit-level suites bound to run_check and the test step, instead of six.
+- **s1014**: RemotePlacementTest now composes RemotePlacementBody inside a Column, as the settings page does, so the project row no longer covers the global row's buttons.
 <!-- status:end -->
