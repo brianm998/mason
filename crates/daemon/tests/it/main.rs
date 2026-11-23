@@ -61,6 +61,7 @@ mod notify;
 mod onboarding;
 mod orphans;
 mod outside;
+mod owner_notes;
 mod owner_session;
 mod panics;
 mod pause_banners;

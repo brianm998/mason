@@ -61,6 +61,7 @@ pub mod notify;
 pub mod numbers;
 pub mod onboarding;
 pub mod outside;
+pub mod ownernotes;
 pub mod place;
 pub mod plan_view;
 pub mod plugins;

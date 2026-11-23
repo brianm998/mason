@@ -215,6 +215,22 @@ fn a_red_post_land_tier_freezes_landing_until_the_fix_lands() {
         "{:?}",
         hv.banners.iter().map(|b| &b.kind).collect::<Vec<_>>()
     );
+    // Every banner is one short line; the reason is in the detail (#951).
+    for b in &hv.banners {
+        assert!(
+            !b.text.contains('\n') && b.text.chars().count() <= 80,
+            "{}",
+            b.text
+        );
+    }
+    let frozen = hv
+        .banners
+        .iter()
+        .find(|b| b.kind == "landing_frozen")
+        .unwrap();
+    assert!(frozen
+        .detail
+        .contains(&w.d.store.freezes().unwrap()[0].reason));
     let f = w.d.store.freezes().unwrap().remove(0);
     let fix = TaskId(f.fix_task.expect("a fix task was filed"));
     let wd = w.d.world().unwrap();

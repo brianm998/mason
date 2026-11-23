@@ -731,7 +731,9 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s961**: The step-host portable transport tests are Unix-only until the Windows IPC transport exists, which fixes the red Windows CI job.
 - **s963**: A skip debt whose task branch was deleted after landing is now proven landed from the merge on the base branch, so the idle pass and `settle_debts` can pay it instead of leaving it open for ever.
 - **s969**: see decision 0962. Task #841's red landing result came from a bad batch build; three
+- **s975**: an owner's retry note is also kept per task and shown to the reviewer and later develop rounds as "Owner decisions on this task"; see decision 0968.
 - **s978**: `lint_files` now reads the repository guards' `<path>: <message>` and `<path>:<line>: <message>` lines, for paths in the batch's union diff only, so the existing file blame parks the one task that added the file instead of bisecting.
+- **s979**: Every notification row in both monitors is one line, and a row with more to say has a "?" button that opens a dialog with the full reason, the choices and an "Open task #N" action for each task it names; `Banner` gained a `detail` field.
 - **s983**: The monitor draws a task's blockers as one wrapping text of whole links (a sidebar row names three and "and N more"; the task page drops its "waiting for" line when the blocker list is shown), so 29 blockers no longer crush into one-character columns.
 - **s984**: A double click on the Failed tile now opens the lone failed task, or a Failed page listing every failed task (with "N of M" when capped); the phone tile tap and `mason://section/failed` do the same.
 - **s998**: masons_own_impact_map_selects_suites_by_path now expects the eight unit-level suites bound to run_check and the test step, instead of six.

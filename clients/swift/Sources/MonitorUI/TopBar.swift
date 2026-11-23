@@ -194,12 +194,65 @@ struct BannersView: View {
             .sheet(isPresented: Binding(get: { model.ownerSessionDialog != nil }, set: { if !$0 { model.closeOwnerSession() } })) {
                 OwnerSessionSheet(model: model)
             }
+            .sheet(isPresented: Binding(get: { detailRow != nil }, set: { if !$0 { model.notificationDetailKey = nil } })) {
+                if let row = detailRow { detailSheet(row) }
+            }
             .alert("Update masond now?", isPresented: Binding(get: { model.confirmingDaemonUpdate }, set: { if !$0 { model.cancelDaemonUpdate() } })) {
                 Button("Update now") { model.confirmDaemonUpdate() }
                 Button("Keep waiting", role: .cancel) { model.cancelDaemonUpdate() }
             } message: {
                 Text(model.daemonUpdateConfirm)
             }
+    }
+
+    /// The row whose "?" dialog is open.
+    private var detailRow: NotificationRow? {
+        guard let key = model.notificationDetailKey else { return nil }
+        return model.allNotificationRows().first { $0.key == key }
+    }
+
+    /// Whether a row gets the "?" button: it has more to say than its one line.
+    private func showsDetails(_ row: NotificationRow) -> Bool {
+        if row.kind == .pending { return false }
+        if row.kind == .paused && row.bannerIndex == nil { return false }
+        return row.hasDetails
+    }
+
+    /// The dialog: the full summary, the detail, and the row's actions.
+    func detailSheet(_ row: NotificationRow) -> some View {
+        let close = { model.notificationDetailKey = nil }
+        return VStack(alignment: .leading, spacing: theme.spacing) {
+            Text(row.text).font(theme.title())
+                .accessibilityIdentifier("notification-detail-summary")
+            if !row.detail.isEmpty {
+                Text(row.detail).font(theme.body(.regular)).textSelection(.enabled)
+                    .accessibilityIdentifier("notification-detail-text")
+            }
+            if row.clientID == "daemon-update", model.canUpdateDaemon, model.downloadURL.isEmpty, !model.daemonUpdateConfirm.isEmpty {
+                Text(model.daemonUpdateConfirm).font(theme.small())
+            }
+            HStack(spacing: theme.spacing) {
+                if let button = row.button {
+                    Button(button) { close(); press(row) }.accessibilityIdentifier("notification-detail-action")
+                }
+                if row.kind == .paused, let e = row.bannerIndex, let b = (model.header?.banners ?? []).indices.contains(e) ? model.header?.banners[e] : nil, model.canAct {
+                    Button("Resume") { close(); model.resumePause(project: b.project, mode: b.mode) }
+                        .accessibilityIdentifier("notification-detail-resume")
+                }
+                ForEach(row.taskNumbers, id: \.self) { n in
+                    Button("Open task #\(n)") {
+                        close()
+                        if let url = URL(string: "mason://task/\(n)") { model.open(url: url) }
+                    }.accessibilityIdentifier("open-task:\(n)")
+                }
+                Spacer()
+                Button("Close") { close() }.keyboardShortcut(.cancelAction)
+                    .accessibilityIdentifier("notification-detail-close")
+            }
+        }
+        .padding(theme.spacingLarge)
+        .frame(minWidth: 420)
+        .accessibilityIdentifier("notification-detail")
     }
 
     private func rowHeight(_ r: NotificationRow) -> CGFloat { heights[r.key] ?? 0 }
@@ -304,6 +357,14 @@ struct BannersView: View {
         let pending = row.kind == .pending
         return HStack(spacing: theme.spacing) {
             content(row).frame(maxWidth: .infinity, alignment: .leading)
+            if showsDetails(row) {
+                Button { model.notificationDetailKey = row.key } label: { Image(systemName: "questionmark.circle") }
+                    .buttonStyle(.borderless)
+                    .touchTarget().hint("Details")
+                    .accessibilityLabel("Details")
+                    .accessibilityIdentifier("details:\(row.key)")
+                    .probe("details:\(row.key)")
+            }
             Button { model.dismissNotification(row.key) } label: { Image(systemName: "xmark") }
                 .buttonStyle(.borderless)
                 .touchTarget().hint("Dismiss")
@@ -332,7 +393,9 @@ struct BannersView: View {
     @ViewBuilder func textRow(_ row: NotificationRow) -> some View {
         HStack(spacing: theme.spacing) {
             bannerImage(row.daemonKind.flatMap { BannerIcons.id(forDaemonKind: $0) } ?? row.icon)
-            Text(row.text).font(theme.body(.medium)).frame(maxWidth: .infinity, alignment: .leading)
+            Text(row.text).font(theme.body(.medium)).lineLimit(1).truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityLabel(row.detail.isEmpty ? row.text : row.text + ". " + row.detail)
                 .accessibilityIdentifier(row.uiID + "-text")
                 .probe(row.uiID + "-text")
             if let button = row.button { Button(button) { press(row) }.accessibilityIdentifier(row.uiID) }
@@ -378,7 +441,8 @@ struct BannersView: View {
     func expandedPause(_ b: Mason_V1_Banner, index: Int) -> some View {
         HStack(spacing: theme.spacing) {
             bannerImage(BannerIcons.id(forDaemonKind: b.kind))
-            Text(b.text).font(theme.body(.medium))
+            Text(b.text).font(theme.body(.medium)).lineLimit(1).truncationMode(.tail)
+                .accessibilityLabel(b.detail.isEmpty ? b.text : b.text + ". " + b.detail)
             Spacer()
             if model.canAct {
                 Button("Resume") { model.resumePause(project: b.project, mode: b.mode) }
