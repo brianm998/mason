@@ -59,6 +59,7 @@ mod lease_pid;
 mod limits;
 mod live_tokens;
 mod notify;
+mod onboarding;
 mod orphans;
 mod outside;
 mod owner_notes;
