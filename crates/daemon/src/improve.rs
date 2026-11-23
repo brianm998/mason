@@ -364,6 +364,7 @@ pub fn publish(d: &Arc<Daemon>, task: u64, confirm: bool) -> Result<Value, Fail>
 /// Look at each improvement that went upstream. Merged: rejoin the main channel. Closed
 /// without merging, or no longer merging cleanly: ask the owner about carrying the patch.
 pub fn poll(d: &Arc<Daemon>) {
+    let _caller = mason_adapter_api::github_budget::as_caller("improve");
     let Some((pid, sp)) = proposals::self_project(d) else {
         return;
     };
