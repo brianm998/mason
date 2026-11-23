@@ -495,10 +495,13 @@ fn masons_own_impact_map_selects_suites_by_path() {
     assert!(picked(&["crates/daemon/src/a.rs"]));
     assert!(!picked(&["clients/swift/Sources/A.swift"]));
     assert!(!picked(&["docs/x.md"]));
-    // All six (with `fmt`, s691, and `clippy`, s778) are bound to run_check and the test step.
+    // `[step.test] suites` lists six. The binding is by level, though, so all eight unit-level
+    // suites are bound to run_check and the test step: `guards` and `exit-guards` run under
+    // run_check but are not in the step's list (s998, decision 0991). This follows the
+    // definition as written; a change to the bindings updates the number on purpose.
     assert_eq!(all.len(), 6);
-    assert_eq!(d.testing.bound(When::Development).len(), 6);
-    assert_eq!(d.testing.bound(When::TestStep).len(), 6);
+    assert_eq!(d.testing.bound(When::Development).len(), 8);
+    assert_eq!(d.testing.bound(When::TestStep).len(), 8);
 }
 
 #[test]
