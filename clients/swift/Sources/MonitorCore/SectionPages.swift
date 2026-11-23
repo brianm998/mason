@@ -11,8 +11,16 @@ extension MonitorModel {
         sidebar?.sections.first { $0.state == name }
     }
 
-    /// The task rows of a stage's page, in the sidebar's order.
-    public func sectionRows(_ name: String) -> [TaskRow] { sectionSidebar(name)?.rows ?? [] }
+    /// The sidebar sections whose tasks a stage's tile counts: the stage's own section and, for
+    /// `proposed`, the tracker's imports (`proposed_imports`), which the daemon lists apart but
+    /// counts in the same tile. In the sidebar's order.
+    public func tileSections(_ name: String) -> [SidebarSection] {
+        let names = name == "proposed" ? ["proposed", "proposed_imports"] : [name]
+        return names.compactMap { sectionSidebar($0) }
+    }
+
+    /// The task rows behind a stage's tile and on its page, in the sidebar's order.
+    public func sectionRows(_ name: String) -> [TaskRow] { tileSections(name).flatMap(\.rows) }
 
     /// The count for a capped section page's header ("500 of 2000", as in the sidebar), else nil.
     public func sectionCountText(_ name: String) -> String? {

@@ -452,6 +452,30 @@ final class MonitorCoreTests: XCTestCase {
         XCTAssertEqual(m.lastResult, "there is no step `x`")
     }
 
+    /// The daemon lists tracker-imported proposals in their own section (`proposed_imports`) but
+    /// counts them in the proposed tile: one plain proposal beside thirty imports is not "one".
+    func testProposedTileCoversTheTrackerImportsSection() {
+        let m = model()
+        let imports = (100..<103).map { row(UInt64($0), state: "proposed") }
+        m.sidebar!.sections.append(section("proposed", rows: [row(40, state: "proposed")]))
+        m.sidebar!.sections.append(section("proposed_imports", collapsed: true, rows: imports))
+        XCTAssertEqual(m.sectionRows("proposed").map(\.id), [40, 100, 101, 102])
+        m.tileClicked(state: "proposed", clickCount: 2)
+        XCTAssertEqual(m.page, .section("proposed"), "four proposals open the page, not the plain one")
+        XCTAssertTrue(m.isExpanded(m.sidebar!.sections.first { $0.state == "proposed_imports" }!))
+        var c = StateCount(); c.state = "proposed"; c.count = 4
+        m.go(.task(101))
+        XCTAssertTrue(m.tileShowsCurrentTask(c), "an imported proposal is one of the tile's tasks")
+
+        let onlyImports = model()
+        onlyImports.sidebar!.sections.append(section("proposed", rows: []))
+        onlyImports.sidebar!.sections.append(section("proposed_imports", collapsed: true, rows: [row(100, state: "proposed")]))
+        onlyImports.tileClicked(state: "proposed", clickCount: 1)
+        XCTAssertEqual(onlyImports.scrollTarget, "proposed_imports", "scrolls to the section that has the tasks")
+        onlyImports.tileClicked(state: "proposed", clickCount: 2)
+        XCTAssertEqual(onlyImports.page, .task(100), "a lone imported proposal opens")
+    }
+
     func testDoubleClickOnAnEmptyStateChangesNothingBeyondTheReveal() {
         let m = model()
         m.sidebar!.sections.append(section("canceled", collapsed: true))
