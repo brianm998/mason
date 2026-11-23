@@ -9,4 +9,6 @@ grep -E 'sectionNames' -A2 clients/compose/core/src/main/kotlin/mason/monitor/Na
 if [ "$(uname)" = Darwin ]; then
   swift test --package-path clients/swift --filter 'MonitorCoreTests|PhoneNavTests'
 fi
-(cd clients/compose && ./gradlew :core:test)
+if command -v java >/dev/null && command -v gradle >/dev/null && [ -z "${MASON_SKIP_COMPOSE:-}" ]; then
+  (cd clients/compose && gradle --no-daemon -q :core:test)
+fi
