@@ -128,7 +128,7 @@ pub struct Applied {
 
 /// `POST /onboarding/apply`, up to and including registration. Every refusal comes before
 /// anything is written.
-pub fn apply(d: &Daemon, body: &Value) -> Result<Applied, Refusal> {
+pub fn apply(d: &std::sync::Arc<Daemon>, body: &Value) -> Result<Applied, Refusal> {
     let (path, flags) = parse(body)?;
     refuse_registered(d, &path)?;
     let det = mason_onboard::detect::detect(&path).map_err(|e| (400, e))?;
