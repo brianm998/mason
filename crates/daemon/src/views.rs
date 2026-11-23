@@ -690,7 +690,8 @@ impl<'a> Ctx<'a> {
             if project.is_empty() || f.project == project {
                 banners.push(Banner {
                     kind: "landing_frozen".into(),
-                    text: if f.source == "ci" {
+                    text: format!("Landing is frozen for {}", f.project),
+                    detail: if f.source == "ci" {
                         format!(
                             "Landing is frozen for {}: only the fix task lands until that job is green on the base branch ({})",
                             f.project, f.reason
@@ -724,6 +725,7 @@ impl<'a> Ctx<'a> {
             if b.level.is_empty() {
                 b.level = banner_level(&b.kind).into();
             }
+            one_line(b);
         }
         HeaderView {
             project: project.to_string(),
@@ -1742,6 +1744,34 @@ impl<'a> Ctx<'a> {
     }
 }
 
+/// The longest banner `text`, in characters (#951).
+pub const BANNER_TEXT_MAX: usize = 80;
+
+/// Keeps a banner's `text` to one short line (#951): newlines become spaces, and a text over
+/// [`BANNER_TEXT_MAX`] is cut at a word with an ellipsis. Whatever was cut goes to `detail`
+/// (the whole text, if the producer wrote none), so nothing is lost.
+fn one_line(b: &mut Banner) {
+    let flat = b.text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= BANNER_TEXT_MAX {
+        if flat != b.text && b.detail.is_empty() {
+            b.detail = b.text.trim().to_string();
+        }
+        b.text = flat;
+        return;
+    }
+    let mut cut: String = flat.chars().take(BANNER_TEXT_MAX - 1).collect();
+    if let Some(i) = cut.rfind(' ') {
+        if i > BANNER_TEXT_MAX / 2 {
+            cut.truncate(i);
+        }
+    }
+    let cut = cut.trim_end_matches([' ', ',', ';', ':']).to_string();
+    if b.detail.is_empty() {
+        b.detail = b.text.trim().to_string();
+    }
+    b.text = format!("{cut}…");
+}
+
 /// Who a banner is for (s929): `action` needs the owner, `warning` is wrong and nobody is
 /// handling it, `info` is progress or already being handled. A kind not listed is a warning,
 /// so a new producer shows in the bar until it is classified.
@@ -1781,11 +1811,14 @@ fn ci_watch_banners(project: &str, v: &serde_json::Value) -> Vec<Banner> {
     if !pending.is_empty() {
         banners.push(banner(
             "ci_watch",
-            format!(
+            format!("{project}: red on the base branch, waiting for a second red run"),
+        ));
+        if let Some(b) = banners.last_mut() {
+            b.detail = format!(
                 "{project}: red on the base branch, waiting for a second red run: {}",
                 pending.join(", ")
-            ),
-        ));
+            );
+        }
     }
     // Jobs an open ticket is fixing are handled: one info entry per project.
     let held: Vec<&serde_json::Value> = v["held_back"].as_array().into_iter().flatten().collect();
@@ -1810,19 +1843,27 @@ fn ci_watch_banners(project: &str, v: &serde_json::Value) -> Vec<Banner> {
                 tickets.join(", ")
             )
         };
+        let summary = format!(
+            "{project}: {n} red CI job{} being fixed",
+            if n == 1 { "" } else { "s" }
+        );
         banners.push(Banner {
             level: "info".into(),
-            ..banner("ci_watch", text)
+            detail: text,
+            ..banner("ci_watch", summary)
         });
     }
     if let Some(t) = v["unconfirmed_text"].as_str() {
         banners.push(banner("ci_watch_quiet", format!("{project}: {t}")));
     }
     if let Some(e) = v["error"].as_str() {
-        banners.push(banner(
-            "ci_watch",
-            format!("{project}: the base-branch CI watch cannot look: {e}"),
-        ));
+        banners.push(Banner {
+            detail: format!("{project}: the base-branch CI watch cannot look: {e}"),
+            ..banner(
+                "ci_watch",
+                format!("{project}: the base-branch CI watch cannot look"),
+            )
+        });
     }
     banners
 }
@@ -2558,10 +2599,61 @@ mod banner_level_tests {
         let b = ci_watch_banners("mason", &v);
         let held: Vec<_> = b.iter().filter(|b| b.level == "info").collect();
         assert_eq!(held.len(), 1);
-        assert_eq!(held[0].text, "mason: 3 red CI jobs being fixed: #836, #935");
+        assert_eq!(held[0].text, "mason: 3 red CI jobs being fixed");
+        assert_eq!(
+            held[0].detail,
+            "mason: 3 red CI jobs being fixed: #836, #935"
+        );
         // Waiting for a second red run and "cannot look" are not handled: they keep the default.
         let rest: Vec<_> = b.iter().filter(|b| b.level != "info").collect();
         assert_eq!(rest.len(), 2);
         assert!(rest.iter().all(|b| banner_level(&b.kind) == "warning"));
+    }
+
+    #[test]
+    fn a_banner_text_is_one_short_line_and_the_rest_is_detail() {
+        let long = format!(
+            "Landing frozen:\nonly the fix task lands {}",
+            "until green ".repeat(20)
+        );
+        let mut b = Banner {
+            kind: "landing_frozen".into(),
+            text: long.clone(),
+            ..Default::default()
+        };
+        one_line(&mut b);
+        assert!(!b.text.contains('\n'));
+        assert!(b.text.chars().count() <= BANNER_TEXT_MAX, "{}", b.text);
+        assert!(b.text.ends_with('…'));
+        assert_eq!(b.detail, long.trim());
+        // A producer's own detail is kept; a short text with no newline is untouched.
+        let mut c = Banner {
+            text: "short".into(),
+            detail: "why".into(),
+            ..Default::default()
+        };
+        one_line(&mut c);
+        assert_eq!((c.text.as_str(), c.detail.as_str()), ("short", "why"));
+        let mut d = Banner {
+            text: "two\nlines".into(),
+            ..Default::default()
+        };
+        one_line(&mut d);
+        assert_eq!(
+            (d.text.as_str(), d.detail.as_str()),
+            ("two lines", "two\nlines")
+        );
+    }
+
+    #[test]
+    fn ci_watch_banners_keep_the_reason_in_the_detail() {
+        let v = serde_json::json!({"pending": [{"job": "d"}], "error": "gh failed\nbadly"});
+        let mut b = ci_watch_banners("mason", &v);
+        for x in &mut b {
+            one_line(x);
+            assert!(!x.text.contains('\n') && x.text.chars().count() <= BANNER_TEXT_MAX);
+        }
+        assert!(b[0].detail.contains('d'));
+        assert!(b[1].detail.contains("gh failed"));
     }
 }
