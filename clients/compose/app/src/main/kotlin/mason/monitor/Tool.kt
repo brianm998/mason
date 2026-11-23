@@ -69,16 +69,12 @@ private fun step(model: MonitorModel): Boolean {
     // read after the step): wait for them, then let any trailing view land.
     val status = call(model, Command(raw = mason.v1.Raw(method = "GET", path = "/status")), "status")
     val seq = (Codec.json(status.json)?.get("seq") as? Number)?.toLong()
-    // The daemon sends no view whose content did not change, so lastViewSeq may never reach
-    // seq: a bounded quiet window (QUIET_TICKS x 50 ms without a view or event) then decides.
+    // The demo daemon resends every view at each new seq, so lastViewSeq reaches seq.
     if (seq != null) {
         val end = System.currentTimeMillis() + 60_000
-        var last = model.lastSeq
-        var quiet = 0
-        while (model.lastViewSeq < seq && quiet < QUIET_TICKS) {
+        while (model.lastViewSeq < seq) {
             if (System.currentTimeMillis() > end) fail("timed out waiting for the views of seq $seq")
             Thread.sleep(50)
-            if (model.lastSeq == last) quiet++ else { quiet = 0; last = model.lastSeq }
         }
     }
     settle(model)

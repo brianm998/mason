@@ -1447,3 +1447,34 @@ fn history_bodies_come_with_row_bodies_and_the_sidebar_is_sent_once() {
     );
     assert!(l * 4 < f, "without bodies {l} bytes, with {f}");
 }
+
+#[test]
+fn a_demo_client_gets_all_three_views_at_every_step_even_when_nothing_changed() {
+    let (d, port, _dir) = demo();
+    let mut c = Client::connect(port, Encoding::Json).unwrap();
+    c.hello(0, false).unwrap();
+    collect(&mut c, Duration::from_secs(5), |m| !m.is_empty());
+    for _ in 0..8 {
+        next_step(&mut c);
+        let seq = d.store.last_seq().unwrap();
+        // Wait on the messages themselves: a view of each kind stamped at the step's seq.
+        let got = collect(&mut c, Duration::from_secs(30), |m| {
+            let kinds: std::collections::HashSet<_> = m
+                .iter()
+                .filter_map(|m| match &m.body {
+                    Some(server_message::Body::View(u)) if u.seq >= seq => {
+                        u.view.as_ref()?.body.as_ref().map(std::mem::discriminant)
+                    }
+                    _ => None,
+                })
+                .collect();
+            kinds.len() >= 3
+        });
+        assert!(!got.is_empty(), "no views at seq {seq}");
+        let n = got
+            .iter()
+            .filter(|m| matches!(&m.body, Some(server_message::Body::View(u)) if u.seq >= seq))
+            .count();
+        assert!(n >= 3, "only {n} views at seq {seq}");
+    }
+}

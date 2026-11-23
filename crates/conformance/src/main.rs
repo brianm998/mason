@@ -116,7 +116,8 @@ fn run(c: &mut Client, screen: &mut Screen, method: &str, path: &str) -> Command
     r
 }
 
-/// Wait until the screen has reached the daemon's current seq, or 1.5 s pass with nothing new.
+/// Wait until the screen has reached the daemon's current seq. The demo daemon resends every
+/// view at each new seq, so there is no quiet-window fallback (decision 1025).
 fn settle(c: &mut Client, screen: &mut Screen) {
     let hard = std::time::Instant::now() + Duration::from_secs(60);
     let r = run(c, screen, "GET", "/status");
@@ -125,17 +126,12 @@ fn settle(c: &mut Client, screen: &mut Screen) {
         .as_u64()
         .or_else(|| v["seq"].as_str().and_then(|s| s.parse().ok()))
         .unwrap_or(0);
-    let mut quiet = std::time::Instant::now();
-    let mut last = screen.seq;
     while screen.seq < target || screen.views.len() < 3 {
         if std::time::Instant::now() > hard {
-            die("the screen did not reach the daemon's seq within 60 s");
-        }
-        if screen.seq > last {
-            last = screen.seq;
-            quiet = std::time::Instant::now();
-        } else if quiet.elapsed() > Duration::from_millis(1500) && screen.views.len() >= 3 {
-            break;
+            die(&format!(
+                "the screen did not reach the daemon's seq {target} within 60 s (at {})",
+                screen.seq
+            ));
         }
         if let Ok(Some(m)) = c.recv(Duration::from_millis(50)) {
             screen.absorb(m);
