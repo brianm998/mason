@@ -457,79 +457,247 @@ fn remote_base_ref(repo: &Path, remote: &str, base: &str) -> String {
     }
 }
 
-// ---- other workflows' jobs (#766) ---------------------------------------------------------
+// ---- other workflows' jobs (#766, #819) ----------------------------------------------------
 
-/// What the repository's other workflows (not MASON's own) are running on GitHub's runners,
-/// read from the Actions API. The list of in-progress runs is asked with its last ETag, so a 304
-/// costs nothing and leaves the count as it was, with no job lookups.
-#[derive(Default)]
-pub struct OtherWorkflows {
-    etag: Option<String>,
-    /// Running jobs of other workflows.
-    pub jobs: u32,
-    /// A short label for them: `develop CI: 7 jobs`.
-    pub label: String,
+/// A repository the poller reads: its API, name and token, and the workflow files that are
+/// MASON's own (their runs are not counted: the pool counts them itself).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AccountRepo {
+    pub api: String,
+    pub repo: String,
+    pub token: String,
+    pub own: Vec<String>,
 }
 
-impl OtherWorkflows {
-    /// Look once. `own` is MASON's workflow file name (`mason-run.yml`): its runs are not
-    /// counted, the pool counts them itself. Returns whether the count may have changed.
-    pub fn poll(&mut self, gh: &GitHub, own: &str) -> Result<bool, String> {
-        let found = gh
-            .in_progress_runs(self.etag.as_deref())
-            .map_err(|e| e.to_string())?;
-        let Some((runs, etag)) = found else {
-            return Ok(false);
-        };
-        let mut by_name: std::collections::BTreeMap<String, u32> = Default::default();
-        for (id, name, path) in runs {
-            if path.rsplit('/').next() == Some(own) {
-                continue;
+/// The repositories the registered projects name in `[remote_runs]`, `[ci]` (GitHub Actions) or
+/// `[tracker]`, once each, with the token of the first section that names it.
+pub fn account_repos(d: &Daemon) -> Vec<AccountRepo> {
+    let mut out: Vec<AccountRepo> = vec![];
+    let mut add = |api: &str, repo: &str, token: &str, own: Option<&str>| {
+        if repo.is_empty() || token.is_empty() {
+            return;
+        }
+        let at = out.iter().position(|r| r.repo == repo && r.api == api);
+        let r = match at {
+            Some(i) => &mut out[i],
+            None => {
+                out.push(AccountRepo {
+                    api: api.to_string(),
+                    repo: repo.to_string(),
+                    token: token.to_string(),
+                    own: vec![],
+                });
+                out.last_mut().unwrap()
             }
-            let jobs = gh.remote_run_jobs(id).map_err(|e| e.to_string())?;
-            let running = jobs.iter().filter(|j| j.status == "in_progress").count() as u32;
-            if running > 0 {
-                *by_name.entry(name).or_default() += running;
+        };
+        if let Some(o) = own {
+            if !r.own.iter().any(|x| x == o) {
+                r.own.push(o.to_string());
             }
         }
-        self.etag = etag;
-        self.jobs = by_name.values().sum();
-        self.label = by_name
-            .iter()
-            .map(|(n, j)| format!("{n}: {j} job{}", if *j == 1 { "" } else { "s" }))
-            .collect::<Vec<_>>()
-            .join(", ");
-        Ok(true)
+    };
+    for p in d.projects().values() {
+        if let Some(r) = &p.services.remote {
+            add(&r.api, &r.repo, &r.token, Some(&r.workflow));
+        }
+        if let Some(c) = &p.services.ci {
+            if let crate::config::CiKind::GithubActions {
+                api, repo, token, ..
+            } = &c.kind
+            {
+                add(api, repo, token, None);
+            }
+        }
+        if let Some(t) = &p.services.tracker {
+            if t.plugin.is_none() {
+                add(&t.api, &t.repo, &t.token, None);
+            }
+        }
+    }
+    out
+}
+
+/// What one run of another workflow has on the runners.
+#[derive(Clone, Debug, Default)]
+struct RunJobs {
+    etag: Option<String>,
+    name: String,
+    running: u32,
+    queued: u32,
+    macos_running: u32,
+    macos_queued: u32,
+}
+
+/// One repository's state: the ETag and runs of each list (`in_progress`, `queued`), and what
+/// each run has, so a 304 changes nothing and costs nothing.
+#[derive(Default)]
+struct RepoState {
+    list_etag: [Option<String>; 2],
+    lists: [Vec<(u64, String, String)>; 2],
+    runs: std::collections::BTreeMap<u64, RunJobs>,
+    /// Read in full at least once.
+    read: bool,
+    error: Option<String>,
+}
+
+/// What the account's other workflows have on GitHub's runners, running or queued, in every
+/// repository given to [`AccountJobs::poll`]. Each repository's lists of runs are asked with
+/// their last ETag; jobs are looked up only for runs of a list that changed, and with the run's
+/// own ETag.
+#[derive(Default)]
+pub struct AccountJobs {
+    repos: std::collections::BTreeMap<String, RepoState>,
+    last: crate::sched::OtherJobs,
+}
+
+fn job_is_macos(j: &mason_adapters::github::ActionJob) -> bool {
+    j.labels.iter().any(|l| l.starts_with("macos"))
+}
+
+impl AccountJobs {
+    /// Look once at each repository. A repository that cannot be read keeps its last count (the
+    /// result says it is stale) or, when never read, is named as not counted. `now_ms` stamps a
+    /// complete read.
+    pub fn poll(
+        &mut self,
+        sources: &[(AccountRepo, GitHub)],
+        now_ms: u64,
+    ) -> crate::sched::OtherJobs {
+        self.repos
+            .retain(|k, _| sources.iter().any(|(r, _)| &r.repo == k));
+        for (r, gh) in sources {
+            let st = self.repos.entry(r.repo.clone()).or_default();
+            match Self::poll_repo(st, gh, &r.own) {
+                Ok(()) => {
+                    st.read = true;
+                    st.error = None;
+                }
+                Err(e) => st.error = Some(e),
+            }
+        }
+        let mut out = crate::sched::OtherJobs::default();
+        let mut by_name: std::collections::BTreeMap<String, (u32, u32)> = Default::default();
+        for (repo, st) in &self.repos {
+            if !st.read {
+                out.not_counted.push(format!(
+                    "{repo} ({})",
+                    st.error.as_deref().unwrap_or("unread")
+                ));
+                continue;
+            }
+            out.stale |= st.error.is_some();
+            let short = repo.rsplit('/').next().unwrap_or(repo);
+            for run in st.runs.values() {
+                out.gha += run.running + run.queued;
+                out.macos += run.macos_running + run.macos_queued;
+                let e = by_name.entry(format!("{short} {}", run.name)).or_default();
+                e.0 += run.running;
+                e.1 += run.queued;
+            }
+        }
+        let mut parts = vec![];
+        for (n, (run, q)) in &by_name {
+            if *run > 0 {
+                parts.push(format!("{n} {run} running"));
+            }
+            if *q > 0 {
+                parts.push(format!("{n} {q} queued"));
+            }
+        }
+        out.label = parts.join(", ");
+        out.read_at_ms = if out.stale {
+            self.last.read_at_ms
+        } else {
+            now_ms
+        };
+        self.last = out.clone();
+        out
+    }
+
+    fn poll_repo(st: &mut RepoState, gh: &GitHub, own: &[String]) -> Result<(), String> {
+        let mut changed = false;
+        for (i, status) in ["in_progress", "queued"].into_iter().enumerate() {
+            let found = gh
+                .runs_with_status(status, st.list_etag[i].as_deref())
+                .map_err(|e| e.to_string())?;
+            if let Some((runs, etag)) = found {
+                st.lists[i] = runs;
+                st.list_etag[i] = etag;
+                changed = true;
+            }
+        }
+        if !changed {
+            return Ok(());
+        }
+        let mut live: std::collections::BTreeMap<u64, String> = Default::default();
+        for (id, name, path) in st.lists.iter().flatten() {
+            if own
+                .iter()
+                .any(|o| path.rsplit('/').next() == Some(o.as_str()))
+            {
+                continue;
+            }
+            live.insert(*id, name.clone());
+        }
+        st.runs.retain(|id, _| live.contains_key(id));
+        for (id, name) in live {
+            let run = st.runs.entry(id).or_default();
+            let Some((jobs, etag)) = gh
+                .remote_run_jobs_changed(id, run.etag.as_deref())
+                .map_err(|e| e.to_string())?
+            else {
+                continue;
+            };
+            *run = RunJobs {
+                etag,
+                name,
+                ..Default::default()
+            };
+            for j in &jobs {
+                let mac = job_is_macos(j) as u32;
+                match j.status.as_str() {
+                    "in_progress" => {
+                        run.running += 1;
+                        run.macos_running += mac;
+                    }
+                    "queued" => {
+                        run.queued += 1;
+                        run.macos_queued += mac;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(())
     }
 }
 
-/// Keep the broker told how many jobs other workflows run, every 30 seconds, for the first
-/// project with `[remote_runs]`. Nothing runs where no project has one.
+/// Keep the broker told what the account's other workflows have on GitHub's runners, every 30
+/// seconds. Nothing runs where no project names a GitHub repository.
 pub fn spawn_other_workflows(d: &Arc<Daemon>) {
-    if forced_for_tests() || !any_remote(d) {
+    if forced_for_tests() || account_repos(d).is_empty() {
         return;
     }
-    let mut seen = OtherWorkflows::default();
+    let mut seen = AccountJobs::default();
     crate::bg::spawn_loop(d, "other-workflows", move |weak| {
         std::thread::sleep(Duration::from_secs(30));
         let Some(d) = weak.upgrade() else {
             return false;
         };
-        let Some(p) = d
-            .projects()
-            .values()
-            .find(|p| p.services.remote.is_some())
-            .cloned()
-        else {
-            return true;
-        };
-        if let Some(site) = site_for(&d, &p.id, &p.path) {
-            match seen.poll(&site.gh, &site.workflow) {
-                Ok(true) => d.broker.set_other_workflows(seen.jobs, &seen.label),
-                Ok(false) => {}
-                Err(e) => tracing::debug!("other workflows: {e}"),
-            }
-        }
+        let http: Arc<dyn Http> = Arc::new(Curl {
+            timeout_s: 30,
+            http2: false,
+        });
+        let sources: Vec<(AccountRepo, GitHub)> = account_repos(&d)
+            .into_iter()
+            .filter_map(|r| {
+                let token = TokenRef::parse(&r.token).ok()?;
+                let gh = GitHub::new(http.clone(), &r.api, &r.repo, token);
+                Some((r, gh))
+            })
+            .collect();
+        d.broker
+            .set_other_jobs(seen.poll(&sources, crate::daemon::now_ms()));
         true
     });
 }
@@ -4235,6 +4403,7 @@ mod tests {
             status: status.into(),
             started_at: None,
             conclusion: None,
+            labels: vec![],
             steps: steps
                 .iter()
                 .map(|(n, st, at)| mason_adapters::github::ActionStep {
@@ -4546,10 +4715,17 @@ mod tests {
         assert!(!is_run_job("plan") && !is_run_job("running"));
     }
 
-    /// An Actions API that lists in-progress runs with an ETag and counts the requests.
+    /// A fake Actions API: per repository, runs in two lists (`in_progress`, `queued`) behind one
+    /// ETag, jobs with labels, a repository the token cannot read, and a request log.
+    type FakeJobs = Vec<(String, String)>;
+    type FakeRuns = Vec<(u64, String, String, FakeJobs)>;
+    type FakeSeed<'a> = Vec<(&'a str, Vec<(u64, &'a str, &'a str, FakeJobs)>)>;
+
+    #[derive(Default)]
     struct FakeActions {
         etag: Mutex<String>,
-        running: Mutex<u32>,
+        /// repo -> run id -> (workflow name, workflow file, jobs as (status, label))
+        repos: Mutex<std::collections::BTreeMap<String, FakeRuns>>,
         log: Mutex<Vec<String>>,
     }
 
@@ -4567,31 +4743,50 @@ mod tests {
                     body: body.to_string(),
                 })
             };
-            if r.url.contains("/actions/runs?status=in_progress") {
-                let etag = self.etag.lock().unwrap().clone();
-                if r.headers
-                    .iter()
-                    .any(|(k, v)| k == "If-None-Match" && *v == etag)
-                {
-                    return Ok(Response {
-                        status: 304,
-                        headers: vec![],
-                        body: String::new(),
-                    });
+            let status = |code: u16| {
+                Ok(Response {
+                    status: code,
+                    headers: vec![],
+                    body: "{\"message\": \"x\"}".into(),
+                })
+            };
+            let rest = r.url.split("/repos/").nth(1).unwrap_or_default();
+            let repo: String = rest.split('/').take(2).collect::<Vec<_>>().join("/");
+            let repos = self.repos.lock().unwrap();
+            let Some(runs) = repos.get(&repo) else {
+                return status(404);
+            };
+            let etag = self.etag.lock().unwrap().clone();
+            let not_modified = r
+                .headers
+                .iter()
+                .any(|(k, v)| k == "If-None-Match" && *v == etag);
+            if let Some(q) = r.url.split("/actions/runs?status=").nth(1) {
+                if not_modified {
+                    return status(304);
                 }
-                return ok(
-                    serde_json::json!({"workflow_runs": [
-                        {"id": 1, "name": "CI", "path": ".github/workflows/ci.yml"},
-                        {"id": 2, "name": "MASON run", "path": ".github/workflows/mason-run.yml"}]}),
-                    Some(etag),
-                );
-            }
-            if r.url.contains("/actions/runs/1/jobs") {
-                let n = *self.running.lock().unwrap();
-                let jobs: Vec<_> = (0..n)
-                    .map(|i| serde_json::json!({"name": format!("j{i}"), "status": "in_progress"}))
+                let want = q.split('&').next().unwrap();
+                let list: Vec<_> = runs
+                    .iter()
+                    .filter(|(_, _, _, jobs)| jobs.iter().any(|(st, _)| st == want))
+                    .map(|(id, name, path, _)| {
+                        serde_json::json!({"id": id, "name": name, "path": path})
+                    })
                     .collect();
-                return ok(serde_json::json!({"jobs": jobs}), None);
+                return ok(serde_json::json!({"workflow_runs": list}), Some(etag));
+            }
+            if let Some(id) = r.url.split("/actions/runs/").nth(1) {
+                if not_modified {
+                    return status(304);
+                }
+                let id: u64 = id.split('/').next().unwrap().parse().unwrap();
+                let jobs: Vec<_> = runs
+                    .iter()
+                    .filter(|(i, ..)| *i == id)
+                    .flat_map(|(_, _, _, jobs)| jobs)
+                    .map(|(st, label)| serde_json::json!({"name": "j", "status": st, "labels": [label]}))
+                    .collect();
+                return ok(serde_json::json!({"jobs": jobs}), Some(etag));
             }
             Err(mason_adapter_api::http::Transport(format!(
                 "unexpected {}",
@@ -4600,33 +4795,207 @@ mod tests {
         }
     }
 
-    #[test]
-    fn other_workflows_are_counted_and_a_304_changes_nothing_and_asks_for_nothing_more() {
+    fn jobs(n: usize, status: &str, label: &str) -> Vec<(String, String)> {
+        (0..n)
+            .map(|_| (status.to_string(), label.to_string()))
+            .collect()
+    }
+
+    fn source(api: &Arc<FakeActions>, repo: &str, own: &[&str]) -> (AccountRepo, GitHub) {
         token();
+        (
+            AccountRepo {
+                api: "https://api.github.com".into(),
+                repo: repo.into(),
+                token: "env:MASON_TEST_REMOTE_TOKEN".into(),
+                own: own.iter().map(|s| s.to_string()).collect(),
+            },
+            GitHub::new(
+                api.clone(),
+                "https://api.github.com",
+                repo,
+                TokenRef::Env("MASON_TEST_REMOTE_TOKEN".into()),
+            ),
+        )
+    }
+
+    fn fake(repos: FakeSeed) -> Arc<FakeActions> {
         let api = Arc::new(FakeActions {
             etag: Mutex::new("\"a\"".into()),
-            running: Mutex::new(3),
-            log: Mutex::new(vec![]),
+            ..Default::default()
         });
-        let gh = GitHub::new(
-            api.clone(),
-            "https://api.github.com",
-            "o/r",
-            TokenRef::Env("MASON_TEST_REMOTE_TOKEN".into()),
+        for (repo, runs) in repos {
+            api.repos.lock().unwrap().insert(
+                repo.into(),
+                runs.into_iter()
+                    .map(|(i, n, p, j)| (i, n.to_string(), p.to_string(), j))
+                    .collect(),
+            );
+        }
+        api
+    }
+
+    #[test]
+    fn queued_jobs_in_other_repositories_and_the_ceiling_limit_what_mason_may_take() {
+        let api = fake(vec![
+            (
+                "o/star",
+                vec![(
+                    1,
+                    "pr-gate",
+                    ".github/workflows/pr-gate.yml",
+                    jobs(3, "queued", "ubuntu-latest"),
+                )],
+            ),
+            (
+                "o/mason",
+                vec![
+                    (
+                        2,
+                        "CI",
+                        ".github/workflows/ci.yml",
+                        jobs(2, "in_progress", "ubuntu-latest"),
+                    ),
+                    (
+                        3,
+                        "MASON run",
+                        ".github/workflows/mason-run.yml",
+                        jobs(4, "in_progress", "ubuntu-latest"),
+                    ),
+                ],
+            ),
+        ]);
+        let sources = [
+            source(&api, "o/mason", &["mason-run.yml"]),
+            source(&api, "o/star", &[]),
+        ];
+        let mut seen = AccountJobs::default();
+        let other = seen.poll(&sources, 1000);
+        assert_eq!(
+            (other.gha, other.macos),
+            (5, 0),
+            "MASON's own run is not counted"
         );
-        let mut seen = OtherWorkflows::default();
-        assert!(seen.poll(&gh, "mason-run.yml").unwrap());
-        assert_eq!((seen.jobs, seen.label.as_str()), (3, "CI: 3 jobs"));
-        let asked = api.log.lock().unwrap().len();
-        // The jobs finish but GitHub says nothing changed: the count stays, and only the one
-        // conditional request is made.
-        *api.running.lock().unwrap() = 0;
-        assert!(!seen.poll(&gh, "mason-run.yml").unwrap());
-        assert_eq!(seen.jobs, 3);
-        assert_eq!(api.log.lock().unwrap().len(), asked + 1);
-        // A new ETag: the new count is read.
+        assert!(
+            other.label.contains("star pr-gate 3 queued"),
+            "{}",
+            other.label
+        );
+        assert!(
+            other.label.contains("mason CI 2 running"),
+            "{}",
+            other.label
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let b = crate::sched::tests::runner_broker(dir.path(), 16, 4, 0);
+        b.set_limit("gha_ceiling", 6).unwrap();
+        b.set_other_jobs(other);
+        let ids: Vec<u64> = (1..=7)
+            .map(|t| crate::sched::tests::queue_gha(&b, t))
+            .collect();
+        assert_eq!(
+            ids.iter()
+                .filter(|i| crate::sched::tests::is_held(&b, **i))
+                .count(),
+            1
+        );
+        // The jobs finish, under a new ETag.
+        api.repos.lock().unwrap().get_mut("o/star").unwrap().clear();
+        api.repos
+            .lock()
+            .unwrap()
+            .get_mut("o/mason")
+            .unwrap()
+            .clear();
         *api.etag.lock().unwrap() = "\"b\"".into();
-        assert!(seen.poll(&gh, "mason-run.yml").unwrap());
-        assert_eq!(seen.jobs, 0);
+        let other = seen.poll(&sources, 2000);
+        assert_eq!(other.gha, 0);
+        b.set_other_jobs(other);
+        assert_eq!(
+            ids.iter()
+                .filter(|i| crate::sched::tests::is_held(&b, **i))
+                .count(),
+            6
+        );
+    }
+
+    #[test]
+    fn macos_jobs_are_counted_apart() {
+        let api = fake(vec![(
+            "o/star",
+            vec![(
+                1,
+                "CLI Build",
+                ".github/workflows/cli.yml",
+                jobs(2, "in_progress", "macos-14"),
+            )],
+        )]);
+        let mut seen = AccountJobs::default();
+        let other = seen.poll(&[source(&api, "o/star", &[])], 1);
+        assert_eq!((other.gha, other.macos), (2, 2));
+    }
+
+    #[test]
+    fn a_304_changes_nothing_and_asks_for_nothing_more() {
+        let api = fake(vec![(
+            "o/r",
+            vec![(
+                1,
+                "CI",
+                ".github/workflows/ci.yml",
+                jobs(3, "in_progress", "ubuntu-latest"),
+            )],
+        )]);
+        let sources = [source(&api, "o/r", &[])];
+        let mut seen = AccountJobs::default();
+        assert_eq!(seen.poll(&sources, 1).gha, 3);
+        api.repos.lock().unwrap().get_mut("o/r").unwrap().clear();
+        let asked = api.log.lock().unwrap().len();
+        // Nothing changed on GitHub's side: the count stays, and only the two conditional
+        // list requests are made, with no job lookups.
+        assert_eq!(seen.poll(&sources, 2).gha, 3);
+        assert_eq!(api.log.lock().unwrap().len(), asked + 2);
+    }
+
+    #[test]
+    fn a_repository_the_token_cannot_read_is_named_and_not_counted() {
+        let api = fake(vec![(
+            "o/r",
+            vec![(
+                1,
+                "CI",
+                ".github/workflows/ci.yml",
+                jobs(2, "in_progress", "ubuntu-latest"),
+            )],
+        )]);
+        let sources = [source(&api, "o/r", &[]), source(&api, "o/private", &[])];
+        let mut seen = AccountJobs::default();
+        let other = seen.poll(&sources, 1);
+        assert_eq!(other.gha, 2);
+        assert_eq!(other.not_counted.len(), 1);
+        assert!(
+            other.not_counted[0].starts_with("o/private"),
+            "{:?}",
+            other.not_counted
+        );
+    }
+
+    #[test]
+    fn a_failed_look_keeps_the_last_count_and_says_it_is_stale() {
+        let api = fake(vec![(
+            "o/r",
+            vec![(
+                1,
+                "CI",
+                ".github/workflows/ci.yml",
+                jobs(2, "in_progress", "ubuntu-latest"),
+            )],
+        )]);
+        let sources = [source(&api, "o/r", &[])];
+        let mut seen = AccountJobs::default();
+        assert!(!seen.poll(&sources, 100).stale);
+        api.repos.lock().unwrap().clear();
+        let other = seen.poll(&sources, 200);
+        assert_eq!((other.gha, other.stale, other.read_at_ms), (2, true, 100));
     }
 }
