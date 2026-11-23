@@ -777,6 +777,38 @@ fn a_pending_ci_counts_its_jobs_by_state_one_entry_per_workflow() {
 }
 
 #[test]
+fn progress_right_after_a_pending_status_reads_nothing_again() {
+    use serde_json::json;
+    // One list of runs and one read of each unfinished run's jobs; the finished run's jobs are
+    // read once, by `progress`. A second `progress` has nothing to reuse and reads all again.
+    let g = judged_gh(
+        json!([
+            {"method": "GET", "url": "/actions/runs?head_sha=sha1", "response": ok(json!({"workflow_runs": [
+                {"id": 5, "name": "pr-gate", "status": "in_progress", "conclusion": null},
+                {"id": 7, "name": "docs", "status": "completed", "conclusion": "success"}]}))},
+            {"method": "GET", "url": "/actions/runs/5/jobs?filter=latest&per_page=100", "response": ok(json!({"jobs": [
+                {"id": 54, "name": "build", "status": "in_progress", "conclusion": null}]}))},
+            {"method": "GET", "url": "/actions/runs/7/jobs?filter=latest&per_page=100", "response": ok(json!({"jobs": [
+                {"id": 71, "name": "lint", "status": "completed", "conclusion": "success"}]}))},
+        ]),
+        true,
+    );
+    let (state, _) = g.gh.status_detail("sha1").unwrap();
+    assert_eq!(state, CiState::Pending);
+    let p = g.gh.progress("sha1").unwrap();
+    assert_eq!(p.workflows.len(), 2);
+    assert_eq!(p.workflows[0].running, 1);
+    assert_eq!(p.workflows[1].passed, 1);
+    assert!(g.http.unused().is_empty());
+    assert_eq!(g.http.requests().len(), 3, "each request made once");
+    // Nothing is left over to reuse: a progress of another commit, or a second one, asks again.
+    assert!(
+        g.gh.progress("sha1").is_err(),
+        "the script has no more answers"
+    );
+}
+
+#[test]
 fn check_runs_give_the_same_breakdown() {
     use serde_json::json;
     let list = json!([
