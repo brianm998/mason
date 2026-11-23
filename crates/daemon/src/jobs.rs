@@ -3403,7 +3403,9 @@ fn agent_job(c: &Ctx) {
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok());
     let mut feedback = std::fs::read_to_string(dir.join("feedback.txt")).ok();
-    feedback = with_retry_note(feedback, take_retry_note(&dir));
+    let one_shot = take_retry_note(&dir);
+    let note_shown = one_shot.is_some();
+    feedback = with_retry_note(feedback, one_shot);
     if let Some(files) = &conflicts {
         if kind == StepKind::Develop {
             let note = conflict_note(&c.project.base_ref(), files);
@@ -3511,6 +3513,15 @@ fn agent_job(c: &Ctx) {
             }
             StepKind::Diagnose | StepKind::Chat | StepKind::Health => String::new(),
         }
+    };
+
+    // The owner's notes on this task's retries override the task text (task 988). The develop
+    // round that just got the one-shot note already has it in its feedback.
+    let prompt = match crate::ownernotes::block(&dir) {
+        Some(b) if kind == StepKind::Review || (kind == StepKind::Develop && !note_shown) => {
+            format!("{prompt}\n\n{b}")
+        }
+        _ => prompt,
     };
 
     // The numbers MASON reserved for this task (a task claimed before numbers existed gets
@@ -5376,6 +5387,10 @@ pub fn cleanup(d: &Arc<Daemon>, task: TaskId, delete_branch: bool) {
         return;
     };
     let landed = t.state == State::Landed;
+    // The owner's retry notes end with the task (task 988).
+    if landed || t.state == State::Canceled {
+        crate::ownernotes::clear(&d.task_dir(task));
+    }
     {
         let lock = d.repo_lock(t.project);
         let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
