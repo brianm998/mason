@@ -730,6 +730,10 @@ message Banner {
   // already being handled). A client draws action and warning as bar rows and info in the top
   // bar's status line. Empty (an older daemon) reads as "warning". Additive.
   string level = 6;
+  // The rest of `text` (#951): the reason, the error, what the owner can do, the related task
+  // numbers. `text` is one short line (no newline, about 80 characters at most); a client
+  // shows a "?" button that opens a dialog with the summary and this. May be empty. Additive.
+  string detail = 7;
 }
 
 message HeaderView {
