@@ -57,6 +57,12 @@ pub struct Group {
     pub modules: BTreeMap<String, BTreeSet<String>>,
     /// One line per narrowed directory target, how its modules were picked (#656).
     pub notes: Vec<String>,
+    /// Unit tests (`--lib`, `--bins`) narrowed to some modules (#958): the libtest filters
+    /// (`covmap::`), and which of the two targets the group runs. Ignored where `lib`/`bins`
+    /// (or `whole`) already run the target whole.
+    pub unit_modules: BTreeSet<String>,
+    pub unit_lib: bool,
+    pub unit_bins: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -362,6 +368,149 @@ fn references(p: &Pkg, same_package: bool, changed_rel: &str, content: &str, tex
         || public_items(content).iter().any(|i| contains_word(text, i))
 }
 
+/// The lib's modules of a package, as `a::b` paths, from its `src/` files: path to module.
+/// `lib.rs`, `main.rs`, and `src/bin/` are not modules of the lib.
+fn lib_modules(p: &Pkg, files: &[String]) -> BTreeMap<String, String> {
+    let prefix = format!("{}/src/", p.dir);
+    let mut out = BTreeMap::new();
+    for f in files {
+        let Some(rel) = f.strip_prefix(&prefix) else {
+            continue;
+        };
+        if let Some(m) = module_path(rel) {
+            out.insert(f.clone(), m);
+        }
+    }
+    out
+}
+
+/// The module path of a file under `src/` (`foo/bar.rs` is `foo::bar`, `foo/mod.rs` is `foo`);
+/// `None` for the crate roots, anything under `bin/`, and non-Rust files.
+fn module_path(rel_in_src: &str) -> Option<String> {
+    let stem = rel_in_src.strip_suffix(".rs")?;
+    if matches!(stem, "lib" | "main") || stem.starts_with("bin/") {
+        return None;
+    }
+    let mut segs: Vec<&str> = stem.split('/').collect();
+    if segs.last() == Some(&"mod") {
+        segs.pop();
+    }
+    (!segs.is_empty()).then(|| segs.join("::"))
+}
+
+/// Does a `mod.rs` hold nothing but module declarations, attributes, comments and `use` lines?
+fn only_declares(text: &str) -> bool {
+    text.lines().map(str::trim).all(|l| {
+        l.is_empty()
+            || l.starts_with("//")
+            || l.starts_with("#[")
+            || l.starts_with("#![")
+            || l.ends_with(';')
+                && (l.starts_with("mod ")
+                    || l.starts_with("pub mod ")
+                    || l.starts_with("pub(crate) mod ")
+                    || l.starts_with("use ")
+                    || l.starts_with("pub use ")
+                    || l.starts_with("pub(crate) use "))
+    })
+}
+
+/// Text without its declaration and `use` lines, which name every module without using it.
+fn without_decls(text: &str) -> String {
+    text.lines()
+        .filter(|l| {
+            let l = l.trim_start();
+            !(l.starts_with("mod ")
+                || l.starts_with("pub mod ")
+                || l.starts_with("pub(crate) mod ")
+                || l.starts_with("use ")
+                || l.starts_with("pub use ")
+                || l.starts_with("pub(crate) use "))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The libtest filters that cover the unit tests of one changed `src` file and of the modules
+/// that refer to it (#958); `None` when the whole lib and bins must run. A module is referred
+/// to by a word scan of the other modules' text (`crate::m`, `super::m`, `use m::...`), plus
+/// the names a `use` line in `lib.rs` or a `mod.rs` brings from it. `mods` maps every module
+/// file to its path, `read` gives text.
+fn unit_filters(
+    p: &Pkg,
+    rel: &str,
+    content: &str,
+    mods: &BTreeMap<String, String>,
+    files: &[String],
+    read: &dyn Fn(&str) -> Option<String>,
+) -> Option<BTreeSet<String>> {
+    let in_src = rel.strip_prefix("src/")?;
+    let mut me = module_path(in_src)?;
+    if content.contains("macro_export") || (in_src.ends_with("/mod.rs") && only_declares(content)) {
+        return None;
+    }
+    // A unit test file of a module (`foo/tests.rs`) is the module's own tests.
+    if let Some(parent) = me.strip_suffix("::tests") {
+        me = parent.to_string();
+    } else if me == "tests" {
+        return None;
+    }
+    let name = me.rsplit("::").next().unwrap_or(&me).to_string();
+    let mut names = vec![name];
+    let prefix = format!("{}/src/", p.dir);
+    let mut picked: BTreeSet<String> = BTreeSet::from([me.clone()]);
+    // Names a `use` line of lib.rs or a mod.rs brings out of the changed module.
+    for f in files.iter().filter(|f| f.starts_with(&prefix)) {
+        let file = f.rsplit('/').next().unwrap_or(f);
+        if file != "lib.rs" && file != "mod.rs" {
+            continue;
+        }
+        let text = read(f).unwrap_or_default();
+        for l in text.lines().map(str::trim) {
+            if l.contains("use ") && contains_word(l, &names[0]) {
+                if l.contains('*') {
+                    return None;
+                }
+                names.extend(
+                    l.split(|c: char| !is_word_char(c))
+                        .filter(|w| {
+                            !w.is_empty()
+                                && !matches!(*w, "pub" | "use" | "crate" | "self" | "super" | "as")
+                        })
+                        .map(String::from),
+                );
+            }
+        }
+    }
+    for f in files.iter().filter(|f| f.starts_with(&prefix)) {
+        let in_f = &f[prefix.len()..];
+        if !in_f.ends_with(".rs") || in_f == rel {
+            continue;
+        }
+        let text = without_decls(&read(f).unwrap_or_default());
+        let hit = names.iter().any(|n| contains_word(&text, n));
+        match mods.get(f) {
+            Some(m) => {
+                if hit {
+                    picked.insert(m.clone());
+                }
+            }
+            // Crate roots and binaries have their own unit tests: filters cannot reach them.
+            None if hit && (text.contains("#[test]") || text.contains("#[cfg(test)]")) => {
+                return None
+            }
+            None => {}
+        }
+    }
+    // A filter that another covers (`foo::` holds `foo::bar::`) is redundant.
+    let all = picked.clone();
+    picked.retain(|m| {
+        !all.iter()
+            .any(|o| o != m && m.starts_with(&format!("{o}::")))
+    });
+    Some(picked.into_iter().map(|m| format!("{m}::")).collect())
+}
+
 /// The packages that depend on `name` through any chain of path dependencies, and `name`.
 fn family<'a>(pkgs: &'a [Pkg], name: &'a str) -> BTreeSet<&'a str> {
     let mut family: BTreeSet<&str> = BTreeSet::from([name]);
@@ -547,12 +696,28 @@ pub fn select_with(
             }
         }
     }
+    // Per package: the unit-test module filters, `None` for the lib and bins whole.
+    let mut unit: BTreeMap<String, Option<BTreeSet<String>>> = BTreeMap::new();
     for (p, rel) in &src_changes {
         let content = read(&format!("{}/{rel}", p.dir)).unwrap_or_default();
         let g = out.entry(p.name.clone()).or_default();
-        g.lib |= p.lib.is_some();
-        g.bins |= !p.bins.is_empty();
         g.doc |= p.lib.is_some() && content.contains("```");
+        let mods = lib_modules(p, files);
+        match p
+            .lib
+            .is_some()
+            .then(|| unit_filters(p, rel, &content, &mods, files, read))
+        {
+            Some(Some(f)) => unit
+                .entry(p.name.clone())
+                .or_insert_with(|| Some(BTreeSet::new()))
+                .as_mut()
+                .map(|set| set.extend(f)),
+            _ => {
+                unit.insert(p.name.clone(), None);
+                None
+            }
+        };
         let fam = family(pkgs, &p.name);
         for q in pkgs.iter().filter(|q| fam.contains(q.name.as_str())) {
             for t in &q.tests {
@@ -592,6 +757,30 @@ pub fn select_with(
                         .tests
                         .insert(t.name.clone());
                 }
+            }
+        }
+    }
+    for (name, filters) in unit {
+        let Some(p) = pkgs.iter().find(|q| q.name == name) else {
+            continue;
+        };
+        let g = out.entry(name).or_default();
+        let total: BTreeSet<String> = lib_modules(p, files).into_values().collect();
+        match filters {
+            Some(f) if !f.is_empty() && f.len() * 2 <= total.len() => {
+                g.unit_modules.extend(f.iter().cloned());
+                g.unit_lib = p.lib.is_some();
+                g.unit_bins = !p.bins.is_empty();
+                g.notes.push(format!(
+                    "{} lib: {} of {} modules, by name scan",
+                    p.name,
+                    f.len(),
+                    total.len()
+                ));
+            }
+            _ => {
+                g.lib |= p.lib.is_some();
+                g.bins |= !p.bins.is_empty();
             }
         }
     }
@@ -665,6 +854,22 @@ pub fn render(groups: &BTreeMap<String, Group>) -> Vec<String> {
         }
         if g.doc {
             out.push(format!("-p {name} --doc"));
+        }
+    }
+    // Narrowed unit tests: a group of their own, since the filter would reach any other target.
+    for (name, g) in groups {
+        let lib_whole = g.lib || !g.unit_lib;
+        let bins_whole = g.bins || !g.unit_bins;
+        if !(g.whole || g.unit_modules.is_empty() || lib_whole && bins_whole) {
+            let mut s = format!("-p {name}");
+            if g.unit_lib {
+                s.push_str(" --lib");
+            }
+            if g.unit_bins {
+                s.push_str(" --bins");
+            }
+            let f: Vec<&str> = g.unit_modules.iter().map(String::as_str).collect();
+            out.push(format!("{s} -- {}", f.join(" ")));
         }
     }
     // A filtered target is a group of its own, as cargo applies a filter to every target of a
@@ -868,7 +1073,11 @@ mod tests {
         // `names` and `plain` mention neither.
         assert_eq!(
             fx.rendered(&["crates/leaf/src/shapes.rs"]),
-            vec!["-p leaf --lib --test own", "-p top --test uses"]
+            vec![
+                "-p leaf --test own",
+                "-p top --test uses",
+                "-p leaf --lib -- shapes::"
+            ]
         );
     }
 
@@ -1050,7 +1259,7 @@ mod tests {
             panic!()
         };
         assert!(g["top"].tests.contains("plain"));
-        assert!(g["leaf"].bins);
+        assert!(g["leaf"].unit_bins);
     }
 
     #[test]

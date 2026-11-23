@@ -56,6 +56,7 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     var settings by mutableStateOf<SettingsSnapshot?>(null)
     var notifySettings by mutableStateOf<NotifySettings?>(null)
     var settingsNotice by mutableStateOf<String?>(null)
+    var remoteSettings by mutableStateOf<RemoteSettings?>(null)
     /** The Devices section (s433): LAN state, paired devices, the code on show, and what the last action said. */
     var lanStatus by mutableStateOf<LanStatus?>(null)
     var devices by mutableStateOf<DeviceList?>(null)
@@ -834,6 +835,19 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         val p = editorProject
         if (p.isNotEmpty()) raw("GET", SettingsPayload.path(p), id = "settings")
         raw("GET", "/notify/settings", id = "notify-settings")
+        raw("GET", "/remote", id = "remote")
+    }
+
+    /** Change the global placement mode; the page reloads `/remote` on the answer. */
+    fun changeGlobalMode(mode: String) {
+        settingsNotice = null
+        raw("POST", "/remote", id = "remote-save", json = SettingsPayload.remoteMode(mode))
+    }
+
+    /** Change the selected project's placement mode. */
+    fun changeProjectMode(mode: String) {
+        settingsNotice = null
+        raw("POST", "/remote", id = "remote-save", json = SettingsPayload.remoteMode(mode, editorProject))
     }
 
     /** Change one project setting (a body from [SettingsPayload]); the page reloads on the answer. */
@@ -1063,9 +1077,11 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
                 if (r.ok) { devicesNotice = "Revoked."; loadDevices() } else devicesNotice = r.error
             }
             if (r.id == "notify-settings" && r.ok) notifySettings = NotifySettings.parse(r.json)
+            if (r.id == "remote" && r.ok) remoteSettings = RemoteSettings.parse(r.json)
             if (r.id in SETTINGS_RESULTS) {
                 settingsNotice = if (r.ok) SettingsPayload.done(r.id) else r.error
                 if (r.ok && (r.id == "settings-save" || r.id == "notify-save")) loadSettings()
+                if (r.ok && r.id == "remote-save") raw("GET", "/remote", id = "remote")
             }
             if (r.id.startsWith("publish:") && r.ok) publishPreview = PublishPreview.parse(r.json)
             onResult?.invoke(r)
