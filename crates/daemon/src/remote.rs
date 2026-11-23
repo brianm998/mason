@@ -1547,7 +1547,30 @@ pub fn execute(
     let _ = std::fs::create_dir_all(dir);
     let rec = record_path(dir, &spec.id);
     let log = dir.join(format!("{}.log", spec.id));
-    let (mut st, resumed) = match State::load(&rec) {
+    let mut loaded = State::load(&rec);
+    // A run is reused only for the tree and command it ran. A record for another key (or an old
+    // one with none) is superseded: its run is cancelled if live, its ref and record go, and the
+    // run starts again.
+    if let Some(old) = loaded.take() {
+        if !spec.tree_key.is_empty() && old.tree_key != spec.tree_key {
+            tracing::info!(
+                id = %spec.id,
+                old_tree = %old.tree_key,
+                new_tree = %spec.tree_key,
+                "not reusing the earlier run: it was made on another tree"
+            );
+            let mut old = old;
+            if !old.collected {
+                cancel(site, &old);
+            }
+            delete_ref(site, &mut old, &rec);
+            let _ = std::fs::remove_file(&rec);
+            let _ = std::fs::remove_file(dir.join(format!("{}.log", spec.id)));
+        } else {
+            loaded = Some(old);
+        }
+    }
+    let (mut st, resumed) = match loaded {
         Some(s) => (s, true),
         None => {
             let name = ref_name(&spec.project, &spec.id);

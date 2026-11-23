@@ -400,6 +400,137 @@ fn estimate(who: &Who, suite: &str, phase: &str) -> Option<u64> {
 
 type Check = Arc<dyn Fn() -> Stop + Send + Sync>;
 
+/// The key a run is reused under: the tree it runs on and its command (the shape
+/// `hostedcheck` files its evidence under). Empty where git cannot be asked at all (a directory
+/// that is no worktree), which compares equal to itself and so changes nothing there; in a
+/// worktree whose state git cannot read, the key is one no other run shares.
+fn run_key_for(cwd: &Path, cmd: &str) -> String {
+    if git::run(cwd, &["rev-parse", "--git-dir"]).is_err() {
+        return String::new();
+    }
+    crate::hostedcheck::key_of(&crate::hostedcheck::tree_key(cwd), cmd)
+}
+
+/// The file in a host's directory that says which key it was started for.
+fn host_key_file(dir: &Path) -> PathBuf {
+    dir.join("run.key")
+}
+
+/// Stop the host `id` (and its second try) and take its directory away, with the log it wrote
+/// under `log_dir`: a run for another tree is not attached to.
+fn discard_host(d: &Arc<Daemon>, id: &str, log_dir: &Path) {
+    let hosts = d.cfg.hosts_dir();
+    for on in [id.to_string(), mason_hostloss_id(id)] {
+        let dir = hosts.join(&on);
+        if !dir.exists() {
+            continue;
+        }
+        if let Ok(mut h) = HostClient::connect(&dir.join("sock"), PREVIOUS, CURRENT, "daemon") {
+            let _ = h.stop(1000);
+        }
+        let _ = mason_step_host::registry::reap_dir_by(&dir, "daemon");
+        let _ = std::fs::remove_dir_all(&dir);
+        for ext in ["log", "exit"] {
+            let _ = std::fs::remove_file(log_dir.join(format!("{on}.{ext}")));
+        }
+    }
+}
+
+fn mason_hostloss_id(id: &str) -> String {
+    crate::hostloss::rerun_id(id)
+}
+
+/// Every attempt a step run started for one suite and rung: `<id>\t<key>` per line, written
+/// before the run starts, so a recovered step finds each run it started (#1074).
+fn attempts_file(who: &Who, tag: &str, suite: &str) -> PathBuf {
+    who.log_dir
+        .join(format!("{}-{tag}-{suite}.attempts", who.id_prefix))
+}
+
+fn read_attempts(path: &Path) -> Vec<(String, String)> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| {
+            let (id, key) = l.split_once('\t').unwrap_or((l, ""));
+            (!id.is_empty()).then(|| (id.to_string(), key.to_string()))
+        })
+        .collect()
+}
+
+fn write_attempts(path: &Path, list: &[(String, String)]) {
+    if let Some(p) = path.parent() {
+        let _ = std::fs::create_dir_all(p);
+    }
+    let text: String = list.iter().map(|(i, k)| format!("{i}\t{k}\n")).collect();
+    let _ = std::fs::write(path, text);
+}
+
+/// What a recovered step finds of the runs its earlier job started.
+struct Recovered {
+    /// The latest attempt for the current key, to attach to.
+    attach: Option<String>,
+    /// There were attempts on record, so the plain first id may be a stale one.
+    had_any: bool,
+}
+
+/// A step that starts its job again after a restart: read the attempts on record, cancel every
+/// run that is for another key or was replaced by a newer attempt (giving its runner unit
+/// back), and name the one to attach to. The record keeps only that one.
+fn recover_attempts(who: &Who, tag: &str, suite: &str, key: &str) -> Recovered {
+    let path = attempts_file(who, tag, suite);
+    let all = read_attempts(&path);
+    if all.is_empty() {
+        return Recovered {
+            attach: None,
+            had_any: false,
+        };
+    }
+    let latest = all.iter().rposition(|(_, k)| k == key);
+    let mut tree_changed = false;
+    for (i, (id, k)) in all.iter().enumerate() {
+        if Some(i) == latest {
+            continue;
+        }
+        if k != key {
+            tree_changed = true;
+            tracing::info!(%id, old = %k, new = %key, "not reusing an earlier run: another tree or command");
+        }
+        crate::remote::cancel_record(&who.d, &who.log_dir.join(format!("{id}.remote")));
+        discard_host(&who.d, id, &who.log_dir);
+    }
+    let keep: Vec<(String, String)> = latest.map(|i| all[i].clone()).into_iter().collect();
+    write_attempts(&path, &keep);
+    let attach = keep.first().map(|(i, _)| i.clone());
+    if let Some(run) = who.run() {
+        let text = if attach.is_some() {
+            Some(format!("reattached to {suite} (same tree)"))
+        } else if tree_changed {
+            Some(format!("{suite} started again: the tree changed"))
+        } else {
+            None
+        };
+        if let Some(t) = text {
+            who.d.progress_report(run, |p, now| p.set_message(&t, now));
+        }
+    }
+    Recovered {
+        attach,
+        had_any: true,
+    }
+}
+
+/// Record attempt `id` for `key` before it starts.
+fn note_attempt(who: &Who, tag: &str, suite: &str, id: &str, key: &str) {
+    let path = attempts_file(who, tag, suite);
+    let mut all = read_attempts(&path);
+    if all.iter().any(|(i, _)| i == id) {
+        return;
+    }
+    all.push((id.to_string(), key.to_string()));
+    write_attempts(&path, &all);
+}
+
 /// Run a suite command under a step host. If the host is lost before the command
 /// finished, run it once more on a fresh host (`<id>-host1`) and judge that run; a
 /// second loss in a row is an error naming both. A lost host is never a result.
@@ -511,6 +642,7 @@ fn run_hosted_resuming(
         }
     }
     let _fallback = fallback;
+    let key = run_key_for(cwd, cmd);
     let hosts = d.cfg.hosts_dir();
     let again_id = hl::rerun_id(id);
     let mut first = None;
@@ -550,6 +682,7 @@ fn run_hosted_resuming(
             watch,
             th,
             env.clone(),
+            &key,
         ) {
             Ok(mut r) => {
                 if let Some(p) = plan.take() {
@@ -613,6 +746,7 @@ fn run_remote(
         ),
         &site,
     );
+    spec.tree_key = run_key_for(cwd, cmd);
     // The whole command of a suite that has shards is split across runners (#701); a narrowed
     // run, a run without the known-red tests and the like are not the whole suite and run on one.
     let sharded = watch.and_then(|s| {
@@ -747,9 +881,19 @@ fn run_hosted_once(
     watch: Option<&Suite>,
     th: Thresholds,
     env: Vec<(String, String)>,
+    key: &str,
 ) -> Result<Ran, HostedErr> {
     let hosts = d.cfg.hosts_dir();
     let dir = hosts.join(id);
+    // A host started for another tree or command is stopped, not attached to (#1074). One with
+    // no key file was started before the key was written: it counts as another.
+    if !key.is_empty()
+        && dir.join("host.kv").exists()
+        && std::fs::read_to_string(host_key_file(&dir)).ok().as_deref() != Some(key)
+    {
+        tracing::info!(%id, "not attaching to the host: it was started for another tree or command");
+        discard_host(d, id, log_dir);
+    }
     if !dir.join("host.kv").exists() {
         let o = SpawnOptions {
             host_bin: d.cfg.host_bin.clone(),
@@ -764,6 +908,9 @@ fn run_hosted_once(
             heartbeat: d.cfg.heartbeat,
         };
         spawn_host(&o).map_err(|e| HostedErr::Other(format!("cannot start `{cmd}`: {e}")))?;
+        if !key.is_empty() {
+            let _ = std::fs::write(host_key_file(&dir), key);
+        }
     }
     let done = Arc::new(AtomicBool::new(false));
     let why = Arc::new(AtomicU8::new(0)); // 0 none, 1 timed out, 2 skipped, 3 gone
@@ -1960,6 +2107,7 @@ fn run_suite(
         .and_then(|t| crate::knownred::skip_command(t, &quarantined));
     let limit = suite.timeout.unwrap_or(Duration::from_secs(1800));
     let mut attempt = 0u32;
+    let mut recovered: Option<Recovered> = None;
     let mut remote_env_fails = 0u32;
     let mut waiting = false;
     loop {
@@ -2033,11 +2181,25 @@ fn run_suite(
             std::thread::sleep(d.cfg.env_retry);
             continue;
         }
-        let id = if attempt == 0 {
-            format!("{}-u-{}", who.id_prefix, suite.name)
-        } else {
-            format!("{}-u{}-{}", who.id_prefix, now_ms(), suite.name)
+        let run_cmd = crate::jobs::pty_wrap(
+            suite.pty,
+            &lifecycle::with_device(
+                skipped_cmd.as_deref().unwrap_or(&suite.command),
+                dev_id(dev.as_ref()),
+            ),
+        );
+        let key = run_key_for(cwd, &run_cmd);
+        // The first time round after a restart: find what the earlier job started (#1074).
+        let recovered =
+            recovered.get_or_insert_with(|| recover_attempts(who, "u", &suite.name, &key));
+        let id = match recovered.attach.take() {
+            Some(id) => id,
+            None if attempt == 0 && !recovered.had_any => {
+                format!("{}-u-{}", who.id_prefix, suite.name)
+            }
+            None => format!("{}-u{}-{}", who.id_prefix, now_ms(), suite.name),
         };
+        note_attempt(who, "u", &suite.name, &id, &key);
         // A whole-suite run with no skips can go on after a lost host from what finished (#621).
         let resume = if skipped_cmd.is_none() && suite.results_file.is_none() && !suite.pty {
             crate::resume::template(suite)
@@ -2048,13 +2210,7 @@ fn run_suite(
             d,
             &who.project,
             &id,
-            &crate::jobs::pty_wrap(
-                suite.pty,
-                &lifecycle::with_device(
-                    skipped_cmd.as_deref().unwrap_or(&suite.command),
-                    dev_id(dev.as_ref()),
-                ),
-            ),
+            &run_cmd,
             cwd,
             limit,
             &who.log_dir,
@@ -2591,11 +2747,37 @@ fn rerun_failing(
     attempt: u32,
     dev: Option<&Dev>,
 ) -> Option<Vec<String>> {
-    let id = if attempt == 0 {
-        format!("{}-r-{}", who.id_prefix, suite.name)
-    } else {
-        format!("{}-r{}-{}", who.id_prefix, now_ms(), suite.name)
+    let cmd = crate::jobs::pty_wrap(
+        suite.pty,
+        &lifecycle::with_device(&rerun_command(suite, failures, false), dev_id(dev)),
+    );
+    let key = run_key_for(cwd, &cmd);
+    // Only the first rung of this suite in this process looks for what an earlier process
+    // started; a later one (after a retry) is a new run.
+    static LOOKED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    let first_here = {
+        let mut l = LOOKED.lock().unwrap_or_else(|e| e.into_inner());
+        let me = format!("{}-{}", who.id_prefix, suite.name);
+        let fresh = !l.contains(&me);
+        if fresh {
+            l.push(me);
+        }
+        fresh
     };
+    let rec = if first_here {
+        recover_attempts(who, "r", &suite.name, &key)
+    } else {
+        Recovered {
+            attach: None,
+            had_any: false,
+        }
+    };
+    let id = match rec.attach {
+        Some(id) => id,
+        None if attempt == 0 && !rec.had_any => format!("{}-r-{}", who.id_prefix, suite.name),
+        None => format!("{}-r{}-{}", who.id_prefix, now_ms(), suite.name),
+    };
+    note_attempt(who, "r", &suite.name, &id, &key);
     run_tests_alone(who, suite, cwd, failures, &id, false, dev)
 }
 
