@@ -12,6 +12,7 @@ pub mod conformance;
 pub mod contract;
 pub mod device;
 pub mod device_kit;
+pub mod github_budget;
 pub mod http;
 pub mod kit;
 pub mod netguard;

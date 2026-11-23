@@ -7,6 +7,7 @@
 
 use crate::config::CiKind;
 use crate::daemon::{now_ms, Daemon};
+use mason_adapter_api::github_budget;
 use mason_adapter_api::http::Curl;
 use mason_adapters::github::{ActionsJob, ActionsRun, GitHub};
 use mason_core::ci_watch::{
@@ -357,6 +358,13 @@ pub fn spawn(d: &Arc<Daemon>) {
         let Some(d) = weak.upgrade() else {
             return false;
         };
+        if let Some(w) = github_budget::wait_s() {
+            // The GitHub quota is used up until its reset: nothing is asked, and nothing is
+            // logged for it (the alert says it once).
+            drop(d);
+            std::thread::sleep(Duration::from_secs(w.min(60)));
+            return true;
+        }
         let mut every = 20;
         for (pid, p) in &d.projects() {
             // Suites the CI jobs cover are recorded green from its runs, at most every five
@@ -395,7 +403,13 @@ pub fn spawn(d: &Arc<Daemon>) {
                 }
             };
             if let Err(e) = pass(&d, *pid, &rules, &gh, now_ms()) {
-                tracing::warn!(project = %p.id, "base-branch CI watch: {e}");
+                let e = match github_budget::exhausted_until() {
+                    Some(t) => crate::bg::quota_text(t),
+                    None => {
+                        tracing::warn!(project = %p.id, "base-branch CI watch: {e}");
+                        e
+                    }
+                };
                 let mut s = load(&d, &p.id);
                 s.error = Some(e);
                 s.checked_at = now_ms();
@@ -403,7 +417,11 @@ pub fn spawn(d: &Arc<Daemon>) {
             }
         }
         drop(d);
-        std::thread::sleep(Duration::from_secs(every));
+        // The CI history is the first to slow down when the quota runs short.
+        std::thread::sleep(Duration::from_secs(github_budget::paced(
+            every,
+            github_budget::Priority::Background,
+        )));
         true
     });
 }
