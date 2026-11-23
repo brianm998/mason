@@ -24,62 +24,87 @@
 name: mason-run
 
 on:
-  push:
-    branches: ["mason/run/**"]
+  # MASON pushes the snapshot ref and then dispatches this workflow on it (a push to
+  # `mason/run/**` must NOT start it: that would start every run twice). The inputs are the
+  # shard list and the runner, so the run is one wave of jobs with no planning job in front.
+  workflow_dispatch:
+    inputs:
+      runs_on:
+        description: "the runner label, as JSON (must equal .mason/run.json's runs_on)"
+        required: true
+        type: string
+      matrix:
+        description: "the shard numbers, as JSON (must equal .mason/run.json's matrix)"
+        required: true
+        type: string
+      timeout_min:
+        description: "the step limit in minutes (must equal .mason/run.json's timeout_min)"
+        required: true
+        type: string
+      sharded:
+        description: "true when the suite is split across runners"
+        required: true
+        type: string
+      toolchains:
+        description: "the toolchains to set up, as JSON (must equal .mason/run.json's toolchains)"
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 jobs:
-  plan:
-    runs-on: ubuntu-latest
-    outputs:
-      runs_on: ${{ steps.p.outputs.runs_on }}
-      timeout_min: ${{ steps.p.outputs.timeout_min }}
-      matrix: ${{ steps.p.outputs.matrix }}
-      sharded: ${{ steps.p.outputs.sharded }}
-      toolchains: ${{ steps.p.outputs.toolchains }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-      - id: p
-        run: |
-          echo "runs_on=$(jq -c .runs_on .mason/run.json)" >> "$GITHUB_OUTPUT"
-          echo "timeout_min=$(jq -c .timeout_min .mason/run.json)" >> "$GITHUB_OUTPUT"
-          # A suite split across runners (#701) has one job per shard, numbered from 1; a run
-          # that is not sharded has the one job `run`.
-          echo "matrix=$(jq -c '.matrix // [1]' .mason/run.json)" >> "$GITHUB_OUTPUT"
-          # The toolchains the run's suite needs (rust, java, swift); only those are set up.
-          echo "toolchains=$(jq -c '.toolchains // ["rust"]' .mason/run.json)" >> "$GITHUB_OUTPUT"
-          echo "sharded=$(jq -r '(.shards // 1) > 1' .mason/run.json)" >> "$GITHUB_OUTPUT"
-
   run:
-    needs: plan
     # MASON finds the job by this name: `run`, or `run (3)` for shard 3.
-    name: ${{ needs.plan.outputs.sharded == 'true' && format('run ({0})', matrix.shard) || 'run' }}
-    runs-on: ${{ fromJSON(needs.plan.outputs.runs_on) }}
+    name: ${{ inputs.sharded == 'true' && format('run ({0})', matrix.shard) || 'run' }}
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
     strategy:
       # A red shard must not cancel the others: every test still runs.
       fail-fast: false
       matrix:
-        shard: ${{ fromJSON(needs.plan.outputs.matrix) }}
+        shard: ${{ fromJSON(inputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
+      # The inputs chose the runner and the shards; run.json is what MASON pinned. A run whose
+      # inputs differ from it does not go on.
+      - name: inputs match run.json
+        shell: bash
+        env:
+          IN_RUNS_ON: ${{ inputs.runs_on }}
+          IN_MATRIX: ${{ inputs.matrix }}
+          IN_TIMEOUT: ${{ inputs.timeout_min }}
+          IN_SHARDED: ${{ inputs.sharded }}
+          IN_TOOLCHAINS: ${{ inputs.toolchains }}
+        run: |
+          set -euo pipefail
+          bad=0
+          same() {
+            if [ "$2" != "$3" ]; then
+              echo "input $1 is '$2' but .mason/run.json says '$3'; refusing to run" >&2
+              bad=1
+            fi
+          }
+          same runs_on "$IN_RUNS_ON" "$(jq -c .runs_on .mason/run.json)"
+          same matrix "$IN_MATRIX" "$(jq -c '.matrix // [1]' .mason/run.json)"
+          same timeout_min "$IN_TIMEOUT" "$(jq -c .timeout_min .mason/run.json)"
+          same sharded "$IN_SHARDED" "$(jq -r '(.shards // 1) > 1' .mason/run.json)"
+          same toolchains "$IN_TOOLCHAINS" "$(jq -c '.toolchains // ["rust"]' .mason/run.json)"
+          exit "$bad"
+
       # MASON's own setup, for its four suites: Rust (the workspace and the exit scripts), Swift
       # (clients/swift, macOS runners) and Gradle (clients/compose).
       - uses: dtolnay/rust-toolchain@master
-        if: contains(fromJSON(needs.plan.outputs.toolchains), 'rust')
+        if: contains(fromJSON(inputs.toolchains), 'rust')
         with:
           toolchain: 1.96.0
           components: rustfmt, clippy
       # The suites build into $HOME/.cache/mason-target/<checkout dir>, which rust-cache does
       # not cache; point it at the workspace's ./target, which it does.
       - name: Link the suite's target directory into the workspace
-        if: contains(fromJSON(needs.plan.outputs.toolchains), 'rust')
+        if: contains(fromJSON(inputs.toolchains), 'rust')
         shell: bash
         run: |
           set -euo pipefail
@@ -88,13 +113,13 @@ jobs:
       # One shared key for every MASON run. Run branches only restore; mason-cache.yml saves it
       # from the base branch, so the ref-scoped caches of hundreds of run branches never pile up.
       - uses: Swatinem/rust-cache@v2
-        if: contains(fromJSON(needs.plan.outputs.toolchains), 'rust')
+        if: contains(fromJSON(inputs.toolchains), 'rust')
         with:
           shared-key: mason-run
           save-if: ${{ github.ref == 'refs/heads/develop' }}
           cache-on-failure: true
       - name: Select Xcode
-        if: runner.os == 'macOS' && contains(fromJSON(needs.plan.outputs.toolchains), 'swift')
+        if: runner.os == 'macOS' && contains(fromJSON(inputs.toolchains), 'swift')
         shell: bash
         run: |
           set -euo pipefail
@@ -111,15 +136,15 @@ jobs:
           fi
           xcodebuild -version
       - uses: actions/setup-java@v4
-        if: contains(fromJSON(needs.plan.outputs.toolchains), 'java')
+        if: contains(fromJSON(inputs.toolchains), 'java')
         with: { distribution: temurin, java-version: "21" }
       - uses: gradle/actions/setup-gradle@v4
-        if: contains(fromJSON(needs.plan.outputs.toolchains), 'java')
+        if: contains(fromJSON(inputs.toolchains), 'java')
         with: { gradle-version: "8.12" }
 
       - name: run
         shell: bash
-        timeout-minutes: ${{ fromJSON(needs.plan.outputs.timeout_min) }}
+        timeout-minutes: ${{ fromJSON(inputs.timeout_min) }}
         run: |
           set +e
           out="$RUNNER_TEMP/mason-out"
@@ -165,7 +190,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ needs.plan.outputs.sharded == 'true' && format('mason-run-{0}', matrix.shard) || 'mason-run' }}
+          name: ${{ inputs.sharded == 'true' && format('mason-run-{0}', matrix.shard) || 'mason-run' }}
           path: ${{ runner.temp }}/mason-out
           if-no-files-found: error
 
