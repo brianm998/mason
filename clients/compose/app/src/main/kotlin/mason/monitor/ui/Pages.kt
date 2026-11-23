@@ -997,6 +997,13 @@ fun SettingsPage(model: MonitorModel) {
                 }
             }
         }
+        if (s != null) {
+            Section("Where runs go") {
+                val r = model.remoteSettings
+                if (r == null) Text("Loading where runs go.", style = theme.body(color = theme.muted))
+                else RemotePlacementBody(r, s.project, { model.changeGlobalMode(it) }, { model.changeProjectMode(it) })
+            }
+        }
         model.notifySettings?.let { n ->
             Section("Notifications") {
                 n.routes.forEach { r ->
@@ -1023,13 +1030,32 @@ fun SettingsPage(model: MonitorModel) {
     }
 }
 
+/** The body of the "Where runs go" section (#891): the global mode and the project's. */
 @Composable
-private fun SettingChoice(title: String, tag: String, value: String, pick: (String) -> Unit) {
+internal fun RemotePlacementBody(remote: RemoteSettings, project: String, pickGlobal: (String) -> Unit, pickProject: (String) -> Unit) {
     val theme = LocalTheme.current
+    SettingChoice("All of MASON", "settings:remote:global", remote.mode, options = RemoteSettings.MODES, onPick = pickGlobal)
+    remote.problem?.let { Text(it, style = theme.small(color = theme.muted)) }
+    remote.changedText?.let { Text(it, style = theme.small(color = theme.muted)) }
+    remote.project(project)?.let { p ->
+        SettingChoice(project, "settings:remote:project", p.mode, options = RemoteSettings.MODES, enabled = p.canChange, onPick = pickProject)
+        Text(p.sourceText, style = theme.small(color = theme.muted))
+        if (p.runsOn.isNotEmpty()) Text("GitHub runner: ${p.runsOn}", style = theme.small(color = theme.muted))
+    }
+    Text(RemoteSettings.EXPLANATION, style = theme.small(color = theme.muted))
+}
+
+@Composable
+internal fun SettingChoice(
+    title: String, tag: String, value: String,
+    options: List<String> = SettingsSnapshot.DISPOSITIONS, enabled: Boolean = true, onPick: (String) -> Unit,
+) {
+    val theme = LocalTheme.current
+    val pick = onPick
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(theme.spacing)) {
         Text(title, style = theme.body())
-        SettingsSnapshot.DISPOSITIONS.forEach { o ->
-            androidx.compose.material3.TextButton(onClick = { if (o != value) pick(o) }, modifier = Modifier.testTag("$tag:$o")) {
+        options.forEach { o ->
+            androidx.compose.material3.TextButton(onClick = { if (o != value) pick(o) }, enabled = enabled, modifier = Modifier.testTag("$tag:$o")) {
                 Text(if (o == value) "[$o]" else o, style = theme.body())
             }
         }
