@@ -367,6 +367,7 @@ swift = "done"
 compose = "done"
 ios = "todo"
 ios_reason = "Not in the first pass (#951): the phone layout draws its own banner rows"
+platform_reason = "The iOS app does not have the one-line notification rows or the \"?\" details dialog yet: s979 built them in the Swift and Compose monitors only (#951)"
 android = "todo"
 android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
