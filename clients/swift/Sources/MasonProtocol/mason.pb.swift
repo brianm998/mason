@@ -2193,6 +2193,11 @@ public nonisolated struct Mason_V1_Banner: Sendable {
   /// bar's status line. Empty (an older daemon) reads as "warning". Additive.
   public var level: String = String()
 
+  /// The rest of `text` (#951): the reason, the error, what the owner can do, the related task
+  /// numbers. `text` is one short line (no newline, about 80 characters at most); a client
+  /// shows a "?" button that opens a dialog with the summary and this. May be empty. Additive.
+  public var detail: String = String()
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -8034,7 +8039,7 @@ nonisolated extension Mason_V1_StateCount: SwiftProtobuf.Message, SwiftProtobuf.
 
 nonisolated extension Mason_V1_Banner: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Banner"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}kind\0\u{1}text\0\u{1}project\0\u{1}mode\0\u{1}session\0\u{1}level\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}kind\0\u{1}text\0\u{1}project\0\u{1}mode\0\u{1}session\0\u{1}level\0\u{1}detail\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -8048,6 +8053,7 @@ nonisolated extension Mason_V1_Banner: SwiftProtobuf.Message, SwiftProtobuf._Mes
       case 4: try { try decoder.decodeSingularStringField(value: &self.mode) }()
       case 5: try { try decoder.decodeSingularUInt64Field(value: &self.session) }()
       case 6: try { try decoder.decodeSingularStringField(value: &self.level) }()
+      case 7: try { try decoder.decodeSingularStringField(value: &self.detail) }()
       default: break
       }
     }
@@ -8072,6 +8078,9 @@ nonisolated extension Mason_V1_Banner: SwiftProtobuf.Message, SwiftProtobuf._Mes
     if !self.level.isEmpty {
       try visitor.visitSingularStringField(value: self.level, fieldNumber: 6)
     }
+    if !self.detail.isEmpty {
+      try visitor.visitSingularStringField(value: self.detail, fieldNumber: 7)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -8082,6 +8091,7 @@ nonisolated extension Mason_V1_Banner: SwiftProtobuf.Message, SwiftProtobuf._Mes
     if lhs.mode != rhs.mode {return false}
     if lhs.session != rhs.session {return false}
     if lhs.level != rhs.level {return false}
+    if lhs.detail != rhs.detail {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
