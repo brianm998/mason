@@ -28,6 +28,18 @@ pub const WINDOW_S: u64 = 600;
 /// 1795455580 on some), and windows are an hour apart.
 const RESET_JITTER_S: u64 = 120;
 
+/// How many answers of a window other than the record's must agree, and outnumber the record's
+/// own, before they replace it while the record's window is live and no `/rate_limit` read
+/// vouches for it ([`Budget::record`]).
+const AGREE: u32 = 3;
+/// How often `GET /rate_limit` (free: it is not charged to the quota) is read, in seconds.
+const AUTH_EVERY_S: u64 = 300;
+/// The soonest a read is tried again after an attempt, failed or not, in seconds.
+const AUTH_RETRY_S: u64 = 60;
+/// How long a `/rate_limit` read is trusted to name the live window, in seconds: while it is,
+/// answers of any other window are ignored.
+const AUTH_TRUST_S: u64 = 900;
+
 /// The most an interval is stretched, as a multiple of its normal length.
 const MAX_FACTOR: u64 = 30;
 /// The longest a stretched interval gets, in seconds.
@@ -131,6 +143,42 @@ pub struct Budget {
     /// Recent calls: (second, caller, charged), oldest first.
     events: VecDeque<(u64, String, bool)>,
     totals: BTreeMap<String, Totals>,
+    /// How many answers have named the record's window.
+    votes: u32,
+    /// Answers of another window than the record's, which is live: the window and how many.
+    cand: Option<(Quota, u32)>,
+    /// When `GET /rate_limit` last set the record, and when one was last tried.
+    auth_at: Option<u64>,
+    attempt_at: Option<u64>,
+}
+
+/// Do two quotas name one window (resets a few seconds apart)?
+fn same_window(a: &Quota, b: &Quota) -> bool {
+    a.reset.abs_diff(b.reset) <= RESET_JITTER_S
+}
+
+/// Two answers of one window as one quota: the lowest remaining, the highest used, the later
+/// reset.
+fn merge(old: &Quota, new: &Quota) -> Quota {
+    Quota {
+        remaining: old.remaining.min(new.remaining),
+        used: old.used.max(new.used),
+        reset: old.reset.max(new.reset),
+        ..*new
+    }
+}
+
+/// The `core` quota of a `GET /rate_limit` body (`{"resources": {"core": {...}}}`).
+pub fn authoritative_of(body: &str) -> Option<Quota> {
+    let v: Value = serde_json::from_str(body).ok()?;
+    let c = v.get("resources")?.get("core")?;
+    let num = |n: &str| c.get(n).and_then(Value::as_u64);
+    Some(Quota {
+        limit: num("limit")?,
+        remaining: num("remaining")?,
+        reset: num("reset")?,
+        used: num("used"),
+    })
 }
 
 impl Budget {
@@ -139,9 +187,21 @@ impl Budget {
     }
 
     /// An answer from GitHub: count it for `caller`, and take the quota from its headers.
-    /// Answers arrive from many threads in any order. One of the same window (a reset within
-    /// [`RESET_JITTER_S`]) keeps the lower remaining count; one of a later window replaces the
-    /// record and one of an earlier window changes nothing.
+    /// Answers arrive from many threads in any order, and not all describe the quota that
+    /// counts: on 2026-11-23 `/actions/permissions`, `/actions/caches`, `/actions/cache/usage`
+    /// and `/releases/latest` answered with `x-ratelimit-resource: core` and a window of their
+    /// own (a reset 379 s later, a count of 4795 while the real one was 4368), and the later
+    /// reset replaced the record. So, while the record's window is live:
+    ///
+    /// * an answer of the same window (a reset within [`RESET_JITTER_S`]) keeps the lower
+    ///   remaining count;
+    /// * an answer of another window changes nothing when a `/rate_limit` read of the last
+    ///   [`AUTH_TRUST_S`] seconds vouches for the record ([`Budget::note_authoritative`]);
+    /// * else it is only a candidate, and replaces the record once [`AGREE`] answers named
+    ///   that window and they outnumber those of the record's own (so a first odd answer after a
+    ///   restart loses to the real window's answers that follow, earlier or later).
+    ///
+    /// Once the record's window has ended, the next answer starts a new one.
     pub fn record(&mut self, caller: &str, now_s: u64, status: u16, headers: &[(String, String)]) {
         let charged = status != 304;
         self.events.push_back((now_s, caller.to_string(), charged));
@@ -152,18 +212,74 @@ impl Budget {
         let Some(new) = quota_of(headers) else {
             return;
         };
-        self.core = Some(match self.core {
-            Some(old) if old.reset > now_s && old.reset.abs_diff(new.reset) <= RESET_JITTER_S => {
-                Quota {
-                    remaining: old.remaining.min(new.remaining),
-                    used: old.used.max(new.used),
-                    reset: old.reset.max(new.reset),
-                    ..new
-                }
-            }
-            Some(old) if old.reset > now_s && old.reset > new.reset => old,
-            _ => new,
+        let Some(old) = self.core.filter(|q| q.reset > now_s) else {
+            self.core = Some(new);
+            self.votes = 1;
+            self.cand = None;
+            return;
+        };
+        if same_window(&old, &new) {
+            self.core = Some(merge(&old, &new));
+            self.votes = self.votes.saturating_add(1);
+            return;
+        }
+        if self.authority_fresh(now_s) {
+            return;
+        }
+        let (cand, n) = match self.cand {
+            Some((c, n)) if same_window(&c, &new) => (merge(&c, &new), n + 1),
+            _ => (new, 1),
+        };
+        if n >= AGREE && n > self.votes {
+            self.core = Some(cand);
+            self.votes = n;
+            self.cand = None;
+        } else {
+            self.cand = Some((cand, n));
+        }
+    }
+
+    fn authority_fresh(&self, now_s: u64) -> bool {
+        self.auth_at
+            .is_some_and(|t| now_s.saturating_sub(t) <= AUTH_TRUST_S)
+    }
+
+    /// The answer of `GET /rate_limit`: the truth. It sets the record to that window, keeping
+    /// the lower remaining count when the record named the same one (an answer may have
+    /// arrived after the read was made).
+    pub fn note_authoritative(&mut self, now_s: u64, q: Quota) {
+        self.auth_at = Some(now_s);
+        self.attempt_at = Some(now_s);
+        self.cand = None;
+        self.votes = AGREE;
+        self.core = Some(match self.core.filter(|o| o.reset > now_s) {
+            Some(old) if same_window(&old, &q) => Quota {
+                remaining: old.remaining.min(q.remaining),
+                used: old.used.max(q.used),
+                ..q
+            },
+            _ => q,
         });
+    }
+
+    /// Whether a `/rate_limit` read is due, and if so it is now taken as tried (the caller makes
+    /// it): never within [`AUTH_RETRY_S`] of the last attempt, else when none has succeeded,
+    /// the last is [`AUTH_EVERY_S`] old, or the record's window has ended.
+    pub fn claim_refresh(&mut self, now_s: u64) -> bool {
+        if self
+            .attempt_at
+            .is_some_and(|t| now_s.saturating_sub(t) < AUTH_RETRY_S)
+        {
+            return false;
+        }
+        let due = self.quota(now_s).is_none()
+            || self
+                .auth_at
+                .is_none_or(|t| now_s.saturating_sub(t) >= AUTH_EVERY_S);
+        if due {
+            self.attempt_at = Some(now_s);
+        }
+        due
     }
 
     fn prune(&mut self, now_s: u64) {
@@ -260,6 +376,9 @@ impl Budget {
                 v["used"] = u.into();
             }
         }
+        if let Some(t) = self.auth_at {
+            v["checked_ms"] = (t * 1000).into();
+        }
         v
     }
 }
@@ -319,7 +438,7 @@ pub fn current_caller() -> String {
 }
 
 /// The request path without the host or the query: what a debug line may show.
-fn path_of(url: &str) -> &str {
+pub(crate) fn path_of(url: &str) -> &str {
     let rest = url.split_once("://").map_or(url, |(_, r)| r);
     let path = rest.find('/').map_or("", |i| &rest[i..]);
     path.split('?').next().unwrap_or(path)
@@ -344,6 +463,19 @@ pub fn note_request(method: &str, url: &str, status: u16, headers: &[(String, St
         "GitHub request"
     );
     with(|b| b.record(&who, now_s(), status, headers));
+}
+
+/// Whether this thread should read `GET /rate_limit` now (it is then taken as tried: see
+/// [`Budget::claim_refresh`]).
+pub fn claim_refresh() -> bool {
+    with(|b| b.claim_refresh(now_s()))
+}
+
+/// The body of a `GET /rate_limit` answer: the record's truth.
+pub fn note_rate_limit(body: &str) {
+    if let Some(q) = authoritative_of(body) {
+        with(|b| b.note_authoritative(now_s(), q));
+    }
 }
 
 /// Seconds to wait before any request may be sent, while the quota is used up.
@@ -442,15 +574,15 @@ mod tests {
         // An answer of an older window (an earlier reset) changes nothing.
         b.record("a", 1001, 200, &hdrs(5000, 4999, 1500));
         assert_eq!(b.quota(1001).unwrap().remaining, 90);
-        // A later window replaces it.
-        b.record("a", 1002, 200, &hdrs(5000, 4999, 5600));
-        assert_eq!(b.quota(1002).unwrap().remaining, 4999);
+        // A later window replaces it once the old one has ended.
+        b.record("a", 2000, 200, &hdrs(5000, 4999, 5600));
+        assert_eq!(b.quota(2000).unwrap().remaining, 4999);
         // Another resource never changes the core record.
         let mut s = hdrs(30, 0, 5600);
         s.retain(|(k, _)| k != "x-ratelimit-resource");
         s.push(("x-ratelimit-resource".into(), "search".into()));
-        b.record("a", 1003, 403, &s);
-        assert_eq!(b.wait_s(1003), None);
+        b.record("a", 2001, 403, &s);
+        assert_eq!(b.wait_s(2001), None);
     }
 
     /// Two answers of one window as GitHub sent them on 2026-11-23: the same token and hour,
@@ -472,6 +604,149 @@ mod tests {
         // The next hour's window replaces the record.
         b.record("a", 1_795_455_600, 200, &hdrs(5000, 4990, 1_795_459_180));
         assert_eq!(b.quota(1_795_455_600).unwrap().remaining, 4990);
+    }
+
+    /// Measured 2026-11-23: GitHub's `/rate_limit` said remaining 4368, reset 1795466385, while
+    /// `/actions/permissions`, `/actions/caches`, `/actions/cache/usage` and `/releases/latest`
+    /// answered 4795 with reset 1795466764 (a window of their own, 379 s later), and the record
+    /// took it.
+    const REAL: u64 = 1_795_466_385;
+    const ODD: u64 = 1_795_466_764;
+    const NOW: u64 = 1_795_464_800;
+
+    #[test]
+    fn one_answer_of_a_later_window_does_not_replace_a_live_record() {
+        let mut b = Budget::new();
+        b.record("a", NOW, 200, &hdrs(5000, 4368, REAL));
+        b.record("ci-watch", NOW + 1, 200, &hdrs(5000, 4795, ODD));
+        let q = b.quota(NOW + 1).unwrap();
+        assert_eq!((q.remaining, q.reset), (4368, REAL));
+        // Nor do two, nor does it lift the count when the real window answers again.
+        b.record("ci-watch", NOW + 2, 200, &hdrs(5000, 4794, ODD));
+        b.record("a", NOW + 3, 200, &hdrs(5000, 4360, REAL - 1));
+        let q = b.quota(NOW + 3).unwrap();
+        assert_eq!((q.remaining, q.reset), (4360, REAL));
+    }
+
+    #[test]
+    fn a_new_window_is_taken_once_the_old_one_has_ended() {
+        let mut b = Budget::new();
+        b.record("a", NOW, 200, &hdrs(5000, 10, REAL));
+        // The odd one is ahead while the record is live: ignored. At the reset the record is
+        // stale and the next answer, of whichever window, starts afresh.
+        b.record("a", NOW + 1, 200, &hdrs(5000, 4795, ODD));
+        assert_eq!(b.quota(NOW + 1).unwrap().remaining, 10);
+        assert_eq!(b.quota(REAL), None);
+        b.record("a", REAL + 1, 200, &hdrs(5000, 4999, REAL + 3600));
+        let q = b.quota(REAL + 1).unwrap();
+        assert_eq!((q.remaining, q.reset), (4999, REAL + 3600));
+    }
+
+    #[test]
+    fn after_a_restart_a_first_odd_answer_loses_to_the_answers_that_follow() {
+        let mut b = Budget::new();
+        // The first answer after the start is the odd bucket's.
+        b.record("a", NOW, 200, &hdrs(5000, 4825, ODD));
+        assert_eq!(b.quota(NOW).unwrap().reset, ODD);
+        // The real window's answers, earlier by 379 s, are only candidates at first ...
+        b.record("a", NOW + 1, 200, &hdrs(5000, 4368, REAL));
+        b.record("a", NOW + 2, 200, &hdrs(5000, 4367, REAL));
+        assert_eq!(b.quota(NOW + 2).unwrap().reset, ODD);
+        // ... and replace the record when three agree and outnumber the odd one's.
+        b.record("a", NOW + 3, 200, &hdrs(5000, 4366, REAL - 1));
+        let q = b.quota(NOW + 3).unwrap();
+        assert_eq!((q.remaining, q.reset), (4366, REAL));
+        // Odd answers now are the minority.
+        b.record("a", NOW + 4, 200, &hdrs(5000, 4793, ODD));
+        b.record("a", NOW + 5, 200, &hdrs(5000, 4792, ODD));
+        b.record("a", NOW + 6, 200, &hdrs(5000, 4791, ODD));
+        assert_eq!(b.quota(NOW + 6).unwrap().reset, REAL);
+    }
+
+    #[test]
+    fn a_rate_limit_read_is_the_truth_and_shields_the_record() {
+        let mut b = Budget::new();
+        b.record("a", NOW, 200, &hdrs(5000, 4825, ODD));
+        let body = r#"{"resources":{"core":{"limit":5000,"used":632,"remaining":4368,"reset":1795466385},
+            "search":{"limit":30,"used":0,"remaining":30,"reset":1795464860}}}"#;
+        let q = authoritative_of(body).unwrap();
+        assert_eq!((q.remaining, q.used, q.reset), (4368, Some(632), REAL));
+        b.note_authoritative(NOW + 1, q);
+        let q = b.quota(NOW + 1).unwrap();
+        assert_eq!((q.remaining, q.reset), (4368, REAL));
+        // However many odd answers follow, they change nothing; the real ones are merged.
+        for i in 0..10 {
+            b.record("a", NOW + 2 + i, 200, &hdrs(5000, 4790 - i, ODD));
+        }
+        b.record("a", NOW + 20, 200, &hdrs(5000, 4300, REAL - 1));
+        let q = b.quota(NOW + 20).unwrap();
+        assert_eq!((q.remaining, q.reset), (4300, REAL));
+        assert_eq!(b.snapshot(NOW + 20)["checked_ms"], (NOW + 1) * 1000);
+        // A read that is not a rate-limit body names nothing.
+        assert_eq!(authoritative_of("{}"), None);
+        assert_eq!(authoritative_of("not json"), None);
+    }
+
+    #[test]
+    fn a_rate_limit_read_that_is_stale_no_longer_shields_the_record() {
+        let mut b = Budget::new();
+        let q = authoritative_of(&format!(
+            r#"{{"resources":{{"core":{{"limit":5000,"used":1000,"remaining":4000,"reset":{REAL}}}}}}}"#
+        ))
+        .unwrap();
+        b.note_authoritative(NOW, q);
+        // Within the trust time the odd window is ignored however often it answers.
+        for i in 0..5 {
+            b.record("a", NOW + AUTH_TRUST_S, 200, &hdrs(5000, 4700 - i, ODD));
+        }
+        assert_eq!(b.quota(NOW + AUTH_TRUST_S).unwrap().reset, REAL);
+        // Past it (reads kept failing) the voting rule decides: the read counts as AGREE
+        // answers, so the other window needs more than that.
+        let later = NOW + AUTH_TRUST_S + 1;
+        for i in 0..AGREE as u64 {
+            b.record("a", later, 200, &hdrs(5000, 4700 - i, ODD));
+        }
+        assert_eq!(b.quota(later).unwrap().reset, REAL);
+        b.record("a", later, 200, &hdrs(5000, 4690, ODD));
+        assert_eq!(b.quota(later).unwrap().reset, ODD);
+    }
+
+    #[test]
+    fn a_rate_limit_read_is_due_at_the_start_every_few_minutes_and_after_a_reset() {
+        let mut b = Budget::new();
+        assert!(b.claim_refresh(NOW));
+        // Taken as tried: a second thread does not repeat it, nor within a minute.
+        assert!(!b.claim_refresh(NOW));
+        assert!(!b.claim_refresh(NOW + AUTH_RETRY_S - 1));
+        // A failed read (nothing noted) is tried again after the retry time.
+        assert!(b.claim_refresh(NOW + AUTH_RETRY_S));
+        let q = Quota {
+            limit: 5000,
+            remaining: 4000,
+            reset: REAL,
+            used: Some(1000),
+        };
+        b.note_authoritative(NOW + 100, q);
+        assert!(!b.claim_refresh(NOW + 100 + AUTH_EVERY_S - 1));
+        assert!(b.claim_refresh(NOW + 100 + AUTH_EVERY_S));
+        // When the window has ended a read is due as soon as the retry time allows.
+        b.note_authoritative(REAL - 10, q);
+        assert!(!b.claim_refresh(REAL + 1));
+        assert!(b.claim_refresh(REAL + AUTH_RETRY_S));
+    }
+
+    #[test]
+    fn answers_without_core_headers_and_304s_of_the_live_window_do_not_disturb_it() {
+        let mut b = Budget::new();
+        b.record("a", NOW, 200, &hdrs(5000, 4368, REAL));
+        // A 404 or a 304 that carries the window's headers is the same window (as probed);
+        // one with no ratelimit headers at all sets nothing.
+        b.record("a", NOW + 1, 404, &hdrs(5000, 4367, REAL - 1));
+        b.record("a", NOW + 2, 304, &hdrs(5000, 4367, REAL));
+        b.record("a", NOW + 3, 404, &[]);
+        let q = b.quota(NOW + 3).unwrap();
+        assert_eq!((q.remaining, q.reset), (4367, REAL));
+        assert_eq!(b.snapshot(NOW + 3)["callers"][0]["calls"], 4);
     }
 
     #[test]

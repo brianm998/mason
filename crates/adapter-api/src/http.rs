@@ -177,7 +177,11 @@ impl Curl {
     ) -> Result<Response, Transport> {
         netguard::check(&r.url).map_err(|e| Transport(e.to_string()))?;
         let github = is_github_api(&r.url);
-        if github {
+        // `GET /rate_limit` is free (not charged to any quota) and says what the quota is, so it
+        // is neither refused nor counted as a call.
+        let rate_limit = github && github_budget::path_of(&r.url) == "/rate_limit";
+        if github && !rate_limit {
+            self.refresh_quota(r);
             // The core quota is used up: GitHub would refuse, so nothing is sent. The answer is
             // its own refusal, with the time left to the reset.
             if let Some(wait) = github_budget::wait_s() {
@@ -224,14 +228,42 @@ impl Curl {
             ));
         }
         let (status, headers) = parse_head(&head)?;
-        if github {
+        let body = String::from_utf8_lossy(&out.stdout).to_string();
+        if rate_limit {
+            if status == 200 {
+                github_budget::note_rate_limit(&body);
+            }
+        } else if github {
             github_budget::note_request(&r.method, &r.url, status, &headers);
         }
         Ok(Response {
             status,
             headers,
-            body: String::from_utf8_lossy(&out.stdout).to_string(),
+            body,
         })
+    }
+
+    /// Read `GET /rate_limit` with the request's own credentials when the record is due for it
+    /// ([`github_budget::claim_refresh`]: at most every few minutes, and on the first request
+    /// after a start or a reset). Some endpoints answer with a quota window of their own, so
+    /// the headers of answers alone cannot be trusted to name the window that counts; this read
+    /// can. A failed read changes nothing and is not retried for a minute.
+    fn refresh_quota(&self, r: &Request) {
+        let Some(auth) = r
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+        else {
+            return;
+        };
+        if !github_budget::claim_refresh() {
+            return;
+        }
+        let req = Request::get(&format!("{}/rate_limit", GITHUB_API))
+            .with("Authorization", &auth.1)
+            .with("Accept", "application/vnd.github+json")
+            .with("User-Agent", "mason");
+        let _ = self.fetch(&req, None);
     }
 }
 
@@ -263,6 +295,8 @@ fn is_github_api(url: &str) -> bool {
     url.strip_prefix("https://")
         .is_some_and(|r| r.split('/').next() == Some("api.github.com"))
 }
+
+const GITHUB_API: &str = "https://api.github.com";
 
 fn nonce() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
