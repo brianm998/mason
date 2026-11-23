@@ -23,6 +23,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// How far back "recently" looks, in seconds.
 pub const WINDOW_S: u64 = 600;
 
+/// How far apart two answers' `x-ratelimit-reset` may be and still name the same window.
+/// GitHub's answers for one window differ by a few seconds (2026-11-23: 1795455576 on most,
+/// 1795455580 on some), and windows are an hour apart.
+const RESET_JITTER_S: u64 = 120;
+
 /// The most an interval is stretched, as a multiple of its normal length.
 const MAX_FACTOR: u64 = 30;
 /// The longest a stretched interval gets, in seconds.
@@ -134,8 +139,9 @@ impl Budget {
     }
 
     /// An answer from GitHub: count it for `caller`, and take the quota from its headers.
-    /// Answers arrive from many threads in any order, so a record that is newer (a later reset)
-    /// replaces the old one and one of the same window keeps the lower remaining count.
+    /// Answers arrive from many threads in any order. One of the same window (a reset within
+    /// [`RESET_JITTER_S`]) keeps the lower remaining count; one of a later window replaces the
+    /// record and one of an earlier window changes nothing.
     pub fn record(&mut self, caller: &str, now_s: u64, status: u16, headers: &[(String, String)]) {
         let charged = status != 304;
         self.events.push_back((now_s, caller.to_string(), charged));
@@ -147,12 +153,15 @@ impl Budget {
             return;
         };
         self.core = Some(match self.core {
+            Some(old) if old.reset > now_s && old.reset.abs_diff(new.reset) <= RESET_JITTER_S => {
+                Quota {
+                    remaining: old.remaining.min(new.remaining),
+                    used: old.used.max(new.used),
+                    reset: old.reset.max(new.reset),
+                    ..new
+                }
+            }
             Some(old) if old.reset > now_s && old.reset > new.reset => old,
-            Some(old) if old.reset > now_s && old.reset == new.reset => Quota {
-                remaining: old.remaining.min(new.remaining),
-                used: old.used.max(new.used),
-                ..new
-            },
             _ => new,
         });
     }
@@ -284,15 +293,57 @@ impl Drop for CallerGuard {
 }
 
 /// Name the caller of the GitHub requests this thread makes until the guard is dropped
-/// (`remote-run`, `other-workflows`, `ci-watch`, `tracker`, `landing`; `other` by default).
+/// (`remote-run`, `other-workflows`, `ci-watch`, `tracker`, `landing`, ...; by default the
+/// thread's name under `other:`, see [`thread_label`]).
 pub fn as_caller(name: &'static str) -> CallerGuard {
     CallerGuard(CALLER.with(|c| c.replace(name)))
 }
 
+/// What a thread without a caller name is counted under: `other:` and the start of its
+/// thread's name (`other:batch` for `batch-3`, `other:unnamed` for none), so the unnamed
+/// spenders show up in `mason resources` by where they run.
+pub fn thread_label(thread: Option<&str>) -> String {
+    let kind = thread
+        .and_then(|n| n.split(['-', ':', '/']).next())
+        .filter(|k| !k.is_empty())
+        .unwrap_or("unnamed");
+    format!("other:{kind}")
+}
+
+/// The caller this thread's requests are counted under now.
+pub fn current_caller() -> String {
+    match CALLER.with(|c| c.get()) {
+        "other" => thread_label(std::thread::current().name()),
+        named => named.to_string(),
+    }
+}
+
+/// The request path without the host or the query: what a debug line may show.
+fn path_of(url: &str) -> &str {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let path = rest.find('/').map_or("", |i| &rest[i..]);
+    path.split('?').next().unwrap_or(path)
+}
+
 /// An answer from `api.github.com`, charged to this thread's caller.
 pub fn note(status: u16, headers: &[(String, String)]) {
-    let who = CALLER.with(|c| c.get());
-    with(|b| b.record(who, now_s(), status, headers));
+    let who = current_caller();
+    with(|b| b.record(&who, now_s(), status, headers));
+}
+
+/// [`note`], with a debug line saying who asked for what (the path, never the query or a
+/// token): `RUST_LOG=mason_adapter_api=debug` shows each request's caller and thread.
+pub fn note_request(method: &str, url: &str, status: u16, headers: &[(String, String)]) {
+    let who = current_caller();
+    tracing::debug!(
+        caller = %who,
+        thread = std::thread::current().name().unwrap_or("unnamed"),
+        method,
+        path = path_of(url),
+        status,
+        "GitHub request"
+    );
+    with(|b| b.record(&who, now_s(), status, headers));
 }
 
 /// Seconds to wait before any request may be sent, while the quota is used up.
@@ -400,6 +451,55 @@ mod tests {
         s.push(("x-ratelimit-resource".into(), "search".into()));
         b.record("a", 1003, 403, &s);
         assert_eq!(b.wait_s(1003), None);
+    }
+
+    /// Two answers of one window as GitHub sent them on 2026-11-23: the same token and hour,
+    /// resets 4 s apart. The later reset arrived first and made the record ignore every answer
+    /// of the earlier one, so `remaining` stayed at 4737 while GitHub's count went to 3443.
+    #[test]
+    fn answers_of_one_window_with_resets_a_few_seconds_apart_keep_the_lowest_count() {
+        let now = 1_795_451_900;
+        let mut b = Budget::new();
+        b.record("a", now, 200, &hdrs(5000, 4737, 1_795_455_580));
+        b.record("remote-run", now, 200, &hdrs(5000, 3443, 1_795_455_576));
+        let q = b.quota(now).unwrap();
+        assert_eq!((q.remaining, q.used), (3443, Some(1557)));
+        assert_eq!(q.reset, 1_795_455_580);
+        // A later answer with the higher reset does not lift it again, nor does a 304's.
+        b.record("a", now + 1, 200, &hdrs(5000, 3440, 1_795_455_580));
+        b.record("a", now + 2, 304, &hdrs(5000, 4999, 1_795_455_580));
+        assert_eq!(b.quota(now + 2).unwrap().remaining, 3440);
+        // The next hour's window replaces the record.
+        b.record("a", 1_795_455_600, 200, &hdrs(5000, 4990, 1_795_459_180));
+        assert_eq!(b.quota(1_795_455_600).unwrap().remaining, 4990);
+    }
+
+    #[test]
+    fn unnamed_threads_are_counted_under_their_thread_name() {
+        assert_eq!(thread_label(Some("batch-3")), "other:batch");
+        assert_eq!(thread_label(Some("job-mason/full-ci")), "other:job");
+        assert_eq!(thread_label(Some("http-worker-1")), "other:http");
+        assert_eq!(thread_label(Some("")), "other:unnamed");
+        assert_eq!(thread_label(None), "other:unnamed");
+        std::thread::Builder::new()
+            .name("sweeper-1".into())
+            .spawn(|| {
+                assert_eq!(current_caller(), "other:sweeper");
+                let _g = as_caller("remote-sweep");
+                assert_eq!(current_caller(), "remote-sweep");
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn a_debug_line_names_the_path_only() {
+        assert_eq!(
+            path_of("https://api.github.com/repos/a/b/actions/runs?head_sha=abc&per_page=20"),
+            "/repos/a/b/actions/runs"
+        );
+        assert_eq!(path_of("https://api.github.com"), "");
     }
 
     #[test]
