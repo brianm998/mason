@@ -771,12 +771,6 @@ pub fn select_with(
                 g.unit_modules.extend(f.iter().cloned());
                 g.unit_lib = p.lib.is_some();
                 g.unit_bins = !p.bins.is_empty();
-                g.notes.push(format!(
-                    "{} lib: {} of {} modules, by name scan",
-                    p.name,
-                    f.len(),
-                    total.len()
-                ));
             }
             _ => {
                 g.lib |= p.lib.is_some();
@@ -1163,6 +1157,10 @@ mod tests {
             vec!["-p top --test names --test uses"]
         );
         // Outside `.mason/` the bare file name still matches.
+        fx.pkgs[1].tests.push(TestTarget {
+            name: "tpl".into(),
+            src: "crates/top/tests/tpl.rs".into(),
+        });
         fx.files.insert(
             "crates/top/tests/tpl.rs".into(),
             "write(\"mason.toml\");".into(),
@@ -1601,13 +1599,21 @@ mod tests {
                 Pick::All { .. } => vec![],
             }
         };
+        // The changed file's own crate also has its lib unit tests picked by module (#958); that
+        // pick is always a name scan, and its note comes first.
         assert_eq!(
             notes(Some(&m)),
-            vec!["it: 1 of 3 modules, by the coverage map of 1234567"]
+            vec![
+                "leaf lib: 1 of 2 modules, by name scan",
+                "it: 1 of 3 modules, by the coverage map of 1234567"
+            ]
         );
         assert_eq!(
             notes(None),
-            vec!["it: 1 of 3 modules, by name scan (no coverage map)"]
+            vec![
+                "leaf lib: 1 of 2 modules, by name scan",
+                "it: 1 of 3 modules, by name scan (no coverage map)"
+            ]
         );
     }
 
