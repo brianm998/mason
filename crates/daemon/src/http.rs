@@ -3495,7 +3495,13 @@ async fn resources(Shared(d): Shared<Arc<Daemon>>) -> Res {
     let d2 = d.clone();
     let v = d
         .pool
-        .run(move || d2.broker.snapshot())
+        .run(move || {
+            let mut v = d2.broker.snapshot();
+            if let Some(g) = v.get_mut("gha").and_then(|g| g.as_object_mut()) {
+                g.insert("runs".into(), crate::remote::holder_views(&d2).into());
+            }
+            v
+        })
         .await
         .map_err(pool_err)?;
     Ok(Json(v))

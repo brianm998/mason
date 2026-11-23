@@ -1969,7 +1969,7 @@ impl TestChecks {
                 tree: crate::hostedcheck::tree_key(&self.wt),
                 holds: uses.clone(),
                 label: format!("#{} check", self.task),
-                stop: None,
+                stop: Some(self.slots.run_over()),
                 place: None,
                 global: false,
             }
@@ -2666,7 +2666,7 @@ impl TestChecks {
                 tree: crate::hostedcheck::tree_key(&self.wt),
                 holds: uses.clone(),
                 label: format!("#{} check", self.task),
-                stop: None,
+                stop: Some(self.slots.run_over()),
                 place: None,
                 global: true,
             }
@@ -2927,6 +2927,13 @@ fn credit_remote_wait<T>(
     credit_wait_with(&|d| extra.add_remote(d), every, wait)
 }
 
+/// The note a check's stop hook gives (#823): `Some` once the task's open run is no longer the
+/// check's own (`open` is `Some(false)`); `None` while it is open or the world cannot be read.
+fn run_over_note(open: Option<bool>, task: u64) -> Option<String> {
+    (open == Some(false))
+        .then(|| format!("cancelled (#{task}): its step ended or the task was skipped"))
+}
+
 struct CheckSlots {
     d: Arc<Daemon>,
     task: TaskId,
@@ -2949,6 +2956,19 @@ struct CheckSlots {
 }
 
 impl CheckSlots {
+    /// A stop hook for the agent's checks (#823): fires once the task's open run is no longer
+    /// this run (the step ended, or the task was skipped, cancelled or landed), so a check on
+    /// GitHub is cancelled then and not left holding a runner until a restart.
+    fn run_over(&self) -> crate::hostedcheck::StopFn {
+        let (d, task, run) = (self.d.clone(), self.task, self.run);
+        std::sync::Arc::new(move || {
+            run_over_note(
+                d.world().map(|w| w.open_run(task) == Some(run)).ok(),
+                task.0,
+            )
+        })
+    }
+
     fn new(c: &Ctx) -> CheckSlots {
         let test = c.def.steps.iter().find(|s| s.kind == StepType::Test);
         let test_uses = test
@@ -5396,6 +5416,13 @@ pub fn cleanup(d: &Arc<Daemon>, task: TaskId, delete_branch: bool) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_check_is_told_to_stop_once_its_run_is_no_longer_the_open_one() {
+        assert!(super::run_over_note(Some(false), 7).is_some());
+        assert!(super::run_over_note(Some(true), 7).is_none());
+        assert!(super::run_over_note(None, 7).is_none());
+    }
+
     #[test]
     fn pack_candidates_prefer_the_step_file_then_the_round_then_the_kind() {
         use super::pack_candidates as pc;
