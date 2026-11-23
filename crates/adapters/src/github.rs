@@ -61,6 +61,15 @@ pub struct GitHub {
     /// off: no log is fetched and nothing is reported per job. `Some` holds the
     /// project's extra log patterns, added to the built-in ones.
     pub infra: Option<Vec<String>>,
+    /// The repository's workflows, by id and by file path, read once and again on a miss.
+    names: Arc<std::sync::Mutex<WorkflowNames>>,
+}
+
+/// Workflow names by id and by file path (`.github/workflows/ci.yml`).
+#[derive(Default)]
+struct WorkflowNames {
+    by_id: std::collections::HashMap<u64, String>,
+    by_path: std::collections::HashMap<String, String>,
 }
 
 impl GitHub {
@@ -148,7 +157,50 @@ impl GitHub {
             token,
             workflow: None,
             infra: None,
+            names: Default::default(),
         }
+    }
+
+    /// The workflow's own name for a run (`CI`), not the run's `name`, which is its display
+    /// title when the workflow sets `run-name:`. Found by the run's `workflow_id`, else its
+    /// `path`, in the repository's workflow list (read again only on a miss). A run with
+    /// neither, or a list that cannot be read, falls back to the run's `name`.
+    fn workflow_name(&self, r: &Value) -> String {
+        let id = r["workflow_id"].as_u64();
+        let path = r["path"].as_str().filter(|p| !p.is_empty());
+        // `path` on a run can carry `@ref` for a reusable workflow: keep the file part.
+        let path = path.map(|p| p.split('@').next().unwrap_or(p));
+        let find = |n: &WorkflowNames| {
+            id.and_then(|i| n.by_id.get(&i))
+                .or_else(|| path.and_then(|p| n.by_path.get(p)))
+                .cloned()
+        };
+        if id.is_some() || path.is_some() {
+            if let Ok(mut n) = self.names.lock() {
+                if let Some(name) = find(&n) {
+                    return name;
+                }
+                if let Ok(v) = self.json(Request::get(&self.url("/actions/workflows?per_page=100")))
+                {
+                    *n = WorkflowNames::default();
+                    for w in v["workflows"].as_array().into_iter().flatten() {
+                        let Some(name) = w["name"].as_str() else {
+                            continue;
+                        };
+                        if let Some(i) = w["id"].as_u64() {
+                            n.by_id.insert(i, name.to_string());
+                        }
+                        if let Some(p) = w["path"].as_str() {
+                            n.by_path.insert(p.to_string(), name.to_string());
+                        }
+                    }
+                    if let Some(name) = find(&n) {
+                        return name;
+                    }
+                }
+            }
+        }
+        r["name"].as_str().unwrap_or_default().to_string()
     }
 
     fn url(&self, path: &str) -> String {
@@ -730,7 +782,7 @@ impl GitHub {
             .filter_map(|r| {
                 Some(ActionsRun {
                     id: r["id"].as_u64()?,
-                    workflow: r["name"].as_str().unwrap_or_default().to_string(),
+                    workflow: self.workflow_name(r),
                     sha: r["head_sha"].as_str().unwrap_or_default().to_string(),
                     url: r["html_url"].as_str().unwrap_or_default().to_string(),
                     created_ms: iso_ms(r["created_at"].as_str().unwrap_or_default()),
@@ -782,7 +834,7 @@ impl GitHub {
             .filter_map(|r| {
                 Some(WorkflowRun {
                     id: r["id"].as_u64()?,
-                    workflow: r["name"].as_str().unwrap_or_default().to_string(),
+                    workflow: self.workflow_name(r),
                     sha: r["head_sha"].as_str().unwrap_or_default().to_string(),
                     url: r["html_url"].as_str().unwrap_or_default().to_string(),
                     created_ms: iso_ms(r["created_at"].as_str().unwrap_or_default()),
@@ -917,7 +969,7 @@ impl BuildSystemAdapter for GitHub {
                     );
                 }
                 detail.push(CiRunJobs {
-                    workflow: r["name"].as_str().unwrap_or("?").to_string(),
+                    workflow: self.workflow_name(r),
                     jobs,
                 });
             }
@@ -937,7 +989,7 @@ impl BuildSystemAdapter for GitHub {
                 "/actions/runs/{id}/jobs?filter=latest&per_page=100"
             ))))?;
             out.workflows.push(count_jobs(
-                r["name"].as_str().unwrap_or("?"),
+                &self.workflow_name(r),
                 r["html_url"].as_str().unwrap_or_default(),
                 jobs["jobs"].as_array().map_or(&[][..], Vec::as_slice),
             ));
