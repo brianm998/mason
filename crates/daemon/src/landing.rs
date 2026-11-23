@@ -3641,6 +3641,13 @@ impl Runner {
         out
     }
 
+    /// Every file any member task's diff touches: the only paths a guard's `<path>: <message>`
+    /// line may blame.
+    fn union_files(&self) -> Vec<String> {
+        let all: BTreeSet<&String> = self.fps.values().flat_map(|f| f.files.iter()).collect();
+        all.into_iter().cloned().collect()
+    }
+
     /// The files a lint-shaped red names. A red of the lint tier has them from `lint_checks`;
     /// a red whose only failing tests are the `ci_gates` fmt and SPDX checks has them from a
     /// lint run now (it takes seconds). `None` for any other red.
@@ -3795,7 +3802,7 @@ impl Runner {
                     out.green = false;
                     out.failed.insert(name.clone());
                     *self.lint_files.lock().unwrap_or_else(|e| e.into_inner()) =
-                        lint_files(&o.full);
+                        lint_files(&o.full, &self.union_files());
                     *self.lint_where.lock().unwrap_or_else(|e| e.into_inner()) =
                         lint_places(&o.full);
                     out.notes.push(format!(
@@ -4027,7 +4034,7 @@ impl Runner {
                     out.failed.insert(name.clone());
                     // A build error names `--> file:line` too: the floor blames by file.
                     *self.lint_files.lock().unwrap_or_else(|e| e.into_inner()) =
-                        lint_files(&o.full);
+                        lint_files(&o.full, &self.union_files());
                     out.notes.push(format!(
                         "{name}: {what} does not build ({ran_on}, {}){}{}\n{}",
                         took(),
@@ -5606,8 +5613,11 @@ pub(crate) fn strip_ansi(s: &str) -> String {
 }
 
 /// The distinct files a lint's output names, without lines: rustfmt's `Diff in file:line`
-/// and clippy's `--> file:line:col`.
-fn lint_files(output: &str) -> Vec<String> {
+/// and clippy's `--> file:line:col`, plus the repository's own guards' `<path>: <message>` and
+/// `<path>:<line>: <message>`, the last only for a path in `known` (the batch's union diff), so
+/// a prose line with a colon never names a file.
+fn lint_files(output: &str, known: &[String]) -> Vec<String> {
+    let norm = |f: &str| f.trim_start_matches("./").to_string();
     let output = strip_ansi(output);
     let mut v: Vec<String> = vec![];
     for l in output.lines() {
@@ -5621,6 +5631,13 @@ fn lint_files(output: &str) -> Vec<String> {
                 Some((f, n)) if n.chars().all(|c| c.is_ascii_digit()) => f.to_string(),
                 _ => r.to_string(),
             })
+        } else if let Some((head, _)) = t.split_once(": ") {
+            let path = match head.rsplit_once(':') {
+                Some((f, n)) if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) => f,
+                _ => head,
+            };
+            let path = norm(path);
+            known.iter().find(|k| norm(k) == path).map(|k| norm(k))
         } else {
             None
         };
@@ -5786,8 +5803,23 @@ mod tests {
     #[test]
     fn lint_parsers_read_coloured_output_and_rustfmt_diffs() {
         let out = "\x1b[1m\x1b[91merror\x1b[0m: x\n  \x1b[1m\x1b[94m--> \x1b[0mcrates/a/b.rs:969:42\nDiff in c/d.rs:3:\n";
-        assert_eq!(lint_files(out), vec!["crates/a/b.rs", "c/d.rs"]);
+        assert_eq!(lint_files(out, &[]), vec!["crates/a/b.rs", "c/d.rs"]);
         assert_eq!(lint_places(out), " (at crates/a/b.rs:969, c/d.rs:3)");
+    }
+
+    #[test]
+    fn lint_files_reads_guard_lines_only_for_files_in_the_diff() {
+        let known = vec!["scripts/exit/s960.sh".to_string(), "a/b.sh".to_string()];
+        let out = "scripts/exit/s960.sh: runs swift without testing MASON_SKIP_SWIFT\n\
+                   a/b.sh:12: bad thing\n\
+                   scripts/other.sh: not in the diff\n\
+                   note: something happened\n";
+        assert_eq!(
+            lint_files(out, &known),
+            vec!["scripts/exit/s960.sh", "a/b.sh"]
+        );
+        assert!(lint_files("scripts/other.sh: x\nnote: y\n", &known).is_empty());
+        assert!(lint_files(out, &[]).is_empty());
     }
 
     #[test]
@@ -5796,8 +5828,8 @@ mod tests {
         for i in 0..100 {
             out.push_str(&format!("note {i}\n"));
         }
-        assert_eq!(lint_files(&out), vec!["far/away.rs"]);
-        assert!(lint_files(&crate::jobs::tail(&out, 40)).is_empty());
+        assert_eq!(lint_files(&out, &[]), vec!["far/away.rs"]);
+        assert!(lint_files(&crate::jobs::tail(&out, 40), &[]).is_empty());
     }
 
     #[test]

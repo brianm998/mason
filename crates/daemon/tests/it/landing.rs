@@ -598,6 +598,30 @@ fn a_coloured_clippy_red_parks_the_task_that_touches_the_file_without_a_split() 
 }
 
 #[test]
+fn a_guard_line_naming_a_file_one_task_added_parks_that_task_without_a_split() {
+    // s978: the repository's guards print `<path>: <message>`, which named no file, so the
+    // batch was bisected.
+    let probe = tempfile::tempdir().unwrap();
+    let log = probe.path().join("calls");
+    let script = format!(
+        "#!/bin/sh\nn=\"$1\"\necho \"$n\" >> {}\necho \"1..1\"\nif [ \"$n\" = lint ] && [ -f scripts/exit/s1.sh ]; then\n  echo \"scripts/exit/s1.sh: runs swift without testing MASON_SKIP_SWIFT\" >&2\n  echo \"not ok 1 - lint\"; exit 1\nfi\necho \"ok 1 - $n\"\n",
+        log.display()
+    );
+    let w = world(LINT_AND_BATCH, &[("checks.sh", &script)]);
+    let bad = w.task("swift", &[("scripts/exit/s1.sh", "swift test")]);
+    let g1 = w.task("one", &[("a/one.txt", "1")]);
+    let g2 = w.task("two", &[("a/two.txt", "2")]);
+    wait_for("both clean tasks to land", 120, || {
+        w.landed(g1) && w.landed(g2)
+    });
+    wait_for("the offending task to be sent back", 60, || {
+        w.sent_back(bad).is_some()
+    });
+    assert!(!w.on_main("scripts/exit/s1.sh"));
+    let _ = log;
+}
+
+#[test]
 fn a_lint_red_in_a_file_no_task_touches_is_not_blamed_by_file() {
     // The file belongs to the base: the existing ladder (rerun, impact, split) handles it.
     let probe = tempfile::tempdir().unwrap();
