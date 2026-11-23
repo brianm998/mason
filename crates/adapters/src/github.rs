@@ -1258,6 +1258,21 @@ impl GitHub {
             .map(|_| ())
     }
 
+    /// Does GitHub know the workflow file and is it active (`GET /actions/workflows/{file}`)?
+    /// A dispatch needs both; whether the token may write Actions is only known by dispatching.
+    pub fn workflow_active(&self, file: &str) -> Result<(), ApiError> {
+        let v = self.json(Request::get(
+            &self.url(&format!("/actions/workflows/{file}")),
+        ))?;
+        match v["state"].as_str() {
+            Some("active") => Ok(()),
+            other => Err(ApiError::new(
+                ErrorKind::Unavailable,
+                format!("the workflow is {}", other.unwrap_or("not listed")),
+            )),
+        }
+    }
+
     /// Delete the Actions caches saved by `git_ref`, so a deleted run branch leaves none behind:
     /// list them (`GET /actions/caches?ref=`) and delete each by id
     /// (`DELETE /actions/caches/{id}`). GitHub's bulk `DELETE /actions/caches` needs a cache
