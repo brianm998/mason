@@ -109,12 +109,30 @@ struct Tool {
         }
     }
 
-    /// Let the views settle: no new sequence number for a moment.
+    /// Let the views settle: wait until the model reaches the daemon's seq (from GET /status),
+    /// giving up on it after 1.5 s with no new sequence number; 60 s is a hard limit.
     @MainActor
     static func settle(_ model: MonitorModel) async {
+        var target: UInt64 = 0
+        var got = false
+        model.onResult = { r in
+            if r.id == "settle-status" {
+                let v = (try? JSONSerialization.jsonObject(with: Data(r.json.utf8))) as? [String: Any]
+                if let n = v?["seq"] as? NSNumber { target = n.uint64Value }
+                else if let s = v?["seq"] as? String, let n = UInt64(s) { target = n }
+                got = true
+            }
+        }
+        var c = Mason_V1_Command()
+        c.id = "settle-status"
+        c.raw = .with { $0.method = "GET"; $0.path = "/status" }
+        model.send(c)
+        await until("the daemon's status") { got }
+        let end = Date().addingTimeInterval(60)
         var last = model.lastSeq
         var quiet = 0
-        while quiet < 6 {
+        while quiet < (model.lastSeq >= target ? 6 : 30) {
+            if Date() > end { fail("the screen did not reach the daemon's seq \(target) within 60 s") }
             try? await Task.sleep(nanoseconds: 50_000_000)
             if model.lastSeq == last { quiet += 1 } else { quiet = 0; last = model.lastSeq }
         }
