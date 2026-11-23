@@ -1646,6 +1646,65 @@ async fn registration_reload(Shared(d): Shared<Arc<Daemon>>, Path(name): Path<St
     }))
 }
 
+/// Git repositories the owner could add (`[onboarding] roots`). Owner only.
+async fn onboarding_candidates(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+) -> Res {
+    owner_only(&d, &who_of(&headers), "add a project")?;
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || crate::onboarding::candidates(&d2))
+        .await
+        .map_err(pool_err)?;
+    Ok(Json(v))
+}
+
+/// The next question and the files an Add Project would write. Writes nothing. Owner only.
+async fn onboarding_plan(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Json(b): Json<Value>,
+) -> Res {
+    owner_only(&d, &who_of(&headers), "add a project")?;
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || crate::onboarding::plan(&d2, &b))
+        .await
+        .map_err(pool_err)?
+        .map_err(|(c, m)| fail(code(c), m))?;
+    Ok(Json(v))
+}
+
+/// Set a project up, register it and file the proof task. Owner only.
+async fn onboarding_apply(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Json(b): Json<Value>,
+) -> Res {
+    owner_only(&d, &who_of(&headers), "add a project")?;
+    let d2 = d.clone();
+    let a = d
+        .pool
+        .run(move || crate::onboarding::apply(&d2, &b))
+        .await
+        .map_err(pool_err)?
+        .map_err(|(c, m)| fail(code(c), m))?;
+    let mut out = a.body;
+    if a.prove && a.registered {
+        let task = json!({"project": a.id, "title": mason_onboard::PROOF_TITLE,
+            "body": mason_onboard::PROOF_BODY, "priority": "normal", "proposed": false,
+            "explored": true, "after": []});
+        match add_task(Shared(d.clone()), Json(task)).await {
+            Ok(Json(v)) => out["proof_task"] = v["task"].clone(),
+            Err((_, Json(e))) => out["proof_error"] = e["error"].clone(),
+        }
+    }
+    Ok(Json(out))
+}
+
 /// Register a project that has a registration file but that masond did not start with.
 async fn project_register(Shared(d): Shared<Arc<Daemon>>, Path(name): Path<String>) -> Res {
     let d2 = d.clone();
@@ -4108,6 +4167,9 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/projects/{name}/editor/{what}", post(editor_history))
         .route("/projects/{name}/reload", post(project_reload))
         .route("/projects/{name}/register", post(project_register))
+        .route("/onboarding/candidates", get(onboarding_candidates))
+        .route("/onboarding/plan", post(onboarding_plan))
+        .route("/onboarding/apply", post(onboarding_apply))
         .route(
             "/projects/{name}/registration/reload",
             post(registration_reload),
