@@ -568,11 +568,6 @@ fn run_hosted_resuming(
     }
 }
 
-/// A suite command run on GitHub Actions. `covered`: the caller holds this machine's slots for
-/// the run, so a fallback's room check does not count them against it. `Ok(None)`: it could not
-/// go remote and the project's `fallback` is `local`, so the caller runs it here. An outage or a missing runner is an `Err`
-/// that [`crate::remote::environmental`] recognizes.
-#[allow(clippy::too_many_arguments)]
 /// What the definition's test step `uses`: the slots a run that falls back to this machine takes.
 fn test_step_uses(d: &Arc<Daemon>, project: &str) -> std::collections::BTreeMap<String, u32> {
     d.project_id_by_name(project)
@@ -586,6 +581,11 @@ fn test_step_uses(d: &Arc<Daemon>, project: &str) -> std::collections::BTreeMap<
         .unwrap_or_default()
 }
 
+/// A suite command run on GitHub Actions. `covered`: the caller holds this machine's slots for
+/// the run, so a fallback's room check does not count them against it. `Ok(None)`: it could not
+/// go remote and the project's `fallback` is `local`, so the caller runs it here. An outage or a missing runner is an `Err`
+/// that [`crate::remote::environmental`] recognizes.
+#[allow(clippy::too_many_arguments)]
 fn run_remote(
     d: &Arc<Daemon>,
     project: &str,
