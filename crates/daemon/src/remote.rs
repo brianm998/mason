@@ -6091,7 +6091,7 @@ mod tests {
         sp.shard_command = Some(narrowed.into());
         sp.partial_lists = true;
         let dir = t.join("runs");
-        let Ok(Outcome::Done(f)) = execute_sharded(&s, &sp, &dir, &|| None) else {
+        let Ok(Outcome::Done(f)) = execute_sharded(&s, &sp, &dir, &|| None, &Grant::test()) else {
             panic!("the sharded run did not finish");
         };
         assert_eq!(f.parts.len(), 2);
