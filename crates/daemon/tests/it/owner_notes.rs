@@ -126,6 +126,12 @@ fn an_owner_retry_note_reaches_the_review_and_goes_when_the_task_lands() {
     assert!(review.contains(NOTE), "{review}");
     // The develop round the note was given to has it once, in its feedback.
     assert_eq!(get("dev").matches(NOTE).count(), 1, "{}", get("dev"));
+    // The notes go in the landed task's cleanup (`jobs::cleanup`), which runs after the state
+    // reads Landed: checked at that moment it was red on busy runners, green alone. Wait for the
+    // cleanup, not for a moment; a note that never goes still fails.
+    let _ = support::try_wait_for_exact("landing to remove the notes", 120, 200, || {
+        mason_daemon::ownernotes::list(&d.task_dir(t)).is_empty()
+    });
     assert!(
         mason_daemon::ownernotes::list(&d.task_dir(t)).is_empty(),
         "landing removed the notes"
