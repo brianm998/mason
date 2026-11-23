@@ -486,6 +486,9 @@ pub fn show(d: &Daemon, json_out: bool) -> Result<(), String> {
             }
         }
     }
+    if let Some(l) = github_api_line(&v["github_api"], now) {
+        println!("  {l}");
+    }
     if let Some(max) = v["cpu"]["compile_max_pct"].as_u64() {
         println!("  {}", cpu_line(&v["cpu"], max));
     }
@@ -544,6 +547,40 @@ pub fn gha_run_lines(g: &Value) -> Vec<String> {
             )
         })
         .collect()
+}
+
+/// The GitHub REST quota (`github_api`): `GitHub API  1234/5000 left, resets 07:39 (charged last
+/// 10 min: remote-run 410, ...)`, or `GitHub API  exhausted until 07:39: polling paused`. `None`
+/// before any request has been answered.
+pub fn github_api_line(g: &Value, _now: u64) -> Option<String> {
+    let reset = g["reset_ms"].as_u64()?;
+    let at = crate::local_clock(reset);
+    if g["exhausted"].as_bool() == Some(true) {
+        return Some(format!("GitHub API  exhausted until {at}: polling paused"));
+    }
+    let who: Vec<String> = g["recent"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|r| {
+            Some(format!(
+                "{} {}",
+                r["name"].as_str()?,
+                r["charged"].as_u64()?
+            ))
+        })
+        .collect();
+    let mins = g["window_s"].as_u64().unwrap_or(600) / 60;
+    let spent = if who.is_empty() {
+        String::new()
+    } else {
+        format!(" (charged last {mins} min: {})", who.join(", "))
+    };
+    Some(format!(
+        "GitHub API  {}/{} left, resets {at}{spent}",
+        g["remaining"].as_u64()?,
+        g["limit"].as_u64()?
+    ))
 }
 
 /// The `gha` pool's split (#766, #819): `MASON 11, other 7 (mason CI 5 running, star pr-gate 2
@@ -802,6 +839,25 @@ fn shell_quote(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_github_api_line_shows_what_is_left_or_that_polling_is_paused() {
+        assert_eq!(github_api_line(&json!({}), 0), None);
+        let left = json!({"limit": 5000, "remaining": 1234, "reset_ms": 1_700_000_000_000u64,
+            "exhausted": false, "window_s": 600,
+            "recent": [{"name": "remote-run", "charged": 410}, {"name": "ci-watch", "charged": 30}]});
+        let l = github_api_line(&left, 0).unwrap();
+        assert!(l.starts_with("GitHub API  1234/5000 left, resets "), "{l}");
+        assert!(
+            l.ends_with("(charged last 10 min: remote-run 410, ci-watch 30)"),
+            "{l}"
+        );
+        let out = json!({"limit": 5000, "remaining": 0, "reset_ms": 1_700_000_000_000u64,
+            "exhausted": true, "window_s": 600, "recent": []});
+        let l = github_api_line(&out, 0).unwrap();
+        assert!(l.starts_with("GitHub API  exhausted until "), "{l}");
+        assert!(l.ends_with(": polling paused"), "{l}");
+    }
 
     #[test]
     fn a_share_reads_label_percent_and_title() {

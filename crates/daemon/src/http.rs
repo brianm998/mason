@@ -128,6 +128,16 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
             v["worktree"] = json!(p.worktree(&d.cfg, t.id.0).display().to_string());
         }
         v["definition"] = json!(t.def);
+        if let Some(r) = d
+            .store
+            .diagnoses(Some(t.id.0))
+            .ok()
+            .and_then(|v| v.into_iter().next_back())
+            .and_then(|r| serde_json::from_str::<Value>(&r.args).ok())
+            .and_then(|a| a["ran_on"].as_str().map(String::from))
+        {
+            v["diagnosis_ran_on"] = json!(r);
+        }
         v["cpu_permille"] = json!(d
             .cpu_reading()
             .by_task
@@ -977,7 +987,7 @@ async fn diagnoses(Shared(d): Shared<Arc<Daemon>>, Path(id): Path<u64>) -> Res {
         .map(|r| {
             let a: Value = serde_json::from_str(&r.args).unwrap_or(json!({}));
             json!({"id": r.id, "task": r.task, "at": r.at_ms, "verdict": r.verdict,
-                   "status": r.status, "args": a,
+                   "status": r.status, "args": a, "ran_on": a["ran_on"],
                    "text": crate::diagnose::card_text(r.task, r.id, &r.verdict, &a)})
         })
         .collect::<Vec<_>>())))
@@ -2209,6 +2219,7 @@ async fn refresh_tracker(Shared(d): Shared<Arc<Daemon>>, Path(id): Path<u64>) ->
     let v = d
         .pool
         .run(move || {
+            let _caller = mason_adapter_api::github_budget::as_caller("tracker");
             let w = d2.world().map_err(store_err)?;
             let t = w.tasks.get(&TaskId(id)).ok_or_else(|| fail(StatusCode::NOT_FOUND, format!("no task #{id}")))?;
             let pid = t.project;
@@ -3499,6 +3510,12 @@ async fn resources(Shared(d): Shared<Arc<Daemon>>) -> Res {
             let mut v = d2.broker.snapshot();
             if let Some(g) = v.get_mut("gha").and_then(|g| g.as_object_mut()) {
                 g.insert("runs".into(), crate::remote::holder_views(&d2).into());
+            }
+            if let Some(o) = v.as_object_mut() {
+                o.insert(
+                    "github_api".into(),
+                    mason_adapter_api::github_budget::snapshot(),
+                );
             }
             v
         })

@@ -33,6 +33,32 @@ pub fn report(d: &Daemon, what: &str, p: &(dyn std::any::Any + Send)) {
 /// (it sleeps itself, so a pass never keeps the daemon alive while it waits) and returns
 /// `false` when the loop should end (the daemon is gone). Injected panic point:
 /// `loop:<name>`.
+/// What is said, once, when GitHub's quota is used up: polling is paused until `reset_s` (epoch
+/// seconds).
+pub fn quota_text(reset_s: u64) -> String {
+    format!(
+        "GitHub API quota used up until {}; polling paused",
+        crate::update::clock_at(reset_s * 1000)
+    )
+}
+
+/// The name a loop's GitHub requests are counted under (`mason resources`).
+fn github_caller(loop_name: &str) -> &'static str {
+    match loop_name {
+        "tracker" => "tracker",
+        "ci-watch" => "ci-watch",
+        "other-workflows" => "other-workflows",
+        n if n.starts_with("landing-") => "landing",
+        // Pays CI debts (`suites::pay_ci`).
+        "debts" => "debt",
+        // Follows the dispatched run of a full-test schedule (`ci_schedule::follow`).
+        "introspect" => "schedule",
+        // Cancels runs nobody collects (`hostedcheck::stop_unwanted`).
+        "compile-watch" => "remote-hold",
+        _ => "other",
+    }
+}
+
 pub fn spawn_loop<F>(d: &Arc<Daemon>, name: impl Into<String>, mut pass: F)
 where
     F: FnMut(&Weak<Daemon>) -> bool + Send + 'static,
@@ -40,7 +66,10 @@ where
     let name: String = name.into();
     let weak = Arc::downgrade(d);
     let n = name.clone();
+    let caller = github_caller(&n);
     let _ = std::thread::Builder::new().name(name).spawn(move || loop {
+        // What the GitHub requests of this thread are counted under.
+        let _caller = mason_adapter_api::github_budget::as_caller(caller);
         let r = catch_unwind(AssertUnwindSafe(|| {
             if let Some(d) = weak.upgrade() {
                 d.crash.panic_point(&format!("loop:{n}"));

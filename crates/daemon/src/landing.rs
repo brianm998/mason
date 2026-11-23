@@ -1126,6 +1126,8 @@ fn start(d: &Arc<Daemon>, pid: ProjectId, members: Vec<Wait>, cfg: LandingConfig
     let spawned = std::thread::Builder::new()
         .name(format!("batch-{slot}"))
         .spawn(move || {
+            // Its CI and pull-request polls are the landing's, not another caller's.
+            let _caller = mason_adapter_api::github_budget::as_caller("landing");
             // The slot is given back on every way out of this thread.
             let _slot = SlotGuard {
                 d: d2.clone(),

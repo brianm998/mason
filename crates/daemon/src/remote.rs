@@ -25,6 +25,7 @@
 
 use crate::config::{ProjectCfg, RemoteCfg};
 use crate::daemon::{now_ms, Daemon};
+use mason_adapter_api::github_budget::{self, Priority};
 use mason_adapter_api::http::{Curl, Http};
 use mason_adapter_api::service::{ErrorKind, Observed, PollEvent, Poller};
 use mason_adapters::github::{ActionRun, GitHub, TokenRef};
@@ -242,6 +243,9 @@ pub struct RunSpec {
     pub shard_lists: Vec<Vec<String>>,
     /// What a shard's runner runs instead of `command`.
     pub shard_command: Option<String>,
+    /// The lists name tests of the whole suite, not only of this narrowed run (#873): a shard
+    /// that ran none of them is then no defect, so no shard is counted as listing any.
+    pub partial_lists: bool,
 }
 
 impl RunSpec {
@@ -522,6 +526,10 @@ pub fn account_repos(d: &Daemon) -> Vec<AccountRepo> {
 struct RunJobs {
     etag: Option<String>,
     name: String,
+    /// The list the run was in when its jobs were read (0 in progress, 1 queued).
+    list: usize,
+    /// When its jobs were read, ms.
+    read_ms: u64,
     running: u32,
     queued: u32,
     macos_running: u32,
@@ -567,7 +575,7 @@ impl AccountJobs {
             .retain(|k, _| sources.iter().any(|(r, _)| &r.repo == k));
         for (r, gh) in sources {
             let st = self.repos.entry(r.repo.clone()).or_default();
-            match Self::poll_repo(st, gh, &r.own) {
+            match Self::poll_repo(st, gh, &r.own, now_ms) {
                 Ok(()) => {
                     st.read = true;
                     st.error = None;
@@ -614,7 +622,12 @@ impl AccountJobs {
         out
     }
 
-    fn poll_repo(st: &mut RepoState, gh: &GitHub, own: &[String]) -> Result<(), String> {
+    fn poll_repo(
+        st: &mut RepoState,
+        gh: &GitHub,
+        own: &[String],
+        now_ms: u64,
+    ) -> Result<(), String> {
         let mut changed = false;
         for (i, status) in ["in_progress", "queued"].into_iter().enumerate() {
             let found = gh
@@ -629,7 +642,7 @@ impl AccountJobs {
         if !changed {
             return Ok(());
         }
-        let mut live: std::collections::BTreeMap<u64, String> = Default::default();
+        let mut live: std::collections::BTreeMap<u64, (String, usize)> = Default::default();
         for (id, name, path) in st.lists.iter().flatten() {
             if own
                 .iter()
@@ -637,20 +650,34 @@ impl AccountJobs {
             {
                 continue;
             }
-            live.insert(*id, name.clone());
+            let list = st.lists[1].iter().any(|(i, _, _)| i == id) as usize;
+            live.insert(*id, (name.clone(), list));
         }
         st.runs.retain(|id, _| live.contains_key(id));
-        for (id, name) in live {
+        for (id, (name, list)) in live {
             let run = st.runs.entry(id).or_default();
+            // A run whose status in the lists is what it was when its jobs were read, and read
+            // not long ago, is not asked about again.
+            if run.read_ms > 0
+                && run.list == list
+                && now_ms.saturating_sub(run.read_ms) < JOBS_AGAIN_MS
+            {
+                continue;
+            }
             let Some((jobs, etag)) = gh
                 .remote_run_jobs_changed(id, run.etag.as_deref())
                 .map_err(|e| e.to_string())?
             else {
+                run.name = name;
+                run.list = list;
+                run.read_ms = now_ms.max(1);
                 continue;
             };
             *run = RunJobs {
                 etag,
                 name,
+                list,
+                read_ms: now_ms.max(1),
                 ..Default::default()
             };
             for j in &jobs {
@@ -672,18 +699,33 @@ impl AccountJobs {
     }
 }
 
-/// Keep the broker told what the account's other workflows have on GitHub's runners, every 30
-/// seconds. Nothing runs where no project names a GitHub repository.
+/// How long a run of another workflow keeps the jobs read for it when its status in the lists
+/// has not changed.
+const JOBS_AGAIN_MS: u64 = 180_000;
+
+/// Seconds between looks at the account's other workflows.
+const OTHER_WORKFLOWS_EVERY_S: u64 = 60;
+
+/// Keep the broker told what the account's other workflows have on GitHub's runners, every
+/// minute (longer when the GitHub quota is running short, and not at all while it is used up).
+/// Nothing runs where no project names a GitHub repository.
 pub fn spawn_other_workflows(d: &Arc<Daemon>) {
     if forced_for_tests() || account_repos(d).is_empty() {
         return;
     }
     let mut seen = AccountJobs::default();
+    let mut every = OTHER_WORKFLOWS_EVERY_S;
     crate::bg::spawn_loop(d, "other-workflows", move |weak| {
-        std::thread::sleep(Duration::from_secs(30));
+        std::thread::sleep(Duration::from_secs(every));
         let Some(d) = weak.upgrade() else {
             return false;
         };
+        if let Some(w) = github_budget::wait_s() {
+            // The quota is used up: the count stands as it is until the reset.
+            every = w.min(60);
+            return true;
+        }
+        every = github_budget::paced(OTHER_WORKFLOWS_EVERY_S, Priority::Background);
         let http: Arc<dyn Http> = Arc::new(Curl {
             timeout_s: 30,
             http2: false,
@@ -1234,7 +1276,10 @@ pub fn sweep_stale_refs(d: &Arc<Daemon>) {
     LAST.store(now, std::sync::atomic::Ordering::SeqCst);
     // Off the sweep's thread: it lists the remote and asks GitHub for each ref's age.
     let d = d.clone();
-    std::thread::spawn(move || sweep_stale_refs_now(&d, now));
+    std::thread::spawn(move || {
+        let _caller = github_budget::as_caller("remote-sweep");
+        sweep_stale_refs_now(&d, now)
+    });
 }
 
 fn sweep_stale_refs_now(d: &Daemon, now: u64) {
@@ -1297,6 +1342,7 @@ fn sweep_stale_refs_now(d: &Daemon, now: u64) {
 
 // ---- running ----------------------------------------------------------------------------------
 
+#[derive(Debug)]
 pub enum Outcome {
     Done(Finished),
     /// The owner skipped or forced, or the task is gone: the run was cancelled.
@@ -1544,6 +1590,7 @@ pub fn execute(
     dir: &Path,
     stop: &dyn Fn() -> Option<StopWhy>,
 ) -> Result<Outcome, Fail> {
+    let _caller = github_budget::as_caller("remote-run");
     let _ = std::fs::create_dir_all(dir);
     let rec = record_path(dir, &spec.id);
     let log = dir.join(format!("{}.log", spec.id));
@@ -1683,6 +1730,9 @@ pub fn execute(
                 delete_ref(site, &mut st, &rec);
                 return Ok(Outcome::Done(finished_from(&st, &log)));
             }
+        } else if github_budget::wait_s().is_some() {
+            // GitHub's quota is used up until its reset: whether a runner has the run cannot be
+            // seen, so the wait for one is not counted (and nothing can be cancelled either).
         } else {
             // Not picked up yet. A run that is due to come back here (favor-remote's
             // `spill_after`, or `pickup_timeout`) does so only with room for it here when the site
@@ -1739,6 +1789,22 @@ pub fn execute(
             site.clock.sleep(500);
             continue;
         }
+        let waited = now.saturating_sub(st.pushed_ms);
+        let mut deadline = site.pickup_timeout.as_millis() as u64;
+        if let Some(a) = site.spill_after {
+            deadline = deadline.min(a.as_millis() as u64);
+        }
+        poller.interval_s = github_budget::paced(
+            run_poll_interval_s(
+                site.poll_s,
+                st.run_id.is_some(),
+                st.picked_ms.is_some(),
+                artifact_misses > 0,
+                waited,
+                deadline,
+            ),
+            Priority::Collect,
+        );
         let step = poll(
             site,
             &mut st,
@@ -1766,6 +1832,7 @@ pub fn execute(
                         listed: spec
                             .shard_lists
                             .get(a.shard as usize - 1)
+                            .filter(|_| !spec.partial_lists)
                             .map_or(0, |l| l.len() as u32),
                         code: a.code,
                         signal: a.signal,
@@ -1853,6 +1920,12 @@ pub fn execute(
             }
             Err(e) => {
                 let ev = poller.observe(now / 1000, Observed::Failed(e.clone()));
+                // The quota being used up is not an outage: the run is still there, and the
+                // poller waits for the reset.
+                if matches!(e.kind, ErrorKind::RateLimited { .. }) {
+                    outage_since = None;
+                    continue;
+                }
                 match ev {
                     PollEvent::Stopped { why } => {
                         // A token that is refused or a repository that is gone: nothing here
@@ -1970,6 +2043,34 @@ fn push(site: &Site, st: &State) -> Result<(), String> {
     }
 }
 
+/// Seconds between looks at a run, before the budget stretches them. Quick (`base_s`) while the
+/// run is being found after the dispatch and while a finished run's artifact is awaited, and
+/// when a run unpicked for long enough is near the time it would come back here (so a pickup is
+/// seen before the timeout, which is wall time, not polls). A run still queued is looked at six
+/// times, and a running one three times, as rarely. Pure.
+pub fn run_poll_interval_s(
+    base_s: u64,
+    run_known: bool,
+    picked: bool,
+    awaiting_artifact: bool,
+    waited_ms: u64,
+    deadline_ms: u64,
+) -> u64 {
+    let base = base_s.max(1);
+    if !run_known || awaiting_artifact {
+        base
+    } else if picked {
+        base * 3
+    } else {
+        let slow = base * 6;
+        if waited_ms.saturating_add(slow.saturating_mul(2000)) >= deadline_ms {
+            base
+        } else {
+            slow
+        }
+    }
+}
+
 enum Step {
     Wait,
     Got(Artifact),
@@ -1992,6 +2093,7 @@ fn poll(
     now: u64,
 ) -> Result<Step, mason_adapter_api::service::ApiError> {
     let secs = now / 1000;
+    let mut run_changed = true;
     let run = match st.run_id {
         None => {
             let found = site
@@ -2016,6 +2118,7 @@ fn poll(
                 r
             }
             None => {
+                run_changed = false;
                 poller.observe(secs, Observed::Unchanged);
                 ActionRun {
                     id,
@@ -2036,9 +2139,19 @@ fn poll(
     };
     // The jobs, for whether a runner has the job and for what it is doing. A 304 on the run says
     // nothing about its jobs, so they have their own ETag (a 304 does not count against the
-    // rate limit); the last answer stands until they change.
+    // rate limit); the last answer stands until they change. They are read when the run changed
+    // (it goes in progress when a runner takes a job), when never read, and otherwise only when
+    // the last reading is old: a minute for a run not yet picked up (its pickup is timed), two
+    // minutes for the step shown of one running.
     if run.status != "completed" {
-        live.refresh(site, run.id)?;
+        let stale_ms = if st.picked_ms.is_none() {
+            60_000
+        } else {
+            120_000
+        };
+        if run_changed || live.stale(now, stale_ms) {
+            live.refresh(site, run.id, now)?;
+        }
         let jobs = &live.jobs;
         // What the monitor shows of each job (no second read: the last answer stands).
         crate::remote_runs::set_jobs(rec, job_view(jobs));
@@ -2191,14 +2304,24 @@ struct Live {
     jobs: Vec<mason_adapters::github::ActionJob>,
     /// The phase text last handed to `Site::on_phase`.
     said: Option<String>,
+    /// When the jobs were last asked for.
+    read_ms: Option<u64>,
 }
 
 impl Live {
+    /// Never read, or read at least `after_ms` ago.
+    fn stale(&self, now: u64, after_ms: u64) -> bool {
+        self.read_ms
+            .is_none_or(|t| now.saturating_sub(t) >= after_ms)
+    }
+
     fn refresh(
         &mut self,
         site: &Site,
         id: u64,
+        now: u64,
     ) -> Result<(), mason_adapter_api::service::ApiError> {
+        self.read_ms = Some(now);
         if let Some((jobs, etag)) = site.gh.remote_run_jobs_changed(id, self.etag.as_deref())? {
             self.jobs = jobs;
             self.etag = etag;
@@ -2492,6 +2615,19 @@ pub fn fallback_lease(
     uses: &std::collections::BTreeMap<String, u32>,
     label: &str,
 ) -> Result<Option<crate::sched::Lease>, String> {
+    fallback_lease_until(d, project, task, uses, label, &|| false)
+}
+
+/// [`fallback_lease`] whose wait also ends when `stopped` says so (the owner skipped the task's
+/// testing while its check queued here, #873).
+pub fn fallback_lease_until(
+    d: &Arc<Daemon>,
+    project: &str,
+    task: Option<mason_core::TaskId>,
+    uses: &std::collections::BTreeMap<String, u32>,
+    label: &str,
+    stopped: &dyn Fn() -> bool,
+) -> Result<Option<crate::sched::Lease>, String> {
     let needs = crate::sched::needs_of(uses, None);
     if !needs.exclusive && needs.amounts.is_empty() {
         return Ok(None);
@@ -2509,12 +2645,15 @@ pub fn fallback_lease(
     let owner = task.and_then(|t| d.world().ok().and_then(|w| w.tasks.get(&t).cloned()));
     let rank = fallback_rank(d, task, owner.as_ref(), def.as_deref());
     let who = task.unwrap_or(mason_core::TaskId(0));
-    let alive = || match task {
-        Some(t) => d
-            .world()
-            .map(|w| w.tasks.get(&t).is_some_and(|x| x.state.is_step()))
-            .unwrap_or(true),
-        None => true,
+    let alive = || {
+        !stopped()
+            && match task {
+                Some(t) => d
+                    .world()
+                    .map(|w| w.tasks.get(&t).is_some_and(|x| x.state.is_step()))
+                    .unwrap_or(true),
+                None => true,
+            }
     };
     tracing::info!(project, %label, ?uses, "no GitHub runner: queueing for this machine's slots (fallback = local)");
     d.broker
@@ -2859,6 +2998,7 @@ pub fn reap_adopted(d: &Arc<Daemon>) {
     }
     let d = d.clone();
     std::thread::spawn(move || {
+        let _caller = github_budget::as_caller("remote-hold");
         let holds = holds_dir(&d.cfg.hosts_dir());
         let gone = d
             .world()
@@ -2990,6 +3130,7 @@ pub fn spec_for(
         only: vec![],
         shard_lists: vec![],
         shard_command: None,
+        partial_lists: false,
     }
 }
 
@@ -3029,6 +3170,86 @@ pub fn run_or_fallback(
         Err(Fail::Environmental(why)) => Err(env_err(&why)),
         Err(Fail::Error(e)) => Err(e),
     }
+}
+
+/// Why a run ended without a result about the code (#873), or `None` when it gave one (green,
+/// or red with a test named). Not a result: an outage, no runner within `pickup_timeout`, a
+/// refused push, a run without an artifact, and a run cancelled at the runner limit that named
+/// no failing test. A run that was stopped on purpose is not a miss.
+pub fn no_result(r: &Result<Outcome, Fail>, limit: Duration) -> Option<String> {
+    match r {
+        Err(Fail::Environmental(why)) => Some(why.clone()),
+        // A cut-off run that names a failing test, or tests that started and never finished,
+        // answers about the code: a hang is a result.
+        Ok(Outcome::Done(f))
+            if f.timed_out
+                && crate::rerun::failing_names(&f.output).is_empty()
+                && crate::suites::still_running(&f.output).is_empty() =>
+        {
+            Some(format!(
+                "the run reached the runner limit of {} s without naming a failing test",
+                limit.as_secs()
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// A run that did not give a result, tried again once on GitHub (#873). Both misses are told to
+/// `said`, which shows them in the check's progress. `Ok((outcome, notes))`: `outcome` is the
+/// result of the run that gave one; `None` means both runs missed and the project's `fallback`
+/// is `local`, so the caller runs it here. Two misses without that give an [`env_err`] worded
+/// "no result (infrastructure): ...", never a failure of the code.
+pub fn run_retrying(
+    site: &Site,
+    spec: &RunSpec,
+    dir: &Path,
+    stop: &dyn Fn() -> Option<StopWhy>,
+    said: &dyn Fn(&str),
+) -> Result<(Option<Outcome>, Vec<String>), String> {
+    let mut notes: Vec<String> = vec![];
+    let mut whys: Vec<String> = vec![];
+    let mut attempt = spec.clone();
+    for n in 0..2u32 {
+        if n > 0 {
+            if let Some(why) = stop() {
+                return Ok((Some(Outcome::Stopped(why)), notes));
+            }
+            attempt.id = format!("{}-r{n}", spec.id);
+            let note = format!(
+                "no result from the first run ({}); running it again on GitHub",
+                whys[0]
+            );
+            tracing::warn!(run = %spec.id, "{note}");
+            said(&note);
+            notes.push(note);
+        }
+        let r = execute_sharded(site, &attempt, dir, stop);
+        match no_result(&r, spec.limit) {
+            None => {
+                return match r {
+                    Ok(o) => Ok((Some(o), notes)),
+                    Err(Fail::Environmental(why)) => Err(env_err(&why)),
+                    Err(Fail::Error(e)) => Err(e),
+                }
+            }
+            // A favor-remote run that came back here on purpose (#833) is the placement mode's
+            // answer, not a miss to retry on GitHub.
+            Some(why) if n == 0 && site.fallback_local && why.contains("(favor-remote:") => {
+                said(&format!("{why}; running it on this Mac"));
+                return Ok((None, notes));
+            }
+            Some(why) => whys.push(why),
+        }
+    }
+    let both = format!("{}; then {}", whys[0], whys[1]);
+    if site.fallback_local {
+        let note = format!("no result from two runs on GitHub ({both}); running it on this Mac");
+        tracing::warn!(run = %spec.id, "{note}");
+        said(&note);
+        return Ok((None, notes));
+    }
+    Err(env_err(&both))
 }
 
 #[cfg(test)]
@@ -3184,6 +3405,7 @@ mod tests {
             only: vec![],
             shard_lists: vec![],
             shard_command: None,
+            partial_lists: false,
         }
     }
 
@@ -3207,6 +3429,10 @@ mod tests {
         Status(u16),
         /// The run is found but the artifact never appears.
         NoArtifact,
+        /// The first run is never picked up; the second runs normally (#873).
+        MissFirst,
+        /// The first run is picked up and never ends; the second runs normally (#873).
+        HangFirst,
         /// The run never ends by itself; once cancelled it completes, with its artifact.
         Hung,
         /// As `Hung`, but no artifact ever appears.
@@ -3272,9 +3498,14 @@ mod tests {
         fn phase(&self) -> (&'static str, &'static str) {
             let n = *self.looks.lock().unwrap();
             let hung = matches!(self.mode, Mode::Hung | Mode::HungNoArtifact);
-            if self.mode == Mode::NeverPicked || n <= self.queued {
+            let first_only = self.runs_seen.lock().unwrap().len() < 2;
+            if self.mode == Mode::NeverPicked
+                || (first_only && self.mode == Mode::MissFirst)
+                || n <= self.queued
+            {
                 ("queued", "queued")
-            } else if (hung && self.cancels.lock().unwrap().is_empty())
+            } else if (first_only && self.mode == Mode::HangFirst)
+                || (hung && self.cancels.lock().unwrap().is_empty())
                 || (!hung && n <= self.queued + self.running)
             {
                 ("in_progress", "in_progress")
@@ -4513,7 +4744,7 @@ mod tests {
         let mut gh = Arc::try_unwrap(FakeGh::new(&r, &zip, Mode::Normal))
             .ok()
             .unwrap();
-        gh.queued = 30; // 30 looks at 10 s: five minutes queued, which is not the limit's time
+        gh.queued = 15; // 15 looks at 60 s: fifteen minutes queued, which is not the limit's time
         gh.running = 100_000;
         let gh = Arc::new(gh);
         let s = site(&r, gh.clone(), clock(), false);
@@ -5117,7 +5348,6 @@ mod tests {
         let none = with_build(spec("b2"), None);
         assert!(none.build.is_none());
     }
-
     #[test]
     fn job_names_of_a_sharded_run_are_run_jobs() {
         assert!(is_run_job("run") && is_run_job("run (3)"));
@@ -5126,6 +5356,11 @@ mod tests {
 
     /// A fake Actions API: per repository, runs in two lists (`in_progress`, `queued`) behind one
     /// ETag, jobs with labels, a repository the token cannot read, and a request log.
+    type Retried = (
+        Result<(Option<Outcome>, Vec<String>), String>,
+        Arc<FakeGh>,
+        Vec<String>,
+    );
     type FakeJobs = Vec<(String, String)>;
     type FakeRuns = Vec<(u64, String, String, FakeJobs)>;
     type FakeSeed<'a> = Vec<(&'a str, Vec<(u64, &'a str, &'a str, FakeJobs)>)>;
@@ -5329,6 +5564,63 @@ mod tests {
     }
 
     #[test]
+    fn a_run_whose_list_status_is_unchanged_has_its_jobs_asked_again_only_after_a_while() {
+        let one = |n: usize| {
+            vec![(
+                1,
+                "CI",
+                ".github/workflows/ci.yml",
+                jobs(n, "in_progress", "ubuntu-latest"),
+            )]
+        };
+        let put = |api: &Arc<FakeActions>, n: usize, etag: &str| {
+            let (i, name, path, j) = one(n).remove(0);
+            api.repos.lock().unwrap().insert(
+                "o/r".into(),
+                vec![(i, name.to_string(), path.to_string(), j)],
+            );
+            *api.etag.lock().unwrap() = etag.into();
+        };
+        let api = fake(vec![("o/r", one(3))]);
+        let sources = [source(&api, "o/r", &[])];
+        let mut seen = AccountJobs::default();
+        assert_eq!(seen.poll(&sources, 1000).gha, 3);
+        // The lists changed (a new ETag) but the run is in the same list and was read a moment
+        // ago: its jobs are not asked for again.
+        put(&api, 1, "\"b\"");
+        let asked = api.log.lock().unwrap().len();
+        assert_eq!(seen.poll(&sources, 2000).gha, 3);
+        assert_eq!(
+            api.log.lock().unwrap().len(),
+            asked + 2,
+            "only the two lists"
+        );
+        // Long enough later they are.
+        put(&api, 1, "\"c\"");
+        assert_eq!(seen.poll(&sources, 1000 + JOBS_AGAIN_MS).gha, 1);
+    }
+
+    #[test]
+    fn a_queued_run_is_looked_at_rarely_a_running_one_less_rarely_and_the_pickup_is_not_missed() {
+        // Finding the run, or waiting for its artifact: the base interval.
+        assert_eq!(run_poll_interval_s(10, false, false, false, 0, 600_000), 10);
+        assert_eq!(run_poll_interval_s(10, true, true, true, 0, 600_000), 10);
+        // Queued: a minute. Running: 30 s.
+        assert_eq!(run_poll_interval_s(10, true, false, false, 0, 600_000), 60);
+        assert_eq!(run_poll_interval_s(10, true, true, false, 0, 600_000), 30);
+        // Queued and within two slow polls of the pickup timeout: quick again, so a runner that
+        // takes it just before the timeout is seen.
+        assert_eq!(
+            run_poll_interval_s(10, true, false, false, 480_000, 600_000),
+            10
+        );
+        assert_eq!(
+            run_poll_interval_s(10, true, false, false, 479_999, 600_000),
+            60
+        );
+    }
+
+    #[test]
     fn macos_jobs_are_counted_apart() {
         let api = fake(vec![(
             "o/star",
@@ -5406,5 +5698,190 @@ mod tests {
         api.repos.lock().unwrap().clear();
         let other = seen.poll(&sources, 200);
         assert_eq!((other.gha, other.stale, other.read_at_ms), (2, true, 100));
+    }
+
+    /// `run_retrying` against `mode`, with the pushes in `refuse_first` refused once.
+    fn retrying(mode: Mode, refuse_first: bool, fallback: bool) -> Retried {
+        let r = repo();
+        token();
+        if refuse_first {
+            let hook = r.bare.join("hooks/pre-receive");
+            let marker = r.bare.join("refused-once");
+            std::fs::create_dir_all(r.bare.join("hooks")).unwrap();
+            // GitHub refuses the first four pushes: the push's own tries (#772) are all used up
+            // by the first run, and the fifth push is the retry's.
+            std::fs::write(
+                &hook,
+                format!(
+                    "#!/bin/sh\nn=$(cat '{m}' 2>/dev/null || echo 0)\nn=$((n + 1))\necho $n > '{m}'\nif [ $n -le 4 ]; then echo refused >&2; exit 1; fi\nexit 0\n",
+                    m = marker.display()
+                ),
+            )
+            .unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let zip = artifact(r._t.path(), GREEN, 0, None);
+        let gh = FakeGh::new(&r, &zip, mode);
+        let s = site(&r, gh.clone(), clock(), fallback);
+        let said = Mutex::new(vec![]);
+        let dir = r._t.path().join("runs");
+        let out = run_retrying(&s, &spec("rt1"), &dir, &|| None, &|t| {
+            said.lock().unwrap().push(t.to_string())
+        });
+        let said = said.into_inner().unwrap();
+        (out, gh, said)
+    }
+
+    #[test]
+    fn a_run_nobody_picks_up_is_run_again_and_the_agent_sees_one_result() {
+        let (out, gh, said) = retrying(Mode::MissFirst, false, false);
+        let (Some(Outcome::Done(f)), notes) = out.unwrap() else {
+            panic!("no result");
+        };
+        assert_eq!(f.code, 0);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("no runner picked up"), "{notes:?}");
+        assert_eq!(said, notes, "the retry is shown in the check's progress");
+        assert_eq!(gh.runs_seen.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_refused_push_is_run_again_after_a_backoff() {
+        let (out, _, said) = retrying(Mode::Normal, true, false);
+        let (Some(Outcome::Done(f)), notes) = out.unwrap() else {
+            panic!("no result");
+        };
+        assert_eq!(f.code, 0);
+        assert!(notes[0].contains("could not push"), "{notes:?}");
+        assert_eq!(said.len(), 1);
+    }
+
+    #[test]
+    fn a_run_cancelled_at_the_limit_naming_no_test_is_run_again() {
+        let (out, gh, _) = retrying(Mode::HangFirst, false, false);
+        let (Some(Outcome::Done(f)), notes) = out.unwrap() else {
+            panic!("no result");
+        };
+        assert!(!f.timed_out && f.code == 0, "the second run is the answer");
+        assert!(notes[0].contains("runner limit"), "{notes:?}");
+        assert_eq!(
+            gh.cancels.lock().unwrap().len(),
+            1,
+            "the first run was cancelled"
+        );
+    }
+
+    #[test]
+    fn two_misses_are_no_result_not_a_failure() {
+        let (out, _, said) = retrying(Mode::NeverPicked, false, false);
+        let e = out.unwrap_err();
+        let why = environmental(&e).expect("an environmental error, not a red result");
+        assert!(why.contains("; then "), "{why}");
+        assert_eq!(said.len(), 1, "one retry was shown");
+    }
+
+    #[test]
+    fn two_misses_under_a_local_fallback_go_to_this_machine() {
+        let (out, _, said) = retrying(Mode::NeverPicked, false, true);
+        let (o, notes) = out.unwrap();
+        assert!(o.is_none(), "the caller runs it here");
+        assert_eq!(notes.len(), 1);
+        assert_eq!(said.len(), 2, "the retry and the move to this Mac");
+    }
+
+    #[test]
+    fn a_red_run_is_a_result_and_is_not_retried() {
+        let r = repo();
+        token();
+        let zip = artifact(r._t.path(), "test a ... FAILED\n", 101, None);
+        let gh = FakeGh::new(&r, &zip, Mode::Normal);
+        let s = site(&r, gh.clone(), clock(), false);
+        let dir = r._t.path().join("runs");
+        let (Some(Outcome::Done(f)), notes) =
+            run_retrying(&s, &spec("rt2"), &dir, &|| None, &|_| {}).unwrap()
+        else {
+            panic!("no result");
+        };
+        assert_eq!(f.code, 101);
+        assert!(notes.is_empty());
+        assert_eq!(gh.runs_seen.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_skip_while_a_run_waits_cancels_it_on_github() {
+        let r = repo();
+        token();
+        let zip = artifact(r._t.path(), GREEN, 0, None);
+        let gh = FakeGh::new(&r, &zip, Mode::NeverPicked);
+        let clk = clock();
+        let start = clk.now_ms();
+        let s = site(&r, gh.clone(), clk.clone(), false);
+        let dir = r._t.path().join("runs");
+        let (o, _) = run_retrying(
+            &s,
+            &spec("rt3"),
+            &dir,
+            &|| (clk.now_ms() - start >= 60_000).then_some(StopWhy::Skipped),
+            &|_| {},
+        )
+        .unwrap();
+        assert!(matches!(o, Some(Outcome::Stopped(StopWhy::Skipped))));
+        assert_eq!(gh.cancels.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_narrowed_run_of_three_targets_goes_out_as_two_jobs_with_the_narrowed_command() {
+        let r = repo();
+        token();
+        let t = r._t.path();
+        let mut zips = std::collections::BTreeMap::new();
+        for k in 1..=2u32 {
+            let d = t.join(format!("shard{k}"));
+            std::fs::create_dir_all(&d).unwrap();
+            zips.insert(k, artifact(&d, "test a ... ok\n", 0, None));
+        }
+        let gh = Arc::new(ShardGh {
+            bare: r.bare.clone(),
+            zips,
+            lost: vec![],
+            shas: Mutex::new(vec![]),
+        });
+        let mut s = site(
+            &r,
+            FakeGh::new(&r, &artifact(t, GREEN, 0, None), Mode::Normal),
+            clock(),
+            false,
+        );
+        s.gh = GitHub::new(
+            gh.clone(),
+            "https://api.github.com",
+            "o/r",
+            TokenRef::Env("MASON_TEST_REMOTE_TOKEN".into()),
+        );
+        let narrowed = "mason_rc=0; ( python3 -I scripts/test-shard.py -- cargo test -p a --lib ) || mason_rc=1; ( python3 -I scripts/test-shard.py -- cargo test -p b --test it ) || mason_rc=1; ( python3 -I scripts/test-shard.py -- cargo test -p c --lib ) || mason_rc=1; [ $mason_rc -eq 0 ]";
+        let mut sp = sharded_spec("nr1", &[&["a", "b"], &["c"]]);
+        sp.shard_command = Some(narrowed.into());
+        sp.partial_lists = true;
+        let dir = t.join("runs");
+        let Ok(Outcome::Done(f)) = execute_sharded(&s, &sp, &dir, &|| None) else {
+            panic!("the sharded run did not finish");
+        };
+        assert_eq!(f.parts.len(), 2);
+        // A shard whose share of the whole suite's lists holds none of this narrowed run's tests
+        // is no defect: no shard counts as having listed any.
+        assert!(f.parts.iter().all(|p| p.listed == 0));
+        let shas = gh.shas.lock().unwrap().clone();
+        assert_eq!(shas.len(), 1, "one run, two jobs");
+        let json: serde_json::Value = serde_json::from_str(&git_ok(
+            &r.wt,
+            &["show", &format!("{}:.mason/run.json", shas[0])],
+        ))
+        .unwrap();
+        assert_eq!(json["matrix"], serde_json::json!([1, 2]));
+        let cmd = json["shard_command"].as_str().unwrap();
+        for g in ["-p a --lib", "-p b --test it", "-p c --lib"] {
+            assert!(cmd.contains(g), "{cmd}");
+        }
     }
 }
