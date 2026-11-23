@@ -686,6 +686,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s851**: The Compose conformance tool now waits for the views of each step (a new `lastViewSeq` that only applied views move) and a 1.5 s quiet window, instead of treating the events message's seq as proof the views had landed.
 - **s852**: `a_hung_git_is_killed_at_its_deadline` no longer asserts that it finished within 3 s; it checks `timed_out`, the "timed out" message and that the helper process is gone.
 - **s853**: The abandoned-run test keeps its waiting request polled through every wait and fails at once, naming the explain text, if the request is dropped instead of sitting out the 900 s floor.
+- **s856**: a remote run now starts by pushing its snapshot ref and dispatching the run workflow on it with the runner and shard list as inputs, so there is no `plan` job and the run waits for a runner once.
 - **s858**: The RowRedrawTests progress-view render counts are replaced by a deterministic MonitorCore observation test, so CI/monitor-swift no longer depends on SwiftUI updates inside ImageRenderer.
 - **s859**: The fake git host now runs its archive and checks commands through `shell_command` and `to_shell_path` so they work on Windows, and a check run that could not happen is no longer cached as red.
 - **s860**: a develop agent that kept committing was never given progress time after a daemon restart, because the extender measured elapsed time from the daemon process's start while the host's limit counts from the step's launch; it now counts from the recorded launch.
@@ -712,6 +713,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s906**: The fake host materialises a PR head with git read-tree and checkout-index instead of git archive piped to tar, so its checks run on Windows.
 - **s911**: on 2026-11-22 the local queue froze for about three hours. A landing batch holds this
 - **s912**: The red CI/monitor-compose run 45005421555 names no failing step in the supplied log tail (only post-job Gradle cache cleanup and the cache-save skip), so no code changed and decision 0905 records how to classify it from the full log.
+- **s914**: Two of the six red shard-3 scripts had Linux-independent causes and are fixed (s669's fixture lacked the files the lint now reads; s546's affected-test fixture never registered its `tpl` target); s777 passed on Linux, and s09, s40 and s422 were not reproduced.
 - **s917**: Recorded that the cause of s616, s664, s757 and s787 failing on ubuntu-latest shard 1 could not be determined because the per-script failure lines of run 45005421555 were not available to this session, so no fix was made.
 - **s918**: Remote exit-scripts runs skip the Swift and Compose builds as ci.yml does, and a red exit script that is also red on the base is excused.
 - **s924**: see decision 0917. With `fallback = "local"`, 16 runs came back from GitHub at once into a
@@ -738,4 +740,13 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s984**: A double click on the Failed tile now opens the lone failed task, or a Failed page listing every failed task (with "N of M" when capped); the phone tile tap and `mason://section/failed` do the same.
 - **s998**: masons_own_impact_map_selects_suites_by_path now expects the eight unit-level suites bound to run_check and the test step, instead of six.
 - **s1014**: RemotePlacementTest now composes RemotePlacementBody inside a Column, as the settings page does, so the project row no longer covers the global row's buttons.
+- **s1015**: Unit-test narrowing no longer pushes a line into `Group.notes`, which is per directory target, so `the_note_says_how_the_modules_were_picked` passes again.
+- **s1022**: s249 clears the shard variables for its temporary repository and s782 accepts both the busy and the quiet next-trigger text.
+- **s1026**: s13.sh now prints the per-checkpoint id diff when the Compose conformance check fails, and Compose's step() reports a quiet exit before the views reached the daemon's seq, so the next red of run 45005421555's kind can be diagnosed.
+- **s1030**: The Land now freeze test holds the fix at a gate so the freeze is certainly in force, then waits for the fix and `other` to land instead of asserting `other` never does.
+- **s1035**: s22, s244 and s728 are named in weights.txt and s1035 checks them, but their cause is not diagnosed because the failed-step log was not readable from the pipeline.
+- **s1036**: Recorded that the s77, s117 and s902 reds on ubuntu shard 2 could not be traced without the full CI log, and changed no code.
+- **s1037**: The `the_note_says_how_the_modules_were_picked` failure on a0f67a2 was fixed by 9c18e970f (stop unit narrowing from pushing a note into Group.notes); no source change is needed.
+- **s1038**: scripts/run-exit-scripts.sh now prints a failed script's last 40 lines and marks limit kills `(over N s)` in the `FAILED scripts:` list.
+- **s1039**: s782 now clears the inherited shard and plan variables, and the first failing assertion of s249 and s782 in run 45143216377 is still open.
 <!-- status:end -->

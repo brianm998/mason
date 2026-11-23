@@ -814,20 +814,34 @@ fn land_now_does_not_land_a_batch_that_does_not_build() {
 }
 
 #[test]
-fn land_now_keeps_the_freeze() {
-    let w = world("window = \"0s\"\n", &[]);
+fn land_now_waits_for_the_freeze_to_lift() {
+    // The freeze is cleared when the fix's batch is verified, before it is promoted, so
+    // "other never lands" has no fixed order. Hold the fix at a gate: the freeze is then
+    // certainly in force while we look, and `other` lands only after it lifts.
+    let gate_dir = tempfile::tempdir().unwrap().keep();
+    let gate = gate_dir.join("gate");
+    let checks = gated_checks(&gate);
+    let w = world_built(
+        "window = \"2s\"\nmax_size = 5\n[[tier]]\nname = \"batch\"\nsuites = [\"integration\"]\n",
+        &[("checks.sh", &checks)],
+    );
     let fix = w.task("the fix", &[("x/fix.txt", "1")]);
-    let other = w.task("not the fix", &[("x/other.txt", "1")]);
+    wait_for("the fix's batch to run", 90, || w.d.landing().in_batch(fix));
     w.d.store
         .set_freeze("scratch", "test freeze", Some(fix.0), 1)
         .unwrap();
+    let other = w.task("not the fix", &[("x/other.txt", "1")]);
     let (code, _) = post_api(&w.d, format!("/tasks/{}/land-now", other.0));
     assert_eq!(code, 200);
-    // The fix passes the freeze; the coordinator has then looked at the queue with `other`
-    // flagged, and left it.
-    wait_for("the fix to land", 90, || w.landed(fix));
+    // The gate is closed, so the fix is unverified and the freeze holds.
     assert!(!w.landed(other), "Land now does not pass a freeze");
-    assert!(!w.on_main("x/other.txt"));
+    assert!(!w.on_main("x/other.txt"), "Land now does not pass a freeze");
+    std::fs::write(&gate, "go").unwrap();
+    wait_for("the fix to land", 90, || w.landed(fix));
+    wait_for("other to land once the freeze lifts", 90, || {
+        w.landed(other)
+    });
+    assert!(w.on_main("x/other.txt"));
 }
 
 /// A fake GitHub that never assigns a runner: it accepts connections and says nothing. The
