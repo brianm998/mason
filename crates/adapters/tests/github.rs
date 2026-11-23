@@ -1000,6 +1000,16 @@ fn an_artifact_is_downloaded_through_the_signed_redirect_without_the_token() {
 }
 
 #[test]
+fn a_base_run_is_named_by_its_workflow_not_its_display_title() {
+    let g = gh("base_runs_titled.json");
+    let runs = g.gh.base_runs("develop").unwrap();
+    assert_eq!(runs.len(), 2);
+    assert!(runs.iter().all(|r| r.workflow == "CI"));
+    // One read of the workflow list serves both runs.
+    assert!(g.http.unused().is_empty());
+}
+
+#[test]
 fn a_refs_caches_are_listed_and_deleted_one_by_one() {
     // GitHub's bulk DELETE /actions/caches needs a cache key as well as the ref (HTTP 422
     // without one), so the caches of a run ref are listed and deleted by id; one already
