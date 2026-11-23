@@ -672,7 +672,12 @@ fn check_run_spec(
     rs
 }
 
-fn remote_check(d: &Arc<Daemon>, spec: &CheckSpec, id: &str) -> Option<Shared> {
+fn remote_check(
+    d: &Arc<Daemon>,
+    spec: &CheckSpec,
+    id: &str,
+    progress: Option<&CheckProgress>,
+) -> Option<Shared> {
     use crate::remote as rm;
     let runs_on = runs_on_github(d, spec)?;
     let project = rm::project_of(d, &spec.cwd)?;
@@ -693,13 +698,35 @@ fn remote_check(d: &Arc<Daemon>, spec: &CheckSpec, id: &str) -> Option<Shared> {
         rm::with_build(check_run_spec(&project, id, spec, &runs_on), build),
         &site,
     );
+    // The suite's own command (whole, or narrowed with a shard command of its own, #873) goes
+    // out as one job per shard.
+    let rs = match place.map(|(_, s)| s) {
+        Some(ps) if ps.shards > 1 && spec.cmd == ps.command => match ps
+            .dev_shard_command
+            .as_deref()
+            // A narrowed check's own shard command (filled in, #880); else the whole suite's.
+            .filter(|c| !c.contains('{'))
+            .or(ps.shard_command.as_deref())
+        {
+            Some(sc) => {
+                let mut rs = rs;
+                rs.shards = ps.shards;
+                rs.shard_command = Some(sc.to_string());
+                rs.shard_lists = crate::suites::shard_lists(d, &project, ps);
+                rs.partial_lists = crate::suites::lists_partial(ps);
+                rs
+            }
+            None => rs,
+        },
+        _ => rs,
+    };
     // The units it holds, on record until it ends, for a daemon that restarts (#700).
     let _hold = rm::HoldGuard::new(
         &d.cfg.hosts_dir(),
         &rs,
         id,
         id,
-        1,
+        rs.shards.max(1),
         &spec.log_dir,
         if spec.global || place.is_some_and(|(t, _)| t.is_none()) {
             "batch"
@@ -722,10 +749,17 @@ fn remote_check(d: &Arc<Daemon>, spec: &CheckSpec, id: &str) -> Option<Shared> {
         *note.lock().unwrap_or_else(|e| e.into_inner()) = Some(n);
         Some(rm::StopWhy::Skipped)
     };
+    // A run that gave no result is tried again here, not handed back to the agent (#873); the
+    // retry is shown in the check's progress.
+    let said = |t: &str| {
+        if let Some(p) = progress {
+            d.check_edit(p.run, p.check, |c, _| c.current = t.to_string());
+        }
+    };
     Some(
-        match rm::run_or_fallback(&site, &rs, &spec.log_dir, &stop) {
-            Ok(None) => return None,
-            Ok(Some(rm::Outcome::Stopped(_))) => Ok(CheckOutcome {
+        match rm::run_retrying(&site, &rs, &spec.log_dir, &stop, &said) {
+            Ok((None, _)) => return None,
+            Ok((Some(rm::Outcome::Stopped(_)), _)) => Ok(CheckOutcome {
                 passed: false,
                 timed_out: false,
                 output: String::new(),
@@ -734,17 +768,26 @@ fn remote_check(d: &Arc<Daemon>, spec: &CheckSpec, id: &str) -> Option<Shared> {
                 stopped: note.lock().unwrap_or_else(|e| e.into_inner()).clone(),
                 phase: None,
             }),
-            Ok(Some(rm::Outcome::Done(f))) => Ok(CheckOutcome {
-                passed: f.code == 0 && f.signal == 0 && !f.timed_out,
-                timed_out: f.timed_out,
-                output: format!("({})\n{}", f.ran_on, crate::jobs::tail(&f.output, 40)),
-                full: f.output.clone(),
-                id: id.to_string(),
-                stopped: None,
-                phase: f.phase.clone(),
-            }),
+            Ok((Some(rm::Outcome::Done(f)), notes)) => {
+                let retried: String = notes.iter().map(|n| format!("({n})\n")).collect();
+                Ok(CheckOutcome {
+                    passed: f.code == 0 && f.signal == 0 && !f.timed_out,
+                    timed_out: f.timed_out,
+                    output: format!(
+                        "{retried}({})\n{}",
+                        f.ran_on,
+                        crate::jobs::tail(&f.output, 40)
+                    ),
+                    full: f.output.clone(),
+                    id: id.to_string(),
+                    stopped: None,
+                    phase: f.phase.clone(),
+                })
+            }
             Err(e) => Err(match rm::environmental(&e) {
-                Some(why) => format!("{OUTAGE_PREFIX}{why}; run it again"),
+                // Two runs gave no result: not a failure of the code (#873). Landing waits out
+                // such an outage by this prefix (#772).
+                Some(why) => format!("{OUTAGE_PREFIX}{why}"),
                 None => e,
             }),
         },
@@ -752,7 +795,7 @@ fn remote_check(d: &Arc<Daemon>, spec: &CheckSpec, id: &str) -> Option<Shared> {
 }
 
 /// What an error from [`run`] starts with when GitHub, not the code, kept the check from running.
-pub const OUTAGE_PREFIX: &str = "the check could not run on GitHub: ";
+pub const OUTAGE_PREFIX: &str = "no result (infrastructure): ";
 
 /// Whether an error from [`run`] is that outage (#772).
 pub fn is_outage(e: &str) -> bool {
@@ -766,7 +809,7 @@ fn collect(
     progress: Option<&CheckProgress>,
 ) -> Shared {
     let bound_remote = runs_on_github(d, spec).is_some();
-    if let Some(r) = remote_check(d, spec, id) {
+    if let Some(r) = remote_check(d, spec, id, progress) {
         return r;
     }
     // Meant for GitHub but sent here (`fallback = "local"`): it skipped this machine's queue,
@@ -774,13 +817,31 @@ fn collect(
     // and CPU and thermal holds as any local run. Held until the command ends.
     let _fallback = if bound_remote && !dir_has_host(d, id) {
         match crate::remote::project_of(d, &spec.cwd) {
-            Some(project) => crate::remote::fallback_lease(
+            Some(project) => match crate::remote::fallback_lease_until(
                 d,
                 &project,
                 spec.place.as_ref().and_then(|(t, _)| *t),
                 &spec.holds,
                 &format!("{} (no GitHub runner, run here)", spec.label),
-            )?,
+                // A skip ends the wait for this machine's slots too (#873).
+                &|| spec.stop.as_ref().is_some_and(|f| f().is_some()),
+            ) {
+                Ok(l) => l,
+                Err(e) => {
+                    return match spec.stop.as_ref().and_then(|f| f()) {
+                        Some(note) => Ok(CheckOutcome {
+                            passed: false,
+                            timed_out: false,
+                            output: String::new(),
+                            full: String::new(),
+                            id: id.to_string(),
+                            stopped: Some(note),
+                            phase: None,
+                        }),
+                        None => Err(e),
+                    }
+                }
+            },
             None => None,
         }
     } else {
