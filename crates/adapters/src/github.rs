@@ -63,7 +63,21 @@ pub struct GitHub {
     pub infra: Option<Vec<String>>,
     /// The repository's workflows, by id and by file path, read once and again on a miss.
     names: Arc<std::sync::Mutex<WorkflowNames>>,
+    /// The runs and jobs the last unfinished `status_detail` read, for the `progress` that the
+    /// landing asks for right after it (the same commit): not read twice.
+    last_read: Arc<std::sync::Mutex<Option<ReadRuns>>>,
 }
+
+/// What `status_detail` read of a commit's runs while they were unfinished.
+struct ReadRuns {
+    sha: String,
+    at: std::time::Instant,
+    runs: Vec<Value>,
+    jobs: std::collections::HashMap<u64, Value>,
+}
+
+/// How long what `status_detail` read stands in for a `progress` of the same commit.
+const READ_STANDS: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Workflow names by id and by file path (`.github/workflows/ci.yml`).
 #[derive(Default)]
@@ -158,6 +172,7 @@ impl GitHub {
             workflow: None,
             infra: None,
             names: Default::default(),
+            last_read: Default::default(),
         }
     }
 
@@ -953,6 +968,12 @@ impl BuildSystemAdapter for GitHub {
             if state != CiState::Pending {
                 return Ok((state, vec![]));
             }
+            *self.last_read.lock().unwrap_or_else(|e| e.into_inner()) = Some(ReadRuns {
+                sha: run.to_string(),
+                at: std::time::Instant::now(),
+                runs: runs.clone(),
+                jobs: read.clone(),
+            });
             let mut detail = vec![];
             for r in &runs {
                 let Some(id) = r["id"].as_u64() else { continue };
@@ -978,16 +999,38 @@ impl BuildSystemAdapter for GitHub {
         self.finished(&runs).map(|s| (s, vec![]))
     }
 
+    /// The jobs by state for each run of the commit. Asked right after an unfinished
+    /// `status_detail` of the same commit (the landing does, every poll), it uses what that
+    /// read: the list of runs and the jobs of each unfinished one, so a poll costs one set of
+    /// requests, not two.
     fn progress(&self, run: &str) -> Result<CiProgress, ApiError> {
-        let v = self.json(Request::get(
-            &self.url(&format!("/actions/runs?head_sha={run}&per_page=20")),
-        ))?;
+        let fresh = self
+            .last_read
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+            .filter(|c| c.sha == run && c.at.elapsed() < READ_STANDS);
+        let (runs, mut known) = match fresh {
+            Some(c) => (c.runs, c.jobs),
+            None => {
+                let v = self.json(Request::get(
+                    &self.url(&format!("/actions/runs?head_sha={run}&per_page=20")),
+                ))?;
+                (
+                    v["workflow_runs"].as_array().cloned().unwrap_or_default(),
+                    Default::default(),
+                )
+            }
+        };
         let mut out = CiProgress::default();
-        for r in v["workflow_runs"].as_array().into_iter().flatten() {
+        for r in &runs {
             let Some(id) = r["id"].as_u64() else { continue };
-            let jobs = self.json(Request::get(&self.url(&format!(
-                "/actions/runs/{id}/jobs?filter=latest&per_page=100"
-            ))))?;
+            let jobs = match known.remove(&id) {
+                Some(j) => j,
+                None => self.json(Request::get(&self.url(&format!(
+                    "/actions/runs/{id}/jobs?filter=latest&per_page=100"
+                ))))?,
+            };
             out.workflows.push(count_jobs(
                 &self.workflow_name(r),
                 r["html_url"].as_str().unwrap_or_default(),
