@@ -4787,7 +4787,7 @@ mod tests {
                 .any(|q| q.contains("/jobs"))
                 .then_some(StopWhy::Skipped)
         };
-        let out = execute(&s, &sp, logs.path(), &stop).unwrap();
+        let out = execute(&s, &sp, logs.path(), &stop, &Grant::test()).unwrap();
         assert!(matches!(out, Outcome::Stopped(StopWhy::Skipped)));
         let log = gh.requests();
         let at = |needle: &str| log.iter().position(|q| q.contains(needle));
@@ -4856,7 +4856,7 @@ mod tests {
         let gh = FakeGh::new(&r, &zip, Mode::Normal);
         gh.dispatches.lock().unwrap().push("earlier {}".into());
         let s = site(&r, gh.clone(), clock(), false);
-        let out = execute(&s, &sp, logs.path(), &|| None).unwrap();
+        let out = execute(&s, &sp, logs.path(), &|| None, &Grant::test()).unwrap();
         assert!(matches!(out, Outcome::Done(f) if f.output == GREEN));
         assert_eq!(gh.dispatches.lock().unwrap().len(), 1, "started once only");
         // GitHub has none: the restarted daemon starts it, once.
@@ -4874,7 +4874,7 @@ mod tests {
         .save(&rec(logs2.path()));
         let gh2 = FakeGh::new(&r2, &zip, Mode::Normal);
         let s2 = site(&r2, gh2.clone(), clock(), false);
-        let out = execute(&s2, &sp, logs2.path(), &|| None).unwrap();
+        let out = execute(&s2, &sp, logs2.path(), &|| None, &Grant::test()).unwrap();
         assert!(matches!(out, Outcome::Done(f) if f.output == GREEN));
         assert_eq!(gh2.dispatches.lock().unwrap().len(), 1);
     }
@@ -4888,7 +4888,7 @@ mod tests {
         let gh = FakeGh::new(&r, &zip, Mode::Status(403));
         let s = site(&r, gh, clock(), false);
         let logs = tempfile::tempdir().unwrap();
-        let Err(e) = execute(&s, &spec("d3"), logs.path(), &|| None) else {
+        let Err(e) = execute(&s, &spec("d3"), logs.path(), &|| None, &Grant::test()) else {
             panic!("the run started")
         };
         assert!(matches!(e, Fail::Environmental(m) if m.contains("could not start")));
