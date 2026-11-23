@@ -302,3 +302,34 @@ fn a_batch_suite_falling_back_here_takes_its_slots_ranked_as_the_batch() {
     drop(debt.join().unwrap());
     assert_eq!(d.broker.used("compile"), 0);
 }
+
+#[test]
+fn a_skip_ends_the_wait_for_this_machines_slots() {
+    // #873: the owner skipped a task's testing while its check queued behind another here.
+    let w = world("window = \"20m\"\n", &[]);
+    let d = w.d.clone();
+    d.broker.set_limit("compile", 1).unwrap();
+    let first = mason_daemon::remote::fallback_lease(&d, "scratch", None, &compile(), "first")
+        .unwrap()
+        .expect("a lease");
+    let skipped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let h = {
+        let (d, skipped) = (d.clone(), skipped.clone());
+        std::thread::spawn(move || {
+            mason_daemon::remote::fallback_lease_until(
+                &d,
+                "scratch",
+                None,
+                &compile(),
+                "second",
+                &|| skipped.load(std::sync::atomic::Ordering::SeqCst),
+            )
+            .map(|l| l.is_some())
+        })
+    };
+    skipped.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(h.join().unwrap().is_err(), "the wait ended without a slot");
+    assert_eq!(d.broker.used("compile"), 1, "only the first holds one");
+    drop(first);
+    assert_eq!(d.broker.used("compile"), 0);
+}

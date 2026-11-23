@@ -242,6 +242,9 @@ pub struct RunSpec {
     pub shard_lists: Vec<Vec<String>>,
     /// What a shard's runner runs instead of `command`.
     pub shard_command: Option<String>,
+    /// The lists name tests of the whole suite, not only of this narrowed run (#873): a shard
+    /// that ran none of them is then no defect, so no shard is counted as listing any.
+    pub partial_lists: bool,
 }
 
 impl RunSpec {
@@ -1297,6 +1300,7 @@ fn sweep_stale_refs_now(d: &Daemon, now: u64) {
 
 // ---- running ----------------------------------------------------------------------------------
 
+#[derive(Debug)]
 pub enum Outcome {
     Done(Finished),
     /// The owner skipped or forced, or the task is gone: the run was cancelled.
@@ -1766,6 +1770,7 @@ pub fn execute(
                         listed: spec
                             .shard_lists
                             .get(a.shard as usize - 1)
+                            .filter(|_| !spec.partial_lists)
                             .map_or(0, |l| l.len() as u32),
                         code: a.code,
                         signal: a.signal,
@@ -2492,6 +2497,19 @@ pub fn fallback_lease(
     uses: &std::collections::BTreeMap<String, u32>,
     label: &str,
 ) -> Result<Option<crate::sched::Lease>, String> {
+    fallback_lease_until(d, project, task, uses, label, &|| false)
+}
+
+/// [`fallback_lease`] whose wait also ends when `stopped` says so (the owner skipped the task's
+/// testing while its check queued here, #873).
+pub fn fallback_lease_until(
+    d: &Arc<Daemon>,
+    project: &str,
+    task: Option<mason_core::TaskId>,
+    uses: &std::collections::BTreeMap<String, u32>,
+    label: &str,
+    stopped: &dyn Fn() -> bool,
+) -> Result<Option<crate::sched::Lease>, String> {
     let needs = crate::sched::needs_of(uses, None);
     if !needs.exclusive && needs.amounts.is_empty() {
         return Ok(None);
@@ -2509,12 +2527,15 @@ pub fn fallback_lease(
     let owner = task.and_then(|t| d.world().ok().and_then(|w| w.tasks.get(&t).cloned()));
     let rank = fallback_rank(d, task, owner.as_ref(), def.as_deref());
     let who = task.unwrap_or(mason_core::TaskId(0));
-    let alive = || match task {
-        Some(t) => d
-            .world()
-            .map(|w| w.tasks.get(&t).is_some_and(|x| x.state.is_step()))
-            .unwrap_or(true),
-        None => true,
+    let alive = || {
+        !stopped()
+            && match task {
+                Some(t) => d
+                    .world()
+                    .map(|w| w.tasks.get(&t).is_some_and(|x| x.state.is_step()))
+                    .unwrap_or(true),
+                None => true,
+            }
     };
     tracing::info!(project, %label, ?uses, "no GitHub runner: queueing for this machine's slots (fallback = local)");
     d.broker
@@ -2990,6 +3011,7 @@ pub fn spec_for(
         only: vec![],
         shard_lists: vec![],
         shard_command: None,
+        partial_lists: false,
     }
 }
 
@@ -3029,6 +3051,86 @@ pub fn run_or_fallback(
         Err(Fail::Environmental(why)) => Err(env_err(&why)),
         Err(Fail::Error(e)) => Err(e),
     }
+}
+
+/// Why a run ended without a result about the code (#873), or `None` when it gave one (green,
+/// or red with a test named). Not a result: an outage, no runner within `pickup_timeout`, a
+/// refused push, a run without an artifact, and a run cancelled at the runner limit that named
+/// no failing test. A run that was stopped on purpose is not a miss.
+pub fn no_result(r: &Result<Outcome, Fail>, limit: Duration) -> Option<String> {
+    match r {
+        Err(Fail::Environmental(why)) => Some(why.clone()),
+        // A cut-off run that names a failing test, or tests that started and never finished,
+        // answers about the code: a hang is a result.
+        Ok(Outcome::Done(f))
+            if f.timed_out
+                && crate::rerun::failing_names(&f.output).is_empty()
+                && crate::suites::still_running(&f.output).is_empty() =>
+        {
+            Some(format!(
+                "the run reached the runner limit of {} s without naming a failing test",
+                limit.as_secs()
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// A run that did not give a result, tried again once on GitHub (#873). Both misses are told to
+/// `said`, which shows them in the check's progress. `Ok((outcome, notes))`: `outcome` is the
+/// result of the run that gave one; `None` means both runs missed and the project's `fallback`
+/// is `local`, so the caller runs it here. Two misses without that give an [`env_err`] worded
+/// "no result (infrastructure): ...", never a failure of the code.
+pub fn run_retrying(
+    site: &Site,
+    spec: &RunSpec,
+    dir: &Path,
+    stop: &dyn Fn() -> Option<StopWhy>,
+    said: &dyn Fn(&str),
+) -> Result<(Option<Outcome>, Vec<String>), String> {
+    let mut notes: Vec<String> = vec![];
+    let mut whys: Vec<String> = vec![];
+    let mut attempt = spec.clone();
+    for n in 0..2u32 {
+        if n > 0 {
+            if let Some(why) = stop() {
+                return Ok((Some(Outcome::Stopped(why)), notes));
+            }
+            attempt.id = format!("{}-r{n}", spec.id);
+            let note = format!(
+                "no result from the first run ({}); running it again on GitHub",
+                whys[0]
+            );
+            tracing::warn!(run = %spec.id, "{note}");
+            said(&note);
+            notes.push(note);
+        }
+        let r = execute_sharded(site, &attempt, dir, stop);
+        match no_result(&r, spec.limit) {
+            None => {
+                return match r {
+                    Ok(o) => Ok((Some(o), notes)),
+                    Err(Fail::Environmental(why)) => Err(env_err(&why)),
+                    Err(Fail::Error(e)) => Err(e),
+                }
+            }
+            // A favor-remote run that came back here on purpose (#833) is the placement mode's
+            // answer, not a miss to retry on GitHub.
+            Some(why) if n == 0 && site.fallback_local && why.contains("(favor-remote:") => {
+                said(&format!("{why}; running it on this Mac"));
+                return Ok((None, notes));
+            }
+            Some(why) => whys.push(why),
+        }
+    }
+    let both = format!("{}; then {}", whys[0], whys[1]);
+    if site.fallback_local {
+        let note = format!("no result from two runs on GitHub ({both}); running it on this Mac");
+        tracing::warn!(run = %spec.id, "{note}");
+        said(&note);
+        return Ok((None, notes));
+    }
+    Err(env_err(&both))
 }
 
 #[cfg(test)]
@@ -3184,6 +3286,7 @@ mod tests {
             only: vec![],
             shard_lists: vec![],
             shard_command: None,
+            partial_lists: false,
         }
     }
 
@@ -3207,6 +3310,10 @@ mod tests {
         Status(u16),
         /// The run is found but the artifact never appears.
         NoArtifact,
+        /// The first run is never picked up; the second runs normally (#873).
+        MissFirst,
+        /// The first run is picked up and never ends; the second runs normally (#873).
+        HangFirst,
         /// The run never ends by itself; once cancelled it completes, with its artifact.
         Hung,
         /// As `Hung`, but no artifact ever appears.
@@ -3272,9 +3379,14 @@ mod tests {
         fn phase(&self) -> (&'static str, &'static str) {
             let n = *self.looks.lock().unwrap();
             let hung = matches!(self.mode, Mode::Hung | Mode::HungNoArtifact);
-            if self.mode == Mode::NeverPicked || n <= self.queued {
+            let first_only = self.runs_seen.lock().unwrap().len() < 2;
+            if self.mode == Mode::NeverPicked
+                || (first_only && self.mode == Mode::MissFirst)
+                || n <= self.queued
+            {
                 ("queued", "queued")
-            } else if (hung && self.cancels.lock().unwrap().is_empty())
+            } else if (first_only && self.mode == Mode::HangFirst)
+                || (hung && self.cancels.lock().unwrap().is_empty())
                 || (!hung && n <= self.queued + self.running)
             {
                 ("in_progress", "in_progress")
@@ -5117,7 +5229,6 @@ mod tests {
         let none = with_build(spec("b2"), None);
         assert!(none.build.is_none());
     }
-
     #[test]
     fn job_names_of_a_sharded_run_are_run_jobs() {
         assert!(is_run_job("run") && is_run_job("run (3)"));
@@ -5126,6 +5237,11 @@ mod tests {
 
     /// A fake Actions API: per repository, runs in two lists (`in_progress`, `queued`) behind one
     /// ETag, jobs with labels, a repository the token cannot read, and a request log.
+    type Retried = (
+        Result<(Option<Outcome>, Vec<String>), String>,
+        Arc<FakeGh>,
+        Vec<String>,
+    );
     type FakeJobs = Vec<(String, String)>;
     type FakeRuns = Vec<(u64, String, String, FakeJobs)>;
     type FakeSeed<'a> = Vec<(&'a str, Vec<(u64, &'a str, &'a str, FakeJobs)>)>;
@@ -5406,5 +5522,190 @@ mod tests {
         api.repos.lock().unwrap().clear();
         let other = seen.poll(&sources, 200);
         assert_eq!((other.gha, other.stale, other.read_at_ms), (2, true, 100));
+    }
+
+    /// `run_retrying` against `mode`, with the pushes in `refuse_first` refused once.
+    fn retrying(mode: Mode, refuse_first: bool, fallback: bool) -> Retried {
+        let r = repo();
+        token();
+        if refuse_first {
+            let hook = r.bare.join("hooks/pre-receive");
+            let marker = r.bare.join("refused-once");
+            std::fs::create_dir_all(r.bare.join("hooks")).unwrap();
+            // GitHub refuses the first four pushes: the push's own tries (#772) are all used up
+            // by the first run, and the fifth push is the retry's.
+            std::fs::write(
+                &hook,
+                format!(
+                    "#!/bin/sh\nn=$(cat '{m}' 2>/dev/null || echo 0)\nn=$((n + 1))\necho $n > '{m}'\nif [ $n -le 4 ]; then echo refused >&2; exit 1; fi\nexit 0\n",
+                    m = marker.display()
+                ),
+            )
+            .unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let zip = artifact(r._t.path(), GREEN, 0, None);
+        let gh = FakeGh::new(&r, &zip, mode);
+        let s = site(&r, gh.clone(), clock(), fallback);
+        let said = Mutex::new(vec![]);
+        let dir = r._t.path().join("runs");
+        let out = run_retrying(&s, &spec("rt1"), &dir, &|| None, &|t| {
+            said.lock().unwrap().push(t.to_string())
+        });
+        let said = said.into_inner().unwrap();
+        (out, gh, said)
+    }
+
+    #[test]
+    fn a_run_nobody_picks_up_is_run_again_and_the_agent_sees_one_result() {
+        let (out, gh, said) = retrying(Mode::MissFirst, false, false);
+        let (Some(Outcome::Done(f)), notes) = out.unwrap() else {
+            panic!("no result");
+        };
+        assert_eq!(f.code, 0);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("no runner picked up"), "{notes:?}");
+        assert_eq!(said, notes, "the retry is shown in the check's progress");
+        assert_eq!(gh.runs_seen.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_refused_push_is_run_again_after_a_backoff() {
+        let (out, _, said) = retrying(Mode::Normal, true, false);
+        let (Some(Outcome::Done(f)), notes) = out.unwrap() else {
+            panic!("no result");
+        };
+        assert_eq!(f.code, 0);
+        assert!(notes[0].contains("could not push"), "{notes:?}");
+        assert_eq!(said.len(), 1);
+    }
+
+    #[test]
+    fn a_run_cancelled_at_the_limit_naming_no_test_is_run_again() {
+        let (out, gh, _) = retrying(Mode::HangFirst, false, false);
+        let (Some(Outcome::Done(f)), notes) = out.unwrap() else {
+            panic!("no result");
+        };
+        assert!(!f.timed_out && f.code == 0, "the second run is the answer");
+        assert!(notes[0].contains("runner limit"), "{notes:?}");
+        assert_eq!(
+            gh.cancels.lock().unwrap().len(),
+            1,
+            "the first run was cancelled"
+        );
+    }
+
+    #[test]
+    fn two_misses_are_no_result_not_a_failure() {
+        let (out, _, said) = retrying(Mode::NeverPicked, false, false);
+        let e = out.unwrap_err();
+        let why = environmental(&e).expect("an environmental error, not a red result");
+        assert!(why.contains("; then "), "{why}");
+        assert_eq!(said.len(), 1, "one retry was shown");
+    }
+
+    #[test]
+    fn two_misses_under_a_local_fallback_go_to_this_machine() {
+        let (out, _, said) = retrying(Mode::NeverPicked, false, true);
+        let (o, notes) = out.unwrap();
+        assert!(o.is_none(), "the caller runs it here");
+        assert_eq!(notes.len(), 1);
+        assert_eq!(said.len(), 2, "the retry and the move to this Mac");
+    }
+
+    #[test]
+    fn a_red_run_is_a_result_and_is_not_retried() {
+        let r = repo();
+        token();
+        let zip = artifact(r._t.path(), "test a ... FAILED\n", 101, None);
+        let gh = FakeGh::new(&r, &zip, Mode::Normal);
+        let s = site(&r, gh.clone(), clock(), false);
+        let dir = r._t.path().join("runs");
+        let (Some(Outcome::Done(f)), notes) =
+            run_retrying(&s, &spec("rt2"), &dir, &|| None, &|_| {}).unwrap()
+        else {
+            panic!("no result");
+        };
+        assert_eq!(f.code, 101);
+        assert!(notes.is_empty());
+        assert_eq!(gh.runs_seen.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_skip_while_a_run_waits_cancels_it_on_github() {
+        let r = repo();
+        token();
+        let zip = artifact(r._t.path(), GREEN, 0, None);
+        let gh = FakeGh::new(&r, &zip, Mode::NeverPicked);
+        let clk = clock();
+        let start = clk.now_ms();
+        let s = site(&r, gh.clone(), clk.clone(), false);
+        let dir = r._t.path().join("runs");
+        let (o, _) = run_retrying(
+            &s,
+            &spec("rt3"),
+            &dir,
+            &|| (clk.now_ms() - start >= 60_000).then_some(StopWhy::Skipped),
+            &|_| {},
+        )
+        .unwrap();
+        assert!(matches!(o, Some(Outcome::Stopped(StopWhy::Skipped))));
+        assert_eq!(gh.cancels.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_narrowed_run_of_three_targets_goes_out_as_two_jobs_with_the_narrowed_command() {
+        let r = repo();
+        token();
+        let t = r._t.path();
+        let mut zips = std::collections::BTreeMap::new();
+        for k in 1..=2u32 {
+            let d = t.join(format!("shard{k}"));
+            std::fs::create_dir_all(&d).unwrap();
+            zips.insert(k, artifact(&d, "test a ... ok\n", 0, None));
+        }
+        let gh = Arc::new(ShardGh {
+            bare: r.bare.clone(),
+            zips,
+            lost: vec![],
+            shas: Mutex::new(vec![]),
+        });
+        let mut s = site(
+            &r,
+            FakeGh::new(&r, &artifact(t, GREEN, 0, None), Mode::Normal),
+            clock(),
+            false,
+        );
+        s.gh = GitHub::new(
+            gh.clone(),
+            "https://api.github.com",
+            "o/r",
+            TokenRef::Env("MASON_TEST_REMOTE_TOKEN".into()),
+        );
+        let narrowed = "mason_rc=0; ( python3 -I scripts/test-shard.py -- cargo test -p a --lib ) || mason_rc=1; ( python3 -I scripts/test-shard.py -- cargo test -p b --test it ) || mason_rc=1; ( python3 -I scripts/test-shard.py -- cargo test -p c --lib ) || mason_rc=1; [ $mason_rc -eq 0 ]";
+        let mut sp = sharded_spec("nr1", &[&["a", "b"], &["c"]]);
+        sp.shard_command = Some(narrowed.into());
+        sp.partial_lists = true;
+        let dir = t.join("runs");
+        let Ok(Outcome::Done(f)) = execute_sharded(&s, &sp, &dir, &|| None) else {
+            panic!("the sharded run did not finish");
+        };
+        assert_eq!(f.parts.len(), 2);
+        // A shard whose share of the whole suite's lists holds none of this narrowed run's tests
+        // is no defect: no shard counts as having listed any.
+        assert!(f.parts.iter().all(|p| p.listed == 0));
+        let shas = gh.shas.lock().unwrap().clone();
+        assert_eq!(shas.len(), 1, "one run, two jobs");
+        let json: serde_json::Value = serde_json::from_str(&git_ok(
+            &r.wt,
+            &["show", &format!("{}:.mason/run.json", shas[0])],
+        ))
+        .unwrap();
+        assert_eq!(json["matrix"], serde_json::json!([1, 2]));
+        let cmd = json["shard_command"].as_str().unwrap();
+        for g in ["-p a --lib", "-p b --test it", "-p c --lib"] {
+            assert!(cmd.contains(g), "{cmd}");
+        }
     }
 }
