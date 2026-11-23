@@ -6716,7 +6716,6 @@ mod batch_cover_tests {
 }
 
 #[cfg(test)]
-<<<<<<< HEAD
 mod narrowed_shard_tests {
     use super::*;
     use crate::scope::Narrow;
@@ -6766,7 +6765,10 @@ mod narrowed_shard_tests {
         s.narrowed = false;
         s.shard_command = Some("MASON_EXIT_SHARD=1/2 bash x.sh".into());
         assert!(lists_partial(&s));
-=======
+    }
+}
+
+#[cfg(test)]
 mod merged_branch_tests {
     use super::merged_branch_commit;
     use std::path::Path;
@@ -6817,6 +6819,5 @@ mod merged_branch_tests {
             Some(work)
         );
         assert_eq!(merged_branch_commit(d, "mason/mason/t96", "main"), None);
->>>>>>> origin/develop
     }
 }
