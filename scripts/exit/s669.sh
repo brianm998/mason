@@ -9,8 +9,13 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 cd "$tmp"
 git init -q .
 git config user.email t@example.com; git config user.name t
-mkdir -p scripts/exit .mason docs
-cp "$root"/scripts/check-spdx.sh "$root"/scripts/check-exit-guards.sh "$root"/scripts/check-exit-portability.sh \
+mkdir -p scripts/exit .mason docs .github/workflows templates/github
+# The exit-script guard reads the workspace's package names.
+mkdir -p crates/x; printf '# SPDX-License-Identifier: GPL-3.0-or-later\n[package]\nname = "x"\n' > crates/x/Cargo.toml
+# The lint parses workflow files; one of each kind so its globs match.
+printf '# SPDX-License-Identifier: GPL-3.0-or-later\non: push\n' > .github/workflows/a.yml
+printf '# SPDX-License-Identifier: MIT\non: push\n' > templates/github/a.yml
+cp "$root"/scripts/check-spdx.sh "$root"/scripts/check-workflows.sh "$root"/scripts/check-exit-guards.sh "$root"/scripts/check-exit-portability.sh \
    "$root"/scripts/select-exit-scripts.sh "$root"/scripts/run-changed-exit-scripts.sh scripts/
 cp "$root"/.mason/mason.toml .mason/
 # The lint command, as defined, without the cargo steps (which need a workspace).

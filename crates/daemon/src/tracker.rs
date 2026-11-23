@@ -407,15 +407,16 @@ pub fn poll_once(
             return Err(text);
         }
         PollEvent::Backoff { why, .. } => {
-            d.landing().raise(
-                pid,
-                key,
-                "tracker",
-                &format!(
+            // The GitHub quota used up is said once, with the reset time, not as an outage
+            // repeated on every failed poll.
+            let text = match mason_adapter_api::github_budget::exhausted_until() {
+                Some(t) => format!("{}: {}", p.id, crate::bg::quota_text(t)),
+                None => format!(
                     "{}: the tracker is not answering ({why}); trying again",
                     p.id
                 ),
-            );
+            };
+            d.landing().raise(pid, key, "tracker", &text);
             d.tracker.set_record(pid, None, Some(why.clone()));
             return Err(why);
         }
