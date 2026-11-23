@@ -1202,6 +1202,8 @@ pub struct ActionJob {
     pub started_at: Option<String>,
     /// success, failure, cancelled... once the job is done.
     pub conclusion: Option<String>,
+    /// The runner labels the job asked for (`macos-latest`, `ubuntu-24.04`).
+    pub labels: Vec<String>,
     /// The job's steps, in order, as far as GitHub reports them.
     pub steps: Vec<ActionStep>,
 }
@@ -1224,6 +1226,12 @@ fn action_jobs(v: &Value) -> Vec<ActionJob> {
             status: j["status"].as_str().unwrap_or_default().to_string(),
             started_at: j["started_at"].as_str().map(String::from),
             conclusion: j["conclusion"].as_str().map(String::from),
+            labels: j["labels"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|l| l.as_str().map(String::from))
+                .collect(),
             steps: j["steps"]
                 .as_array()
                 .into_iter()
@@ -1343,7 +1351,17 @@ impl GitHub {
         &self,
         etag: Option<&str>,
     ) -> Result<Option<(Vec<(u64, String, String)>, Option<String>)>, ApiError> {
-        let mut r = Request::get(&self.url("/actions/runs?status=in_progress&per_page=100"));
+        self.runs_with_status("in_progress", etag)
+    }
+
+    /// The runs with a status (`in_progress`, `queued`), as `in_progress_runs` gives them.
+    #[allow(clippy::type_complexity)]
+    pub fn runs_with_status(
+        &self,
+        status: &str,
+        etag: Option<&str>,
+    ) -> Result<Option<(Vec<(u64, String, String)>, Option<String>)>, ApiError> {
+        let mut r = Request::get(&self.url(&format!("/actions/runs?status={status}&per_page=100")));
         if let Some(e) = etag {
             r = r.with("If-None-Match", e);
         }
