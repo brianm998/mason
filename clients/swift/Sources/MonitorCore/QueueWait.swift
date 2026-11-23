@@ -82,7 +82,19 @@ public enum QueueWait {
 
     /// A row's second line: "[badge] sentence" while it waits on the scheduler, else its activity.
     public static func line(_ r: Mason_V1_TaskRow) -> String {
-        if r.hasWait && !r.whyWaiting.isEmpty { return "[\(badge(r.wait.cause))] \(r.whyWaiting)" }
-        return r.whyWaiting.isEmpty ? r.activity : r.whyWaiting
+        let why = shorten(r.whyWaiting, blockers: r.blockers)
+        if r.hasWait && !why.isEmpty { return "[\(badge(r.wait.cause))] \(why)" }
+        return why.isEmpty ? shorten(r.activity, blockers: r.blockers) : why
+    }
+
+    /// Blockers named in full up to this many; a longer list reads "N tasks (#a, #b, #c, ...)".
+    public static let namedBlockers = 3
+
+    /// `text` with the full blocker list ("#a, #b, ...") replaced by a count and the first three.
+    static func shorten(_ text: String, blockers: [UInt64]) -> String {
+        guard blockers.count > namedBlockers else { return text }
+        let all = blockers.map { "#\($0)" }.joined(separator: ", ")
+        let first = blockers.prefix(namedBlockers).map { "#\($0)" }.joined(separator: ", ")
+        return text.replacingOccurrences(of: all, with: "\(blockers.count) tasks (\(first), ...)")
     }
 }
