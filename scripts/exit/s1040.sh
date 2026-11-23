@@ -14,7 +14,7 @@ run_with() { # LABEL AWK
   local label=$1 awkbin=$2
   ln -sf "$awkbin" "$tmp/bin/awk"
   printf '#!/usr/bin/env bash\n# SPDX-License-Identifier: GPL-3.0-or-later\nsed -i %s x f\n' "''" > "$tmp/sed.sh"
-  printf '#!/usr/bin/env bash\n# SPDX-License-Identifier: GPL-3.0-or-later\necho a | grep -E %s\n' "'(?:a)'" > "$tmp/grep.sh"
+  pc='(?'; printf '#!/usr/bin/env bash\n# SPDX-License-Identifier: GPL-3.0-or-later\necho a | grep -E %s\n' "'${pc}:a)'" > "$tmp/grep.sh"
   printf '#!/usr/bin/env bash\n# SPDX-License-Identifier: GPL-3.0-or-later\ncargo test -p x --test it a:: b::\n' > "$tmp/cargo.sh" # guard-ok: fixture
   printf '#!/usr/bin/env bash\n# SPDX-License-Identifier: GPL-3.0-or-later\necho ok\n' > "$tmp/clean.sh"
   for f in sed grep cargo; do
