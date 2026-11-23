@@ -1157,6 +1157,10 @@ mod tests {
             vec!["-p top --test names --test uses"]
         );
         // Outside `.mason/` the bare file name still matches.
+        fx.pkgs[1].tests.push(TestTarget {
+            name: "tpl".into(),
+            src: "crates/top/tests/tpl.rs".into(),
+        });
         fx.files.insert(
             "crates/top/tests/tpl.rs".into(),
             "write(\"mason.toml\");".into(),
