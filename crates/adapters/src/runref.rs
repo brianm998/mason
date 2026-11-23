@@ -193,6 +193,43 @@ pub fn push_trigger(text: &str) -> Push {
     }
 }
 
+/// Can the workflow be started by `workflow_dispatch`? MASON starts its run workflow that way
+/// (the shard list and the runner are the dispatch's inputs).
+pub fn dispatches(text: &str) -> bool {
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#') && !l.trim().is_empty())
+        .collect();
+    let Some(oi) = lines.iter().position(|l| {
+        indent(l) == 0
+            && ["on:", "\"on\":", "'on':", "true:"]
+                .iter()
+                .any(|k| l.starts_with(k))
+    }) else {
+        return false;
+    };
+    let head = lines[oi].split_once(':').map_or("", |x| x.1).trim();
+    let head = head.split(" #").next().unwrap_or("").trim();
+    if !head.is_empty() {
+        return head
+            .trim_matches(|c| c == '[' || c == ']' || c == '{' || c == '}')
+            .split(',')
+            .any(|e| unquote(e.split(':').next().unwrap_or("")) == "workflow_dispatch");
+    }
+    let block: Vec<&str> = lines[oi + 1..]
+        .iter()
+        .copied()
+        .take_while(|l| indent(l) > 0)
+        .collect();
+    let child = block.iter().map(|l| indent(l)).min().unwrap_or(0);
+    block.iter().any(|l| {
+        let s = l.trim_start();
+        (indent(l) == child && s.starts_with("workflow_dispatch"))
+            || s.strip_prefix('-')
+                .is_some_and(|e| unquote(e) == "workflow_dispatch")
+    })
+}
+
 fn from_push_block(body: &[&str], inline: &str) -> Push {
     let mut all: Vec<&str> = vec![];
     if !inline.is_empty() && !inline.starts_with('#') {
@@ -248,9 +285,14 @@ pub fn workflow_problems(files: &[(String, String)], workflow: &str) -> Vec<Stri
             "there is no .github/workflows/{workflow} on the base branch; `mason remote setup` writes it"
         )),
         Some((_, t)) => {
-            if !fires_on(&push_trigger(t), SAMPLE_REF) {
+            if !dispatches(t) {
                 out.push(format!(
-                    "{workflow} does not run on pushes to `mason/run/**`; add `on: {{ push: {{ branches: [\"mason/run/**\"] }} }}`"
+                    "{workflow} does not accept `workflow_dispatch`, which is how a run starts with its shard list and runner as inputs; add `on: {{ workflow_dispatch: {{ inputs: ... }} }}` (the copy `mason remote setup` writes has it)"
+                ));
+            }
+            if fires_on(&push_trigger(t), SAMPLE_REF) {
+                out.push(format!(
+                    "{workflow} also runs on pushes to `mason/run/**`, so every run would start twice (once by the push, once by the dispatch); remove its `push` trigger"
                 ));
             }
         }
@@ -322,7 +364,8 @@ mod tests {
             .collect()
     }
 
-    const RUN: &str = "name: r\non:\n  push:\n    branches: [\"mason/run/**\"]\n";
+    const RUN: &str =
+        "name: r\non:\n  workflow_dispatch:\n    inputs:\n      matrix:\n        type: string\n";
 
     #[test]
     fn the_trigger_is_found_or_missing() {
@@ -330,7 +373,8 @@ mod tests {
         let none = "on:\n  pull_request:\n";
         let p = workflow_problems(&files(&[("mason-run.yml", none)]), "mason-run.yml");
         assert!(
-            p.iter().any(|x| x.contains("does not run on pushes")),
+            p.iter()
+                .any(|x| x.contains("does not accept `workflow_dispatch`")),
             "{p:?}"
         );
         let p = workflow_problems(&files(&[]), "mason-run.yml");
@@ -338,8 +382,38 @@ mod tests {
             .iter()
             .any(|x| x.contains("no .github/workflows/mason-run.yml")));
         // A comment is not a trigger.
-        let c = "on:\n  push:\n    branches: [develop]\n    # mason/run/**\n";
+        let c = "on:\n  push:\n    branches: [develop]\n    # workflow_dispatch\n";
         assert!(!workflow_problems(&files(&[("mason-run.yml", c)]), "mason-run.yml").is_empty());
+        // The old push trigger would start every run twice beside the dispatch.
+        let both = "on:\n  workflow_dispatch:\n  push:\n    branches: [\"mason/run/**\"]\n";
+        let p = workflow_problems(&files(&[("mason-run.yml", both)]), "mason-run.yml");
+        assert!(p.iter().any(|x| x.contains("start twice")), "{p:?}");
+        let old = "on:\n  push:\n    branches: [\"mason/run/**\"]\n";
+        assert_eq!(
+            workflow_problems(&files(&[("mason-run.yml", old)]), "mason-run.yml").len(),
+            2
+        );
+    }
+
+    #[test]
+    fn the_dispatch_trigger_is_read_in_each_form() {
+        for yes in [
+            "on: workflow_dispatch\n",
+            "on: [push, workflow_dispatch]\n",
+            "on: { workflow_dispatch: {} }\n",
+            "on:\n  - workflow_dispatch\n",
+            "on:\n  workflow_dispatch:\n    inputs:\n      a:\n",
+        ] {
+            assert!(dispatches(yes), "{yes:?}");
+        }
+        for no in [
+            "on: push\n",
+            "on:\n  push:\n    branches: [x]\n",
+            "# on: workflow_dispatch\njobs: {}\n",
+            "on:\n  push:\n    # workflow_dispatch\n",
+        ] {
+            assert!(!dispatches(no), "{no:?}");
+        }
     }
 
     #[test]
