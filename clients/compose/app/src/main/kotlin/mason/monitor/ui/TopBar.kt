@@ -195,6 +195,9 @@ private fun updateRow(
     }
 }
 
+/** The label of the action that opens a task the notification names. */
+private fun openTaskLabel(n: Long) = "Open task #$n"
+
 /** The "?" button of a row with more to say, and the dialog it opens: summary, detail and the row's actions. */
 @Composable
 private fun DetailsButton(
@@ -219,7 +222,7 @@ private fun DetailsButton(
                     }
                     extra()
                     NoticeText.taskNumbers(one.text, one.detail).forEach { n ->
-                        Button(onClick = { close(); model.open("mason://task/$n") }, modifier = Modifier.testTag("open-task:$n")) { Text("Open task #$n") }
+                        Button(onClick = { close(); model.open("mason://task/$n") }, modifier = Modifier.testTag("open-task:$n")) { Text(openTaskLabel(n)) }
                     }
                 }
             },
