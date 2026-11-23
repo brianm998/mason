@@ -30,6 +30,8 @@ import mason.monitor.topBarMascot
 import mason.monitor.topBarMascotTooltip
 import mason.monitor.topBarMascotClicked
 import mason.monitor.MonitorModel
+import mason.monitor.NoticeText
+import androidx.compose.ui.text.style.TextOverflow
 
 /**
  * The top bar, on every page: home over back and forward; the attention indicator (only
@@ -174,16 +176,58 @@ private fun ProjectFilter(model: MonitorModel) {
 }
 
 @Composable
-private fun updateRow(text: String, button: String?, id: String, theme: Theme, icon: String? = null, sep: @Composable () -> Unit = {}, action: () -> Unit) {
+private fun updateRow(
+    model: MonitorModel, text: String, button: String?, id: String, theme: Theme, icon: String? = null,
+    sep: @Composable () -> Unit = {}, detail: String = "", daemonUpdate: Boolean = false, action: () -> Unit,
+) {
     sep()
+    val one = NoticeText.oneLine(text, detail)
     Row(
         modifier = Modifier.fillMaxWidth().background(theme.slow.copy(alpha = 0.18f))
             .padding(horizontal = theme.spacingLarge, vertical = theme.spacing).testTag("$id-banner"),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         BannerImage(icon, theme)
-        Text(text, style = theme.body(FontWeight.Medium), modifier = Modifier.weight(1f))
+        Text(one.text, style = theme.body(FontWeight.Medium), maxLines = 1, overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f).semantics { contentDescription = if (one.detail.isEmpty()) one.text else "${one.text}. ${one.detail}" })
         if (button != null) Button(onClick = action, modifier = Modifier.testTag(id)) { Text(button) }
+        DetailsButton(model, one, id, button, daemonUpdate, action)
+    }
+}
+
+/** The label of the action that opens a task the notification names. */
+private fun openTaskLabel(n: Long) = "Open task #$n"
+
+/** The "?" button of a row with more to say, and the dialog it opens: summary, detail and the row's actions. */
+@Composable
+private fun DetailsButton(
+    model: MonitorModel, one: NoticeText.Lines, id: String, button: String?, daemonUpdate: Boolean = false,
+    action: (() -> Unit)? = null, extra: @Composable () -> Unit = {},
+) {
+    if (!one.hasDetails) return
+    var open by remember { mutableStateOf(false) }
+    IconButton(onClick = { open = true }, modifier = Modifier.testTag("details:$id").semantics { contentDescription = "Details" }) { Text("?") }
+    if (open) {
+        val close = { open = false }
+        AlertDialog(
+            onDismissRequest = close,
+            modifier = Modifier.testTag("notification-detail:$id"),
+            title = { Text(one.text, modifier = Modifier.testTag("notification-detail-summary")) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(one.detail, modifier = Modifier.testTag("notification-detail-text"))
+                    if (daemonUpdate && model.daemonUpdateConfirm.isNotEmpty()) Text(model.daemonUpdateConfirm)
+                    if (button != null && action != null) {
+                        Button(onClick = { close(); action() }, modifier = Modifier.testTag("notification-detail-action")) { Text(button) }
+                    }
+                    extra()
+                    NoticeText.taskNumbers(one.text, one.detail).forEach { n ->
+                        Button(onClick = { close(); model.open("mason://task/$n") }, modifier = Modifier.testTag("open-task:$n")) { Text(openTaskLabel(n)) }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = close, modifier = Modifier.testTag("notification-detail-close")) { Text("Close") } },
+        )
     }
 }
 
@@ -198,11 +242,11 @@ fun BannersView(model: MonitorModel) {
         if (n > 0) Box(Modifier.fillMaxWidth().height(1.dp).background(theme.border).testTag("row-divider:$n"))
     }
     Column {
-        if (model.announcer.daemonDown) banner("Daemon down: MASON has lost its daemon. Check that masond is running.", "daemon-down", theme, "daemon_down", sep = sep)
-        if (!model.connected) banner(if (model.reconnecting) "Daemon restarting, reconnecting…" else "Connection lost. Reconnecting…", "connection", theme, "connection_lost", sep = sep)
-        model.readOnlyReason?.let { banner("Read-only: $it", "read-only", theme, "read_only", sep = sep) }
+        if (model.announcer.daemonDown) banner(model, "Daemon down: MASON has lost its daemon. Check that masond is running.", "daemon-down", theme, "daemon_down", sep = sep)
+        if (!model.connected) banner(model, if (model.reconnecting) "Daemon restarting, reconnecting…" else "Connection lost. Reconnecting…", "connection", theme, "connection_lost", sep = sep)
+        model.readOnlyReason?.let { banner(model, "Read-only: $it", "read-only", theme, "read_only", sep = sep) }
         if (model.daemonUpdateText.isNotEmpty() && !model.daemonUpdateIsInfo) {
-            updateRow(model.daemonUpdateText, if (model.canUpdateDaemon) (if (model.downloadUrl.isEmpty()) model.daemonUpdateButton else "Download") else null, "daemon-update", theme, sep = sep) { if (model.downloadUrl.isEmpty()) model.pressUpdateDaemon() else model.openDownloadPage() }
+            updateRow(model, model.daemonUpdateText, if (model.canUpdateDaemon) (if (model.downloadUrl.isEmpty()) model.daemonUpdateButton else "Download") else null, "daemon-update", theme, sep = sep, daemonUpdate = model.canUpdateDaemon && model.downloadUrl.isEmpty()) { if (model.downloadUrl.isEmpty()) model.pressUpdateDaemon() else model.openDownloadPage() }
         }
         if (model.confirmingDaemonUpdate) {
             AlertDialog(
@@ -217,7 +261,7 @@ fun BannersView(model: MonitorModel) {
             ?: model.updateError
             ?: if (model.updateAvailable) "A newer monitor is available (${model.latestMonitor.take(8)})." else null
         if (monitorText != null) {
-            updateRow(monitorText, if (model.updateAvailable && model.updating == null) "Update monitor" else null, "monitor-update", theme, "update", sep = sep) { model.updateMonitor() }
+            updateRow(model, monitorText, if (model.updateAvailable && model.updating == null) "Update monitor" else null, "monitor-update", theme, "update", sep = sep) { model.updateMonitor() }
         }
         model.header?.banners?.forEachIndexed { i, b ->
             // Info is progress or already being handled: the top bar's status line, not a row.
@@ -225,19 +269,19 @@ fun BannersView(model: MonitorModel) {
             if (b.kind == "push_auth") {
                 // A refused push holds landing; the owner picks the key that fixes it.
                 val project = MonitorModel.pushAuthProject(b)
-                updateRow(b.text, if (model.canAct) "Choose SSH key…" else null, "push-auth:$project", theme, BannerIcons.forDaemonKind(b.kind), sep = sep) {
+                updateRow(model, b.text, if (model.canAct) "Choose SSH key…" else null, "push-auth:$project", theme, BannerIcons.forDaemonKind(b.kind), sep = sep, detail = b.detail) {
                     model.chooseSshKey(project)
                 }
             } else if (b.kind == "health") {
                 // The pipeline's health session needs the owner: the button opens its dialog.
-                updateRow(b.text, "Open session", "health-session:${b.session}", theme, BannerIcons.forDaemonKind(b.kind), sep = sep) {
+                updateRow(model, b.text, "Open session", "health-session:${b.session}", theme, BannerIcons.forDaemonKind(b.kind), sep = sep, detail = b.detail) {
                     model.openOwnerSession(b.session)
                 }
             } else if (b.kind == "paused") {
                 // The whole pause group is drawn once, where the first pause is.
                 if (i == model.header?.banners?.indexOfFirst { it.kind == "paused" }) PauseGroup(model, theme, sep)
             } else {
-                banner(b.text, "banner:$i", theme, BannerIcons.forDaemonKind(b.kind), sep = sep)
+                banner(model, b.text, "banner:$i", theme, BannerIcons.forDaemonKind(b.kind), sep = sep, detail = b.detail)
             }
         }
         if (model.sshKeyProject != null) SshKeyDialog(model)
@@ -317,7 +361,12 @@ private fun PauseGroup(model: MonitorModel, theme: Theme, sep: @Composable () ->
                 val b = banners[e]
                 Row(modifier = Modifier.weight(1f).testTag("banner:$e"), verticalAlignment = Alignment.CenterVertically) {
                     BannerImage(BannerIcons.forDaemonKind(b.kind), theme)
-                    Text(b.text, style = theme.body(FontWeight.Medium), modifier = Modifier.weight(1f))
+                    val one = NoticeText.oneLine(b.text, b.detail)
+                    Text(one.text, style = theme.body(FontWeight.Medium), maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f).semantics { contentDescription = if (one.detail.isEmpty()) one.text else "${one.text}. ${one.detail}" })
+                    DetailsButton(model, one, "banner:$e", null, extra = {
+                        if (model.canAct) Button(onClick = { model.resumePause(b.project, b.mode) }, modifier = Modifier.testTag("notification-detail-resume")) { Text("Resume") }
+                    })
                     if (model.canAct) {
                         Button(onClick = { model.resumePause(b.project, b.mode) }, modifier = Modifier.testTag("resume-pause:$e")) { Text("Resume") }
                     }
@@ -344,15 +393,18 @@ private fun BannerImage(id: String?, theme: Theme) {
 }
 
 @Composable
-private fun banner(text: String, tag: String, theme: Theme, icon: String? = null, sep: @Composable () -> Unit = {}) {
+private fun banner(model: MonitorModel, text: String, tag: String, theme: Theme, icon: String? = null, sep: @Composable () -> Unit = {}, detail: String = "") {
     sep()
+    val one = NoticeText.oneLine(text, detail)
     Row(
         modifier = Modifier.fillMaxWidth().background(theme.slow.copy(alpha = 0.18f))
             .padding(horizontal = theme.spacingLarge, vertical = theme.spacing).testTag(tag),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         BannerImage(icon, theme)
-        Text(text, style = theme.body(FontWeight.Medium))
+        Text(one.text, style = theme.body(FontWeight.Medium), maxLines = 1, overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f).semantics { contentDescription = if (one.detail.isEmpty()) one.text else "${one.text}. ${one.detail}" })
+        DetailsButton(model, one, tag, null)
     }
 }
 
