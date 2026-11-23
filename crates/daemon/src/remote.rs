@@ -4006,7 +4006,9 @@ mod tests {
         let gh = FakeGh::new(&r, &zip, Mode::Hung);
         let s = site(&r, gh.clone(), clock(), false);
         let logs = tempfile::tempdir().unwrap();
-        let Outcome::Done(f) = execute(&s, &spec("x9"), logs.path(), &|| None).unwrap() else {
+        let Outcome::Done(f) =
+            execute(&s, &spec("x9"), logs.path(), &|| None, &Grant::test()).unwrap()
+        else {
             panic!("not done");
         };
         assert!(f.timed_out);
@@ -4032,7 +4034,9 @@ mod tests {
         let gh = FakeGh::new(&r, &zip, Mode::HungNoArtifact);
         let s = site(&r, gh, clock(), false);
         let logs = tempfile::tempdir().unwrap();
-        let Outcome::Done(f) = execute(&s, &spec("x10"), logs.path(), &|| None).unwrap() else {
+        let Outcome::Done(f) =
+            execute(&s, &spec("x10"), logs.path(), &|| None, &Grant::test()).unwrap()
+        else {
             panic!("not done");
         };
         assert!(f.timed_out);
