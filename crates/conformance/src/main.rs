@@ -443,19 +443,6 @@ fn main() {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::reached;
-
-    #[test]
-    fn settle_target_needs_the_steps_seq_and_three_views() {
-        assert!(!reached(9, 3, 10));
-        assert!(!reached(10, 2, 10));
-        assert!(reached(10, 3, 10));
-        assert!(reached(11, 3, 10));
-    }
-}
-
 fn port_of(args: &mut Vec<String>) -> u16 {
     opt(args, "--port")
         .and_then(|p| p.parse().ok())
@@ -636,5 +623,18 @@ fn latency(args: &mut Vec<String>) {
     if median.as_millis() >= limit {
         eprintln!("too slow");
         exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reached;
+
+    #[test]
+    fn settle_target_needs_the_steps_seq_and_three_views() {
+        assert!(!reached(9, 3, 10));
+        assert!(!reached(10, 2, 10));
+        assert!(reached(10, 3, 10));
+        assert!(reached(11, 3, 10));
     }
 }
