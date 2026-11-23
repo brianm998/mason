@@ -106,6 +106,10 @@ final class DiskSectionTests: XCTestCase {
         let f = CpuDiskRow.placement(width: 1000, heights: (40, 40), stacked: false, spacing: 10)
         XCTAssertEqual(f.cpu, CGRect(x: 0, y: 0, width: 594, height: 40))
         XCTAssertEqual(f.disk, CGRect(x: 604, y: 0, width: 396, height: 40))
+        XCTAssertEqual(f.cpu.minY, f.disk.minY, "both on the top row")
+        XCTAssertEqual(f.disk.minX - f.cpu.maxX, 10, "one spacing between them")
+        XCTAssertEqual(f.disk.maxX, 1000, "the disk reaches the right edge")
+        XCTAssertEqual(f.cpu.width / f.disk.width, 1.5, accuracy: 0.001, "3:2")
     }
 
     func testStackedAtANarrowWidthCpuFirst() {
@@ -116,6 +120,8 @@ final class DiskSectionTests: XCTestCase {
         let wide = CpuDiskRow.placement(width: 1000, heights: (40, 40), stacked: true, spacing: 10)
         XCTAssertEqual(wide.cpu, CGRect(x: 0, y: 0, width: 1000, height: 40))
         XCTAssertEqual(wide.disk, CGRect(x: 0, y: 50, width: 1000, height: 40))
+        XCTAssertEqual(f.disk.minY, f.cpu.maxY + 10, "one spacing below the CPU")
+        XCTAssertEqual(wide.disk.minX, 0)
     }
 
     func testTheCpuSectionStillRendersAtTheNarrowerWidth() {
