@@ -1115,7 +1115,13 @@ fn daemon_speech(d: &Daemon, s: &Settings, now: u64) {
     }
     let taken = d
         .store
-        .take_announcements("daemon", now.saturating_sub(s.stale_ms), PLAIN_TAKE, now, false)
+        .take_announcements(
+            "daemon",
+            now.saturating_sub(s.stale_ms),
+            PLAIN_TAKE,
+            now,
+            false,
+        )
         .unwrap_or_default();
     // Delivery is recorded on the original rows, whatever is said in their place.
     record_played(
@@ -1207,7 +1213,10 @@ fn fold_for_speech(
         .filter(|r| r.speech && !is_line(r))
         .cloned()
         .collect();
-    let items: Vec<(String, String)> = folded.iter().map(|r| (spoken_kind(r), String::new())).collect();
+    let items: Vec<(String, String)> = folded
+        .iter()
+        .map(|r| (spoken_kind(r), String::new()))
+        .collect();
     let sentence = n::summary_sentence(&items);
     let rank = |k: &str| match n::sound_for(k) {
         n::Sound::Decision => 0,
@@ -1229,8 +1238,7 @@ fn fold_for_speech(
         .into_iter()
         .filter(|r| !r.speech || is_line(r) && false)
         .collect();
-    if d
-        .store
+    if d.store
         .enqueue_announcement(&key, &kind, &sentence, sound, true, now)
         .unwrap_or(false)
     {

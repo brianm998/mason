@@ -846,8 +846,18 @@ fn the_daemon_says_one_summary_for_five_alerts() {
         ),
     );
     let now = mason_daemon::daemon::now_ms();
+    // Plain keys: `tick` prunes announcements whose alert is not live.
     for id in 1..=5 {
-        queue_failed(&d, id, "initial", now + id);
+        d.store
+            .enqueue_announcement(
+                &format!("plain{id}"),
+                "failed",
+                "Task failed.",
+                true,
+                true,
+                now,
+            )
+            .unwrap();
     }
     notify::tick(&d);
     wait_for("the summary", 10, || out.exists());
