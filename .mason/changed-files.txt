@@ -1,0 +1,7 @@
+.mason/run.json
+clients/features.toml
+crates/core/src/notify.rs
+crates/daemon/tests/it/notify.rs
+docs/decisions/0994-speech-summary-fold.md
+docs/stages/s1001.md
+scripts/exit/s1001.sh
