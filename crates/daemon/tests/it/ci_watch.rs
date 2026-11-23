@@ -509,3 +509,36 @@ fn a_shard_that_fails_once_then_times_out_is_filed_once_and_cleared_by_a_green()
     assert!(mason_core::ci_watch::timeouts(&saved.state, &r).is_empty());
     assert_eq!(titled(&d, "exceeds its time limit").len(), 1);
 }
+
+#[test]
+fn saved_state_keyed_by_a_commit_message_is_dropped_and_rebuilt_under_the_workflow_name() {
+    use mason_core::ci_watch::{JobState, WorkflowState};
+    use mason_daemon::ci_watch::{migrate_keys, Saved};
+    let ws = |last_run| {
+        let mut w = WorkflowState {
+            last_run,
+            ..Default::default()
+        };
+        w.jobs.insert("windows".into(), JobState::default());
+        w
+    };
+    let mut saved = Saved::default();
+    saved.state.workflows.insert("CI".into(), ws(5));
+    saved
+        .state
+        .workflows
+        .insert("fix the thing\n\nlong body".into(), ws(1));
+    saved.state.workflows.insert("fix it".into(), ws(7));
+    let run = |id, workflow: &str| ActionsRun {
+        id,
+        workflow: workflow.into(),
+        sha: String::new(),
+        url: String::new(),
+        created_ms: 0,
+        conclusion: Some("failure".into()),
+        event: "push".into(),
+    };
+    let dropped = migrate_keys(&mut saved, &[run(7, "CI"), run(5, "CI")]);
+    assert_eq!(dropped.len(), 2);
+    assert_eq!(saved.state.workflows.keys().collect::<Vec<_>>(), vec!["CI"]);
+}
