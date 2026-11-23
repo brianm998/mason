@@ -712,6 +712,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s906**: The fake host materialises a PR head with git read-tree and checkout-index instead of git archive piped to tar, so its checks run on Windows.
 - **s911**: on 2026-11-22 the local queue froze for about three hours. A landing batch holds this
 - **s912**: The red CI/monitor-compose run 45005421555 names no failing step in the supplied log tail (only post-job Gradle cache cleanup and the cache-save skip), so no code changed and decision 0905 records how to classify it from the full log.
+- **s914**: Two of the six red shard-3 scripts had Linux-independent causes and are fixed (s669's fixture lacked the files the lint now reads; s546's affected-test fixture never registered its `tpl` target); s777 passed on Linux, and s09, s40 and s422 were not reproduced.
 - **s917**: Recorded that the cause of s616, s664, s757 and s787 failing on ubuntu-latest shard 1 could not be determined because the per-script failure lines of run 45005421555 were not available to this session, so no fix was made.
 - **s918**: Remote exit-scripts runs skip the Swift and Compose builds as ci.yml does, and a red exit script that is also red on the base is excused.
 - **s924**: see decision 0917. With `fallback = "local"`, 16 runs came back from GitHub at once into a
@@ -738,4 +739,6 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s984**: A double click on the Failed tile now opens the lone failed task, or a Failed page listing every failed task (with "N of M" when capped); the phone tile tap and `mason://section/failed` do the same.
 - **s998**: masons_own_impact_map_selects_suites_by_path now expects the eight unit-level suites bound to run_check and the test step, instead of six.
 - **s1014**: RemotePlacementTest now composes RemotePlacementBody inside a Column, as the settings page does, so the project row no longer covers the global row's buttons.
+- **s1015**: Unit-test narrowing no longer pushes a line into `Group.notes`, which is per directory target, so `the_note_says_how_the_modules_were_picked` passes again.
+- **s1022**: s249 clears the shard variables for its temporary repository and s782 accepts both the busy and the quiet next-trigger text.
 <!-- status:end -->
