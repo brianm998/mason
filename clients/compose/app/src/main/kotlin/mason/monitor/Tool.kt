@@ -42,11 +42,23 @@ private fun until(what: String, seconds: Int = 15, cond: () -> Boolean) {
 /** About 1.5 s of quiet, so a busy runner cannot pass before same-burst views land. */
 private const val QUIET_TICKS = 30
 
-/** Let the views settle: no new sequence number for a moment. */
+/**
+ * Let the views settle: read the daemon's seq from GET /status, wait until the model has reached
+ * it, and give up on it only after 1.5 s with no new sequence number (the daemon sends no view
+ * for a change that altered nothing). A hard limit of 60 s fails.
+ */
 private fun settle(model: MonitorModel) {
+    val status = call(model, Command(raw = mason.v1.Raw(method = "GET", path = "/status")), "settle-status")
+    val raw = Codec.json(status.json)?.get("seq")
+    val target = (raw as? Number)?.toLong() ?: (raw as? String)?.toLongOrNull() ?: 0L
+    val end = System.currentTimeMillis() + 60_000
     var last = model.lastSeq
     var quiet = 0
-    while (quiet < QUIET_TICKS) {
+    while (true) {
+        val reached = model.lastSeq >= target
+        // Reached: a short quiet for trailing views. Not reached: the full 1.5 s fallback.
+        if (quiet >= (if (reached) 6 else QUIET_TICKS)) break
+        if (System.currentTimeMillis() > end) fail("the screen did not reach the daemon's seq $target within 60 s")
         Thread.sleep(50)
         if (model.lastSeq == last) quiet++ else { quiet = 0; last = model.lastSeq }
     }
