@@ -779,7 +779,10 @@ fn three_alerts_become_one_summary_and_each_is_recorded() {
     let got = notify::claim_at(&d, "mon", false, now + 10);
     let said = sentences(&got);
     assert_eq!(said.len(), 1, "{got}");
-    assert!(said[0].starts_with("3 ") && said[0].contains("failed"), "{said:?}");
+    assert!(
+        said[0].starts_with("3 ") && said[0].contains("failed"),
+        "{said:?}"
+    );
     assert_eq!(got["announcements"][0]["kind"], "failed");
     for id in 1..=3 {
         assert!(delivered_speech(&d, id, now + id), "alert {id}");
@@ -861,7 +864,10 @@ fn a_backlog_and_a_fold_are_one_summary_not_two() {
     let t0 = mason_daemon::daemon::now_ms();
     queue_failed(&d, 1, "initial", t0);
     queue_failed(&d, 2, "initial", t0 + 1);
-    assert_eq!(sentences(&notify::claim_at(&d, "mon", false, t0 + 10)).len(), 2);
+    assert_eq!(
+        sentences(&notify::claim_at(&d, "mon", false, t0 + 10)).len(),
+        2
+    );
     // Long afterwards: two reminders for alerts already heard, and three new alerts.
     let late = t0 + 3 * HOUR;
     queue_failed(&d, 1, "reminder1", late - 5);

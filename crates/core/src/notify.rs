@@ -535,7 +535,7 @@ pub fn summary_sentence(items: &[(String, String)]) -> String {
         }
     }
     // Most counted first; ties keep the order first seen.
-    kinds.sort_by(|a, b| b.1.cmp(&a.1));
+    kinds.sort_by_key(|k| std::cmp::Reverse(k.1));
     let one_project = items
         .first()
         .map(|f| !f.1.is_empty() && items.iter().all(|i| i.1 == f.1))
@@ -725,7 +725,16 @@ mod tests {
 
     #[test]
     fn summary_is_short_and_not_shouted() {
-        let kinds = ["failed", "needs_you", "approval", "landed", "a", "b", "c", "d"];
+        let kinds = [
+            "failed",
+            "needs_you",
+            "approval",
+            "landed",
+            "a",
+            "b",
+            "c",
+            "d",
+        ];
         let v: Vec<(String, String)> = (0..50)
             .map(|i| (kinds[i % 8].to_string(), "MASON".to_string()))
             .collect();
