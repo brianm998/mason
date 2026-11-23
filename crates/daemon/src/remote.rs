@@ -2817,6 +2817,12 @@ fn ref_project(ref_name: &str) -> Option<&str> {
 /// kept. A run that was cancelled has nothing to collect: its record goes. Returns whether the
 /// hold was freed.
 pub fn reap_hold(site: &Site, holds: &Path, record: &Path) -> bool {
+    reap_hold_etag(site, holds, record, &mut None)
+}
+
+/// [`reap_hold`], asking GitHub with the ETag of the last look (`etag` is updated): a 304 costs
+/// no quota and leaves the hold as it is.
+pub fn reap_hold_etag(site: &Site, holds: &Path, record: &Path, etag: &mut Option<String>) -> bool {
     let Some(id) = record_id(record) else {
         return false;
     };
@@ -2829,9 +2835,12 @@ pub fn reap_hold(site: &Site, holds: &Path, record: &Path) -> bool {
         return true;
     }
     let run = match st.run_id {
-        Some(rid) => match site.gh.run_changed(rid, None) {
-            Ok(r) => r.map(|(r, _)| r),
-            Err(_) => return false,
+        Some(rid) => match site.gh.run_changed(rid, etag.as_deref()) {
+            Ok(Some((r, e))) => {
+                *etag = e;
+                Some(r)
+            }
+            Ok(None) | Err(_) => return false,
         },
         None => match site.gh.runs_for_sha(&st.sha) {
             Ok(v) => v.into_iter().find(|r| r.branch == st.ref_name),
@@ -2886,6 +2895,24 @@ fn check_parts(id: &str) -> Option<(u64, u64, String, u64)> {
     Some((task, run, prefix.to_string(), n.parse().unwrap_or(0)))
 }
 
+/// The family of a test step's run id (`t7r9-u-unit`, `t7r9-u1700000000000-unit`; `-r` for a
+/// rerun of failures) and its attempt number in it (0 for the first).
+fn step_parts(id: &str) -> Option<(String, u64)> {
+    for tag in ["-u", "-r"] {
+        let mut from = 0;
+        while let Some(i) = id[from..].find(tag) {
+            let at = from + i + tag.len();
+            let digits = id[at..].chars().take_while(char::is_ascii_digit).count();
+            if id[at + digits..].starts_with('-') && id[..from + i].contains('r') {
+                let n = id[at..at + digits].parse().unwrap_or(0);
+                return Some((format!("{}{tag}{}", &id[..from + i], &id[at + digits..]), n));
+            }
+            from = at;
+        }
+    }
+    None
+}
+
 /// Which of the adopted runs (key, record) nobody can collect: a check whose task's open run is
 /// another one or none; a step run of a task with no open run; a check superseded by a newer
 /// one of the same prefix for the same run, or one whose check record on disk says it was
@@ -2894,30 +2921,78 @@ pub fn unwanted(
     adopted: &[(String, PathBuf)],
     open_run: &dyn Fn(u64) -> Option<u64>,
 ) -> Vec<PathBuf> {
+    judge(adopted, &[], open_run)
+        .into_iter()
+        .map(|(r, _)| r)
+        .collect()
+}
+
+/// [`unwanted`], with why, and counting `live` too: the runs this daemon is collecting. A run
+/// started by a call the agent made again (a bridge without call-id replay, 2026-11-23) is a
+/// newer one of the same suite, and it is `live`, never adopted: only with it in view is the
+/// older, adopted one seen to be orphaned.
+pub fn judge(
+    adopted: &[(String, PathBuf)],
+    live: &[(String, PathBuf)],
+    open_run: &dyn Fn(u64) -> Option<u64>,
+) -> Vec<(PathBuf, String)> {
+    type Top = (u64, String);
     let mut out = vec![];
-    let mut newest: std::collections::HashMap<(u64, u64, String), u64> = Default::default();
-    let parts: Vec<Option<(u64, u64, String, u64)>> = adopted
-        .iter()
-        .map(|(_, r)| record_id(r).and_then(|i| check_parts(&i)))
-        .collect();
-    for (t, r, p, n) in parts.iter().flatten() {
-        let e = newest.entry((*t, *r, p.clone())).or_insert(*n);
-        *e = (*e).max(*n);
-    }
-    for ((key, record), part) in adopted.iter().zip(&parts) {
-        let bad = match part {
-            Some((t, r, p, n)) => {
-                open_run(*t) != Some(*r)
-                    || newest[&(*t, *r, p.clone())] > *n
-                    || check_record_ended(record)
-            }
-            None => key
-                .strip_prefix("task ")
-                .and_then(|t| t.parse::<u64>().ok())
-                .is_some_and(|t| open_run(t).is_none()),
+    let mut newest: std::collections::HashMap<(u64, u64, String), Top> = Default::default();
+    let mut newest_step: std::collections::HashMap<(String, String), Top> = Default::default();
+    for (key, record) in live.iter().chain(adopted.iter()) {
+        let Some(id) = record_id(record) else {
+            continue;
         };
-        if bad {
-            out.push(record.clone());
+        if let Some((t, r, p, n)) = check_parts(&id) {
+            let e = newest.entry((t, r, p)).or_insert((n, id.clone()));
+            if n > e.0 {
+                *e = (n, id.clone());
+            }
+        } else if key.starts_with("task ") {
+            if let Some((fam, n)) = step_parts(&id) {
+                let e = newest_step
+                    .entry((key.clone(), fam))
+                    .or_insert((n, id.clone()));
+                if n > e.0 {
+                    *e = (n, id.clone());
+                }
+            }
+        }
+    }
+    for (key, record) in adopted {
+        let id = record_id(record).unwrap_or_default();
+        let why = if let Some((t, r, p, n)) = check_parts(&id) {
+            let (top, top_id) = &newest[&(t, r, p)];
+            if open_run(t) != Some(r) {
+                Some("its task's open run is another one or none".to_string())
+            } else if *top > n {
+                Some(format!("superseded by {top_id}"))
+            } else if check_record_ended(record) {
+                Some("its check record says superseded or delivered".to_string())
+            } else {
+                None
+            }
+        } else {
+            let task = key
+                .strip_prefix("task ")
+                .and_then(|t| t.parse::<u64>().ok());
+            let newer = key
+                .starts_with("task ")
+                .then(|| step_parts(&id))
+                .flatten()
+                .and_then(|(fam, n)| {
+                    let (top, top_id) = &newest_step[&(key.clone(), fam)];
+                    (*top > n).then(|| top_id.clone())
+                });
+            match (task, newer) {
+                (Some(t), _) if open_run(t).is_none() => Some("its task has no open run".into()),
+                (_, Some(top)) => Some(format!("superseded by {top}")),
+                _ => None,
+            }
+        };
+        if let Some(why) = why {
+            out.push((record.clone(), why));
         }
     }
     out
@@ -2985,10 +3060,87 @@ pub fn holder_views(d: &Daemon) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// How often an adopted run is asked about at GitHub, before the budget stretches it.
+pub const REAP_EVERY_S: u64 = 120;
+
+/// What the reaper remembers of each adopted run: when to look again and the ETag of the last
+/// look.
+#[derive(Default)]
+pub struct ReapMemo {
+    next_ms: std::collections::HashMap<PathBuf, u64>,
+    etag: std::collections::HashMap<PathBuf, Option<String>>,
+}
+
+/// One pass over `adopted` (see [`reap_adopted`]). Nothing is sent while `quota_wait` says the
+/// quota is used up. A run is cancelled when [`judge`] says nobody can collect it; otherwise it
+/// is looked at only once its next time has come (`every_s` after the last look), with its ETag.
+/// Returns what was done, for the log.
+#[allow(clippy::too_many_arguments)]
+pub fn reap_pass(
+    adopted: &[(String, PathBuf)],
+    live: &[(String, PathBuf)],
+    open_run: &dyn Fn(u64) -> Option<u64>,
+    site_of: &dyn Fn(&Path) -> Option<Site>,
+    holds: &Path,
+    memo: &mut ReapMemo,
+    now_ms: u64,
+    every_s: u64,
+    quota_wait: Option<u64>,
+) -> Vec<String> {
+    let mut done = vec![];
+    if quota_wait.is_some() {
+        return done;
+    }
+    let gone = judge(adopted, live, open_run);
+    memo.next_ms
+        .retain(|r, _| adopted.iter().any(|(_, a)| a == r));
+    memo.etag.retain(|r, _| adopted.iter().any(|(_, a)| a == r));
+    for (_, record) in adopted {
+        if State::load(record).is_none() {
+            if let Some(id) = record_id(record) {
+                remove_hold(holds, &id);
+            }
+            continue;
+        }
+        let cancel_why = gone.iter().find(|(r, _)| r == record).map(|(_, w)| w);
+        if cancel_why.is_none() && memo.next_ms.get(record).is_some_and(|t| now_ms < *t) {
+            continue;
+        }
+        let Some(site) = site_of(record) else {
+            continue;
+        };
+        if let Some(why) = cancel_why {
+            cancel_hold(&site, holds, record);
+            memo.next_ms.remove(record);
+            memo.etag.remove(record);
+            done.push(format!(
+                "cancelled the GitHub run of {}: {why}",
+                record.display()
+            ));
+        } else {
+            memo.next_ms.insert(record.clone(), now_ms + every_s * 1000);
+            let etag = memo.etag.entry(record.clone()).or_default();
+            if reap_hold_etag(&site, holds, record, etag) {
+                memo.next_ms.remove(record);
+                memo.etag.remove(record);
+                done.push(format!(
+                    "freed the units of the finished GitHub run {}",
+                    record.display()
+                ));
+            }
+        }
+    }
+    done
+}
+
 /// One pass over the runs adopted at start: free those GitHub has finished, cancel those no one
-/// can collect. Off the caller's thread, one pass at a time.
+/// can collect (an older run of a suite that a newer call has run again counts: the agent's
+/// call waits on the newer one). Off the caller's thread, one pass at a time. A run is asked
+/// about every [`REAP_EVERY_S`] at most, stretched by the budget as background work, with its
+/// ETag, and not at all while the quota is used up.
 pub fn reap_adopted(d: &Arc<Daemon>) {
     static BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    static MEMO: std::sync::Mutex<Option<ReapMemo>> = std::sync::Mutex::new(None);
     if !any_remote(d) {
         return;
     }
@@ -3000,34 +3152,38 @@ pub fn reap_adopted(d: &Arc<Daemon>) {
     std::thread::spawn(move || {
         let _caller = github_budget::as_caller("remote-hold");
         let holds = holds_dir(&d.cfg.hosts_dir());
-        let gone = d
-            .world()
-            .ok()
-            .map(|w| {
-                let open: std::collections::HashMap<u64, u64> = w
-                    .tasks
-                    .keys()
-                    .filter_map(|t| Some((t.0, w.open_run(*t)?.0)))
-                    .collect();
-                unwanted(&adopted, &|t| open.get(&t).copied())
-            })
-            .unwrap_or_default();
-        for (_, record) in &adopted {
-            let Some(st) = State::load(record) else {
-                if let Some(id) = record_id(record) {
-                    remove_hold(&holds, &id);
-                }
-                continue;
-            };
-            let Some(site) = site_of_state(&d, &st) else {
-                continue;
-            };
-            if gone.contains(record) {
-                cancel_hold(&site, &holds, record);
-                tracing::info!(record = %record.display(), "cancelled a GitHub run nobody can collect");
-            } else if reap_hold(&site, &holds, record) {
-                tracing::info!(record = %record.display(), "freed the units of a finished GitHub run");
+        let live: Vec<(String, PathBuf)> = running_holds(&holds)
+            .into_iter()
+            .map(|h| (h.key, h.record))
+            .filter(|(_, r)| !adopted.iter().any(|(_, a)| a == r))
+            .collect();
+        // Without a world nothing is judged: every record would look unwanted.
+        if let Ok(w) = d.world() {
+            let open: std::collections::HashMap<u64, u64> = w
+                .tasks
+                .keys()
+                .filter_map(|t| Some((t.0, w.open_run(*t)?.0)))
+                .collect();
+            let mut memo = MEMO
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+                .unwrap_or_default();
+            let done = reap_pass(
+                &adopted,
+                &live,
+                &|t| open.get(&t).copied(),
+                &|rec| site_of_state(&d, &State::load(rec)?),
+                &holds,
+                &mut memo,
+                now_ms(),
+                github_budget::paced(REAP_EVERY_S, Priority::Background),
+                github_budget::wait_s(),
+            );
+            for line in done {
+                tracing::info!("{line}");
             }
+            *MEMO.lock().unwrap_or_else(|e| e.into_inner()) = Some(memo);
         }
         BUSY.store(false, std::sync::atomic::Ordering::SeqCst);
     });
@@ -4455,6 +4611,152 @@ mod tests {
                 "step"
             ]
         );
+    }
+
+    /// A fake GitHub whose run stays queued, and a clock.
+    fn queued_gh(r: &Repo) -> (Arc<FakeGh>, Arc<FakeClock>) {
+        let t = tempfile::tempdir().unwrap();
+        let zip = artifact(t.path(), GREEN, 0, None);
+        let mut gh = Arc::try_unwrap(FakeGh::new(r, &zip, Mode::Normal))
+            .ok()
+            .unwrap();
+        gh.queued = 1000;
+        (Arc::new(gh), clock())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn pass(
+        r: &Repo,
+        gh: &Arc<FakeGh>,
+        clk: &Arc<FakeClock>,
+        adopted: &[(String, PathBuf)],
+        live: &[(String, PathBuf)],
+        holds: &Path,
+        memo: &mut ReapMemo,
+        quota_wait: Option<u64>,
+    ) -> Vec<String> {
+        reap_pass(
+            adopted,
+            live,
+            &|t| (t == 7).then_some(9),
+            &|_| Some(site(r, gh.clone(), clk.clone(), false)),
+            holds,
+            memo,
+            clk.now_ms(),
+            120,
+            quota_wait,
+        )
+    }
+
+    #[test]
+    fn an_adopted_run_an_open_call_has_run_again_is_cancelled_and_the_newer_one_kept() {
+        token();
+        let r = repo();
+        let (gh, clk) = queued_gh(&r);
+        let logs = tempfile::tempdir().unwrap();
+        let (holds, old) = adopted(&r, logs.path(), "t7r9-check-cargo-workspace-build19");
+        // The replayed call's run was started by this daemon: a hold, not adopted.
+        let (_, new) = adopted(&r, logs.path(), "t7r9-check-cargo-workspace-build20");
+        let ad = vec![(
+            "t7r9-check-cargo-workspace-build19".to_string(),
+            old.clone(),
+        )];
+        let live = vec![(
+            "t7r9-check-cargo-workspace-build20".to_string(),
+            new.clone(),
+        )];
+        let mut memo = ReapMemo::default();
+        let done = pass(&r, &gh, &clk, &ad, &live, &holds, &mut memo, None);
+        assert_eq!(done.len(), 1, "{done:?}");
+        assert!(done[0].contains("superseded by t7r9-check-cargo-workspace-build20"));
+        assert_eq!(gh.cancels.lock().unwrap().len(), 1);
+        assert!(!old.exists(), "the older record ends");
+        assert!(new.exists(), "the newer run is kept");
+        let kept: Vec<PathBuf> = running_holds(&holds)
+            .into_iter()
+            .map(|h| h.record)
+            .collect();
+        assert_eq!(kept, vec![new]);
+    }
+
+    #[test]
+    fn the_newest_wanted_adopted_run_is_not_cancelled() {
+        token();
+        let r = repo();
+        let (gh, clk) = queued_gh(&r);
+        let logs = tempfile::tempdir().unwrap();
+        let (holds, rec) = adopted(&r, logs.path(), "t7r9-check-cargo-workspace-build20");
+        let ad = vec![(
+            "t7r9-check-cargo-workspace-build20".to_string(),
+            rec.clone(),
+        )];
+        let mut memo = ReapMemo::default();
+        let done = pass(&r, &gh, &clk, &ad, &[], &holds, &mut memo, None);
+        assert!(done.is_empty(), "{done:?}");
+        assert!(gh.cancels.lock().unwrap().is_empty());
+        assert!(rec.exists());
+        assert_eq!(running_holds(&holds).len(), 1);
+    }
+
+    #[test]
+    fn an_older_test_step_attempt_beside_a_newer_one_is_cancelled() {
+        token();
+        let r = repo();
+        let (gh, clk) = queued_gh(&r);
+        let logs = tempfile::tempdir().unwrap();
+        let (holds, old) = adopted(&r, logs.path(), "t7r9-u-unit");
+        let (_, new) = adopted(&r, logs.path(), "t7r9-u1700000000000-unit");
+        let ad = vec![("task 7".to_string(), old.clone())];
+        let live = vec![("task 7".to_string(), new.clone())];
+        let mut memo = ReapMemo::default();
+        let done = pass(&r, &gh, &clk, &ad, &live, &holds, &mut memo, None);
+        assert_eq!(done.len(), 1, "{done:?}");
+        assert!(!old.exists() && new.exists());
+    }
+
+    #[test]
+    fn adopted_holds_are_not_asked_about_again_before_their_next_time() {
+        token();
+        let r = repo();
+        let (gh, clk) = queued_gh(&r);
+        let logs = tempfile::tempdir().unwrap();
+        let (holds, rec) = adopted(&r, logs.path(), "t7r9-check-cargo-workspace-build20");
+        let ad = vec![("t7r9-check-cargo-workspace-build20".to_string(), rec)];
+        let mut memo = ReapMemo::default();
+        let looks = || *gh.looks.lock().unwrap();
+        pass(&r, &gh, &clk, &ad, &[], &holds, &mut memo, None);
+        assert_eq!(looks(), 1);
+        clk.sleep(30_000);
+        pass(&r, &gh, &clk, &ad, &[], &holds, &mut memo, None);
+        clk.sleep(60_000);
+        pass(&r, &gh, &clk, &ad, &[], &holds, &mut memo, None);
+        assert_eq!(looks(), 1, "no look before the next time");
+        clk.sleep(30_000);
+        pass(&r, &gh, &clk, &ad, &[], &holds, &mut memo, None);
+        assert_eq!(looks(), 2);
+        assert_eq!(memo.etag.len(), 1, "the ETag of the last look is kept");
+    }
+
+    #[test]
+    fn nothing_is_sent_while_the_quota_is_used_up() {
+        token();
+        let r = repo();
+        let (gh, clk) = queued_gh(&r);
+        let logs = tempfile::tempdir().unwrap();
+        let (holds, old) = adopted(&r, logs.path(), "t7r9-check-cargo-workspace-build19");
+        let (_, new) = adopted(&r, logs.path(), "t7r9-check-cargo-workspace-build20");
+        let ad = vec![
+            ("a".to_string(), old.clone()),
+            ("b".to_string(), new.clone()),
+        ];
+        let mut memo = ReapMemo::default();
+        let done = pass(&r, &gh, &clk, &ad, &[], &holds, &mut memo, Some(600));
+        assert!(done.is_empty());
+        assert!(gh.requests().is_empty(), "{:?}", gh.requests());
+        assert!(old.exists() && new.exists());
+        // The quota back: the older one is cancelled.
+        let done = pass(&r, &gh, &clk, &ad, &[], &holds, &mut memo, None);
+        assert_eq!(done.len(), 1, "{done:?}");
     }
 
     const HUNG_OUT: &str = "test a ... ok\ntest holds_one has been running for over 60 seconds\ntest holds_two has been running for over 60 seconds\ntest holds_two ... ok\n";
