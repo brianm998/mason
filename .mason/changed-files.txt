@@ -1,0 +1,5 @@
+.mason/run.json
+docs/stages/s1045.md
+scripts/exit/s1038.sh
+scripts/exit/s1045.sh
+scripts/run-exit-scripts.sh
