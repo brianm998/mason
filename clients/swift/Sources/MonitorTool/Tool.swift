@@ -111,7 +111,8 @@ struct Tool {
 
     /// Let the views settle: no new sequence number for a moment.
     @MainActor
-    static func settle(_ model: MonitorModel) async {
+    static func settle(_ model: MonitorModel, atLeast target: UInt64 = 0) async {
+        await until("the views to reach seq \(target)", seconds: 60) { model.lastSeq >= target }
         var last = model.lastSeq
         var quiet = 0
         while quiet < 6 {
@@ -124,9 +125,11 @@ struct Tool {
     @MainActor
     static func step(_ model: MonitorModel) async -> Bool {
         var advanced: Bool?
+        var seq: UInt64 = 0
         model.onResult = { r in
             if r.id == "step" {
                 let v = (try? JSONSerialization.jsonObject(with: Data(r.json.utf8))) as? [String: Any]
+                seq = (v?["seq"] as? NSNumber)?.uint64Value ?? 0
                 advanced = v?["advanced"] as? Bool ?? false
             }
         }
@@ -135,7 +138,7 @@ struct Tool {
         c.raw = .with { $0.method = "POST"; $0.path = "/demo/next" }
         model.send(c)
         await until("the demo to advance") { advanced != nil }
-        await settle(model)
+        await settle(model, atLeast: seq)
         return advanced ?? false
     }
 
