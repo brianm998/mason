@@ -1823,6 +1823,8 @@ struct TestChecks {
     last_red: std::sync::Mutex<Option<Vec<String>>>,
     /// The tests the check in hand failed, for its history entry.
     check_failing: std::sync::Mutex<Vec<String>>,
+    /// The call in hand is the replay of one a restart cut off (#1051).
+    replay: std::sync::atomic::AtomicBool,
 }
 
 /// A command that runs `rerun` (the failing tests) and `dev` (the changed crates) one after the
@@ -2071,9 +2073,16 @@ impl TestChecks {
             // The one function that decides where runs go (#698) is asked for this suite.
             let placed = |mut s: crate::hostedcheck::CheckSpec, suite: &mason_testing::Suite| {
                 s.place = Some((Some(TaskId(self.task)), Box::new(suite.clone())));
+                // A skip while it waits or runs ends it (#873).
+                // Not for a call made under a skip: that one runs the build and the new tests
+                // by design (#812) and must not be ended by the skip it started under.
+                if !light {
+                    s.stop = Some(self.skip_stop(&suite.name));
+                }
                 s
             };
             let before = suite.command.clone();
+            let mut split_kept = false;
             // What a changed path can be named in: the commands that run and build the suite.
             let named = [
                 Some(suite.command.as_str()),
@@ -2196,6 +2205,13 @@ impl TestChecks {
                         Ok(n) => {
                             suite.command = crate::scope::expand(&dc, &n, false);
                             suite.dev_shard_command = crate::suites::dev_shard_for(&suite, &n);
+                            // Split across the suite's runners on GitHub (#880, #873).
+                            if suite.dev_shard_command.is_some() && suite.shards > 1 {
+                                suite.narrowed = true;
+                                split_kept = true;
+                                narrowed
+                                    .push(format!("{name}: split across {} runners", suite.shards));
+                            }
                             if let Some(db) = &suite.dev_build {
                                 suite.build = Some(crate::scope::expand(db, &n, true));
                             }
@@ -2255,6 +2271,11 @@ impl TestChecks {
                     continue;
                 }
             }
+            // A command that is not the suite's own is not what its `shard_command` runs: one
+            // runner, unless the narrowing above split it for itself (#873).
+            if suite.command != before && !split_kept {
+                suite.shards = 0;
+            }
             if let Some(b) = &suite.build {
                 let known = built.iter().find(|(c, _)| c == b).map(|(_, ok)| *ok);
                 let ok = match known {
@@ -2302,6 +2323,11 @@ impl TestChecks {
                         self.phase(mason_core::checks::CheckPhase::Building);
                         let res = crate::hostedcheck::run(&self.slots.d, &bspec);
                         drop(lease);
+                        if matches!(&res, Ok(o) if o.stopped.is_some()) {
+                            if let Some(r) = self.skipped_run(&name) {
+                                return r;
+                            }
+                        }
                         let ok = matches!(&res, Ok(o) if o.passed);
                         if !ok {
                             lines.push(match &res {
@@ -2388,6 +2414,13 @@ impl TestChecks {
                 crate::hostedcheck::run_with(&self.slots.d, &rspec, pr.as_ref())
             });
             drop(lease);
+            // The owner skipped testing while it waited or ran: the same answer as a call made
+            // after the skip (#873).
+            if matches!(&res, Ok(o) if o.stopped.is_some()) {
+                if let Some(r) = self.skipped_run(&name) {
+                    return r;
+                }
+            }
             match &res {
                 Ok(o) if o.passed => self.reds.passed(&name),
                 Ok(o) => self.remember_red(&name, &o.id),
@@ -2426,7 +2459,13 @@ impl TestChecks {
                 }
                 Err(e) => {
                     failed = true;
-                    lines.push(format!("{name}: FAILED, no result: {e}"));
+                    if crate::hostedcheck::is_outage(&e) {
+                        // Two runs on GitHub gave no result: this says nothing about the code
+                        // (#873), so it is not "FAILED".
+                        lines.push(format!("{name}: {e}. Run the check again."));
+                    } else {
+                        lines.push(format!("{name}: FAILED, no result: {e}"));
+                    }
                 }
             }
         }
@@ -2545,8 +2584,35 @@ impl CheckHandler for TestChecks {
     }
 
     fn run_scoped(&self, name: &str, scope: &CheckScope) -> CheckRun {
-        let note = match (&self.base_fold, name == "tests") {
-            (Some((pid, base)), true) => {
+        // A call with an id holds its finished suites until the agent has the answer, so a
+        // replay of it (after a takeover) takes them instead of running them again (#1051).
+        let _hold = scope
+            .call
+            .as_ref()
+            .map(|_| crate::hostedcheck::hold_results(self.task, self.run));
+        let before = (name == "tests")
+            .then(|| scope.call.as_deref().and_then(|c| self.known_call(c)))
+            .flatten();
+        self.replay
+            .store(before.is_some(), std::sync::atomic::Ordering::SeqCst);
+        let note = match (&self.base_fold, name == "tests", before) {
+            // The same call again: it runs on the tree it began on. The base is not folded
+            // in (that would be a new tree, and every suite would run again), and the answer
+            // says if the base has moved since.
+            (Some((_, base)), true, Some(first)) => {
+                let moved = !mason_landing::git::is_ancestor(&self.wt, base, "HEAD");
+                let mut parts: Vec<String> =
+                    Some(first).filter(|f| !f.is_empty()).into_iter().collect();
+                if moved {
+                    parts.push(format!(
+                        "`{base}` has moved since this check began. It ran on your branch as it \
+                         was when you called it, so what finished before the restart was kept. \
+                         The next run_check merges `{base}` first if that is safe."
+                    ));
+                }
+                (!parts.is_empty()).then(|| parts.join("\n\n"))
+            }
+            (Some((pid, base)), true, None) => {
                 let fold = {
                     let lock = self.slots.d.repo_lock(*pid);
                     let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -2560,7 +2626,11 @@ impl CheckHandler for TestChecks {
                         "run_check: base fold"
                     );
                 }
-                crate::basefold::note(base, &fold)
+                let note = crate::basefold::note(base, &fold);
+                if let Some(c) = &scope.call {
+                    self.remember_call(c, note.as_deref().unwrap_or(""));
+                }
+                note
             }
             _ => None,
         };
@@ -2576,14 +2646,66 @@ impl CheckHandler for TestChecks {
         }
         r
     }
+
+    fn answered(&self, name: &str, _scope: &CheckScope) {
+        if name == "tests" {
+            crate::hostedcheck::answered(self.task, self.run);
+        }
+    }
 }
 
 impl TestChecks {
+    fn call_file(&self) -> PathBuf {
+        self.log_dir
+            .join(format!("t{}r{}.call", self.task, self.run))
+    }
+
+    /// Is `call` the call this run's last `run_check` began with? Then it is a replay, and
+    /// this is what its first run told the agent about the base fold.
+    fn known_call(&self, call: &str) -> Option<String> {
+        let text = std::fs::read_to_string(self.call_file()).ok()?;
+        let (id, note) = text.split_once('\n')?;
+        (id == call).then(|| note.to_string())
+    }
+
+    /// Record the call and the fold note, for a replay of it.
+    fn remember_call(&self, call: &str, note: &str) {
+        let _ = std::fs::write(self.call_file(), format!("{call}\n{note}"));
+    }
+
     /// The open debt that skips this task's test step, if the owner skipped it: the
     /// agent's own checks then run nothing either (s264).
     fn skipped_by_owner(&self) -> Option<u64> {
         let step = self.slots.test_step.as_deref()?;
         crate::suites::skip_for(&self.slots.d, TaskId(self.task), "", step)
+    }
+
+    /// A function that says whether the owner skipped testing for this task's suite `suite`
+    /// (or its step, or all of it): `Some(note)` stops a check that waits or runs (#873).
+    fn skip_stop(&self, suite: &str) -> crate::hostedcheck::StopFn {
+        let (d, task, step) = (
+            self.slots.d.clone(),
+            TaskId(self.task),
+            self.slots.test_step.clone(),
+        );
+        let suite = suite.to_string();
+        Arc::new(move || {
+            let step = step.as_deref()?;
+            crate::suites::skip_for(&d, task, &suite, step)
+                .map(|debt| format!("skipped by the owner (debt #{debt})"))
+        })
+    }
+
+    /// The "Not run: skipped by the owner" answer when `suite` is skipped now, with the agent's
+    /// slot given back as at the end of a check.
+    fn skipped_run(&self, suite: &str) -> Option<CheckRun> {
+        let step = self.slots.test_step.as_deref()?;
+        let debt = crate::suites::skip_for(&self.slots.d, TaskId(self.task), suite, step)?;
+        self.slots.take_agent_slot_back();
+        Some(CheckRun::Done {
+            passed: true,
+            summary: not_run_skipped(debt, true, "The skip arrived while the check ran."),
+        })
     }
 
     /// Conflict markers the agent's work adds to the base, as a failed check. Read from the
@@ -3701,6 +3823,7 @@ fn agent_job(c: &Ctx) {
         reds: Default::default(),
         last_red: std::sync::Mutex::new(None),
         check_failing: Default::default(),
+        replay: Default::default(),
     });
     let validator = (kind == StepKind::Develop).then(|| {
         change_validator(
