@@ -4171,6 +4171,34 @@ fn landing_tier(d: &Daemon, pid: ProjectId) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The task's last commit as the second parent of the oldest merge in `tip`'s history whose
+/// subject starts `Merge branch '<branch>'`; `None` when no such merge exists. For a task whose
+/// branch has been deleted, so its debt can still be proven landed and paid.
+fn merged_branch_commit(path: &std::path::Path, branch: &str, tip: &str) -> Option<String> {
+    let subject = format!("Merge branch '{branch}'");
+    let out = git::run(
+        path,
+        &[
+            "log",
+            "--merges",
+            "--fixed-strings",
+            "--format=%H%x09%s",
+            &format!("--grep={subject}"),
+            tip,
+        ],
+    )
+    .ok()?;
+    let merge = out
+        .lines()
+        .filter_map(|l| l.split_once('\t'))
+        // The closing quote keeps `t96` from matching `t966`.
+        .filter(|(_, s)| s.starts_with(&subject))
+        .map(|(h, _)| h.trim().to_string())
+        .next_back()?;
+    let second = git::run(path, &["rev-parse", &format!("{merge}^2")]).ok()?;
+    Some(second.trim().to_string())
+}
+
 /// The commit a debt's task landed, when the base branch `tip` contains it. Recorded on the
 /// debt the first time it is seen; `None` when the task's branch is gone or never landed, so a
 /// debt without proof of landing is never closed.
@@ -4181,16 +4209,15 @@ fn debt_landed(
     tip: &str,
 ) -> Option<String> {
     let landed = if row.landed.is_empty() {
-        let c = git::run(
+        let branch = p.branch(row.task);
+        match git::run(
             &p.path,
-            &[
-                "rev-parse",
-                "--verify",
-                &format!("{}^{{commit}}", p.branch(row.task)),
-            ],
-        )
-        .ok()?;
-        c.trim().to_string()
+            &["rev-parse", "--verify", &format!("{branch}^{{commit}}")],
+        ) {
+            Ok(c) => c.trim().to_string(),
+            // The branch is deleted once its task lands; the merge on the base names it still.
+            Err(_) => merged_branch_commit(&p.path, &branch, tip)?,
+        }
     } else {
         row.landed.clone()
     };
@@ -6671,5 +6698,59 @@ mod batch_cover_tests {
             exclusive: true,
             ..Default::default()
         }));
+    }
+}
+
+#[cfg(test)]
+mod merged_branch_tests {
+    use super::merged_branch_commit;
+    use std::path::Path;
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let o = std::process::Command::new("git")
+            .current_dir(dir)
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "git {args:?}: {o:?}");
+        String::from_utf8(o.stdout).unwrap().trim().to_string()
+    }
+
+    #[test]
+    fn a_deleted_branch_is_found_by_its_merge_and_t96_does_not_match_t966() {
+        let t = tempfile::tempdir().unwrap();
+        let d = t.path();
+        git(d, &["init", "-q", "-b", "main"]);
+        git(d, &["commit", "-q", "--allow-empty", "-m", "root"]);
+        git(d, &["checkout", "-q", "-b", "mason/mason/t966"]);
+        git(d, &["commit", "-q", "--allow-empty", "-m", "work"]);
+        let work = git(d, &["rev-parse", "HEAD"]);
+        git(d, &["checkout", "-q", "main"]);
+        git(d, &["commit", "-q", "--allow-empty", "-m", "other"]);
+        git(
+            d,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "mason/mason/t966",
+                "-m",
+                "Merge branch 'mason/mason/t966'",
+            ],
+        );
+        git(d, &["branch", "-q", "-D", "mason/mason/t966"]);
+        assert_eq!(
+            merged_branch_commit(d, "mason/mason/t966", "main"),
+            Some(work)
+        );
+        assert_eq!(merged_branch_commit(d, "mason/mason/t96", "main"), None);
     }
 }
