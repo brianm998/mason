@@ -1,0 +1,7 @@
+.mason/run.json
+crates/daemon/src/jobs.rs
+crates/daemon/src/suites.rs
+crates/daemon/tests/it/crash.rs
+docs/decisions/1035-recovered-step-keeps-its-tree.md
+docs/stages/s1042.md
+scripts/exit/s1042.sh
