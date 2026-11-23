@@ -82,4 +82,16 @@ final class QueueWaitTests: XCTestCase {
         held.holding = true
         XCTAssertTrue(QueueWait.lease(held, now: 1_000_000 + 60_000).contains("holds exclusive, for 1 min"))
     }
+
+    /// Task 1020: a long hold names a count and three tasks, a short one names them all.
+    func testLongBlockerListIsShortenedInTheLine() {
+        func row(_ n: Int) -> Mason_V1_TaskRow {
+            var r = Mason_V1_TaskRow()
+            r.blockers = (0..<n).map { UInt64(990 + $0) }
+            r.whyWaiting = "Proposed, held behind " + r.blockers.map { "#\($0)" }.joined(separator: ", ")
+            return r
+        }
+        XCTAssertEqual(QueueWait.line(row(29)), "Proposed, held behind 29 tasks (#990, #991, #992, ...)")
+        XCTAssertEqual(QueueWait.line(row(3)), "Proposed, held behind #990, #991, #992")
+    }
 }
