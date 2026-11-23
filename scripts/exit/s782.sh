@@ -7,6 +7,7 @@
 #     `mason schedule run` starts one that the list then shows as running.
 # Nothing here needs the network: the fake GitHub listens on loopback.
 set -euo pipefail
+unset MASON_EXIT_SHARD MASON_EXIT_PLAN MASON_EXIT_REPEAT MASON_EXIT_DEFAULT_WEIGHT MASON_EXIT_WEIGHTS
 cd "$(git rev-parse --show-toplevel)"
 root=$(mktemp -d /tmp/mason-s782.XXXXXX); daemon=""; gh=""
 cleanup() {
