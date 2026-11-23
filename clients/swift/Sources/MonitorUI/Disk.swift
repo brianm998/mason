@@ -158,36 +158,50 @@ struct CpuDiskRow: Layout {
         !stacked && (width ?? 0) >= CGFloat(Disk.twoColumnMinWidth)
     }
 
+    /// s1027: the layout arithmetic as a pure function, so tests assert exact frames.
+    /// Side by side only when not stacked and `width >= Disk.twoColumnMinWidth`, CPU taking 3:2 of
+    /// the width minus `spacing`; otherwise the disk sits below the CPU at full width.
+    static func placement(width: CGFloat, heights: (CGFloat, CGFloat), stacked: Bool, spacing: CGFloat)
+        -> (cpu: CGRect, disk: CGRect)
+    {
+        if !stacked && width >= CGFloat(Disk.twoColumnMinWidth) {
+            let room = max(0, width - spacing)
+            let a = room * CGFloat(Disk.cpuWeight / (Disk.cpuWeight + Disk.diskWeight))
+            return (
+                CGRect(x: 0, y: 0, width: a, height: heights.0),
+                CGRect(x: a + spacing, y: 0, width: room - a, height: heights.1)
+            )
+        }
+        return (
+            CGRect(x: 0, y: 0, width: width, height: heights.0),
+            CGRect(x: 0, y: heights.0 + spacing, width: width, height: heights.1)
+        )
+    }
+
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
         let w = proposal.width ?? 0
         guard subviews.count == 2 else { return subviews.first?.sizeThatFits(proposal) ?? .zero }
-        if sideBySide(proposal.width) {
-            let (a, b) = widths(w)
-            let ha = subviews[0].sizeThatFits(.init(width: a, height: nil)).height
-            let hb = subviews[1].sizeThatFits(.init(width: b, height: nil)).height
-            return CGSize(width: w, height: max(ha, hb))
-        }
-        let ha = subviews[0].sizeThatFits(.init(width: w, height: nil)).height
-        let hb = subviews[1].sizeThatFits(.init(width: w, height: nil)).height
-        return CGSize(width: w, height: ha + spacing + hb)
+        let (hs, _) = heights(w, subviews)
+        let f = Self.placement(width: w, heights: hs, stacked: stacked, spacing: spacing)
+        return CGSize(width: w, height: max(f.cpu.maxY, f.disk.maxY))
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
         guard subviews.count == 2 else { subviews.first?.place(at: bounds.origin, proposal: .init(bounds.size)); return }
-        if sideBySide(bounds.width) {
-            let (a, b) = widths(bounds.width)
-            subviews[0].place(at: bounds.origin, anchor: .topLeading, proposal: .init(width: a, height: nil))
-            subviews[1].place(at: CGPoint(x: bounds.minX + a + spacing, y: bounds.minY), anchor: .topLeading, proposal: .init(width: b, height: nil))
-        } else {
-            let ha = subviews[0].sizeThatFits(.init(width: bounds.width, height: nil)).height
-            subviews[0].place(at: bounds.origin, anchor: .topLeading, proposal: .init(width: bounds.width, height: nil))
-            subviews[1].place(at: CGPoint(x: bounds.minX, y: bounds.minY + ha + spacing), anchor: .topLeading, proposal: .init(width: bounds.width, height: nil))
+        let (hs, _) = heights(bounds.width, subviews)
+        let f = Self.placement(width: bounds.width, heights: hs, stacked: stacked, spacing: spacing)
+        for (view, r) in zip(subviews, [f.cpu, f.disk]) {
+            view.place(
+                at: CGPoint(x: bounds.minX + r.minX, y: bounds.minY + r.minY), anchor: .topLeading,
+                proposal: .init(width: r.width, height: nil))
         }
     }
 
-    private func widths(_ total: CGFloat) -> (CGFloat, CGFloat) {
-        let room = max(0, total - spacing)
-        let a = room * CGFloat(Disk.cpuWeight / (Disk.cpuWeight + Disk.diskWeight))
-        return (a, room - a)
+    /// Each child's height at the width it will get; the width split depends only on `width`.
+    private func heights(_ width: CGFloat, _ subviews: Subviews) -> ((CGFloat, CGFloat), Bool) {
+        let probe = Self.placement(width: width, heights: (0, 0), stacked: stacked, spacing: spacing)
+        let ha = subviews[0].sizeThatFits(.init(width: probe.cpu.width, height: nil)).height
+        let hb = subviews[1].sizeThatFits(.init(width: probe.disk.width, height: nil)).height
+        return ((ha, hb), sideBySide(width))
     }
 }
