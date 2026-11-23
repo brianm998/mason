@@ -3251,6 +3251,9 @@ fn main() {
                         if let Some(to) = t["retry_to"].as_str() {
                             println!("  retry     goes to `{to}`");
                         }
+                        if let Some(r) = t["diagnosis_ran_on"].as_str() {
+                            println!("  diagnosis: {r}");
+                        }
                         if let Some(n) = t["auto_retries"].as_u64() {
                             let next = match t["next_auto_retry_ms"].as_u64() {
                                 Some(at) => {
@@ -3469,6 +3472,9 @@ fn main() {
                                     row["status"].as_str().unwrap_or("?"),
                                     row["text"].as_str().unwrap_or("")
                                 );
+                                if let Some(r) = row["ran_on"].as_str() {
+                                    println!("    diagnosis: {r}");
+                                }
                             }
                         }
                         (Some(w @ ("apply" | "dismiss")), Some(n)) => {
