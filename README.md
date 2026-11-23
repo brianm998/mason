@@ -728,8 +728,11 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s958**: The Swift monitor holds one `latencyCritical` process activity (and `NSAppSleepDisabled` in the bundle) for its whole life, so its main thread is no longer throttled to priority 4 when its window is behind another app.
 - **s960**: The Swift monitor no longer publishes sidebar, header or progress to its observed model while the window is hidden or minimised, and subscribes to only header and sidebar until it is visible again.
 - **s961**: The step-host portable transport tests are Unix-only until the Windows IPC transport exists, which fixes the red Windows CI job.
+- **s963**: A skip debt whose task branch was deleted after landing is now proven landed from the merge on the base branch, so the idle pass and `settle_debts` can pay it instead of leaving it open for ever.
 - **s969**: see decision 0962. Task #841's red landing result came from a bad batch build; three
 - **s978**: `lint_files` now reads the repository guards' `<path>: <message>` and `<path>:<line>: <message>` lines, for paths in the batch's union diff only, so the existing file blame parks the one task that added the file instead of bisecting.
 - **s983**: The monitor draws a task's blockers as one wrapping text of whole links (a sidebar row names three and "and N more"; the task page drops its "waiting for" line when the blocker list is shown), so 29 blockers no longer crush into one-character columns.
+- **s984**: A double click on the Failed tile now opens the lone failed task, or a Failed page listing every failed task (with "N of M" when capped); the phone tile tap and `mason://section/failed` do the same.
 - **s998**: masons_own_impact_map_selects_suites_by_path now expects the eight unit-level suites bound to run_check and the test step, instead of six.
+- **s1014**: RemotePlacementTest now composes RemotePlacementBody inside a Column, as the settings page does, so the project row no longer covers the global row's buttons.
 <!-- status:end -->
