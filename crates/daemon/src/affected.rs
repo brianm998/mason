@@ -1597,7 +1597,11 @@ mod tests {
                 "x",
                 cov,
             ) {
-                Pick::Some(g) => g.values().flat_map(|g| g.notes.clone()).collect::<Vec<_>>(),
+                Pick::Some(g) => g
+                    .values()
+                    .flat_map(|g| g.notes.clone())
+                    .filter(|n| n.starts_with("it:"))
+                    .collect::<Vec<_>>(),
                 Pick::All { .. } => vec![],
             }
         };
