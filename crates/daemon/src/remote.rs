@@ -5542,8 +5542,12 @@ mod tests {
                 ),
             )
             .unwrap();
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+            // Executable bits are Unix-only; the Windows CI job builds these tests but does not run them.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
         }
         let zip = artifact(r._t.path(), GREEN, 0, None);
         let gh = FakeGh::new(&r, &zip, mode);
