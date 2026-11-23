@@ -3289,6 +3289,13 @@ fn main() {
                     if let Some(c) = t["closing"]["note"].as_str() {
                         println!("  tests     {c}");
                     }
+                    for n in t["owner_notes"].as_array().into_iter().flatten() {
+                        println!(
+                            "  owner note ({}) {}",
+                            n["step"].as_str().unwrap_or("?"),
+                            n["note"].as_str().unwrap_or("")
+                        );
+                    }
                     for x in t["debts"].as_array().into_iter().flatten() {
                         println!(
                             "  debt #{:<3} {} {}{}",
@@ -3734,6 +3741,39 @@ fn main() {
                     finish(&a);
                     or_die(d.call("POST", &format!("/tasks/{id}/overrides"), Some(&json!({"key": key, "value": value, "owner": std::env::var("USER").unwrap_or_else(|_| "owner".into())}))));
                     println!("Task #{id}: {key} = {value}");
+                }
+                "notes" => {
+                    let id = task_id(&mut a);
+                    let clear = a.flag("--clear");
+                    finish(&a);
+                    if clear {
+                        // Owner only, as `priority` is.
+                        if std::env::var("MASON_AS").is_err() {
+                            if let Ok(u) = std::env::var("USER") {
+                                std::env::set_var("MASON_AS", u);
+                            }
+                        }
+                        let r = or_die(d.call(
+                            "POST",
+                            &format!("/tasks/{id}/owner-notes/clear"),
+                            Some(&json!({})),
+                        ));
+                        println!("Task #{id}: cleared {} owner note(s)", r["cleared"]);
+                    } else {
+                        let r = or_die(d.call("GET", &format!("/tasks/{id}/owner-notes"), None));
+                        let notes = r["notes"].as_array().cloned().unwrap_or_default();
+                        if notes.is_empty() {
+                            println!("Task #{id} has no owner notes.");
+                        }
+                        for n in notes {
+                            println!(
+                                "[{}] {}: {}",
+                                n["at_ms"],
+                                n["step"].as_str().unwrap_or("?"),
+                                n["note"].as_str().unwrap_or("")
+                            );
+                        }
+                    }
                 }
                 "priority" => {
                     let id = task_id(&mut a);

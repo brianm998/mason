@@ -77,7 +77,8 @@ final class PhoneNavTests: XCTestCase {
         XCTAssertEqual(PhoneLayout.tileTarget(state: "developing", rows: [4, 5], connected: true), .section("developing"))
         XCTAssertEqual(PhoneLayout.tileTarget(state: "developing", rows: [], connected: true), .section("developing"))
         XCTAssertEqual(PhoneLayout.tileTarget(state: "landing", rows: [4, 5], connected: true), .landing)
-        XCTAssertNil(PhoneLayout.tileTarget(state: "failed", rows: [4, 5], connected: true), "no page: the tap scrolls")
+        XCTAssertEqual(PhoneLayout.tileTarget(state: "failed", rows: [4, 5], connected: true), .section("failed"))
+        XCTAssertEqual(PhoneLayout.tileTarget(state: "failed", rows: [4], connected: true), .task(4))
         for s in ["needs_attention", "proposed"] {
             XCTAssertEqual(PhoneLayout.tileTarget(state: s, rows: [4, 5], connected: true), .section(s))
             XCTAssertEqual(PhoneLayout.tileTarget(state: s, rows: [4], connected: true), .task(4))

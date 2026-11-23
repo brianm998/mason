@@ -116,6 +116,7 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
     }
     if detail {
         v["body"] = json!(t.body);
+        v["owner_notes"] = json!(crate::ownernotes::list(&d.task_dir(t.id)));
         v["priority"] = json!(format!("{:?}", t.priority).to_lowercase());
         v["attempts"] = json!(t
             .attempts
@@ -728,6 +729,41 @@ async fn task_detail(Shared(d): Shared<Arc<Daemon>>, Path(id): Path<u64>) -> Res
     Ok(Json(v))
 }
 
+/// The owner's notes on a task's retries (task 988).
+async fn owner_notes(Shared(d): Shared<Arc<Daemon>>, Path(id): Path<u64>) -> Res {
+    if !d
+        .world()
+        .map_err(store_err)?
+        .tasks
+        .contains_key(&TaskId(id))
+    {
+        return Err(fail(StatusCode::NOT_FOUND, format!("no task #{id}")));
+    }
+    Ok(Json(
+        json!({"notes": crate::ownernotes::list(&d.task_dir(TaskId(id)))}),
+    ))
+}
+
+/// Remove them; the owner only.
+async fn owner_notes_clear(
+    Shared(d): Shared<Arc<Daemon>>,
+    Path(id): Path<u64>,
+    headers: axum::http::HeaderMap,
+) -> Res {
+    let who = who_of(&headers);
+    owner_only(&d, &who, "clear a task's owner notes")?;
+    if !d
+        .world()
+        .map_err(store_err)?
+        .tasks
+        .contains_key(&TaskId(id))
+    {
+        return Err(fail(StatusCode::NOT_FOUND, format!("no task #{id}")));
+    }
+    let n = crate::ownernotes::clear(&d.task_dir(TaskId(id)));
+    Ok(Json(json!({"ok": true, "cleared": n})))
+}
+
 async fn cancel(
     Shared(d): Shared<Arc<Daemon>>,
     Path(id): Path<u64>,
@@ -889,6 +925,11 @@ pub fn retry_task(
         let dir = d.task_dir(TaskId(id));
         let _ = std::fs::create_dir_all(&dir);
         let _ = std::fs::write(dir.join(crate::jobs::RETRY_NOTE), m);
+        // The owner's note is also kept for the reviewer and later rounds (task 988); the
+        // daemon's own retries and diagnoses are not decisions.
+        if !ask.auto {
+            crate::ownernotes::append(&dir, crate::daemon::now_ms(), &step, m);
+        }
     }
     // Before the task can join a batch again, so the batch cannot find the old red.
     if ask.forget_red && !ask.auto {
@@ -3464,7 +3505,13 @@ async fn resources(Shared(d): Shared<Arc<Daemon>>) -> Res {
     let d2 = d.clone();
     let v = d
         .pool
-        .run(move || d2.broker.snapshot())
+        .run(move || {
+            let mut v = d2.broker.snapshot();
+            if let Some(g) = v.get_mut("gha").and_then(|g| g.as_object_mut()) {
+                g.insert("runs".into(), crate::remote::holder_views(&d2).into());
+            }
+            v
+        })
         .await
         .map_err(pool_err)?;
     Ok(Json(v))
@@ -4028,6 +4075,8 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/tasks", get(list_tasks).post(add_task))
         .route("/tasks/{id}", get(task_detail))
         .route("/tasks/{id}/cancel", post(cancel))
+        .route("/tasks/{id}/owner-notes", get(owner_notes))
+        .route("/tasks/{id}/owner-notes/clear", post(owner_notes_clear))
         .route("/tasks/{id}/retry", post(retry))
         .route("/tasks/{id}/diagnoses", get(diagnoses))
         .route("/tasks/{id}/diagnoses/{did}/{what}", post(decide_diagnosis))
