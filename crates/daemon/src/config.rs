@@ -942,6 +942,9 @@ pub struct CiCfg {
     pub poll_s: u64,
     /// Give up on a run after this long.
     pub timeout_s: u64,
+    /// Tell the owner when a pending run's jobs have not changed for this long (seconds;
+    /// `0`: never). Only an alert; nothing is cancelled and no verdict changes.
+    pub stuck_after_s: u64,
     /// Tell infrastructure reds from real ones (`github-actions` only): only infrastructure
     /// is rerun, a real red goes back to the tasks at once. Off by default.
     pub infra_judge: bool,
@@ -1161,6 +1164,25 @@ fn parse_services(id: &str, doc: &DocumentMut) -> Result<ServicesCfg, String> {
             kind,
             poll_s: int(t, "poll_s", 20),
             timeout_s: int(t, "timeout_s", 7200),
+            stuck_after_s: match t.get("stuck_after") {
+                None => 1800,
+                Some(v) => match (v.as_integer(), v.as_str()) {
+                    (Some(n), _) if n >= 0 => n as u64,
+                    (_, Some(s)) => match s.trim() {
+                        "0" => 0,
+                        s => mason_landing::config::parse_duration(s)
+                            .map(|d| d.as_secs())
+                            .ok_or_else(|| {
+                                format!("{id}: `[ci] stuck_after` is a duration like \"30m\" or 0")
+                            })?,
+                    },
+                    _ => {
+                        return Err(format!(
+                            "{id}: `[ci] stuck_after` is a duration like \"30m\" or 0"
+                        ))
+                    }
+                },
+            },
         });
     }
     if table("remote").is_some() {
