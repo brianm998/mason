@@ -22,6 +22,7 @@ object SectionPages {
         "review" -> "Review"
         "needs_attention" -> "Needs you"
         "proposed" -> "Proposed"
+        "failed" -> "Failed"
         else -> name
     }
 
@@ -56,3 +57,9 @@ fun MonitorModel.skipAllTests(rows: List<TaskRow>) {
 /** Why Skip testing cannot be used, or null when it can; the button is disabled with this beside it. */
 val MonitorModel.skipDisabledReason: String?
     get() = readOnlyReason?.let { "Read-only: $it" } ?: if (!isOwner) "Only the owner can skip testing" else null
+
+/** The count for a capped section page's header ("500 of 2000"), else null. */
+fun MonitorModel.sectionCountText(name: String): String? {
+    val s = sidebar?.sections?.firstOrNull { it.state == name } ?: return null
+    return if (isCapped(s)) countText(s) else null
+}

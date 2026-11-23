@@ -28,6 +28,21 @@ final class ProposedPageTests: XCTestCase {
         XCTAssertFalse(StageRows.showsApprove(page: "queued", canAct: true, row: yes))
     }
 
+    func testTheCappedFailedPageShowsNOfM() {
+        let model = MonitorModel()
+        var sb = SidebarView()
+        var s = SidebarSection()
+        s.state = "failed"
+        s.rows = [row(1, actions: ["retry"]), row(2, actions: [])]
+        s.count = 7
+        sb.sections = [s]
+        model.sidebar = sb
+        XCTAssertEqual(model.sectionCountText("failed"), "2 of 7")
+        let view = SectionPage(model: model, name: "failed").environment(\.theme, Theme(dark: false, scale: 1))
+            .frame(width: 800, height: 400)
+        XCTAssertNotNil(ImageRenderer(content: view).cgImage)
+    }
+
     func testTheProposedPageRendersOffscreenWithItsRows() {
         let model = MonitorModel()
         var sb = SidebarView()
