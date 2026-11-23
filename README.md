@@ -693,6 +693,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s868**: An update the owner starts takes its `compile` slot ahead of all task work and past the CPU and heat holds (never past a die more than 2 °C over `thermal_max_c`); an automatic update rises the same way after `update_wait_max_s` (default 30 min).
 - **s871**: `narrow_each` accepts `{file}` (the unit's file under `narrow_root`) and `{path}` (from the repository root) beside `{}`, so a narrowed pytest suite gets `tests/test_x.py`, not `tests.test_x`, and `mason definition check` warns when a pytest suite uses `{}` alone.
 - **s872**: The Swift monitor's sidebar scroll view gets a new identity per project (`.id(model.project)`), so a project change starts at the top with no stale offset or content-height estimate, and a new offscreen test checks the list can still be scrolled to its last entry.
+- **s873**: A GitHub run cut off at its limit now keeps the artifact's output, names the tests that never finished, and its `run` step stops two minutes before MASON cancels.
 - **s874**: Landing idle time (`landing_idle_ms`) now resets while the queue is deliberately held (self-update drain, unreadable configuration, or every waiting task behind a freeze), so a hold is not reported as an idle queue.
 - **s875**: The cargo-workspace force-skip count (18 of 81) comes from owner and Land-now skips, not suite failures, so the suite is unchanged and the detector's counting is filed as a proposal.
 - **s877**: An analyst task ends when its develop step's result file has been read (no test, review or land, no commits kept), ingests once per task, gets no stage or decision numbers, and the digest's flaky map is per project.
@@ -724,5 +725,6 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s960**: The Swift monitor no longer publishes sidebar, header or progress to its observed model while the window is hidden or minimised, and subscribes to only header and sidebar until it is visible again.
 - **s961**: The step-host portable transport tests are Unix-only until the Windows IPC transport exists, which fixes the red Windows CI job.
 - **s969**: see decision 0962. Task #841's red landing result came from a bad batch build; three
+- **s978**: `lint_files` now reads the repository guards' `<path>: <message>` and `<path>:<line>: <message>` lines, for paths in the batch's union diff only, so the existing file blame parks the one task that added the file instead of bisecting.
 - **s983**: The monitor draws a task's blockers as one wrapping text of whole links (a sidebar row names three and "and N more"; the task page drops its "waiting for" line when the blocker list is shown), so 29 blockers no longer crush into one-character columns.
 <!-- status:end -->
