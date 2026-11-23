@@ -6,7 +6,7 @@ cd "$(dirname "$0")/../.."
 grep -E 'sectionNames' -A2 clients/swift/Sources/MonitorCore/Navigation.swift | grep -q '"failed"'
 grep -E 'sectionNames' -A2 clients/compose/core/src/main/kotlin/mason/monitor/Navigation.kt | grep -q '"failed"'
 # The Swift package's test bundles do not all build on Linux (MasonMascotTests), so run it on macOS only.
-if [ "$(uname)" = Darwin ]; then
+if [ "$(uname)" = Darwin ] && command -v swift >/dev/null && [ -z "${MASON_SKIP_SWIFT:-}" ]; then
   swift test --package-path clients/swift --filter 'MonitorCoreTests|PhoneNavTests'
 fi
 if command -v java >/dev/null && command -v gradle >/dev/null && [ -z "${MASON_SKIP_COMPOSE:-}" ]; then
