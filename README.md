@@ -724,4 +724,5 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s960**: The Swift monitor no longer publishes sidebar, header or progress to its observed model while the window is hidden or minimised, and subscribes to only header and sidebar until it is visible again.
 - **s961**: The step-host portable transport tests are Unix-only until the Windows IPC transport exists, which fixes the red Windows CI job.
 - **s969**: see decision 0962. Task #841's red landing result came from a bad batch build; three
+- **s983**: The monitor draws a task's blockers as one wrapping text of whole links (a sidebar row names three and "and N more"; the task page drops its "waiting for" line when the blocker list is shown), so 29 blockers no longer crush into one-character columns.
 <!-- status:end -->
