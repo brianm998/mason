@@ -1096,6 +1096,58 @@ struct TaskLink: View {
     }
 }
 
+/// "label #a, #b, #c" as one wrapping `Text`, each task a link, so a long list wraps by whole
+/// links and never splits a number. With `limit`, only that many are named and "and N more"
+/// opens `moreTask`'s page. Never an `HStack` of separate texts (task 1020).
+struct BlockerLine: View {
+    @Environment(\.theme) var theme
+    let label: String
+    let ids: [UInt64]
+    let font: Font
+    var limit: Int? = nil
+    var moreTask: UInt64 = 0
+    let go: (UInt64) -> Void
+
+    static func attributed(label: String, ids: [UInt64], limit: Int?, moreTask: UInt64,
+                           muted: Color, link: Color) -> AttributedString {
+        var out = AttributedString(label + " ")
+        out.foregroundColor = muted
+        let shown = limit.map { Array(ids.prefix($0)) } ?? ids
+        for (i, id) in shown.enumerated() {
+            var a = AttributedString("#\(id)")
+            a.link = URL(string: "\(LinkedText.taskScheme)://\(id)")
+            a.foregroundColor = link
+            a.underlineStyle = .single
+            out += a
+            if i < shown.count - 1 { var c = AttributedString(", "); c.foregroundColor = muted; out += c }
+        }
+        if shown.count < ids.count {
+            var and = AttributedString(" and "); and.foregroundColor = muted
+            var more = AttributedString("\(ids.count - shown.count) more")
+            more.link = URL(string: "\(LinkedText.taskScheme)://\(moreTask)")
+            more.foregroundColor = link
+            more.underlineStyle = .single
+            out += and + more
+        }
+        return out
+    }
+
+    var body: some View {
+        Text(Self.attributed(label: label, ids: ids, limit: limit, moreTask: moreTask,
+                             muted: theme.muted, link: theme.link))
+            .font(font)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .environment(\.openURL, OpenURLAction { url in
+                if url.scheme == LinkedText.taskScheme, let n = UInt64(url.host ?? "") {
+                    go(n)
+                    return .handled
+                }
+                return .discarded
+            })
+    }
+}
+
 /// A reference that opens a web page (the tracker, a CI run) in the default browser.
 struct WebLink: View {
     @Environment(\.openURL) private var openURL
