@@ -4094,6 +4094,19 @@ pub fn skip(
         _ => return Err("scope is `suite:NAME` or `step:NAME`".into()),
     }
     let scope = landing_scope(&def, t.state, scope);
+    // Only the Test step reads a step skip; a skip of any other step would be recorded and do
+    // nothing, so it is refused (s1007).
+    if let Some(("step", n)) = scope.split_once(':') {
+        if !def
+            .step(n)
+            .is_some_and(|s| s.kind == mason_definition::StepType::Test)
+        {
+            return Err(format!(
+                "step `{n}` cannot be skipped: only the test step can. To get a task past \
+                 review use `mason task force` or `mason task land-now`"
+            ));
+        }
+    }
     d.store
         .add_debt(task.0, &project, &scope, reason, owner, deferred, now_ms())
         .map_err(|e| e.to_string())

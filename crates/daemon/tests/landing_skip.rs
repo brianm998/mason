@@ -159,3 +159,23 @@ fn skipping_stops_the_build_floor_of_a_batch_with_no_batch_tier() {
     wait_for("the blocked build to be gone", 30, || !alive(&pid));
     assert!(w.on_main("a/hang.build.alpha"));
 }
+
+#[test]
+fn a_skip_of_a_step_that_is_not_the_test_step_is_refused() {
+    let w = world_built("window = \"60s\"\n", &[]);
+    let t = w.task("one", &[("x/one.txt", "1")]);
+    let def = w.d.current_def(w.d.project_id_by_name("scratch").unwrap());
+    let non_test = def
+        .steps
+        .iter()
+        .find(|s| s.kind != mason_definition::StepType::Test)
+        .expect("the definition has a step that is not the test step")
+        .name
+        .clone();
+    let before = debt_scopes(&w, t).len();
+    let err = skip(&w.d, t, &format!("step:{non_test}"), "r", "owner", false).unwrap_err();
+    assert!(err.contains("only the test step"), "{err}");
+    assert_eq!(debt_scopes(&w, t).len(), before, "no debt is recorded");
+    // The Test step still can be.
+    skip(&w.d, t, "step:test", "r", "owner", false).unwrap();
+}
