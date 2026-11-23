@@ -1,0 +1,8 @@
+.mason/run.json
+crates/adapters/src/fakehost.rs
+crates/core/src/ci_stuck.rs
+crates/core/src/lib.rs
+crates/daemon/src/config.rs
+crates/daemon/tests/it/ci_stuck.rs
+crates/daemon/tests/it/main.rs
+docs/examples/star.project.toml

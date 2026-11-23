@@ -22,6 +22,7 @@ mod blockers;
 mod bug_alerts;
 mod ci_infra;
 mod ci_schedule;
+mod ci_stuck;
 mod ci_watch;
 mod covmap_job;
 mod crash;
