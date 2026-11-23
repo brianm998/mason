@@ -14,6 +14,7 @@ pub mod autoquarantine;
 pub mod autoretry;
 pub mod basecheck;
 pub mod basefold;
+pub mod baselift;
 pub mod batch_ci;
 pub mod bg;
 pub mod blockers;
