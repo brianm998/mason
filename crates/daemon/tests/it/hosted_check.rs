@@ -388,8 +388,8 @@ fn a_held_result_is_reused_by_a_replay_until_the_agent_has_the_answer() {
     let (a, b) = (suite("t3r4-check-a", &ma), suite("t3r4-check-b", &mb));
     let call = || {
         let _hold = hold_results(3, 4);
-        let ra = run(&d, &a).unwrap();
-        let rb = run(&d, &b).unwrap();
+        let ra = run(&d, &a, &grant()).unwrap();
+        let rb = run(&d, &b, &grant()).unwrap();
         (ra.id, rb.id)
     };
     let first = call();
@@ -420,8 +420,8 @@ fn a_call_without_a_hold_delivers_at_once_as_before() {
         "tree-a",
         60,
     );
-    let r1 = run(&d, &sp).unwrap();
-    let r2 = run(&d, &sp).unwrap();
+    let r1 = run(&d, &sp, &grant()).unwrap();
+    let r2 = run(&d, &sp, &grant()).unwrap();
     assert_ne!(r1.id, r2.id);
     assert_eq!(lines(&marker), 2);
 }
