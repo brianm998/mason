@@ -1,0 +1,17 @@
+.mason/run.json
+crates/cli/src/main.rs
+crates/core/src/event.rs
+crates/daemon/src/daemon.rs
+crates/daemon/src/http.rs
+crates/daemon/src/lib.rs
+crates/daemon/src/rename.rs
+crates/daemon/tests/it/main.rs
+crates/daemon/tests/it/rename.rs
+crates/engine/src/reducer.rs
+crates/engine/tests/behaviour.rs
+crates/store/src/codec.rs
+crates/store/src/lib.rs
+crates/store/tests/store.rs
+docs/decisions/0958-project-rename-keeps-the-id.md
+docs/stages/s965.md
+scripts/exit/s965.sh
