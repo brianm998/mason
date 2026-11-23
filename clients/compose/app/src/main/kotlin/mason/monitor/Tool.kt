@@ -76,6 +76,9 @@ private fun step(model: MonitorModel): Boolean {
             if (System.currentTimeMillis() > end) fail("timed out waiting for the views of seq $seq")
             Thread.sleep(50)
         }
+        if (model.lastViewSeq < seq) {
+            System.err.println("step: quiet exit, views at #${model.lastViewSeq}, daemon seq #$seq")
+        }
     }
     settle(model)
     return advanced

@@ -85,13 +85,17 @@ while IFS= read -r -u 3 s; do
   name=$(basename "$s" .sh)
   echo "== $s"
   start=$SECONDS
-  run_limited "$s"; rc=$?
+  log=$(mktemp)
+  run_limited "$s" 2>&1 | tee "$log"; rc=${PIPESTATUS[0]}
   echo "$name: $((SECONDS - start)) s"
   case $rc in
     0) ;;
-    2) echo "FAILED: $s (over $limit s)" >&2; fail=1; failed="$failed $s" ;;
-    *) echo "FAILED: $s" >&2; fail=1; failed="$failed $s" ;;
+    2) echo "FAILED: $s (over $limit s)" >&2; fail=1; failed="$failed $s (over $limit s)"
+       echo "-- last 40 lines of $name" >&2; tail -n 40 "$log" >&2 ;;
+    *) echo "FAILED: $s" >&2; fail=1; failed="$failed $s"
+       echo "-- last 40 lines of $name" >&2; tail -n 40 "$log" >&2 ;;
   esac
+  rm -f "$log"
 done 3< <(plan)
 [ "$fail" -eq 0 ] || echo "FAILED scripts:$failed" >&2
 exit $fail
