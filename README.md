@@ -686,6 +686,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s851**: The Compose conformance tool now waits for the views of each step (a new `lastViewSeq` that only applied views move) and a 1.5 s quiet window, instead of treating the events message's seq as proof the views had landed.
 - **s852**: `a_hung_git_is_killed_at_its_deadline` no longer asserts that it finished within 3 s; it checks `timed_out`, the "timed out" message and that the helper process is gone.
 - **s853**: The abandoned-run test keeps its waiting request polled through every wait and fails at once, naming the explain text, if the request is dropped instead of sitting out the 900 s floor.
+- **s856**: a remote run now starts by pushing its snapshot ref and dispatching the run workflow on it with the runner and shard list as inputs, so there is no `plan` job and the run waits for a runner once.
 - **s858**: The RowRedrawTests progress-view render counts are replaced by a deterministic MonitorCore observation test, so CI/monitor-swift no longer depends on SwiftUI updates inside ImageRenderer.
 - **s859**: The fake git host now runs its archive and checks commands through `shell_command` and `to_shell_path` so they work on Windows, and a check run that could not happen is no longer cached as red.
 - **s860**: a develop agent that kept committing was never given progress time after a daemon restart, because the extender measured elapsed time from the daemon process's start while the host's limit counts from the step's launch; it now counts from the recorded launch.
@@ -741,4 +742,9 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s1014**: RemotePlacementTest now composes RemotePlacementBody inside a Column, as the settings page does, so the project row no longer covers the global row's buttons.
 - **s1015**: Unit-test narrowing no longer pushes a line into `Group.notes`, which is per directory target, so `the_note_says_how_the_modules_were_picked` passes again.
 - **s1022**: s249 clears the shard variables for its temporary repository and s782 accepts both the busy and the quiet next-trigger text.
+- **s1026**: s13.sh now prints the per-checkpoint id diff when the Compose conformance check fails, and Compose's step() reports a quiet exit before the views reached the daemon's seq, so the next red of run 45005421555's kind can be diagnosed.
+- **s1030**: The Land now freeze test holds the fix at a gate so the freeze is certainly in force, then waits for the fix and `other` to land instead of asserting `other` never does.
+- **s1035**: s22, s244 and s728 are named in weights.txt and s1035 checks them, but their cause is not diagnosed because the failed-step log was not readable from the pipeline.
+- **s1036**: Recorded that the s77, s117 and s902 reds on ubuntu shard 2 could not be traced without the full CI log, and changed no code.
+- **s1037**: The `the_note_says_how_the_modules_were_picked` failure on a0f67a2 was fixed by 9c18e970f (stop unit narrowing from pushing a note into Group.notes); no source change is needed.
 <!-- status:end -->
