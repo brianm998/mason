@@ -856,6 +856,16 @@ pub fn snapshot(
         let path = format!(".github/workflows/{workflow}");
         let blob = g(&["rev-parse", &format!("{base_ref}:{path}")], None)
             .map_err(|e| format!("the base branch ({base_ref}) has no {path}: {e}"))?;
+        // A run starts by dispatch; a workflow that also runs on the push would start it twice.
+        let own = g(&["cat-file", "blob", &blob], None)?;
+        if mason_adapters::runref::fires_on(
+            &mason_adapters::runref::push_trigger(&own),
+            "mason/run/x",
+        ) {
+            return Err(format!(
+                "the base branch ({base_ref}) has {path}, which runs on `mason/run/**`; a run is started by dispatch, so the push would start it twice (see `mason doctor`)"
+            ));
+        }
         g(
             &[
                 "update-index",
@@ -987,6 +997,8 @@ struct State {
     /// clears this and collects the result from GitHub.
     released: bool,
     ref_deleted: bool,
+    /// The workflow was dispatched on the ref (once; a restarted daemon finds the run by SHA).
+    dispatched: bool,
     code: i32,
     signal: i32,
     timed_out: bool,
@@ -1019,6 +1031,7 @@ impl State {
                 ("collected", (self.collected as u8).to_string()),
                 ("released", (self.released as u8).to_string()),
                 ("ref_deleted", (self.ref_deleted as u8).to_string()),
+                ("dispatched", (self.dispatched as u8).to_string()),
                 ("code", self.code.to_string()),
                 ("signal", self.signal.to_string()),
                 ("timed_out", (self.timed_out as u8).to_string()),
@@ -1067,6 +1080,7 @@ impl State {
             collected: flag("collected"),
             released: flag("released"),
             ref_deleted: flag("ref_deleted"),
+            dispatched: flag("dispatched"),
             code: s("code").parse().unwrap_or(0),
             signal: s("signal").parse().unwrap_or(0),
             timed_out: flag("timed_out"),
@@ -1590,8 +1604,39 @@ pub fn execute(
                 st.ref_name
             )));
         }
+        if let Err(e) = dispatch(site, spec, &mut st, &rec) {
+            // The ref is there and no run was started: take it down again.
+            delete_ref(site, &mut st, &rec);
+            let _ = std::fs::remove_file(&rec);
+            return Err(Fail::Environmental(format!(
+                "could not start {} on GitHub: {e}",
+                st.ref_name
+            )));
+        }
+    } else if !st.dispatched && st.run_id.is_none() {
+        // A daemon that died between the push and the dispatch: start the run, unless GitHub
+        // already has one for this commit.
+        let known = site
+            .gh
+            .runs_for_sha(&st.sha)
+            .map(|v| v.iter().any(|r| r.branch == st.ref_name));
+        match known {
+            Ok(true) => {
+                st.dispatched = true;
+                st.save(&rec);
+            }
+            _ => {
+                let _ = push(site, &st);
+                if let Err(e) = dispatch(site, spec, &mut st, &rec) {
+                    abandon(&mut st);
+                    return Err(Fail::Environmental(format!(
+                        "could not start {} on GitHub: {e}",
+                        st.ref_name
+                    )));
+                }
+            }
+        }
     }
-    let mut check_pushed = resumed;
     let mut poller = Poller::new(site.poll_s);
     let mut outage_since: Option<u64> = None;
     let mut artifact_misses = 0u32;
@@ -1698,7 +1743,6 @@ pub fn execute(
             site,
             &mut st,
             &mut poller,
-            &mut check_pushed,
             &mut artifact_misses,
             &mut live,
             &scratch,
@@ -1832,6 +1876,31 @@ pub fn execute(
     }
 }
 
+/// The inputs of the dispatch: the runner and the shard list the workflow's `run` job starts
+/// with. They are read back from the same JSON as `.mason/run.json`, so they are what the
+/// workflow's check compares them to.
+pub fn dispatch_inputs(spec: &RunSpec) -> Vec<(String, String)> {
+    let v: serde_json::Value = serde_json::from_str(&run_json(spec)).unwrap_or_default();
+    let sharded = v["shards"].as_u64().unwrap_or(1) > 1;
+    vec![
+        ("runs_on".into(), v["runs_on"].to_string()),
+        ("matrix".into(), v["matrix"].to_string()),
+        ("timeout_min".into(), v["timeout_min"].to_string()),
+        ("sharded".into(), sharded.to_string()),
+        ("toolchains".into(), v["toolchains"].to_string()),
+    ]
+}
+
+/// Start the workflow on the pushed ref, once, and record that it was.
+fn dispatch(site: &Site, spec: &RunSpec, st: &mut State, rec: &Path) -> Result<(), String> {
+    site.gh
+        .dispatch_workflow(&site.workflow, &st.ref_name, &dispatch_inputs(spec))
+        .map_err(|e| e.to_string())?;
+    st.dispatched = true;
+    st.save(rec);
+    Ok(())
+}
+
 /// Waits before the second, third and fourth tries of a push (ms).
 const PUSH_BACKOFF_MS: [u64; 3] = [10_000, 30_000, 90_000];
 
@@ -1916,7 +1985,6 @@ fn poll(
     site: &Site,
     st: &mut State,
     poller: &mut Poller,
-    check_pushed: &mut bool,
     misses: &mut u32,
     live: &mut Live,
     scratch: &Path,
@@ -1932,11 +2000,6 @@ fn poll(
                 .into_iter()
                 .find(|r| r.branch == st.ref_name);
             let Some(r) = found else {
-                if std::mem::take(check_pushed) {
-                    // A restarted daemon whose record was written but whose push may not have
-                    // happened: pushing the same commit to the same ref again is harmless.
-                    let _ = push(site, st);
-                }
                 poller.observe(secs, Observed::Unchanged);
                 return Ok(Step::Wait);
             };
@@ -3162,6 +3225,8 @@ mod tests {
         runs_seen: Mutex<std::collections::BTreeSet<String>>,
         /// Panic (a daemon that dies) on this look at the run.
         die_at: Mutex<Option<u32>>,
+        /// The bodies of the dispatches: a run exists only once one was made.
+        dispatches: Mutex<Vec<String>>,
     }
 
     impl FakeGh {
@@ -3181,6 +3246,7 @@ mod tests {
                 cancels: Mutex::new(vec![]),
                 runs_seen: Mutex::new(Default::default()),
                 die_at: Mutex::new(None),
+                dispatches: Mutex::new(vec![]),
             })
         }
         fn requests(&self) -> Vec<String> {
@@ -3248,6 +3314,18 @@ mod tests {
                     body: "{}".into(),
                 });
             }
+            if r.method == "POST" && u.ends_with("/dispatches") {
+                // GitHub starts the run on the ref's head, with no job `plan`.
+                self.dispatches
+                    .lock()
+                    .unwrap()
+                    .push(format!("{u} {}", r.body.clone().unwrap_or_default()));
+                return Ok(Response {
+                    status: 204,
+                    headers: vec![],
+                    body: String::new(),
+                });
+            }
             if r.method == "GET" && u.contains("/actions/caches?ref=") {
                 return ok(serde_json::json!({"total_count": 1, "actions_caches": [{"id": 77}]}));
             }
@@ -3269,10 +3347,14 @@ mod tests {
                 let Some(branch) = self.branch_of(sha) else {
                     return ok(serde_json::json!({"workflow_runs": []}));
                 };
+                if self.dispatches.lock().unwrap().is_empty() {
+                    // Pushed and not dispatched: nothing starts on the push.
+                    return ok(serde_json::json!({"workflow_runs": []}));
+                }
                 self.runs_seen.lock().unwrap().insert(sha.to_string());
                 let (st, _) = self.phase();
                 return ok(serde_json::json!({"workflow_runs": [{
-                    "id": 4242, "status": st, "head_branch": branch, "event": "push",
+                    "id": 4242, "status": st, "head_branch": branch, "event": "workflow_dispatch",
                     "html_url": "https://github.com/o/r/actions/runs/4242",
                     "created_at": "2026-11-20T10:00:00Z"}]}));
             }
@@ -3327,9 +3409,29 @@ mod tests {
             if u.contains("/actions/runs/4242/jobs") {
                 let (_, job) = self.phase();
                 let started = (job != "queued").then_some("2026-11-20T10:00:06Z");
-                return ok(serde_json::json!({"jobs": [
-                    {"name": "plan", "status": "completed", "started_at": "2026-11-20T10:00:01Z"},
-                    {"name": "run", "status": job, "started_at": started}]}));
+                // The jobs the workflow makes from the dispatch's inputs, as GitHub lists them.
+                let last = self.dispatches.lock().unwrap().last().cloned();
+                let inputs: serde_json::Value = last
+                    .and_then(|d| serde_json::from_str(d.split_once(' ')?.1).ok())
+                    .map(|v: serde_json::Value| v["inputs"].clone())
+                    .unwrap_or_default();
+                let names: Vec<String> = if inputs["sharded"] == "true" {
+                    let m: Vec<u32> =
+                        serde_json::from_str(inputs["matrix"].as_str().unwrap_or("[]"))
+                            .unwrap_or_default();
+                    m.iter().map(|k| format!("run ({k})")).collect()
+                } else {
+                    vec!["run".to_string()]
+                };
+                let jobs: Vec<_> = names
+                    .iter()
+                    .enumerate()
+                    .map(|(i, n)| {
+                        serde_json::json!({"id": 9000 + i, "name": n, "status": job,
+                            "started_at": started})
+                    })
+                    .collect();
+                return ok(serde_json::json!({ "jobs": jobs }));
             }
             if u.contains("/actions/runs/4242/artifacts") {
                 if matches!(self.mode, Mode::NoArtifact | Mode::HungNoArtifact) {
@@ -4335,24 +4437,19 @@ mod tests {
     fn an_outage_or_a_refused_token_is_environmental() {
         token();
         let t = tempfile::tempdir().unwrap();
-        for (code, quick) in [(503u16, false), (401, true)] {
+        // GitHub refusing the dispatch itself (an outage or a refused token) ends the attempt
+        // at once and leaves no ref; waiting out an outage applies once the run is started.
+        for code in [503u16, 401] {
             let r = repo();
             let zip = artifact(t.path(), GREEN, 0, None);
             let gh = FakeGh::new(&r, &zip, Mode::Status(code));
             let clk = clock();
             let s = site(&r, gh, clk.clone(), false);
             let logs = tempfile::tempdir().unwrap();
-            let start = clk.now_ms();
             let e = execute(&s, &spec("x8"), logs.path(), &|| None)
                 .err()
                 .unwrap();
             assert!(matches!(e, Fail::Environmental(_)), "{code}: {e:?}");
-            if !quick {
-                assert!(
-                    clk.now_ms() - start >= 1_200_000,
-                    "an outage is waited out first"
-                );
-            }
             assert_eq!(refs(&r.bare), "");
         }
     }
@@ -4464,10 +4561,199 @@ mod tests {
             "one commit was ever run"
         );
         assert_eq!(refs(&r.bare), "");
+        assert_eq!(
+            gh.dispatches.lock().unwrap().len(),
+            1,
+            "the restarted daemon did not dispatch again"
+        );
         // Asked again once collected, it answers from the record and starts nothing.
         let again = execute(&s2, &spec("x11"), logs.path(), &|| None).unwrap();
         assert!(matches!(again, Outcome::Done(g) if g.output == GREEN));
         assert_eq!(gh.runs_seen.lock().unwrap().len(), 1);
+    }
+
+    /// The inputs of the one dispatch the fake saw, as JSON.
+    fn dispatched_inputs(gh: &FakeGh) -> serde_json::Value {
+        let d = gh.dispatches.lock().unwrap();
+        assert_eq!(d.len(), 1, "{d:?}");
+        let body = d[0].split_once(' ').unwrap().1;
+        serde_json::from_str(body).unwrap()
+    }
+
+    #[test]
+    fn execute_pushes_the_ref_then_starts_the_run_once_with_the_runner_and_shards_of_the_spec() {
+        token();
+        let r = repo();
+        let t = tempfile::tempdir().unwrap();
+        let zip = artifact(t.path(), GREEN, 0, None);
+        let gh = FakeGh::new(&r, &zip, Mode::NeverPicked);
+        let s = site(&r, gh.clone(), clock(), false);
+        let logs = tempfile::tempdir().unwrap();
+        let mut sp = spec("d1");
+        sp.shards = 3;
+        sp.shard_lists = vec![vec![], vec![], vec![]];
+        sp.runs_on = "macos-15".into();
+        // Stop once the jobs have been looked at.
+        let g2 = gh.clone();
+        let stop = move || {
+            g2.requests()
+                .iter()
+                .any(|q| q.contains("/jobs"))
+                .then_some(StopWhy::Skipped)
+        };
+        let out = execute(&s, &sp, logs.path(), &stop).unwrap();
+        assert!(matches!(out, Outcome::Stopped(StopWhy::Skipped)));
+        let log = gh.requests();
+        let at = |needle: &str| log.iter().position(|q| q.contains(needle));
+        // The dispatch is one POST to the workflow, on the pushed ref, and it came before any
+        // look for the run.
+        let posts: Vec<_> = log
+            .iter()
+            .filter(|q| q.starts_with("POST") && q.contains("/dispatches"))
+            .collect();
+        assert_eq!(posts.len(), 1, "{log:?}");
+        assert!(posts[0].contains("/actions/workflows/mason-run.yml/dispatches"));
+        assert!(at("/dispatches").unwrap() < at("head_sha=").unwrap());
+        let body = dispatched_inputs(&gh);
+        assert!(body["ref"].as_str().unwrap().starts_with("mason/run/proj/"));
+        assert_eq!(body["inputs"]["runs_on"], "\"macos-15\"");
+        assert_eq!(body["inputs"]["matrix"], "[1,2,3]");
+        assert_eq!(body["inputs"]["sharded"], "true");
+        assert_eq!(body["inputs"]["timeout_min"], "8");
+        // The inputs are what run.json says, so the workflow's check passes.
+        let j: serde_json::Value = serde_json::from_str(&run_json(&sp)).unwrap();
+        assert_eq!(body["inputs"]["matrix"], j["matrix"].to_string());
+        assert_eq!(body["inputs"]["runs_on"], j["runs_on"].to_string());
+        assert_eq!(body["inputs"]["toolchains"], j["toolchains"].to_string());
+        // From the first look the run's jobs are run (1) to run (3), with no `plan` job.
+        let names: Vec<String> =
+            s.gh.run_jobs(4242)
+                .unwrap()
+                .into_iter()
+                .map(|j| j.name)
+                .collect();
+        assert_eq!(names, vec!["run (1)", "run (2)", "run (3)"]);
+        assert!(refs(&r.bare).is_empty(), "a stopped run's ref is deleted");
+    }
+
+    #[test]
+    fn a_restarted_daemon_finds_the_run_by_its_sha_and_does_not_start_it_again() {
+        token();
+        let r = repo();
+        let t = tempfile::tempdir().unwrap();
+        let zip = artifact(t.path(), GREEN, 0, None);
+        let sp = spec("d2");
+        // A record written and a ref pushed by a daemon that died before it dispatched.
+        let write = |logs: &Path| {
+            let sha = snapshot(&r.wt, "origin/main", "mason-run.yml", &run_json(&sp), "m").unwrap();
+            let st = State {
+                ref_name: ref_name(&sp.project, &sp.id),
+                sha,
+                pushed_ms: 1_000_000_000,
+                runs_on: sp.runs_on.clone(),
+                ..Default::default()
+            };
+            st.save(&record_path(logs, &sp.id));
+            git_ok(
+                &r.wt,
+                &[
+                    "push",
+                    "-q",
+                    "origin",
+                    &format!("{}:refs/heads/{}", st.sha, st.ref_name),
+                ],
+            );
+        };
+        // GitHub already has the run (the dispatch got through): no second dispatch.
+        let logs = tempfile::tempdir().unwrap();
+        write(logs.path());
+        let gh = FakeGh::new(&r, &zip, Mode::Normal);
+        gh.dispatches.lock().unwrap().push("earlier {}".into());
+        let s = site(&r, gh.clone(), clock(), false);
+        let out = execute(&s, &sp, logs.path(), &|| None).unwrap();
+        assert!(matches!(out, Outcome::Done(f) if f.output == GREEN));
+        assert_eq!(gh.dispatches.lock().unwrap().len(), 1, "started once only");
+        // GitHub has none: the restarted daemon starts it, once.
+        let r2 = repo();
+        let logs2 = tempfile::tempdir().unwrap();
+        let rec = |l: &Path| record_path(l, &sp.id);
+        let sha = snapshot(&r2.wt, "origin/main", "mason-run.yml", &run_json(&sp), "m").unwrap();
+        State {
+            ref_name: ref_name(&sp.project, &sp.id),
+            sha,
+            pushed_ms: 1_000_000_000,
+            runs_on: sp.runs_on.clone(),
+            ..Default::default()
+        }
+        .save(&rec(logs2.path()));
+        let gh2 = FakeGh::new(&r2, &zip, Mode::Normal);
+        let s2 = site(&r2, gh2.clone(), clock(), false);
+        let out = execute(&s2, &sp, logs2.path(), &|| None).unwrap();
+        assert!(matches!(out, Outcome::Done(f) if f.output == GREEN));
+        assert_eq!(gh2.dispatches.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_dispatch_github_refuses_leaves_no_ref_and_no_record() {
+        token();
+        let r = repo();
+        let t = tempfile::tempdir().unwrap();
+        let zip = artifact(t.path(), GREEN, 0, None);
+        let gh = FakeGh::new(&r, &zip, Mode::Status(403));
+        let s = site(&r, gh, clock(), false);
+        let logs = tempfile::tempdir().unwrap();
+        let Err(e) = execute(&s, &spec("d3"), logs.path(), &|| None) else {
+            panic!("the run started")
+        };
+        assert!(matches!(e, Fail::Environmental(m) if m.contains("could not start")));
+        assert_eq!(refs(&r.bare), "");
+        assert!(!record_path(logs.path(), "d3").exists());
+    }
+
+    #[test]
+    fn the_run_workflow_is_one_wave_that_refuses_inputs_that_differ_from_run_json() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for rel in [
+            ".github/workflows/mason-run.yml",
+            "templates/github/mason-run.yml",
+        ] {
+            let text = std::fs::read_to_string(root.join(rel)).unwrap();
+            // Started by dispatch only: a push to a run ref must not start it a second time.
+            assert!(mason_adapters::runref::dispatches(&text), "{rel}");
+            assert!(
+                !mason_adapters::runref::fires_on(
+                    &mason_adapters::runref::push_trigger(&text),
+                    mason_adapters::runref::SAMPLE_REF
+                ),
+                "{rel} runs on push"
+            );
+            // No planning job: the one job takes its runner and matrix from the inputs.
+            assert!(!text.contains("  plan:"), "{rel}");
+            assert!(!text.contains("needs:"), "{rel}");
+            assert!(text.contains("runs-on: ${{ fromJSON(inputs.runs_on) }}"));
+            assert!(text.contains("shard: ${{ fromJSON(inputs.matrix) }}"));
+            // The first step after checkout compares every input to run.json and fails the job.
+            let at = text.find("name: inputs match run.json").expect(rel);
+            let step = &text[at..];
+            for (input, jq) in [
+                ("runs_on", "jq -c .runs_on .mason/run.json"),
+                ("matrix", "jq -c '.matrix // [1]' .mason/run.json"),
+                ("timeout_min", "jq -c .timeout_min .mason/run.json"),
+                ("sharded", "jq -r '(.shards // 1) > 1' .mason/run.json"),
+                (
+                    "toolchains",
+                    "jq -c '.toolchains // [\"rust\"]' .mason/run.json",
+                ),
+            ] {
+                assert!(
+                    step.contains(&format!("same {input} ")) && step.contains(jq),
+                    "{rel}: {input}"
+                );
+            }
+            assert!(step.contains("exit \"$bad\""), "{rel}");
+            // It comes before the step that runs the command.
+            assert!(at < text.find("- name: run\n").unwrap(), "{rel}");
+        }
     }
 
     #[test]
@@ -4660,6 +4946,13 @@ mod tests {
                     "html_url": "https://github.com/o/r/actions/runs/77",
                     "created_at": "2026-11-20T10:00:00Z"})
             };
+            if r.method == "POST" && u.ends_with("/dispatches") {
+                return Ok(Response {
+                    status: 204,
+                    headers: vec![],
+                    body: String::new(),
+                });
+            }
             if u.contains("/actions/runs?head_sha=") {
                 let sha = u
                     .split("head_sha=")

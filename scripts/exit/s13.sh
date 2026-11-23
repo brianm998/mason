@@ -70,7 +70,24 @@ port() { sed -n 's/.*"port": *\([0-9]*\).*/\1/p' "$root/d/daemon.json"; }
 echo "== 2. the same conformance scenarios, both clients"
 start_demo; "$bin/conformance" expected --port "$(port)" --out "$root/expected" | tail -1; stop_demo
 start_demo; "$kt" conformance --data-dir "$root/d" --out "$root/compose" | tail -1; stop_demo
-"$bin/conformance" check --expected "$root/expected" --actual "$root/compose"
+if ! "$bin/conformance" check --expected "$root/expected" --actual "$root/compose"; then
+  # The evidence a red CI log needs: which ids differ at which checkpoint.
+  python3 - "$root/expected" "$root/compose" <<'PY'
+import glob, json, os, sys
+exp, act = sys.argv[1], sys.argv[2]
+names = sorted({os.path.basename(p) for d in (exp, act) for p in glob.glob(os.path.join(d, "checkpoint-*.json"))})
+def ids(d, n):
+    f = os.path.join(d, n)
+    return {i["id"] for i in json.load(open(f))} if os.path.exists(f) else set()
+for n in names:
+    e, a = ids(exp, n), ids(act, n)
+    if e != a:
+        print(f"{n}: expected {len(e)} ids, compose {len(a)}")
+        for i in sorted(e - a): print("  missing from compose:", i)
+        for i in sorted(a - e): print("  only in compose:", i)
+PY
+  exit 1
+fi
 if [ $swift_ok = 1 ]; then
   start_demo; "$sw" conformance --data-dir "$root/d" --out "$root/swift" | tail -1; stop_demo
   "$bin/conformance" check --expected "$root/expected" --actual "$root/swift"
