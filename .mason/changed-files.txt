@@ -1,0 +1,12 @@
+.mason/run.json
+crates/daemon/src/attention.rs
+crates/daemon/src/daemon.rs
+crates/daemon/src/jobs.rs
+crates/daemon/src/lib.rs
+crates/daemon/src/redwatch.rs
+crates/store/src/lib.rs
+crates/store/src/migrations.rs
+crates/store/tests/store.rs
+docs/decisions/0982-red-develop-fixed-moves-held-tasks.md
+docs/stages/s989.md
+scripts/exit/s989.sh
