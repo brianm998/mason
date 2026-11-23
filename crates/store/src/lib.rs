@@ -83,6 +83,10 @@ pub struct DiagnosisRow {
     pub args: String,
     pub status: String,
     pub decided_ms: u64,
+    /// The decision card (JSON, options with their actions); empty for an older row.
+    pub card: String,
+    /// The `state_entered_at` of the failure this diagnosed (0: not known).
+    pub failed_at: u64,
 }
 
 /// What a suite did at a base commit (s246): failing names and every name, the executed count,
@@ -2194,14 +2198,28 @@ impl Store {
         args: &str,
         status: &str,
         now_ms: u64,
+        failed_at: u64,
     ) -> Result<u64, StoreError> {
         let (v, a, s) = (verdict.to_string(), args.to_string(), status.to_string());
         self.write(move |c| {
             c.execute(
-                "INSERT INTO diagnoses(task, at_ms, verdict, args, status) VALUES (?1,?2,?3,?4,?5)",
-                params![task as i64, now_ms as i64, v, a, s],
+                "INSERT INTO diagnoses(task, at_ms, verdict, args, status, failed_at) \
+                 VALUES (?1,?2,?3,?4,?5,?6)",
+                params![task as i64, now_ms as i64, v, a, s, failed_at as i64],
             )?;
             Ok(c.last_insert_rowid() as u64)
+        })
+    }
+
+    /// Store the decision card of a diagnosis.
+    pub fn set_diagnosis_card(&self, id: u64, card: &str) -> Result<(), StoreError> {
+        let card = card.to_string();
+        self.write(move |c| {
+            c.execute(
+                "UPDATE diagnoses SET card = ?2 WHERE id = ?1",
+                params![id as i64, card],
+            )
+            .map(|_| ())
         })
     }
 
@@ -2209,7 +2227,7 @@ impl Store {
     pub fn diagnoses(&self, task: Option<u64>) -> Result<Vec<DiagnosisRow>, StoreError> {
         self.read(move |c| {
             let mut st = c.prepare(
-                "SELECT id, task, at_ms, verdict, args, status, decided_ms FROM diagnoses \
+                "SELECT id, task, at_ms, verdict, args, status, decided_ms, card, failed_at FROM diagnoses \
                  WHERE (?1 IS NULL OR task = ?1) ORDER BY id",
             )?;
             let rows = st.query_map(params![task.map(|t| t as i64)], |r| {
@@ -2221,6 +2239,8 @@ impl Store {
                     args: r.get(4)?,
                     status: r.get(5)?,
                     decided_ms: r.get::<_, i64>(6)? as u64,
+                    card: r.get(7)?,
+                    failed_at: r.get::<_, i64>(8)? as u64,
                 })
             })?;
             rows.collect()
