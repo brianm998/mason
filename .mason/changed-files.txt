@@ -1,0 +1,16 @@
+.mason/run.json
+crates/cli/src/init.rs
+crates/daemon/Cargo.toml
+crates/daemon/src/config.rs
+crates/daemon/src/daemon.rs
+crates/daemon/src/http.rs
+crates/daemon/src/lib.rs
+crates/daemon/src/main.rs
+crates/daemon/src/onboarding.rs
+crates/daemon/tests/it/main.rs
+crates/daemon/tests/it/onboarding.rs
+crates/onboard/src/lib.rs
+docs/decisions/0975-add-project-endpoints.md
+docs/install.md
+docs/stages/s982.md
+scripts/exit/s982.sh
