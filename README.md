@@ -696,6 +696,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s873**: A GitHub run cut off at its limit now keeps the artifact's output, names the tests that never finished, and its `run` step stops two minutes before MASON cancels.
 - **s874**: Landing idle time (`landing_idle_ms`) now resets while the queue is deliberately held (self-update drain, unreadable configuration, or every waiting task behind a freeze), so a hold is not reported as an idle queue.
 - **s875**: The cargo-workspace force-skip count (18 of 81) comes from owner and Land-now skips, not suite failures, so the suite is unchanged and the detector's counting is filed as a proposal.
+- **s876**: Both monitors' Settings pages have a "Where runs go" section that shows and changes the global placement mode and the selected project's, with the reason for the project's mode, through GET and POST /remote.
 - **s877**: An analyst task ends when its develop step's result file has been read (no test, review or land, no commits kept), ingests once per task, gets no stage or decision numbers, and the digest's flaky map is per project.
 - **s881**: The `run_on` layers test now accepts every placement mode in `RUN_ON_VALUES` instead of asserting that `remote` is rejected.
 - **s882**: The three idle-debt tests failed because `owe` left the task's evidence and gave its debts no landed commit, so the idle pass skipped them; origin/develop already carries the same fix in `owe`, and this note records the cause.
