@@ -1260,6 +1260,72 @@ pub(crate) fn test_commands(
 /// steps go on with the branch as it is). Failing here instead would fail
 /// every later step the same way, so no agent could ever resolve it.
 pub(crate) fn prepare(c: &Ctx) -> Result<Option<String>, String> {
+    prepare_for(c, true)
+}
+
+fn prepared_record(c: &Ctx) -> PathBuf {
+    c.task_dir().join(format!("prepared-r{}", c.run.0))
+}
+
+/// What a run's `prepared-r<run>` record holds: HEAD and tree, one per line.
+fn read_prepared(c: &Ctx) -> Option<(String, String)> {
+    let t = std::fs::read_to_string(prepared_record(c)).ok()?;
+    let mut l = t.lines();
+    Some((l.next()?.trim().to_string(), l.next()?.trim().to_string()))
+}
+
+fn write_prepared(c: &Ctx) {
+    if let (Ok(h), Ok(t)) = (
+        git::run(&c.wt, &["rev-parse", "HEAD"]),
+        git::run(&c.wt, &["rev-parse", "HEAD^{tree}"]),
+    ) {
+        let _ = std::fs::write(prepared_record(c), format!("{}\n{}\n", h.trim(), t.trim()));
+    }
+}
+
+fn say_resumed(c: &Ctx, text: &str) {
+    tracing::info!(task = c.task.0, "{text}");
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(progress_file(c))
+    {
+        let _ = writeln!(f, "{}", serde_json::json!({ "message": text }));
+    }
+}
+
+/// `prepare`, except that a job recovered after a restart keeps its tree: when this run
+/// already prepared (its `prepared-r<run>` record exists) the base is not merged again. A
+/// test step keeps it only while the worktree still has the recorded tree. `resumable` is
+/// false for a later pass of a step in the same job, which merges as a fresh run does.
+pub(crate) fn prepare_for(c: &Ctx, resumable: bool) -> Result<Option<String>, String> {
+    if resumable {
+        if let Some((_, tree)) = read_prepared(c) {
+            let now = git::run(&c.wt, &["rev-parse", "HEAD^{tree}"])
+                .map(|t| t.trim().to_string())
+                .unwrap_or_default();
+            if c.step.kind != StepType::Test || now == tree {
+                let on = if now.is_empty() { tree } else { now };
+                say_resumed(
+                    c,
+                    &format!("resumed after a restart on {on}; base not merged"),
+                );
+                return wait_out_environment(c, "preparing the worktree", || {
+                    let lock = c.d.repo_lock(c.project_id);
+                    let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+                    git::ensure_worktree(&c.project.path, &c.wt, &c.branch, &c.project.base_ref())
+                })
+                .map(|_| None);
+            }
+            say_resumed(
+                c,
+                &format!(
+                    "the worktree no longer has tree {tree} (it is {now}); starting over as a fresh run"
+                ),
+            );
+        }
+    }
     // The fetch has a lock of its own: a stalled remote holds up other fetches,
     // not the worktrees, merges and cleanup that take the repository lock.
     // A fetch that fails (the network dropped, the remote is down) decides nothing: the
@@ -1322,11 +1388,15 @@ fn prepare_locked(c: &Ctx) -> Result<Option<String>, git::GitError> {
             task = c.task.0,
             "worktree has uncommitted changes; not folding in the base now"
         );
+        write_prepared(c);
         return Ok(None);
     }
     match git::catch_up(&c.wt, &base)? {
         CatchUp::Conflict(files) => Ok(Some(files.trim().to_string())),
-        _ => Ok(None),
+        _ => {
+            write_prepared(c);
+            Ok(None)
+        }
     }
 }
 
