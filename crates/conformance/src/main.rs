@@ -116,29 +116,45 @@ fn run(c: &mut Client, screen: &mut Screen, method: &str, path: &str) -> Command
     r
 }
 
-/// Wait until the screen has reached the daemon's current seq, or 1.5 s pass with nothing new.
+/// Wait until the screen has applied views for the daemon's current seq. The daemon sends no
+/// view whose content did not change, so the screen's seq may stay below the daemon's; then the
+/// answer is a signal, not a clock: three `/status` round trips in a row (the same ordered
+/// connection, so views sent before each answer have arrived) agree on the seq with nothing new
+/// shown. The 60 s limit only fails, naming what was awaited.
 fn settle(c: &mut Client, screen: &mut Screen) {
     let hard = std::time::Instant::now() + Duration::from_secs(60);
-    let r = run(c, screen, "GET", "/status");
-    let v: serde_json::Value = serde_json::from_str(&r.json).unwrap_or_default();
-    let target = v["seq"]
-        .as_u64()
-        .or_else(|| v["seq"].as_str().and_then(|s| s.parse().ok()))
-        .unwrap_or(0);
-    let mut quiet = std::time::Instant::now();
-    let mut last = screen.seq;
-    while screen.seq < target || screen.views.len() < 3 {
-        if std::time::Instant::now() > hard {
-            die("the screen did not reach the daemon's seq within 60 s");
-        }
-        if screen.seq > last {
-            last = screen.seq;
-            quiet = std::time::Instant::now();
-        } else if quiet.elapsed() > Duration::from_millis(1500) && screen.views.len() >= 3 {
-            break;
-        }
-        if let Ok(Some(m)) = c.recv(Duration::from_millis(50)) {
+    let mut agreed = 0;
+    let mut prev = (u64::MAX, u64::MAX);
+    loop {
+        let r = run(c, screen, "GET", "/status");
+        let v: serde_json::Value = serde_json::from_str(&r.json).unwrap_or_default();
+        let target = v["seq"]
+            .as_u64()
+            .or_else(|| v["seq"].as_str().and_then(|s| s.parse().ok()))
+            .unwrap_or(0);
+        // Take in what is already on the wire.
+        while let Ok(Some(m)) = c.recv(Duration::from_millis(50)) {
             screen.absorb(m);
+        }
+        let have_views = screen.views.len() >= 3;
+        if have_views && screen.seq >= target {
+            return;
+        }
+        if have_views && prev == (target, screen.seq) {
+            agreed += 1;
+            if agreed >= 3 {
+                return;
+            }
+        } else {
+            agreed = 0;
+        }
+        prev = (target, screen.seq);
+        if std::time::Instant::now() > hard {
+            die(&format!(
+                "the screen did not reach the daemon's seq {target} within 60 s (at {}, {} views)",
+                screen.seq,
+                screen.views.len()
+            ));
         }
     }
 }
