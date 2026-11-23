@@ -1,0 +1,8 @@
+.mason/run.json
+crates/adapters/src/github.rs
+crates/cli/src/resources.rs
+crates/daemon/src/remote.rs
+crates/daemon/src/sched.rs
+docs/decisions/0841-count-all-account-jobs.md
+docs/stages/s848.md
+scripts/exit/s848.sh
