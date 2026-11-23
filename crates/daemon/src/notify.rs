@@ -1234,10 +1234,7 @@ fn fold_for_speech(
     let kind = kinds.first().map(|k| k.0.clone()).unwrap_or_default();
     let sound = folded.iter().any(|r| r.sound);
     let key = format!("summary:{client}:{now}");
-    let mut kept: Vec<AnnouncementRow> = rows
-        .into_iter()
-        .filter(|r| !r.speech || is_line(r) && false)
-        .collect();
+    let mut kept: Vec<AnnouncementRow> = rows.into_iter().filter(|r| !r.speech).collect();
     if d.store
         .enqueue_announcement(&key, &kind, &sentence, sound, true, now)
         .unwrap_or(false)
