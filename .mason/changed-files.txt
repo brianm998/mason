@@ -1,0 +1,9 @@
+.mason/run.json
+crates/adapters/src/github.rs
+crates/adapters/src/runref.rs
+crates/cli/src/doctor.rs
+crates/daemon/src/remote.rs
+docs/decisions/0849-dispatch-run-no-plan.md
+docs/stages/s856.md
+scripts/exit/s856.sh
+templates/github/mason-run.yml
