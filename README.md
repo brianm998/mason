@@ -747,4 +747,6 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s1035**: s22, s244 and s728 are named in weights.txt and s1035 checks them, but their cause is not diagnosed because the failed-step log was not readable from the pipeline.
 - **s1036**: Recorded that the s77, s117 and s902 reds on ubuntu shard 2 could not be traced without the full CI log, and changed no code.
 - **s1037**: The `the_note_says_how_the_modules_were_picked` failure on a0f67a2 was fixed by 9c18e970f (stop unit narrowing from pushing a note into Group.notes); no source change is needed.
+- **s1038**: scripts/run-exit-scripts.sh now prints a failed script's last 40 lines and marks limit kills `(over N s)` in the `FAILED scripts:` list.
+- **s1039**: s782 now clears the inherited shard and plan variables, and the first failing assertion of s249 and s782 in run 45143216377 is still open.
 <!-- status:end -->
