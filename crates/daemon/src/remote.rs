@@ -4944,6 +4944,11 @@ mod tests {
 
     /// A fake Actions API: per repository, runs in two lists (`in_progress`, `queued`) behind one
     /// ETag, jobs with labels, a repository the token cannot read, and a request log.
+    type Retried = (
+        Result<(Option<Outcome>, Vec<String>), String>,
+        Arc<FakeGh>,
+        Vec<String>,
+    );
     type FakeJobs = Vec<(String, String)>;
     type FakeRuns = Vec<(u64, String, String, FakeJobs)>;
     type FakeSeed<'a> = Vec<(&'a str, Vec<(u64, &'a str, &'a str, FakeJobs)>)>;
@@ -5231,11 +5236,7 @@ mod tests {
         mode: Mode,
         refuse_first: bool,
         fallback: bool,
-    ) -> (
-        Result<(Option<Outcome>, Vec<String>), String>,
-        Arc<FakeGh>,
-        Vec<String>,
-    ) {
+    ) -> Retried {
         let r = repo();
         token();
         if refuse_first {
