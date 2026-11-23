@@ -696,6 +696,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s873**: A GitHub run cut off at its limit now keeps the artifact's output, names the tests that never finished, and its `run` step stops two minutes before MASON cancels.
 - **s874**: Landing idle time (`landing_idle_ms`) now resets while the queue is deliberately held (self-update drain, unreadable configuration, or every waiting task behind a freeze), so a hold is not reported as an idle queue.
 - **s875**: The cargo-workspace force-skip count (18 of 81) comes from owner and Land-now skips, not suite failures, so the suite is unchanged and the detector's counting is filed as a proposal.
+- **s876**: Both monitors' Settings pages have a "Where runs go" section that shows and changes the global placement mode and the selected project's, with the reason for the project's mode, through GET and POST /remote.
 - **s877**: An analyst task ends when its develop step's result file has been read (no test, review or land, no commits kept), ingests once per task, gets no stage or decision numbers, and the digest's flaky map is per project.
 - **s881**: The `run_on` layers test now accepts every placement mode in `RUN_ON_VALUES` instead of asserting that `remote` is rejected.
 - **s882**: The three idle-debt tests failed because `owe` left the task's evidence and gave its debts no landed commit, so the idle pass skipped them; origin/develop already carries the same fix in `owe`, and this note records the cause.
@@ -714,6 +715,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s924**: see decision 0917. With `fallback = "local"`, 16 runs came back from GitHub at once into a
 - **s930**: s799's grep now matches landing's current placement text and the suites_schedule tests clear the tree-keyed evidence so the schedule runs the suite; the other red scripts (s449, s50, s117, s193, s209, s219, s521, s691, s758, s77, s782, s798, s800, s808, s819, shards 4 and 5) are still unexplained, and `gh run view 45005421555 --log-failed | grep -nE 'panicked at|FAILED:|== scripts|FAILED scripts'` settles them.
 - **s934**: A narrowed or not-run test suite drops the whole suite's stored total from its sub-progress, so the line reads "N tests" instead of "0 of 2,356".
+- **s935**: see decision 0928. A change under a crate's `src/` ran the crate's lib and bins whole (about 632 tests for mason-daemon); the per-task step now runs only the changed module's unit tests and its referrers'.
 - **s943**: see decision 0936. A batch out on GitHub held a `test-suite` slot for 48+ minutes on
 - **s945**: A "landing is not configured" verdict (for example an unknown key in .mason/landing.toml) is now classed as a failure about the code instead of an outside one, so the land step is no longer retried over and over for an error no retry can fix.
 - **s946**: The landing message "the base does not build" now carries the compiler's first error line, so repeated identical landing failures show their real cause.
