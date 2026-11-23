@@ -1173,6 +1173,7 @@ private fun StageRows(model: MonitorModel, name: String) {
                 )
             }
         }
+        model.sectionCountText(name)?.let { Text(it, style = theme.body(color = theme.muted), modifier = Modifier.testTag("section-count:$name")) }
         if (rows.isEmpty()) Text("Nothing here.", style = theme.body(color = theme.muted))
         rows.forEach { r ->
             Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), verticalAlignment = Alignment.CenterVertically,
