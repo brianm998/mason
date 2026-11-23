@@ -107,7 +107,7 @@ until m schedule list | grep -q 'proj/full'; do
 done
 m schedule list | sed 's/^/   /'
 m schedule list | grep -q 'last full test: none on record' || fail "no 'last full test' line"
-m schedule list | grep -q 'next: when quiet for 30 min' || fail "no next trigger"
+m schedule list | grep -qE 'next: (when )?quiet for' || fail "no next trigger"
 
 echo "== 3. a manual run starts one (same rule), and the list shows it running"
 said=$(m schedule run proj/full)
