@@ -72,7 +72,7 @@ start_demo; "$bin/conformance" expected --port "$(port)" --out "$root/expected" 
 start_demo; "$kt" conformance --data-dir "$root/d" --out "$root/compose" | tail -1; stop_demo
 if ! "$bin/conformance" check --expected "$root/expected" --actual "$root/compose"; then
   # The evidence a red CI log needs: which ids differ at which checkpoint.
-  python3 - "$root/expected" "$root/compose" <<'PY' || true
+  python3 - "$root/expected" "$root/compose" <<'PY'
 import glob, json, os, sys
 exp, act = sys.argv[1], sys.argv[2]
 names = sorted({os.path.basename(p) for d in (exp, act) for p in glob.glob(os.path.join(d, "checkpoint-*.json"))})
