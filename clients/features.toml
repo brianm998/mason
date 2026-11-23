@@ -669,7 +669,7 @@ android = "todo"
 android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.section-detail-pages]
-description = "Each home section has a detail page, mason://section/<name> for active_models, queued, cpu, compilation, exploring, developing, testing and review (landing is the Landing page): only that section with more room. The home section title and a > icon (chevron.right) to its right open it, as does a > at the trailing end of the sidebar section header. A double click on a count tile opens the stage page, or the task when the stage holds exactly one; a single click still reveals the sidebar section. The Testing page lists tasks in the sidebar order, shows suites done of total and has Skip testing per row and for all, sending the sidebar skip command"
+description = "Each home section has a detail page, mason://section/<name> for active_models, queued, cpu, compilation, exploring, developing, testing, review and failed (landing is the Landing page): only that section with more room. The home section title and a > icon (chevron.right) to its right open it, as does a > at the trailing end of the sidebar section header. A double click on a count tile opens the stage page, or the task when the stage holds exactly one; a single click still reveals the sidebar section. The Testing page lists tasks in the sidebar order, shows suites done of total and has Skip testing per row and for all, sending the sidebar skip command"
 swift = "done"
 compose = "done"
 ios = "done"
