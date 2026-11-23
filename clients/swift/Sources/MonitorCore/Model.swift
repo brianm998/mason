@@ -70,6 +70,7 @@ public final class MonitorModel {
     public var settings: SettingsSnapshot?
     public var notifySettings: NotifySettings?
     public var settingsNotice: String?
+    public var remoteSettings: RemoteSettings?
     /// The Devices section (s433): LAN state, paired devices, the code on show, and what the last action said.
     public var lanStatus: LanStatus?
     public var devices: DeviceList?
@@ -972,6 +973,17 @@ public final class MonitorModel {
         let p = editorProject
         if !p.isEmpty { raw("GET", SettingsPayload.settingsPath(project: p), id: "settings") }
         raw("GET", "/notify/settings", id: "notify-settings")
+        raw("GET", "/remote", id: "remote")
+    }
+    /// Change the global placement mode; the page reloads `/remote` on the answer.
+    public func changeGlobalMode(_ mode: String) {
+        settingsNotice = nil
+        raw("POST", "/remote", json: SettingsPayload.remoteMode(mode), id: "remote-save")
+    }
+    /// Change the selected project's placement mode.
+    public func changeProjectMode(_ mode: String) {
+        settingsNotice = nil
+        raw("POST", "/remote", json: SettingsPayload.remoteMode(mode, project: editorProject), id: "remote-save")
     }
     /// Change one project setting (a body from `SettingsPayload`); the page reloads on the answer.
     public func changeProjectSetting(_ body: String) {
@@ -1337,6 +1349,10 @@ public final class MonitorModel {
             if r.ok { devicesNotice = "Revoked."; loadDevices() } else { devicesNotice = r.error }
         }
         if r.id == "notify-settings", r.ok { notifySettings = NotifySettings(json: r.json) }
+        if r.id == "remote", r.ok { remoteSettings = RemoteSettings(json: r.json) }
+        if r.id == "remote-save" {
+            if r.ok { settingsNotice = Self.settingsDone(r.id); raw("GET", "/remote", id: "remote") } else { settingsNotice = r.error }
+        }
         if ["settings-save", "notify-save", "notify-test", "schedule-run"].contains(r.id) {
             settingsNotice = r.ok ? Self.settingsDone(r.id) : r.error
             if r.ok, r.id == "settings-save" || r.id == "notify-save" { loadSettings() }
