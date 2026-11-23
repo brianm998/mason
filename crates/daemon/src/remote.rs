@@ -3365,7 +3365,11 @@ mod tests {
                 };
                 let jobs: Vec<_> = names
                     .iter()
-                    .map(|n| serde_json::json!({"name": n, "status": job, "started_at": started}))
+                    .enumerate()
+                    .map(|(i, n)| {
+                        serde_json::json!({"id": 9000 + i, "name": n, "status": job,
+                            "started_at": started})
+                    })
                     .collect();
                 return ok(serde_json::json!({ "jobs": jobs }));
             }
