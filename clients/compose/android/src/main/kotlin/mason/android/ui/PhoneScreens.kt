@@ -154,6 +154,7 @@ private fun SessionStepper(model: MonitorModel, home: HomeView) {
 @Composable
 private fun SectionPage(model: MonitorModel, name: String, open: (Page) -> Unit) {
     val rows = model.sectionRows(name)
+    model.sectionCountText(name)?.let { Text(it, Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall) }
     if (rows.isEmpty()) Text("Nothing here.", Modifier.padding(16.dp))
     if (name == "testing" && rows.isNotEmpty()) {
         OutlinedButton(onClick = { model.skipAllTests(rows) }, Modifier.padding(horizontal = 16.dp), enabled = model.skipDisabledReason == null) { Text("Skip testing for all") }
