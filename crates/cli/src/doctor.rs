@@ -308,13 +308,17 @@ fn check_remote_run(p: &ProjectCfg, out: &mut Vec<Finding>) {
         });
         GitHub::new(http, &r.api, &r.repo, t)
     });
-    let (repo, actions, cache) = match live {
+    let (repo, actions, cache) = match &live {
         Ok(gh) => (
             gh.repository().map_err(|e| e.detail),
             gh.actions_readable().map_err(|e| e.detail),
             gh.cache_usage_bytes().map_err(|e| e.detail),
         ),
-        Err(e) => (Err(e.clone()), Err(e.clone()), Err(e)),
+        Err(e) => (Err(e.clone()), Err(e.clone()), Err(e.clone())),
+    };
+    let dispatch = match &live {
+        Ok(gh) => gh.workflow_active(&r.workflow).map_err(|e| e.detail),
+        Err(e) => Err(e.clone()),
     };
     out.extend(cache_usage_finding(&p.id, &r.repo, cache));
     out.extend(remote_run_findings(
@@ -325,6 +329,7 @@ fn check_remote_run(p: &ProjectCfg, out: &mut Vec<Finding>) {
         &files,
         repo,
         actions,
+        dispatch,
     ));
 }
 
@@ -349,6 +354,7 @@ fn cache_usage_finding(name: &str, repo_slug: &str, usage: Result<u64, String>) 
 }
 
 /// The findings for remote runs, from what was read. Pure, so it is tested on fake answers.
+#[allow(clippy::too_many_arguments)]
 fn remote_run_findings(
     name: &str,
     base: &str,
@@ -357,13 +363,14 @@ fn remote_run_findings(
     files: &[(String, String)],
     repo: Result<serde_json::Value, String>,
     actions: Result<(), String>,
+    dispatch: Result<(), String>,
 ) -> Vec<Finding> {
     use mason_adapters::runref::{self, PushProtection};
     let mut out = vec![];
     let problems = runref::workflow_problems(files, workflow);
     if problems.is_empty() {
         out.push(ok(format!(
-            "project {name}: {workflow} on {base} runs on `mason/run/**`, and no other workflow does"
+            "project {name}: {workflow} on {base} accepts `workflow_dispatch` and does not run on pushes to `mason/run/**`, and no other workflow does"
         )));
     }
     for x in problems {
@@ -382,6 +389,14 @@ fn remote_run_findings(
                 Ok(()) => out.push(ok(format!("project {name}: the token can read Actions on {repo_slug}"))),
                 Err(e) => out.push(fail(format!(
                     "project {name}: remote runs: the token cannot read Actions on {repo_slug} ({e}); give it Actions read access"
+                ))),
+            }
+            match dispatch {
+                Ok(()) => out.push(ok(format!(
+                    "project {name}: GitHub lists {workflow} on {repo_slug} as active, so it can be dispatched"
+                ))),
+                Err(e) => out.push(fail(format!(
+                    "project {name}: remote runs: GitHub does not list {workflow} on {repo_slug} as an active workflow ({e}), so a run cannot be dispatched; land the workflow with `workflow_dispatch` on the default branch, and give the token Actions write access (read access is not enough to start a run)"
                 ))),
             }
             match runref::push_protection(&v) {
@@ -804,7 +819,7 @@ mod tests {
             .map(|(a, b)| (a.to_string(), b.to_string()))
             .collect()
     }
-    const RUN: &str = "on:\n  push:\n    branches: [\"mason/run/**\"]\n";
+    const RUN: &str = "on:\n  workflow_dispatch:\n";
     const CI: &str = "on:\n  push:\n    branches: [develop]\n";
 
     fn findings(
@@ -820,6 +835,7 @@ mod tests {
             &files(f),
             Ok(repo),
             actions,
+            Ok(()),
         )
     }
 
@@ -857,7 +873,21 @@ mod tests {
         );
         assert!(out
             .iter()
-            .any(|f| f.level == super::Level::Fail && f.text.contains("mason/run/**")));
+            .any(|f| f.level == super::Level::Fail && f.text.contains("workflow_dispatch")));
+        // GitHub not listing the workflow as active fails too (a dispatch would be refused).
+        let r = super::remote_run_findings(
+            "p",
+            "origin/main",
+            "o/r",
+            "mason-run.yml",
+            &files(&[("mason-run.yml", RUN)]),
+            Ok(serde_json::json!({"permissions": {"push": true}})),
+            Ok(()),
+            Err("404".into()),
+        );
+        assert!(r
+            .iter()
+            .any(|f| f.level == super::Level::Fail && f.text.contains("cannot be dispatched")));
         let out = findings(
             &[("mason-run.yml", RUN), ("ci.yml", "on: push\n")],
             good,
