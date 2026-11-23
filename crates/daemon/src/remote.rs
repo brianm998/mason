@@ -593,7 +593,9 @@ pub fn run_json(spec: &RunSpec) -> String {
                 .or_insert_with(|| serde_json::Value::String("1".into()));
         }
     }
-    let timeout_min = spec.limit.as_secs().div_ceil(60).max(1);
+    // The `run` step stops a couple of minutes before MASON cancels the run, so the upload step
+    // still runs and the output so far reaches us (#776).
+    let timeout_min = spec.limit.as_secs().div_ceil(60).saturating_sub(2).max(1);
     serde_json::json!({
         "toolchains": toolchains(&spec.suite),
         "run": spec.id,
@@ -1171,6 +1173,61 @@ fn cancel(site: &Site, st: &State) {
     }
 }
 
+/// How long a run cut off at its limit is given, after the cancel, to end and show its artifact.
+const CANCEL_ARTIFACT_WAIT_MS: u64 = 180_000;
+
+/// The output a cancelled run uploaded, or nothing when no artifact comes within
+/// [`CANCEL_ARTIFACT_WAIT_MS`] (or the run is unknown).
+fn output_after_cancel(site: &Site, st: &State, scratch: &Path) -> Vec<u8> {
+    let Some(id) = st.run_id else {
+        return vec![];
+    };
+    let deadline = site.clock.now_ms().saturating_add(CANCEL_ARTIFACT_WAIT_MS);
+    let names: Vec<(u32, String)> = if st.shards.is_empty() {
+        vec![(1, ARTIFACT.to_string())]
+    } else {
+        st.shards
+            .iter()
+            .map(|k| (*k, artifact_name(true, *k)))
+            .collect()
+    };
+    loop {
+        let done =
+            matches!(site.gh.run_changed(id, None), Ok(Some((r, _))) if r.status == "completed");
+        if done {
+            let mut out = vec![];
+            for (k, name) in &names {
+                let _ = std::fs::remove_dir_all(scratch);
+                if std::fs::create_dir_all(scratch).is_err() {
+                    continue;
+                }
+                let zip = scratch.join(format!("cut-{k}.zip"));
+                if !matches!(site.gh.download_artifact(id, name, &zip), Ok(true)) {
+                    continue;
+                }
+                // Only `output.log`: a cut-off run may have no `result.json`.
+                if let Ok(o) = Command::new(unzip_program())
+                    .args(["-p"])
+                    .arg(&zip)
+                    .arg("output.log")
+                    .output()
+                {
+                    if o.status.success() {
+                        out.extend(o.stdout);
+                    }
+                }
+            }
+            if !out.is_empty() {
+                return out;
+            }
+        }
+        if site.clock.now_ms() >= deadline {
+            return vec![];
+        }
+        site.clock.sleep(5_000);
+    }
+}
+
 fn unzip_program() -> &'static str {
     if Path::new("/usr/bin/unzip").exists() {
         "/usr/bin/unzip"
@@ -1393,10 +1450,25 @@ pub fn execute(
                 st.code = -1;
                 st.signal = 9;
                 st.collected = true;
-                let text = format!(
+                // The output so far (the workflow uploads it even for a cut-off run), then the
+                // cut-off line naming the tests that never finished.
+                let kept = output_after_cancel(site, &st, &scratch);
+                let mut text = String::from_utf8_lossy(&kept).into_owned();
+                if !text.is_empty() && !text.ends_with('\n') {
+                    text.push('\n');
+                }
+                text.push_str(&format!(
                     "(the run was cancelled after its limit of {} s on the runner)\n",
                     spec.limit.as_secs()
-                );
+                ));
+                let hung = crate::suites::still_running(&text);
+                if !hung.is_empty() {
+                    text.push_str(&format!(
+                        "Tests that started and never finished: {}\n",
+                        hung.join(", ")
+                    ));
+                }
+                let _ = std::fs::remove_dir_all(&scratch);
                 let _ = std::fs::write(&log, &text);
                 st.save(&rec);
                 delete_ref(site, &mut st, &rec);
@@ -2697,8 +2769,12 @@ pub fn run_or_fallback(
 pub fn no_result(r: &Result<Outcome, Fail>, limit: Duration) -> Option<String> {
     match r {
         Err(Fail::Environmental(why)) => Some(why.clone()),
+        // A cut-off run that names a failing test, or tests that started and never finished,
+        // answers about the code: a hang is a result.
         Ok(Outcome::Done(f))
-            if f.timed_out && crate::rerun::failing_names(&f.output).is_empty() =>
+            if f.timed_out
+                && crate::rerun::failing_names(&f.output).is_empty()
+                && crate::suites::still_running(&f.output).is_empty() =>
         {
             Some(format!(
                 "the run reached the runner limit of {} s without naming a failing test",
@@ -2947,6 +3023,10 @@ mod tests {
         MissFirst,
         /// The first run is picked up and never ends; the second runs normally (#873).
         HangFirst,
+        /// The run never ends by itself; once cancelled it completes, with its artifact.
+        Hung,
+        /// As `Hung`, but no artifact ever appears.
+        HungNoArtifact,
     }
 
     struct FakeGh {
@@ -3004,6 +3084,7 @@ mod tests {
         }
         fn phase(&self) -> (&'static str, &'static str) {
             let n = *self.looks.lock().unwrap();
+            let hung = matches!(self.mode, Mode::Hung | Mode::HungNoArtifact);
             let first_only = self.runs_seen.lock().unwrap().len() < 2;
             if self.mode == Mode::NeverPicked
                 || (first_only && self.mode == Mode::MissFirst)
@@ -3011,7 +3092,8 @@ mod tests {
             {
                 ("queued", "queued")
             } else if (first_only && self.mode == Mode::HangFirst)
-                || n <= self.queued + self.running
+                || (hung && self.cancels.lock().unwrap().is_empty())
+                || (!hung && n <= self.queued + self.running)
             {
                 ("in_progress", "in_progress")
             } else {
@@ -3134,7 +3216,7 @@ mod tests {
                     {"name": "run", "status": job, "started_at": started}]}));
             }
             if u.contains("/actions/runs/4242/artifacts") {
-                if self.mode == Mode::NoArtifact {
+                if matches!(self.mode, Mode::NoArtifact | Mode::HungNoArtifact) {
                     return ok(serde_json::json!({"artifacts": []}));
                 }
                 return ok(
@@ -3416,7 +3498,8 @@ mod tests {
         assert_eq!(v["rerun"], "cargo test -- --exact {tests}");
         assert_eq!(v["runs_on"], "ubuntu-latest");
         assert_eq!(v["limit_s"], 600);
-        assert_eq!(v["timeout_min"], 10);
+        // Two minutes under the limit, so the upload step runs before MASON cancels.
+        assert_eq!(v["timeout_min"], 8);
         assert_eq!(v["env"]["MASON_TASK"], "7");
         assert!(v["xcode"].is_null());
         assert!(v["env"].get("SECRET_TOKEN").is_none());
@@ -3866,6 +3949,53 @@ mod tests {
                 "t8r3-check-cargo-workspace0",
                 "step"
             ]
+        );
+    }
+
+    const HUNG_OUT: &str = "test a ... ok\ntest holds_one has been running for over 60 seconds\ntest holds_two has been running for over 60 seconds\ntest holds_two ... ok\n";
+
+    #[test]
+    fn a_run_past_its_limit_keeps_the_artifact_output_and_names_the_unfinished_tests() {
+        token();
+        let r = repo();
+        let t = tempfile::tempdir().unwrap();
+        let zip = artifact(t.path(), HUNG_OUT, 0, None);
+        let gh = FakeGh::new(&r, &zip, Mode::Hung);
+        let s = site(&r, gh.clone(), clock(), false);
+        let logs = tempfile::tempdir().unwrap();
+        let Outcome::Done(f) = execute(&s, &spec("x9"), logs.path(), &|| None).unwrap() else {
+            panic!("not done");
+        };
+        assert!(f.timed_out);
+        assert!(f.output.starts_with("test a ... ok\n"), "{}", f.output);
+        assert!(f
+            .output
+            .contains("the run was cancelled after its limit of 600 s"));
+        assert!(
+            f.output.contains("never finished: holds_one\n"),
+            "{}",
+            f.output
+        );
+        assert!(!f.output.contains("never finished: holds_one, holds_two"));
+        assert_eq!(gh.cancels.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_run_past_its_limit_whose_artifact_never_comes_keeps_only_the_cut_off_line() {
+        token();
+        let r = repo();
+        let t = tempfile::tempdir().unwrap();
+        let zip = artifact(t.path(), HUNG_OUT, 0, None);
+        let gh = FakeGh::new(&r, &zip, Mode::HungNoArtifact);
+        let s = site(&r, gh, clock(), false);
+        let logs = tempfile::tempdir().unwrap();
+        let Outcome::Done(f) = execute(&s, &spec("x10"), logs.path(), &|| None).unwrap() else {
+            panic!("not done");
+        };
+        assert!(f.timed_out);
+        assert_eq!(
+            f.output,
+            "(the run was cancelled after its limit of 600 s on the runner)\n"
         );
     }
 
