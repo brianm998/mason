@@ -60,6 +60,7 @@ pub mod monitor_inplace;
 pub mod newtests;
 pub mod notify;
 pub mod numbers;
+pub mod onboarding;
 pub mod outside;
 pub mod ownernotes;
 pub mod place;
