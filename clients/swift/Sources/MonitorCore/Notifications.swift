@@ -26,10 +26,53 @@ public struct NotificationRow: Equatable, Identifiable {
     public let issue: Int?
     /// Which client row this is (`connection`, `daemon-update`, …).
     public let clientID: String?
+    /// The rest of `text` (#951): the reason, the error, what the owner can do. May be empty.
+    public var detail: String = ""
+
+    /// A row with more to say than its one line: the "?" button shows on it.
+    public var hasDetails: Bool { !detail.isEmpty || text.count > MonitorModel.notificationTextLimit }
+
+    /// Every task the row names (`#12`), once each, in the order named: "Open task #N" actions.
+    public var taskNumbers: [Int] {
+        var seen: [Int] = []
+        let all = text + "\n" + detail
+        var rest = Substring(all)
+        while let r = rest.range(of: #"#(\d+)"#, options: .regularExpression) {
+            if let n = Int(rest[r].dropFirst()), !seen.contains(n) { seen.append(n) }
+            rest = rest[r.upperBound...]
+        }
+        return seen
+    }
+}
+
+extension NotificationRow {
+    func with(text: String, detail: String) -> NotificationRow {
+        var r = NotificationRow(key: key, kind: kind, uiID: uiID, text: text, button: button, icon: icon, daemonKind: daemonKind,
+                                bannerIndex: bannerIndex, collapsed: collapsed, issue: issue, clientID: clientID)
+        r.detail = detail
+        return r
+    }
 }
 
 extension MonitorModel {
     public static let visibleNotificationRows = 3
+    /// The longest one-line summary a row shows whole, in characters (#951).
+    public static let notificationTextLimit = 80
+
+    /// A text as one short line and the rest: newlines become spaces and a text over the limit
+    /// is cut at a word with an ellipsis; `detail` is the whole text when something was cut.
+    public static func oneLine(_ text: String, detail: String = "") -> (text: String, detail: String) {
+        let flat = text.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        if flat.count <= notificationTextLimit {
+            return (flat, detail.isEmpty && flat != text ? text : detail)
+        }
+        var cut = String(flat.prefix(notificationTextLimit - 1))
+        if let i = cut.lastIndex(of: " "), cut.distance(from: cut.startIndex, to: i) > notificationTextLimit / 2 {
+            cut = String(cut[..<i])
+        }
+        while let l = cut.last, " ,;:".contains(l) { cut.removeLast() }
+        return (cut + "…", detail.isEmpty ? text : detail)
+    }
     /// The share of the window the notification bar may take.
     public static let notificationWindowShare = 0.6
 
@@ -84,8 +127,11 @@ extension MonitorModel {
     public func allNotificationRows() -> [NotificationRow] {
         var rows: [NotificationRow] = []
         func client(_ id: String, _ text: String, button: String? = nil, icon: String? = nil) {
-            rows.append(NotificationRow(key: id, kind: .client, uiID: id, text: text, button: button, icon: icon, daemonKind: nil,
-                                        bannerIndex: nil, collapsed: [], issue: nil, clientID: id))
+            let one = Self.oneLine(text)
+            var row = NotificationRow(key: id, kind: .client, uiID: id, text: one.text, button: button, icon: icon, daemonKind: nil,
+                                      bannerIndex: nil, collapsed: [], issue: nil, clientID: id)
+            row.detail = one.detail
+            rows.append(row)
         }
         if !connected {
             client("connection", linkStatus ?? (reconnecting ? "Daemon restarting, reconnecting…" : "Connection lost. Reconnecting…"), icon: "connection_lost")
@@ -128,6 +174,12 @@ extension MonitorModel {
                 rows.append(NotificationRow(key: key, kind: .banner, uiID: "banner:\(i)", text: b.text, button: nil, icon: icon, daemonKind: b.kind,
                                             bannerIndex: i, collapsed: [], issue: nil, clientID: nil))
             }
+        }
+        // The daemon's banners arrive as one line; an older daemon's long text is cut here.
+        for i in rows.indices where rows[i].bannerIndex.map({ banners.indices.contains($0) }) == true {
+            let b = banners[rows[i].bannerIndex!]
+            let one = Self.oneLine(rows[i].text, detail: b.detail)
+            rows[i] = rows[i].with(text: one.text, detail: one.detail)
         }
         for p in header?.pendingIssues ?? [] {
             rows.append(NotificationRow(key: "issue:\(p.number)", kind: .pending, uiID: "pending:\(p.project):\(p.number)",
