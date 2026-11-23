@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 package mason.monitor.ui
 
+import androidx.compose.foundation.layout.Column
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertIsEnabled
@@ -20,7 +21,9 @@ class RemotePlacementTest {
     private fun ui(project: String, picked: MutableList<String>, test: androidx.compose.ui.test.ComposeUiTest.() -> Unit) = runComposeUiTest {
         setContent {
             CompositionLocalProvider(LocalTheme provides Theme(dark = false, scale = 1.0)) {
-                RemotePlacementBody(RemoteSettings.parse(body), project, { picked += "global:$it" }, { picked += "project:$it" })
+                Column {
+                    RemotePlacementBody(RemoteSettings.parse(body), project, { picked += "global:$it" }, { picked += "project:$it" })
+                }
             }
         }
         test()
