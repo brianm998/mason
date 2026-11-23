@@ -721,7 +721,12 @@ async fn task_detail(Shared(d): Shared<Arc<Daemon>>, Path(id): Path<u64>) -> Res
 
 /// The owner's notes on a task's retries (task 988).
 async fn owner_notes(Shared(d): Shared<Arc<Daemon>>, Path(id): Path<u64>) -> Res {
-    if !d.world().map_err(store_err)?.tasks.contains_key(&TaskId(id)) {
+    if !d
+        .world()
+        .map_err(store_err)?
+        .tasks
+        .contains_key(&TaskId(id))
+    {
         return Err(fail(StatusCode::NOT_FOUND, format!("no task #{id}")));
     }
     Ok(Json(
@@ -737,7 +742,12 @@ async fn owner_notes_clear(
 ) -> Res {
     let who = who_of(&headers);
     owner_only(&d, &who, "clear a task's owner notes")?;
-    if !d.world().map_err(store_err)?.tasks.contains_key(&TaskId(id)) {
+    if !d
+        .world()
+        .map_err(store_err)?
+        .tasks
+        .contains_key(&TaskId(id))
+    {
         return Err(fail(StatusCode::NOT_FOUND, format!("no task #{id}")));
     }
     let n = crate::ownernotes::clear(&d.task_dir(TaskId(id)));
