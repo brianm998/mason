@@ -334,10 +334,18 @@ fn a_skipped_suite_still_tears_its_device_down() {
     });
     std::fs::remove_file(e.gate.join("hold")).unwrap();
     wait_state(&d, t, State::Landed, 60);
-    let l = log_lines(&e);
-    assert_eq!(
-        l.iter().filter(|x| x.starts_with("setup")).count(),
-        l.iter().filter(|x| x.starts_with("teardown")).count(),
-        "{l:?}"
-    );
+    // Once the task lands, the debt its skip opened is paid by running `emu` on the base, which
+    // sets the device up again. Read at the moment of landing, that payment could be between its
+    // setup and its teardown (red in busy whole runs, green alone). Every setup must still get
+    // its teardown: wait for that, not for a moment.
+    let balanced = |l: &[String]| {
+        l.iter().filter(|x| x.starts_with("setup")).count()
+            == l.iter().filter(|x| x.starts_with("teardown")).count()
+    };
+    let mut l = log_lines(&e);
+    let _ = support::try_wait_for_exact("every setup to be torn down", 120, 200, || {
+        l = log_lines(&e);
+        balanced(&l)
+    });
+    assert!(balanced(&l), "{l:?}");
 }
