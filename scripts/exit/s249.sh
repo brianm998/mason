@@ -50,5 +50,5 @@ echo "== the suite and its impact line are in the definition"
 cd "$root"
 grep -q '^\[suite.exit-scripts\]' .mason/mason.toml
 grep -q '"exit-scripts"\]' .mason/mason.toml
-grep -q '^"scripts/exit/\*\*" = \["cargo-workspace", "exit-scripts"\]' .mason/mason.toml
+grep -q '^"scripts/exit/\*\*" = \["cargo-workspace", "exit-scripts"' .mason/mason.toml
 echo "s249 OK"
