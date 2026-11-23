@@ -6,7 +6,8 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 for n in 22 244 728; do
     grep -q "^s$n " scripts/exit/weights.txt || { echo "weights.txt has no entry for s$n" >&2; exit 1; }
-    if grep -nE '\$SECONDS *-(lt|gt|le|ge)|elapsed *-(lt|gt)|\bdate \+%s\)? *-' "scripts/exit/s$n.sh" | grep -v 'end=' | grep -q .; then
+    # wait loops bounded by $SECONDS are timeouts, not assertions; flag only a measured duration compared to a limit
+    if grep -nE '(elapsed|took|duration|dur)[a-z_]* *-(lt|le|gt|ge)' "scripts/exit/s$n.sh" | grep -q .; then
         echo "s$n.sh has a timing assertion" >&2; exit 1
     fi
 done
