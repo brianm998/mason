@@ -1,0 +1,8 @@
+.mason/run.json
+clients/compose/app/src/main/kotlin/mason/monitor/Tool.kt
+crates/conformance/src/main.rs
+crates/daemon/src/ws.rs
+crates/daemon/tests/it/protocol.rs
+docs/decisions/1025-demo-views-resend-settle.md
+docs/stages/s1032.md
+scripts/exit/s1032.sh
