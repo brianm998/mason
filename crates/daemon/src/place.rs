@@ -205,13 +205,22 @@ impl LocalLoad {
         if covered {
             return None;
         }
-        let full: Vec<&str> = self
+        // Room means a grant now (#1025): a free unit for each slot beyond the requests already
+        // waiting for any of them, which the same gate holds back.
+        let waiting = self.waiting;
+        let blocked: Vec<String> = self
             .free
             .iter()
-            .filter(|(_, n)| **n == 0)
-            .map(|(k, _)| k.as_str())
+            .filter(|(_, n)| **n <= waiting)
+            .map(|(k, n)| {
+                if *n == 0 {
+                    format!("{k} slot free")
+                } else {
+                    format!("{k} unit beyond the {waiting} waiting ({n} free)")
+                }
+            })
             .collect();
-        (!full.is_empty()).then(|| format!("no {} slot free here", full.join("/")))
+        (!blocked.is_empty()).then(|| format!("no {} here", blocked.join(", no ")))
     }
 
     /// "2 compile slots free" for the local reason.
@@ -1723,5 +1732,24 @@ mod tests {
         // Covered: the batch's own full slot is not counted, a hold still is.
         assert_eq!(no_room_for(&reading(None, 1, 1), &uses, true), None);
         assert!(no_room_for(&reading(Some("held for heat"), 1, 1), &uses, true).is_some());
+    }
+
+    /// #1025: room is a grant now, so requests already waiting for the slots count against the
+    /// free units: compile 1/6 used (5 free) with 5 waiting is no room; with 4 waiting it is.
+    #[test]
+    fn room_counts_the_queue_already_waiting() {
+        use crate::sched::LoadReading;
+        let uses = BTreeMap::from([("compile".to_string(), 1u32)]);
+        let reading = |waiting: usize| LoadReading {
+            used: BTreeMap::from([("compile".to_string(), 1)]),
+            limits: BTreeMap::from([("compile".to_string(), 6)]),
+            waiting: vec![(vec!["compile".to_string()], 1000); waiting],
+            held: None,
+        };
+        let why = no_room_for(&reading(5), &uses, false).expect("no room behind 5 waiting");
+        assert!(why.contains("compile"), "{why}");
+        assert_eq!(no_room_for(&reading(4), &uses, false), None);
+        // A batch's covered run is not counted against the queue.
+        assert_eq!(no_room_for(&reading(5), &uses, true), None);
     }
 }
