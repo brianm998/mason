@@ -1753,6 +1753,8 @@ struct TestChecks {
     last_red: std::sync::Mutex<Option<Vec<String>>>,
     /// The tests the check in hand failed, for its history entry.
     check_failing: std::sync::Mutex<Vec<String>>,
+    /// The call in hand is the replay of one a restart cut off (#1051).
+    replay: std::sync::atomic::AtomicBool,
 }
 
 /// A command that runs `rerun` (the failing tests) and `dev` (the changed crates) one after the
@@ -2475,8 +2477,35 @@ impl CheckHandler for TestChecks {
     }
 
     fn run_scoped(&self, name: &str, scope: &CheckScope) -> CheckRun {
-        let note = match (&self.base_fold, name == "tests") {
-            (Some((pid, base)), true) => {
+        // A call with an id holds its finished suites until the agent has the answer, so a
+        // replay of it (after a takeover) takes them instead of running them again (#1051).
+        let _hold = scope
+            .call
+            .as_ref()
+            .map(|_| crate::hostedcheck::hold_results(self.task, self.run));
+        let before = (name == "tests")
+            .then(|| scope.call.as_deref().and_then(|c| self.known_call(c)))
+            .flatten();
+        self.replay
+            .store(before.is_some(), std::sync::atomic::Ordering::SeqCst);
+        let note = match (&self.base_fold, name == "tests", before) {
+            // The same call again: it runs on the tree it began on. The base is not folded
+            // in (that would be a new tree, and every suite would run again), and the answer
+            // says if the base has moved since.
+            (Some((_, base)), true, Some(first)) => {
+                let moved = !mason_landing::git::is_ancestor(&self.wt, base, "HEAD");
+                let mut parts: Vec<String> =
+                    Some(first).filter(|f| !f.is_empty()).into_iter().collect();
+                if moved {
+                    parts.push(format!(
+                        "`{base}` has moved since this check began. It ran on your branch as it \
+                         was when you called it, so what finished before the restart was kept. \
+                         The next run_check merges `{base}` first if that is safe."
+                    ));
+                }
+                (!parts.is_empty()).then(|| parts.join("\n\n"))
+            }
+            (Some((pid, base)), true, None) => {
                 let fold = {
                     let lock = self.slots.d.repo_lock(*pid);
                     let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -2490,7 +2519,11 @@ impl CheckHandler for TestChecks {
                         "run_check: base fold"
                     );
                 }
-                crate::basefold::note(base, &fold)
+                let note = crate::basefold::note(base, &fold);
+                if let Some(c) = &scope.call {
+                    self.remember_call(c, note.as_deref().unwrap_or(""));
+                }
+                note
             }
             _ => None,
         };
@@ -2506,9 +2539,33 @@ impl CheckHandler for TestChecks {
         }
         r
     }
+
+    fn answered(&self, name: &str, _scope: &CheckScope) {
+        if name == "tests" {
+            crate::hostedcheck::answered(self.task, self.run);
+        }
+    }
 }
 
 impl TestChecks {
+    fn call_file(&self) -> PathBuf {
+        self.log_dir
+            .join(format!("t{}r{}.call", self.task, self.run))
+    }
+
+    /// Is `call` the call this run's last `run_check` began with? Then it is a replay, and
+    /// this is what its first run told the agent about the base fold.
+    fn known_call(&self, call: &str) -> Option<String> {
+        let text = std::fs::read_to_string(self.call_file()).ok()?;
+        let (id, note) = text.split_once('\n')?;
+        (id == call).then(|| note.to_string())
+    }
+
+    /// Record the call and the fold note, for a replay of it.
+    fn remember_call(&self, call: &str, note: &str) {
+        let _ = std::fs::write(self.call_file(), format!("{call}\n{note}"));
+    }
+
     /// The open debt that skips this task's test step, if the owner skipped it: the
     /// agent's own checks then run nothing either (s264).
     fn skipped_by_owner(&self) -> Option<u64> {
@@ -3600,6 +3657,7 @@ fn agent_job(c: &Ctx) {
         reds: Default::default(),
         last_red: std::sync::Mutex::new(None),
         check_failing: Default::default(),
+        replay: Default::default(),
     });
     let validator = (kind == StepKind::Develop).then(|| {
         change_validator(
