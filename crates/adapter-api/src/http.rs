@@ -5,6 +5,7 @@
 //! on a command line), tests use [`Recorded`], which replays a script of
 //! responses and fails loudly on any request it was not given.
 
+use crate::github_budget;
 use crate::netguard;
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -175,6 +176,21 @@ impl Curl {
         out_file: Option<&std::path::Path>,
     ) -> Result<Response, Transport> {
         netguard::check(&r.url).map_err(|e| Transport(e.to_string()))?;
+        let github = is_github_api(&r.url);
+        if github {
+            // The core quota is used up: GitHub would refuse, so nothing is sent. The answer is
+            // its own refusal, with the time left to the reset.
+            if let Some(wait) = github_budget::wait_s() {
+                let reset = github_budget::exhausted_until().unwrap_or_default();
+                return Ok(Response {
+                    status: 403,
+                    headers: github_budget::refusal_headers(wait, reset),
+                    body: format!(
+                        "{{\"message\":\"API rate limit exceeded (not sent: MASON waits {wait} s for the reset)\"}}"
+                    ),
+                });
+            }
+        }
         let cfg = self.config(r)?;
         let hdr =
             std::env::temp_dir().join(format!("mason-curl-{}-{}", std::process::id(), nonce()));
@@ -219,16 +235,25 @@ impl Curl {
             .and_then(|l| l.split_whitespace().nth(1))
             .and_then(|s| s.parse().ok())
             .ok_or_else(|| Transport("no status line".into()))?;
-        let headers = lines
+        let headers: Vec<(String, String)> = lines
             .filter_map(|l| l.split_once(':'))
             .map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim().to_string()))
             .collect();
+        if github {
+            github_budget::note(status, &headers);
+        }
         Ok(Response {
             status,
             headers,
             body: String::from_utf8_lossy(&out.stdout).to_string(),
         })
     }
+}
+
+/// Is this a request to GitHub's REST API (the host whose quota is shared)?
+fn is_github_api(url: &str) -> bool {
+    url.strip_prefix("https://")
+        .is_some_and(|r| r.split('/').next() == Some("api.github.com"))
 }
 
 fn nonce() -> u64 {
@@ -345,5 +370,21 @@ impl Http for Recorded {
                 .collect(),
             body: e.body.clone(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_github_api_host_is_budgeted() {
+        assert!(is_github_api(
+            "https://api.github.com/repos/a/b/actions/runs"
+        ));
+        assert!(is_github_api("https://api.github.com"));
+        assert!(!is_github_api("http://127.0.0.1:8080/repos/a/b"));
+        assert!(!is_github_api("https://api.github.com.evil.test/x"));
+        assert!(!is_github_api("https://uploads.github.com/x"));
     }
 }

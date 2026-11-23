@@ -3528,6 +3528,12 @@ async fn resources(Shared(d): Shared<Arc<Daemon>>) -> Res {
             if let Some(g) = v.get_mut("gha").and_then(|g| g.as_object_mut()) {
                 g.insert("runs".into(), crate::remote::holder_views(&d2).into());
             }
+            if let Some(o) = v.as_object_mut() {
+                o.insert(
+                    "github_api".into(),
+                    mason_adapter_api::github_budget::snapshot(),
+                );
+            }
             v
         })
         .await
