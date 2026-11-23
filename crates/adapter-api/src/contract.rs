@@ -680,6 +680,10 @@ pub trait CheckHandler: Send + Sync {
     fn run_scoped(&self, name: &str, _scope: &CheckScope) -> CheckRun {
         self.run(name)
     }
+    /// The whole answer of a `run_check` call has been written to the agent's socket. Until
+    /// then a replay of the call (after the controller went away, #1051) can still need what
+    /// the call used.
+    fn answered(&self, _name: &str, _scope: &CheckScope) {}
 }
 
 /// What the agent asked `run_check` to narrow to. Validated: the names are safe to put in a
@@ -696,6 +700,9 @@ pub struct CheckScope {
     pub full: bool,
     /// Why `full` was asked for (logged with the check; never required).
     pub why: Option<String>,
+    /// The call's id, made by `mason-mcp` and sent again unchanged when it replays the call
+    /// after the controller went away (#1051). `None` from a client that sends none.
+    pub call: Option<String>,
 }
 
 impl CheckScope {
@@ -727,6 +734,16 @@ impl CheckScope {
                         .to_string()
                 })
                 .filter(|w| !w.is_empty()),
+            call: a
+                .get("call_id")
+                .and_then(Value::as_str)
+                .map(|c| {
+                    c.chars()
+                        .filter(|c| c.is_ascii_graphic())
+                        .take(100)
+                        .collect::<String>()
+                })
+                .filter(|c| !c.is_empty()),
         }
     }
 
@@ -1173,6 +1190,15 @@ impl ContractHandle {
             let out = json!({"ok": reply.ok, "text": reply.text});
             writeln!(w, "{out}")?;
             w.flush()?;
+            // The agent has the answer: what a replay of the call would have reused is spent.
+            if let Some(v) = serde_json::from_str::<Value>(&line)
+                .ok()
+                .filter(|v| v.get("tool").and_then(Value::as_str) == Some("run_check"))
+            {
+                let args = v.get("args").cloned().unwrap_or(json!({}));
+                let name = args["name"].as_str().unwrap_or_default();
+                self.0.checks.answered(name, &CheckScope::from_args(&args));
+            }
         }
         Ok(())
     }
@@ -1659,7 +1685,8 @@ mod tests {
                 packages: vec!["mason-daemon".into()],
                 changed: true,
                 full: false,
-                why: None
+                why: None,
+                call: None
             }
         );
         for bad in [
