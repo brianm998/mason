@@ -263,10 +263,7 @@ fn diagnose(d: &Arc<Daemon>, task: TaskId, run: StepRunId) {
     );
     let agent = c.project.agent();
     let eff = crate::tiermap::effective(&d.cfg.config_dir, agent.provider, &c.project.overlay_text);
-    let mapped = eff.mapping.entry(
-        mason_definition::tiers::Tier::Light,
-        mason_definition::tiers::Level::default(),
-    );
+    let (mut spec, ran_on) = session_spec(&text, &c.wt, &c.project, &eff);
     let adapter = crate::jobs::adapter(&c);
     let runner = StepRunner::new(adapter.as_ref(), RunnerConfig::default());
     let contract = ContractHandle::new(StepKind::Diagnose, Box::new(NoChecks));
@@ -277,9 +274,6 @@ fn diagnose(d: &Arc<Daemon>, task: TaskId, run: StepRunId) {
     {
         return;
     }
-    let mut spec = SessionSpec::new(StepKind::Diagnose, &text, &c.wt);
-    spec.model = mapped.model;
-    spec.effort = mapped.effort;
     spec.env = c.project.agent_env.clone();
     spec.env.retain(|(k, _)| k != "MASON_TASK");
     spec.env.push(("MASON_TASK".into(), task.0.to_string()));
@@ -298,12 +292,42 @@ fn diagnose(d: &Arc<Daemon>, task: TaskId, run: StepRunId) {
     let StepEnd::Accepted { submission, .. } = report.end else {
         tracing::info!(task = task.0, "the diagnosis ended without a verdict");
         // Counted all the same, so a session that never answers is not tried again and again.
-        let _ = d
-            .store
-            .add_diagnosis(task.0, "none", "{}", "none", now_ms());
+        let _ = d.store.add_diagnosis(
+            task.0,
+            "none",
+            &json!({"ran_on": ran_on}).to_string(),
+            "none",
+            now_ms(),
+        );
         return;
     };
+    let mut submission = submission;
+    if let Some(o) = submission.as_object_mut() {
+        o.insert("ran_on".into(), json!(ran_on));
+    }
     record(d, &c, submission);
+}
+
+/// The session the diagnosis runs, with the model and effort the project, the provider file
+/// and the built-in table settle on, and the words that say what they were.
+pub fn session_spec(
+    text: &str,
+    wt: &std::path::Path,
+    project: &crate::config::ProjectCfg,
+    eff: &crate::tiermap::Effective,
+) -> (SessionSpec, String) {
+    let (entry, from) = crate::tiermap::diagnose_entry(
+        eff,
+        project.agent().provider,
+        (
+            project.diagnose_model.clone(),
+            project.diagnose_effort.clone(),
+        ),
+    );
+    let mut spec = SessionSpec::new(StepKind::Diagnose, text, wt);
+    spec.model = entry.model.clone();
+    spec.effort = entry.effort.clone();
+    (spec, mason_definition::tiers::diagnose_text(&entry, from))
 }
 
 /// Store a submitted diagnosis, and apply it or leave it as a card.
