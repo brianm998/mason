@@ -99,6 +99,7 @@ mod targets;
 mod task_priority;
 mod taskcache;
 mod testing;
+mod taskedit;
 mod tracker;
 mod update;
 mod update_release;

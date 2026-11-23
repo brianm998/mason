@@ -650,7 +650,7 @@ fn apply(w: &mut World, k: &EventKind, fx: &mut Vec<Effect>) -> Result<(), Reduc
             if !(from.is_step()
                 || matches!(
                     from,
-                    S::Proposed | S::Deferred | S::Queued | S::NeedsAttention
+                    S::Proposed | S::Deferred | S::Queued | S::NeedsAttention | S::Failed
                 ))
             {
                 return Err(illegal(from, k));

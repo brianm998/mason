@@ -1201,3 +1201,45 @@ fn a_priority_chosen_at_approval_ranks_the_queued_task() {
         (S::Queued, Priority::High)
     );
 }
+
+#[test]
+fn an_edit_of_a_failed_task_applies_and_leaves_it_failed() {
+    let mut sim = Sim::new();
+    let t = sim.task_in(S::Developing);
+    sim.ok(E::StepFailed {
+        task: t,
+        reason: "x".into(),
+        class: None,
+    });
+    assert_eq!(sim.state(t), S::Failed);
+    sim.ok(E::TrackerEdited {
+        task: t,
+        title: "narrower".into(),
+        body: "only this".into(),
+        priority: Priority::Normal,
+    });
+    let task = &sim.w.tasks[&t];
+    assert_eq!(
+        (
+            task.state,
+            task.title.as_str(),
+            task.body.as_str(),
+            task.failures
+        ),
+        (S::Failed, "narrower", "only this", 1)
+    );
+}
+
+#[test]
+fn an_edit_of_a_developing_task_changes_the_text_the_next_step_reads() {
+    let mut sim = Sim::new();
+    let t = sim.task_in(S::Developing);
+    sim.ok(E::TrackerEdited {
+        task: t,
+        title: "t".into(),
+        body: "new criterion".into(),
+        priority: Priority::Normal,
+    });
+    assert_eq!(sim.state(t), S::Developing);
+    assert_eq!(sim.w.tasks[&t].body, "new criterion");
+}

@@ -196,7 +196,7 @@ fn expected(from: State, ev: &str) -> Option<State> {
         "BlockersChanged" if matches!(from, S::Proposed | S::Queued) => Some(from),
         "Repinned" if step || matches!(from, S::NeedsAttention | S::Failed) => Some(from),
         "Revived" if from == S::Canceled => Some(S::Queued),
-        "TrackerEdited" if live || matches!(from, S::Proposed | S::Deferred) => Some(from),
+        "TrackerEdited" if live || matches!(from, S::Proposed | S::Deferred | S::Failed) => Some(from),
         "Tick" => Some(from),
         _ => None, // includes Resumed (never paused) and WaitEnded (no wait)
     }
