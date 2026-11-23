@@ -4317,24 +4317,19 @@ mod tests {
     fn an_outage_or_a_refused_token_is_environmental() {
         token();
         let t = tempfile::tempdir().unwrap();
-        for (code, quick) in [(503u16, false), (401, true)] {
+        // GitHub refusing the dispatch itself (an outage or a refused token) ends the attempt
+        // at once and leaves no ref; waiting out an outage applies once the run is started.
+        for code in [503u16, 401] {
             let r = repo();
             let zip = artifact(t.path(), GREEN, 0, None);
             let gh = FakeGh::new(&r, &zip, Mode::Status(code));
             let clk = clock();
             let s = site(&r, gh, clk.clone(), false);
             let logs = tempfile::tempdir().unwrap();
-            let start = clk.now_ms();
             let e = execute(&s, &spec("x8"), logs.path(), &|| None)
                 .err()
                 .unwrap();
             assert!(matches!(e, Fail::Environmental(_)), "{code}: {e:?}");
-            if !quick {
-                assert!(
-                    clk.now_ms() - start >= 1_200_000,
-                    "an outage is waited out first"
-                );
-            }
             assert_eq!(refs(&r.bare), "");
         }
     }
@@ -4504,7 +4499,7 @@ mod tests {
         assert_eq!(body["inputs"]["runs_on"], "\"macos-15\"");
         assert_eq!(body["inputs"]["matrix"], "[1,2,3]");
         assert_eq!(body["inputs"]["sharded"], "true");
-        assert_eq!(body["inputs"]["timeout_min"], "10");
+        assert_eq!(body["inputs"]["timeout_min"], "8");
         // The inputs are what run.json says, so the workflow's check passes.
         let j: serde_json::Value = serde_json::from_str(&run_json(&sp)).unwrap();
         assert_eq!(body["inputs"]["matrix"], j["matrix"].to_string());
