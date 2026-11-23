@@ -1,0 +1,51 @@
+[
+ {
+  "method": "GET",
+  "url": "/actions/runs?branch=",
+  "response": {
+   "status": 200,
+   "body": {
+    "total_count": 2,
+    "workflow_runs": [
+     {
+      "id": 22,
+      "name": "fix the thing\n\nlong body",
+      "display_title": "fix the thing\n\nlong body",
+      "path": ".github/workflows/ci.yml",
+      "workflow_id": 7,
+      "head_sha": "0000000000000000000000000000000000000022",
+      "html_url": "https://github.com/o/r/actions/runs/22",
+      "created_at": "2026-11-11T11:30:00Z",
+      "status": "completed",
+      "conclusion": "failure",
+      "head_branch": "develop"
+     },
+     {
+      "id": 21,
+      "name": "another commit message",
+      "path": ".github/workflows/ci.yml",
+      "head_sha": "0000000000000000000000000000000000000021",
+      "html_url": "https://github.com/o/r/actions/runs/21",
+      "created_at": "2026-11-11T11:00:00Z",
+      "status": "completed",
+      "conclusion": "failure",
+      "head_branch": "develop"
+     }
+    ]
+   }
+  }
+ },
+ {
+  "method": "GET",
+  "url": "/actions/workflows",
+  "response": {
+   "status": 200,
+   "body": {
+    "total_count": 1,
+    "workflows": [
+     {"id": 7, "name": "CI", "path": ".github/workflows/ci.yml"}
+    ]
+   }
+  }
+ }
+]

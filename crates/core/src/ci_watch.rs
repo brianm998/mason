@@ -1362,6 +1362,36 @@ mod tests {
     }
 
     #[test]
+    fn red_runs_of_one_job_on_different_commits_share_the_workflow_key() {
+        // The workflow's name, never a run's display title, is what the adapter hands over (s928).
+        let mut s = State::default();
+        go(
+            &mut s,
+            &[run(1, "CI", "success", &[("windows", "success")])],
+            5000,
+            &none(),
+            0,
+        );
+        go(
+            &mut s,
+            &[run(2, "CI", "failure", &[("windows", "failure")])],
+            6000,
+            &none(),
+            0,
+        );
+        let f = go(
+            &mut s,
+            &[run(3, "CI", "failure", &[("windows", "failure")])],
+            7000,
+            &none(),
+            0,
+        );
+        assert_eq!(f.len(), 1);
+        assert_eq!(key(&f[0].workflow, &f[0].job), "CI/windows");
+        assert_eq!(s.workflows.keys().collect::<Vec<_>>(), vec!["CI"]);
+    }
+
+    #[test]
     fn the_same_run_seen_twice_is_not_agreement() {
         let mut s = State::default();
         go(
