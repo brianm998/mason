@@ -473,6 +473,9 @@ pub fn show(d: &Daemon, json_out: bool) -> Result<(), String> {
             if let Some(l) = gha_line(&v["gha"], now) {
                 println!("      {l}");
             }
+            for l in gha_run_lines(&v["gha"]) {
+                println!("      {l}");
+            }
         }
         for (i, s) in r["slots"].as_array().into_iter().flatten().enumerate() {
             if let Some(by) = s["held_by"].as_str() {
@@ -513,6 +516,34 @@ pub fn show(d: &Daemon, json_out: bool) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// One line for each run holding runner units: its task, and whether anything will still
+/// collect it (#823).
+pub fn gha_run_lines(g: &Value) -> Vec<String> {
+    g["runs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|r| {
+            let task = r["task"]
+                .as_u64()
+                .map_or("no task".to_string(), |t| format!("#{t}"));
+            format!(
+                "run {} ({task}, {}): {}",
+                r["label"].as_str().unwrap_or("?"),
+                r["kind"]
+                    .as_str()
+                    .filter(|k| !k.is_empty())
+                    .unwrap_or("run"),
+                if r["wanted"].as_bool().unwrap_or(true) {
+                    "wanted"
+                } else {
+                    "not wanted, being cancelled"
+                }
+            )
+        })
+        .collect()
 }
 
 /// The `gha` pool's split (#766, #819): `MASON 11, other 7 (mason CI 5 running, star pr-gate 2
