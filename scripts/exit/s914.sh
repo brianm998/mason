@@ -1,20 +1,23 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 # s914: the six scripts that were red on the Linux shard 3 of the full run (s09 s40 s422 s546
-# s669 s777) each pass, and a failure shows its whole output, not the tail.
+# s669 s777) each pass, and a failure names its last lines together at the end, not scattered.
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)"
-bad=""
+t=""; command -v timeout >/dev/null && t="timeout -k 10 1200"
+bad=""; report=""
 for n in s09 s40 s422 s546 s669 s777; do
   log=$(mktemp)
-  if bash "scripts/exit/$n.sh" >"$log" 2>&1; then
+  if $t bash "scripts/exit/$n.sh" >"$log" 2>&1; then
     echo "s914: $n ok"
   else
-    echo "s914: $n FAILED, last 30 lines:" >&2
-    tail -30 "$log" >&2
+    rc=$?
     bad="$bad $n"
+    report="$report
+== $n exit $rc, last 12 lines:
+$(tail -12 "$log" | cut -c1-200)"
   fi
   rm -f "$log"
 done
-[ -z "$bad" ] || { echo "s914: failed:$bad" >&2; exit 1; }
+if [ -n "$bad" ]; then echo "s914: failed:$bad$report" >&2; exit 1; fi
 echo "s914 OK"
