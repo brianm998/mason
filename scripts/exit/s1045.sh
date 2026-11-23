@@ -3,6 +3,7 @@
 # s1045 exit test: a red run repeats each failed script's cause just before the final FAILED line.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
+unset MASON_EXIT_SHARD  # the scratch runs must cover all fake scripts, not the CI shard
 
 d=$(mktemp -d); trap 'rm -rf "$d"' EXIT
 cat > "$d/s21.sh" <<'X'

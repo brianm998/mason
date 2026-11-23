@@ -3,6 +3,7 @@
 # s1038 exit test: a failed exit script's last lines and its limit kill are named in the log.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
+unset MASON_EXIT_SHARD  # the scratch runs must cover all fake scripts, not the CI shard
 
 d=$(mktemp -d); trap 'rm -rf "$d"' EXIT
 cat > "$d/s11.sh" <<'X'
