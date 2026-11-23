@@ -27,7 +27,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
 pub struct CheckSpec {
@@ -356,6 +356,55 @@ fn record_path(spec: &CheckSpec, id: &str) -> PathBuf {
     spec.log_dir.join(format!("{id}.check"))
 }
 
+thread_local! {
+    /// The task and run whose `run_check` call is on this thread, while it holds its results
+    /// until the agent has its answer ([`hold_results`]).
+    static DEFER: std::cell::RefCell<Option<(u64, u64)>> = const { std::cell::RefCell::new(None) };
+}
+
+fn deferred_owner() -> Option<(u64, u64)> {
+    DEFER.with(|c| *c.borrow())
+}
+
+/// Finished runs whose result the agent has not been answered with yet: (log dir, id, key).
+type Unanswered = Mutex<HashMap<(u64, u64), Vec<(PathBuf, String, String)>>>;
+
+fn unanswered() -> &'static Unanswered {
+    static M: OnceLock<Unanswered> = OnceLock::new();
+    M.get_or_init(Default::default)
+}
+
+/// Ends [`hold_results`] when dropped.
+pub struct HoldGuard(Option<(u64, u64)>);
+
+impl Drop for HoldGuard {
+    fn drop(&mut self) {
+        DEFER.with(|c| *c.borrow_mut() = self.0);
+    }
+}
+
+/// For the calls made on this thread while the guard lives, a finished run of `task`'s `run`
+/// stays undelivered (so a replay of the call, with the same tree and command, takes its
+/// result instead of running it again) until [`answered`] says the agent has the answer.
+pub fn hold_results(task: u64, run: u64) -> HoldGuard {
+    HoldGuard(DEFER.with(|c| c.replace(Some((task, run)))))
+}
+
+/// The agent has the whole answer of its `run_check` call: the runs it used are delivered.
+pub fn answered(task: u64, run: u64) {
+    let held = unanswered()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&(task, run))
+        .unwrap_or_default();
+    for (log_dir, id, key) in held {
+        let _ = write_kv(
+            &log_dir.join(format!("{id}.check")),
+            &[("key", key), ("delivered", "1".into())],
+        );
+    }
+}
+
 fn mark_delivered(spec: &CheckSpec, id: &str, key: &str) {
     let _ = write_kv(
         &record_path(spec, id),
@@ -509,8 +558,18 @@ pub fn run_with(d: &Arc<Daemon>, spec: &CheckSpec, progress: Option<&CheckProgre
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .remove(&id);
-    // Given to its callers now: a later call on the same tree runs again.
-    mark_delivered(spec, &id, &key);
+    // Given to its callers now: a later call on the same tree runs again. A call that asked
+    // for its results to be held (#1051) is not done until its answer is written to the
+    // agent: until then a replay of the call, after a takeover, reuses this result.
+    match deferred_owner().filter(|_| check_owner(&id).is_some()) {
+        Some(owner) => unanswered()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(owner)
+            .or_default()
+            .push((spec.log_dir.clone(), id.clone(), key.clone())),
+        None => mark_delivered(spec, &id, &key),
+    }
     {
         let mut g = slot.result.lock().unwrap_or_else(|e| e.into_inner());
         *g = Some(res.clone());
