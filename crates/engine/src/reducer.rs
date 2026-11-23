@@ -237,7 +237,10 @@ fn apply(w: &mut World, k: &EventKind, fx: &mut Vec<Effect>) -> Result<(), Reduc
             if !w.projects.contains_key(project) {
                 return Err(ReduceError::UnknownProject(*project));
             }
-            if w.projects.values().any(|p| p.id != *project && p.name == *name) {
+            if w.projects
+                .values()
+                .any(|p| p.id != *project && p.name == *name)
+            {
                 return Err(ReduceError::NameTaken(name.clone()));
             }
             if let Some(p) = w.projects.get_mut(project) {

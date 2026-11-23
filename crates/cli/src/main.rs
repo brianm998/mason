@@ -1173,11 +1173,17 @@ fn main() {
             }
         }
         "project" => {
-            let sub = a.pos().unwrap_or_else(|| die("project what? reload or rename"));
+            let sub = a
+                .pos()
+                .unwrap_or_else(|| die("project what? reload or rename"));
             if sub == "rename" {
                 let yes = a.flag("--yes") || a.flag("-y");
-                let old = a.pos().unwrap_or_else(|| die("rename which project? mason project rename OLD NEW"));
-                let new = a.pos().unwrap_or_else(|| die("rename it to what? mason project rename OLD NEW"));
+                let old = a
+                    .pos()
+                    .unwrap_or_else(|| die("rename which project? mason project rename OLD NEW"));
+                let new = a
+                    .pos()
+                    .unwrap_or_else(|| die("rename it to what? mason project rename OLD NEW"));
                 finish(&a);
                 let r = or_die(d.call(
                     "POST",
@@ -1199,10 +1205,20 @@ fn main() {
                 }
                 let done = r["result"] == "renamed";
                 println!("{}", if done { "Renamed:" } else { "Would:" });
-                for x in r["actions"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+                for x in r["actions"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                {
                     println!("  {x}");
                 }
-                let kept: Vec<&str> = r["branches_left"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                let kept: Vec<&str> = r["branches_left"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .collect();
                 if !kept.is_empty() {
                     println!("Branches still carrying the old name (left alone):");
                     kept.iter().for_each(|b| println!("  {b}"));

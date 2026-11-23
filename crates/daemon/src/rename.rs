@@ -55,7 +55,12 @@ fn named_branches(repo: &Path, name: &str) -> Vec<String> {
 impl Daemon {
     /// Rename `old` to `new`. Without `yes`, only say what would be done. `Err` carries the
     /// reasons it was refused; nothing has changed then.
-    pub fn rename_project(self: &Arc<Self>, old: &str, new: &str, yes: bool) -> Result<Value, Vec<String>> {
+    pub fn rename_project(
+        self: &Arc<Self>,
+        old: &str,
+        new: &str,
+        yes: bool,
+    ) -> Result<Value, Vec<String>> {
         let pid = self
             .project_id_by_name(old)
             .ok_or_else(|| vec![format!("no project {old:?}")])?;
@@ -81,7 +86,11 @@ impl Daemon {
             errs.push(format!("{} does not exist", from.display()));
         }
         let world = self.world().map_err(|e| vec![e.to_string()])?;
-        if world.projects.values().any(|p| p.id != pid && p.name == new) {
+        if world
+            .projects
+            .values()
+            .any(|p| p.id != pid && p.name == new)
+        {
             errs.push(format!("{new} is already the name of another project"));
         }
         let open: Vec<String> = world
@@ -97,12 +106,16 @@ impl Daemon {
             ));
         }
         if self.landing().busy_projects().contains(&pid) {
-            errs.push(format!("{old} has a landing batch running; wait for it to finish"));
+            errs.push(format!(
+                "{old} has a landing batch running; wait for it to finish"
+            ));
         }
         if !errs.is_empty() {
             return Err(errs);
         }
-        let cfg = self.project(pid).ok_or_else(|| vec![format!("no project {old:?}")])?;
+        let cfg = self
+            .project(pid)
+            .ok_or_else(|| vec![format!("no project {old:?}")])?;
         let trees = landing_worktrees(self, old);
         let branches = named_branches(&cfg.path, old);
         let mut actions = vec![
@@ -124,7 +137,8 @@ impl Daemon {
             return Ok(plan("plan", 0));
         }
 
-        std::fs::rename(&from, &to).map_err(|e| vec![format!("moving the registration file: {e}")])?;
+        std::fs::rename(&from, &to)
+            .map_err(|e| vec![format!("moving the registration file: {e}")])?;
         let back = |why: String| {
             let _ = std::fs::rename(&to, &from);
             vec![why]
@@ -137,10 +151,11 @@ impl Daemon {
         .map_err(|e| back(format!("recording the rename: {e}")))?;
         // The event is in the log, so the rename stands; a failure from here on is reported
         // and a restart replays the event.
-        let rows = self
-            .store
-            .rename_project(old, new)
-            .map_err(|e| vec![format!("the rename is recorded but the store rewrite failed: {e}")])?;
+        let rows = self.store.rename_project(old, new).map_err(|e| {
+            vec![format!(
+                "the rename is recorded but the store rewrite failed: {e}"
+            )]
+        })?;
         if let Some(t) = &newcfg.services.tracker {
             self.tracker.set_interval(pid, t.interval_s);
         }

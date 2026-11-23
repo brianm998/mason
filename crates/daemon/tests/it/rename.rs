@@ -48,8 +48,12 @@ fn a_rename_keeps_the_id_and_every_row() {
     let d = s.start();
     let pid = d.project_id_by_name("scratch").unwrap();
     let task = file_and_cancel(&d, pid);
-    d.store.put_suite_green("scratch", "unit", "abc", 3, 1).unwrap();
-    d.store.add_pause("scratch", "all", "owner", 1, u64::MAX / 4).unwrap();
+    d.store
+        .put_suite_green("scratch", "unit", "abc", 3, 1)
+        .unwrap();
+    d.store
+        .add_pause("scratch", "all", "owner", 1, u64::MAX / 4)
+        .unwrap();
     d.store
         .write(|c| {
             c.execute(
@@ -82,20 +86,61 @@ fn a_rename_keeps_the_id_and_every_row() {
     assert_eq!(w.projects[&pid].name, "renamed");
     assert_eq!(w.tasks[&task].project, pid);
 
-    assert_eq!(d.store.suite_green("renamed", "unit", "abc").unwrap(), Some(3));
+    assert_eq!(
+        d.store.suite_green("renamed", "unit", "abc").unwrap(),
+        Some(3)
+    );
     assert_eq!(d.store.suite_green("scratch", "unit", "abc").unwrap(), None);
-    assert_eq!(count(&d, "SELECT count(*) FROM pauses WHERE project = ?1", "renamed".into()), 1);
-    assert_eq!(count(&d, "SELECT count(*) FROM schedules WHERE name = ?1", "analyst:renamed".into()), 1);
-    assert_eq!(count(&d, "SELECT count(*) FROM schedules WHERE project = ?1", "scratch".into()), 0);
-    assert_eq!(count(&d, "SELECT count(*) FROM alerts WHERE key = ?1", "paused:renamed:all".into()), 1);
-    assert_eq!(count(&d, "SELECT count(*) FROM meta WHERE key = ?1", "def:renamed".into()), 1);
+    assert_eq!(
+        count(
+            &d,
+            "SELECT count(*) FROM pauses WHERE project = ?1",
+            "renamed".into()
+        ),
+        1
+    );
+    assert_eq!(
+        count(
+            &d,
+            "SELECT count(*) FROM schedules WHERE name = ?1",
+            "analyst:renamed".into()
+        ),
+        1
+    );
+    assert_eq!(
+        count(
+            &d,
+            "SELECT count(*) FROM schedules WHERE project = ?1",
+            "scratch".into()
+        ),
+        0
+    );
+    assert_eq!(
+        count(
+            &d,
+            "SELECT count(*) FROM alerts WHERE key = ?1",
+            "paused:renamed:all".into()
+        ),
+        1
+    );
+    assert_eq!(
+        count(
+            &d,
+            "SELECT count(*) FROM meta WHERE key = ?1",
+            "def:renamed".into()
+        ),
+        1
+    );
     d.store.verify().unwrap();
 
     // And back again.
     let r = d.rename_project("renamed", "scratch", true).unwrap();
     assert_eq!(r["result"], "renamed");
     assert_eq!(d.project_id_by_name("scratch"), Some(pid));
-    assert_eq!(d.store.suite_green("scratch", "unit", "abc").unwrap(), Some(3));
+    assert_eq!(
+        d.store.suite_green("scratch", "unit", "abc").unwrap(),
+        Some(3)
+    );
 }
 
 #[test]
@@ -130,7 +175,10 @@ fn a_rename_is_refused_when_something_is_in_the_way() {
         .unwrap();
     assert!(!a.effects.is_empty());
     let e = d.rename_project("scratch", "fresh", true).unwrap_err();
-    assert!(e.iter().any(|m| m.contains("not landed or canceled")), "{e:?}");
+    assert!(
+        e.iter().any(|m| m.contains("not landed or canceled")),
+        "{e:?}"
+    );
     // Nothing moved.
     assert!(s.config_dir.join("projects/scratch.toml").exists());
     assert_eq!(d.project_id_by_name("scratch"), Some(pid));
