@@ -22,6 +22,12 @@ extension MonitorModel {
     /// The task rows behind a stage's tile and on its page, in the sidebar's order.
     public func sectionRows(_ name: String) -> [TaskRow] { tileSections(name).flatMap(\.rows) }
 
+    /// The count for a capped section page's header ("500 of 2000", as in the sidebar), else nil.
+    public func sectionCountText(_ name: String) -> String? {
+        guard let s = sectionSidebar(name), isCapped(s) else { return nil }
+        return countText(s)
+    }
+
     /// The page's title.
     public static func sectionTitle(_ name: String) -> String {
         switch name {
@@ -38,6 +44,7 @@ extension MonitorModel {
         case "review": return "Review"
         case "needs_attention": return "Needs you"
         case "proposed": return "Proposed"
+        case "failed": return "Failed"
         default: return name
         }
     }

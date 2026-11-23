@@ -2687,6 +2687,16 @@ pub fn cancel_hold(site: &Site, holds: &Path, record: &Path) {
     remove_hold(holds, &id);
 }
 
+/// Does the check record beside run `record` (`<id>.check`) say nobody will collect the run: it
+/// was superseded by a newer call, or its result was given? Checks have such a record; a step's
+/// run has none.
+fn check_record_ended(record: &Path) -> bool {
+    let kv = read_kv(&record.with_extension("check"));
+    kv.is_ok_and(|kv| {
+        kv.contains_key("superseded") || kv.get("delivered").map(String::as_str) == Some("1")
+    })
+}
+
 /// `(task, run, prefix, number)` of an agent check's run id (`t731r4599-check-cargo-workspace2`).
 fn check_parts(id: &str) -> Option<(u64, u64, String, u64)> {
     let (task, run) = crate::hostedcheck::check_owner(id)?;
@@ -2697,7 +2707,8 @@ fn check_parts(id: &str) -> Option<(u64, u64, String, u64)> {
 
 /// Which of the adopted runs (key, record) nobody can collect: a check whose task's open run is
 /// another one or none; a step run of a task with no open run; a check superseded by a newer
-/// one of the same prefix for the same run. `open_run` gives a task's open run.
+/// one of the same prefix for the same run, or one whose check record on disk says it was
+/// superseded or its result given (#823). `open_run` gives a task's open run.
 pub fn unwanted(
     adopted: &[(String, PathBuf)],
     open_run: &dyn Fn(u64) -> Option<u64>,
@@ -2714,7 +2725,11 @@ pub fn unwanted(
     }
     for ((key, record), part) in adopted.iter().zip(&parts) {
         let bad = match part {
-            Some((t, r, p, n)) => open_run(*t) != Some(*r) || newest[&(*t, *r, p.clone())] > *n,
+            Some((t, r, p, n)) => {
+                open_run(*t) != Some(*r)
+                    || newest[&(*t, *r, p.clone())] > *n
+                    || check_record_ended(record)
+            }
             None => key
                 .strip_prefix("task ")
                 .and_then(|t| t.parse::<u64>().ok())
@@ -2725,6 +2740,68 @@ pub fn unwanted(
         }
     }
     out
+}
+
+/// The site of the project a run's ref names.
+fn site_of_state(d: &Arc<Daemon>, st: &State) -> Option<Site> {
+    let project = ref_project(&st.ref_name)?;
+    let pid = d
+        .projects()
+        .values()
+        .find(|p| {
+            p.services.remote.is_some() && ref_name(&p.id, "") == format!("mason/run/{project}/")
+        })
+        .map(|p| p.id.clone())?;
+    let p = project_cfg(d, &pid)?;
+    site_for(d, &pid, &p.path)
+}
+
+/// Cancel the GitHub run behind `record` now (a check superseded on another tree, #823): its
+/// run is cancelled, its ref deleted, its record ended and its hold removed, which gives the
+/// units back. `false`: there is no such run out.
+pub fn cancel_record(d: &Arc<Daemon>, record: &Path) -> bool {
+    let Some(st) = State::load(record) else {
+        return false;
+    };
+    if st.collected || st.released {
+        return false;
+    }
+    let Some(site) = site_of_state(d, &st) else {
+        return false;
+    };
+    cancel_hold(&site, &holds_dir(&d.cfg.hosts_dir()), record);
+    true
+}
+
+/// Each run holding runner units, with its task and whether anything will still collect it
+/// (`mason resources`, #823): `wanted` is false for a run [`unwanted`] names.
+pub fn holder_views(d: &Daemon) -> Vec<serde_json::Value> {
+    let holds = running_holds(&holds_dir(&d.cfg.hosts_dir()));
+    let open: std::collections::HashMap<u64, u64> = d
+        .world()
+        .map(|w| {
+            w.tasks
+                .keys()
+                .filter_map(|t| Some((t.0, w.open_run(*t)?.0)))
+                .collect()
+        })
+        .unwrap_or_default();
+    let pairs: Vec<(String, PathBuf)> = holds
+        .iter()
+        .map(|h| (h.key.clone(), h.record.clone()))
+        .collect();
+    let gone = unwanted(&pairs, &|t| open.get(&t).copied());
+    holds
+        .iter()
+        .map(|h| {
+            serde_json::json!({
+                "label": h.label,
+                "kind": h.kind,
+                "task": (h.task != 0).then_some(h.task),
+                "wanted": !gone.contains(&h.record),
+            })
+        })
+        .collect()
 }
 
 /// One pass over the runs adopted at start: free those GitHub has finished, cancel those no one
@@ -2760,24 +2837,7 @@ pub fn reap_adopted(d: &Arc<Daemon>) {
                 }
                 continue;
             };
-            let Some(project) = ref_project(&st.ref_name) else {
-                continue;
-            };
-            let Some(pid) = d
-                .projects()
-                .values()
-                .find(|p| {
-                    p.services.remote.is_some()
-                        && ref_name(&p.id, "") == format!("mason/run/{project}/")
-                })
-                .map(|p| p.id.clone())
-            else {
-                continue;
-            };
-            let Some(p) = project_cfg(&d, &pid) else {
-                continue;
-            };
-            let Some(site) = site_for(&d, &pid, &p.path) else {
+            let Some(site) = site_of_state(&d, &st) else {
                 continue;
             };
             if gone.contains(record) {
@@ -4089,6 +4149,62 @@ mod tests {
         assert!(running_holds(&holds).is_empty());
         assert!(!rec.exists());
         assert_eq!(refs(&r.bare), "");
+    }
+
+    #[test]
+    fn a_superseded_check_is_cancelled_queued_or_in_progress_and_its_hold_is_gone() {
+        token();
+        for (id, picked) in [
+            ("t7r9-check-cargo-workspace0", None),
+            ("t7r9-check-cargo-workspace1", Some(1)),
+        ] {
+            let r = repo();
+            let t = tempfile::tempdir().unwrap();
+            let zip = artifact(t.path(), GREEN, 0, None);
+            let gh = FakeGh::new(&r, &zip, Mode::Normal);
+            let s = site(&r, gh.clone(), clock(), false);
+            let logs = tempfile::tempdir().unwrap();
+            let (holds, rec) = adopted(&r, logs.path(), id);
+            let mut st = State::load(&rec).unwrap();
+            st.picked_ms = picked;
+            st.save(&rec);
+            assert!(!record_ended(&rec));
+            cancel_hold(&s, &holds, &rec);
+            assert_eq!(gh.cancels.lock().unwrap().len(), 1, "{id}");
+            assert!(record_ended(&rec), "{id}: the units come back");
+            assert!(running_holds(&holds).is_empty(), "{id}");
+            assert_eq!(refs(&r.bare), "", "{id}");
+        }
+    }
+
+    #[test]
+    fn the_reaper_names_a_check_whose_record_says_superseded_or_delivered() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut adopted = vec![];
+        for (n, kv) in [
+            (
+                "a",
+                vec![
+                    ("key", "k"),
+                    ("delivered", "1"),
+                    ("superseded", "t7r9-check-cargo-workspace3"),
+                ],
+            ),
+            ("b", vec![("key", "k"), ("delivered", "1")]),
+            ("c", vec![("key", "k"), ("delivered", "0")]),
+        ] {
+            let id = format!("t7r9-check-{n}0");
+            let kv: Vec<(&str, String)> = kv.into_iter().map(|(a, b)| (a, b.to_string())).collect();
+            write_kv(&dir.path().join(format!("{id}.check")), &kv).unwrap();
+            adopted.push((id.clone(), dir.path().join(format!("{id}.remote"))));
+        }
+        // Prefixes differ, so none is "newer"; the task's open run is this one for all.
+        let got = unwanted(&adopted, &|_| Some(9));
+        let names: Vec<String> = got
+            .iter()
+            .map(|p| p.file_stem().unwrap().to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(names, vec!["t7r9-check-a0", "t7r9-check-b0"]);
     }
 
     #[test]
