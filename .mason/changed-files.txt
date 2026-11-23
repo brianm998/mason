@@ -1,0 +1,10 @@
+.mason/run.json
+crates/cli/src/main.rs
+crates/daemon/src/http.rs
+crates/daemon/src/lib.rs
+crates/daemon/src/taskedit.rs
+crates/daemon/tests/it/main.rs
+crates/daemon/tests/it/taskedit.rs
+crates/engine/src/reducer.rs
+crates/engine/tests/behaviour.rs
+crates/engine/tests/matrix.rs
