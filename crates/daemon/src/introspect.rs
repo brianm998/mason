@@ -284,6 +284,7 @@ pub fn tick(d: &Arc<Daemon>) {
         let spawned = std::thread::Builder::new()
             .name(format!("job-{name}"))
             .spawn(move || {
+                let _caller = mason_adapter_api::github_budget::as_caller("schedule");
                 let _ = run_job(&d2, &name, &job);
                 d2.intro
                     .running

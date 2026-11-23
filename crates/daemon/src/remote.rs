@@ -1276,7 +1276,10 @@ pub fn sweep_stale_refs(d: &Arc<Daemon>) {
     LAST.store(now, std::sync::atomic::Ordering::SeqCst);
     // Off the sweep's thread: it lists the remote and asks GitHub for each ref's age.
     let d = d.clone();
-    std::thread::spawn(move || sweep_stale_refs_now(&d, now));
+    std::thread::spawn(move || {
+        let _caller = github_budget::as_caller("remote-sweep");
+        sweep_stale_refs_now(&d, now)
+    });
 }
 
 fn sweep_stale_refs_now(d: &Daemon, now: u64) {
@@ -2995,6 +2998,7 @@ pub fn reap_adopted(d: &Arc<Daemon>) {
     }
     let d = d.clone();
     std::thread::spawn(move || {
+        let _caller = github_budget::as_caller("remote-hold");
         let holds = holds_dir(&d.cfg.hosts_dir());
         let gone = d
             .world()
