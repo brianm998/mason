@@ -29,6 +29,7 @@ mason-definition = { version = "0.1.0", path = "../definition" }
 mason-engine = { version = "0.1.0", path = "../engine" }
 mason-plugins = { version = "0.1.0", path = "../plugins" }
 mason-landing = { version = "0.1.0", path = "../landing" }
+mason-onboard = { version = "0.1.0", path = "../onboard" }
 mason-protocol = { version = "0.1.0", path = "../protocol" }
 mason-resources = { version = "0.1.0", path = "../resources" }
 mason-scheduler = { version = "0.1.0", path = "../scheduler" }
