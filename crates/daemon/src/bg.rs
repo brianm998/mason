@@ -49,6 +49,12 @@ fn github_caller(loop_name: &str) -> &'static str {
         "ci-watch" => "ci-watch",
         "other-workflows" => "other-workflows",
         n if n.starts_with("landing-") => "landing",
+        // Pays CI debts (`suites::pay_ci`).
+        "debts" => "debt",
+        // Follows the dispatched run of a full-test schedule (`ci_schedule::follow`).
+        "introspect" => "schedule",
+        // Cancels runs nobody collects (`hostedcheck::stop_unwanted`).
+        "compile-watch" => "remote-hold",
         _ => "other",
     }
 }

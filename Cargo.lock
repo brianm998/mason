@@ -691,6 +691,7 @@ dependencies = [
  "mason-platform",
  "ring",
  "serde_json",
+ "tracing",
 ]
 
 [[package]]
