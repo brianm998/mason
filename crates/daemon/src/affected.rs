@@ -771,12 +771,6 @@ pub fn select_with(
                 g.unit_modules.extend(f.iter().cloned());
                 g.unit_lib = p.lib.is_some();
                 g.unit_bins = !p.bins.is_empty();
-                g.notes.push(format!(
-                    "{} lib: {} of {} modules, by name scan",
-                    p.name,
-                    f.len(),
-                    total.len()
-                ));
             }
             _ => {
                 g.lib |= p.lib.is_some();
