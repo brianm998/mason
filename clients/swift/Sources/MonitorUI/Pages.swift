@@ -1267,6 +1267,10 @@ struct StageRows: View {
                         .accessibilityIdentifier("landing:land-notice")
                 }
             }
+            if let c = model.sectionCountText(name) {
+                Text(c).font(theme.body()).foregroundStyle(theme.muted)
+                    .accessibilityIdentifier("section-count:\(name)")
+            }
             if rows.isEmpty { Text("Nothing here.").font(theme.body()).foregroundStyle(theme.muted) }
             ForEach(rows, id: \.id) { r in row(r) }
         }

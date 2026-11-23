@@ -148,6 +148,30 @@ pub const DEFAULT_GHA_CEILING: u32 = 20;
 /// The name of the ceiling in `mason resources limit` and limits.kv. It is not a pool.
 pub const GHA_CEILING: &str = "gha_ceiling";
 
+/// GitHub's macOS job limit for the free plan: a job on a `macos*` runner counts against this
+/// as well as against `gha_ceiling` (#819).
+pub const DEFAULT_GHA_MACOS_CEILING: u32 = 5;
+/// The name of the macOS ceiling in `mason resources limit` and limits.kv. It is not a pool.
+pub const GHA_MACOS_CEILING: &str = "gha_macos_ceiling";
+
+/// What the account's other workflows have on GitHub's runners, running or queued, in every
+/// repository the projects name (#819). Read by one poller; the broker only holds the numbers.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OtherJobs {
+    /// Jobs of every kind, macOS ones included.
+    pub gha: u32,
+    /// Of those, the jobs on macOS runners.
+    pub macos: u32,
+    /// A short label: `mason CI 5 running, star pr-gate 2 queued`.
+    pub label: String,
+    /// Repositories the token cannot read: their jobs are not counted.
+    pub not_counted: Vec<String>,
+    /// When the count was last read in full (ms since the epoch); 0: never.
+    pub read_at_ms: u64,
+    /// The last look failed, so the count is the one from `read_at_ms`.
+    pub stale: bool,
+}
+
 /// The default `thermal_max_c`. On 2026-11-18/19 the owner's iMac Pro sat at 90 °C or more for
 /// 647 minutes, 98 °C or more for 97 and peaked at 99.6 °C, with `pmset` reading 100 throughout.
 pub const DEFAULT_THERMAL_MAX_C: u32 = 97;
@@ -447,8 +471,8 @@ struct State {
     /// The account-wide cap on GitHub jobs (`gha_ceiling`), and the running jobs of other
     /// workflows with a short label for them (#766).
     gha_ceiling: u32,
-    other_jobs: u32,
-    other_label: String,
+    gha_macos_ceiling: u32,
+    other: OtherJobs,
     floor_mb: Option<u64>,
     /// resources.toml as read, and the gates changed since (`gates.kv`).
     base: ResourceCfg,
@@ -829,8 +853,8 @@ impl Broker {
                 fixed,
                 pools,
                 gha_ceiling: DEFAULT_GHA_CEILING,
-                other_jobs: 0,
-                other_label: String::new(),
+                gha_macos_ceiling: DEFAULT_GHA_MACOS_CEILING,
+                other: OtherJobs::default(),
                 floor_mb: cfg.memory_floor_mb,
                 base: cfg.clone(),
                 overrides: BTreeMap::new(),
@@ -914,6 +938,10 @@ impl Broker {
                             st.gha_ceiling = n;
                             continue;
                         }
+                        if name == GHA_MACOS_CEILING {
+                            st.gha_macos_ceiling = n;
+                            continue;
+                        }
                         // A saved `compile` count is the owner's word and replaces
                         // cpu.compile_jobs; the CPU and disk gates still apply.
                         let kind = kind_for(&st, name);
@@ -974,12 +1002,14 @@ impl Broker {
         }
         if name == GHA_CEILING {
             st.gha_ceiling = units;
+        } else if name == GHA_MACOS_CEILING {
+            st.gha_macos_ceiling = units;
         } else {
             let kind = kind_for(&st, name);
             st.ledger.set_capacity(name, units, kind);
             st.fixed.insert(name.to_string());
         }
-        if name == GHA_CEILING || name == GHA {
+        if name == GHA_CEILING || name == GHA_MACOS_CEILING || name == GHA || name == GHA_MACOS {
             Self::refresh_other(&mut st);
         }
         let mut lines: BTreeMap<String, u32> = std::fs::read_to_string(&self.limits_file)
@@ -999,24 +1029,23 @@ impl Broker {
         Ok(())
     }
 
-    /// Set what other workflows on the repository are running, from the Actions API (#766):
-    /// `jobs` running jobs, described by `label` ("develop CI: 7 jobs"). They count against the
-    /// `gha` pool, and the ceiling keeps MASON's share under what the account has left.
-    pub fn set_other_workflows(&self, jobs: u32, label: &str) {
+    /// Set what the account's other workflows have on GitHub's runners, running or queued
+    /// (#766, #819). They count against `gha` (and `gha-macos` for macOS jobs), and the ceilings
+    /// keep MASON's share under what the account has left.
+    pub fn set_other_jobs(&self, other: OtherJobs) {
         let mut st = lock(&self.st);
-        if st.other_jobs == jobs && st.other_label == label {
+        if st.other == other {
             return;
         }
-        st.other_jobs = jobs;
-        st.other_label = label.to_string();
+        st.other = other;
         Self::refresh_other(&mut st);
         st = self.pass(st);
         drop(st);
         self.cv.notify_all();
     }
 
-    /// Replace the two `Other` holders with what the numbers say now: the other workflows'
-    /// jobs, and the part of the `gha` limit above what the ceiling leaves after them.
+    /// Replace the `Other` holders with what the numbers say now: the other workflows' jobs, and
+    /// the part of each limit above what its ceiling leaves after them.
     fn refresh_other(st: &mut State) {
         let old: Vec<u64> = st
             .meta
@@ -1027,28 +1056,31 @@ impl Broker {
             st.ledger.release(id);
             st.meta.remove(&id);
         }
-        let limit = st.ledger.capacity(GHA).map_or(0, |c| c.units);
-        let slack = limit.saturating_sub(st.gha_ceiling);
         let now = crate::daemon::now_ms();
-        for (units, label) in [
-            (
-                st.other_jobs.min(limit),
-                if st.other_label.is_empty() {
-                    format!("other workflows: {} jobs", st.other_jobs)
-                } else {
-                    st.other_label.clone()
-                },
-            ),
-            (
-                slack.min(limit.saturating_sub(st.other_jobs.min(limit))),
-                format!("above the account ceiling of {}", st.gha_ceiling),
-            ),
+        let label = if st.other.label.is_empty() {
+            format!("other workflows: {} jobs", st.other.gha)
+        } else {
+            st.other.label.clone()
+        };
+        for (pool, jobs, ceiling) in [
+            (GHA, st.other.gha, st.gha_ceiling),
+            (GHA_MACOS, st.other.macos, st.gha_macos_ceiling),
         ] {
-            if units == 0 {
-                continue;
+            let limit = st.ledger.capacity(pool).map_or(0, |c| c.units);
+            let slack = limit.saturating_sub(ceiling);
+            for (units, label) in [
+                (jobs.min(limit), label.clone()),
+                (
+                    slack.min(limit.saturating_sub(jobs.min(limit))),
+                    format!("above the account ceiling of {ceiling}"),
+                ),
+            ] {
+                if units == 0 {
+                    continue;
+                }
+                let id = st.ledger.adopt(Needs::of(&[(pool, units)]), &label, now);
+                st.meta.insert(id, Meta::Other);
             }
-            let id = st.ledger.adopt(Needs::of(&[(GHA, units)]), &label, now);
-            st.meta.insert(id, Meta::Other);
         }
     }
 
@@ -1085,10 +1117,17 @@ impl Broker {
             .collect();
         serde_json::json!({
             "mason": used,
-            "other": st.other_jobs,
-            "other_label": st.other_label,
+            "other": st.other.gha,
+            "other_label": st.other.label,
             "ceiling": st.gha_ceiling,
             "waiters": waiters,
+            "macos": {
+                "other": st.other.macos,
+                "ceiling": st.gha_macos_ceiling,
+            },
+            "not_counted": st.other.not_counted,
+            "read_at_ms": st.other.read_at_ms,
+            "stale": st.other.stale,
         })
     }
 
@@ -3533,7 +3572,7 @@ pub(crate) fn broker_with_waiting(dir: &Path, n: u64) -> Arc<Broker> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -4497,7 +4536,7 @@ mod tests {
         }
     }
 
-    fn runner_broker(dir: &Path, gha: u32, macos: u32, cpu_pct: u32) -> Arc<Broker> {
+    pub(crate) fn runner_broker(dir: &Path, gha: u32, macos: u32, cpu_pct: u32) -> Arc<Broker> {
         let cfg = ResourceCfg {
             machine: BTreeMap::from([("compile".to_string(), 3)]),
             pools: BTreeMap::from([("gha".to_string(), gha), ("gha-macos".to_string(), macos)]),
@@ -4512,6 +4551,15 @@ mod tests {
             &[],
         )
         .unwrap()
+    }
+
+    pub(crate) fn is_held(b: &Broker, id: u64) -> bool {
+        held(b, id)
+    }
+
+    /// A request for one `gha` unit, queued as task `t`.
+    pub(crate) fn queue_gha(b: &Broker, t: u64) -> u64 {
+        queue_ranked(b, t, false, &BTreeMap::from([("gha".to_string(), 1)]))
     }
 
     fn held(b: &Broker, id: u64) -> bool {
@@ -4763,7 +4811,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let b = runner_broker(dir.path(), 16, 4, 0);
         b.set_limit("gha_ceiling", 4).unwrap();
-        b.set_other_workflows(3, "develop CI: 3 jobs");
+        b.set_other_jobs(OtherJobs {
+            gha: 3,
+            label: "develop CI: 3 jobs".into(),
+            ..Default::default()
+        });
         let first = queue_ranked(&b, 1, false, &gha(1));
         let second = queue_ranked(&b, 2, false, &gha(1));
         assert!(held(&b, first), "one unit is left under the ceiling");
@@ -4778,7 +4830,7 @@ mod tests {
             (Some(1), Some(3), Some(4))
         );
         // The other workflow's jobs finish.
-        b.set_other_workflows(0, "");
+        b.set_other_jobs(OtherJobs::default());
         assert!(held(&b, second));
         // The ceiling caps MASON at 4 units with no other jobs: first and
         // second are two, so 3 and 4 fill it and a fifth must wait.
@@ -4906,5 +4958,26 @@ mod tests {
             k,
             "t5r7-check-cargo-workspace"
         )));
+    }
+
+    #[test]
+    fn macos_jobs_of_other_workflows_count_against_both_pools_and_the_macos_ceiling() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = runner_broker(dir.path(), 16, 5, 0);
+        b.set_limit("gha_macos_ceiling", 5).unwrap();
+        b.set_other_jobs(OtherJobs {
+            gha: 2,
+            macos: 2,
+            label: "star pr-gate 2 running".into(),
+            ..Default::default()
+        });
+        let ids: Vec<u64> = (1..=4)
+            .map(|t| queue_ranked(&b, t, false, &macos_run()))
+            .collect();
+        let got = ids.iter().filter(|id| held(&b, **id)).count();
+        assert_eq!(got, 3, "MASON may take 3 gha-macos units");
+        let view = Broker::gha_view(&lock(&b.st));
+        assert_eq!(view["macos"]["other"].as_u64(), Some(2));
+        assert_eq!(view["other"].as_u64(), Some(2));
     }
 }
