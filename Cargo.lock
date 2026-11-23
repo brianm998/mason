@@ -738,6 +738,7 @@ dependencies = [
  "mason-devices",
  "mason-engine",
  "mason-landing",
+ "mason-onboard",
  "mason-platform",
  "mason-plugins",
  "mason-protocol",
