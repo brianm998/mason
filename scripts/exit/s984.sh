@@ -5,5 +5,8 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 grep -E 'sectionNames' -A2 clients/swift/Sources/MonitorCore/Navigation.swift | grep -q '"failed"'
 grep -E 'sectionNames' -A2 clients/compose/core/src/main/kotlin/mason/monitor/Navigation.kt | grep -q '"failed"'
-swift test --package-path clients/swift --filter 'MonitorCoreTests|PhoneNavTests'
+# The Swift package's test bundles do not all build on Linux (MasonMascotTests), so run it on macOS only.
+if [ "$(uname)" = Darwin ]; then
+  swift test --package-path clients/swift --filter 'MonitorCoreTests|PhoneNavTests'
+fi
 (cd clients/compose && ./gradlew :core:test)
