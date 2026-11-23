@@ -2247,6 +2247,7 @@ async fn refresh_tracker(Shared(d): Shared<Arc<Daemon>>, Path(id): Path<u64>) ->
     let v = d
         .pool
         .run(move || {
+            let _caller = mason_adapter_api::github_budget::as_caller("tracker");
             let w = d2.world().map_err(store_err)?;
             let t = w.tasks.get(&TaskId(id)).ok_or_else(|| fail(StatusCode::NOT_FOUND, format!("no task #{id}")))?;
             let pid = t.project;
