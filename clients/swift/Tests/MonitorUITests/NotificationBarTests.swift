@@ -110,11 +110,41 @@ final class NotificationBarTests: XCTestCase {
         else { return XCTFail("frames missing: \(probed.keys.sorted())") }
         XCTAssertEqual(one.height, 1, accuracy: 0.01)
         XCTAssertEqual(two.height, 1, accuracy: 0.01)
-        XCTAssertGreaterThan(t1.height, t0.height, "the middle row wraps")
+        XCTAssertEqual(t1.height, t0.height, accuracy: 1, "a long row is one line, truncated (#951)")
         XCTAssertLessThanOrEqual(t0.maxY, one.minY + 0.5)
         XCTAssertLessThanOrEqual(one.maxY, t1.minY + 0.5)
         XCTAssertLessThanOrEqual(t1.maxY, two.minY + 0.5)
         XCTAssertLessThanOrEqual(two.maxY, t2.minY + 0.5)
         XCTAssertGreaterThan(one.minY, t0.minY, "nothing above the first row")
+    }
+
+    /// #951: a row with detail has a "?" button; a short row without has none; the dialog shows
+    /// the summary, the detail and an "Open task #N" action.
+    func testDetailsButtonAndDialog() {
+        let m = MonitorModel()
+        m.connected = true
+        var ci = Mason_V1_Banner()
+        ci.kind = "ci_watch"
+        ci.text = "mason: red on the base branch, waiting for a second red run"
+        ci.detail = "mason: red on the base branch, waiting for a second red run: smoke. #42 is fixing it."
+        var short = Mason_V1_Banner()
+        short.kind = "warn"
+        short.text = "Just a note"
+        var h = HeaderView()
+        h.banners = [ci, short]
+        m.header = h
+        let ids = identifiers(laidOut(m))
+        let rows = m.notificationRows()
+        XCTAssertTrue(ids.contains("details:\(rows[0].key)"), "ids: \(ids.sorted())")
+        XCTAssertFalse(ids.contains("details:\(rows[1].key)"))
+        XCTAssertEqual(rows[0].taskNumbers, [42])
+        m.notificationDetailKey = rows[0].key
+        let view = laidOut(m)
+        _ = view
+        let host = NSHostingView(rootView: BannersView(model: m).detailSheet(rows[0])
+            .environment(\.theme, Theme(dark: false, scale: 1)))
+        host.frame = CGRect(x: 0, y: 0, width: 500, height: 400)
+        host.layoutSubtreeIfNeeded()
+        XCTAssertGreaterThan(host.fittingSize.height, 0)
     }
 }
