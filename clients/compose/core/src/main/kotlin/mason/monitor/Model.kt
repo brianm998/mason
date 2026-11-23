@@ -603,6 +603,7 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     fun tileDoubleClicked(state: String) {
         if (!connected) return
         val n = sidebar?.sections?.firstOrNull { it.state == state }?.rows?.size ?: 0
+        if (n == 0 && state == "failed") return
         if (n == 1) revealAndOpenIfOne(state) else Page.sectionPage(state)?.let { go(it) }
     }
 
