@@ -273,12 +273,9 @@ struct RowView: View, Equatable {
                 }
             }
             if !row.blockers.isEmpty {
-                HStack(spacing: theme.spacingSmall) {
-                    Text("blocked by").font(theme.small()).foregroundStyle(theme.muted)
-                    ForEach(row.blockers, id: \.self) { b in
-                        TaskLink(title: "#\(b)", font: theme.small()) { go(.task(b)) }
-                    }
-                }
+                BlockerLine(label: "blocked by", ids: row.blockers, font: theme.small(), limit: 3,
+                            moreTask: row.id) { go(.task($0)) }
+                    .accessibilityIdentifier("row:\(row.id):blocked-by")
             }
         }
         .padding(.horizontal, theme.spacing).padding(.vertical, theme.spacingSmall + 1)
