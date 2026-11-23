@@ -80,6 +80,9 @@ private fun step(model: MonitorModel): Boolean {
             Thread.sleep(50)
             if (model.lastSeq == last) quiet++ else { quiet = 0; last = model.lastSeq }
         }
+        if (model.lastViewSeq < seq) {
+            System.err.println("step: quiet exit, views at #${model.lastViewSeq}, daemon seq #$seq")
+        }
     }
     settle(model)
     return advanced
