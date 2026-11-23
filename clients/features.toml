@@ -458,7 +458,7 @@ android = "todo"
 android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.speech-queue]
-description = "A short sound, then one sentence naming the task, what is wrong and what to do; announcements queue and never overlap; 'wants a decision' and 'broke' use different sounds; muting silences sound and speech and leaves every banner and the attention count"
+description = "A short sound, then one sentence naming the task, what is wrong and what to do; announcements queue and never overlap; three or more waiting at once are read as one summary line from the daemon (`[speech] summarize_from`, default 3, 0 = off); 'wants a decision' and 'broke' use different sounds; muting silences sound and speech and leaves every banner and the attention count"
 swift = "done"
 compose = "done"
 ios = "done"
