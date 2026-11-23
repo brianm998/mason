@@ -1,0 +1,9 @@
+.github/workflows/mason-run.yml
+.mason/run.json
+crates/daemon/src/place.rs
+crates/daemon/src/remote.rs
+crates/daemon/src/sched.rs
+crates/daemon/src/suites.rs
+docs/decisions/0989-fallback-takes-a-lease-before-leaving-github.md
+docs/stages/s996.md
+scripts/exit/s996.sh
