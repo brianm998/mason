@@ -116,6 +116,11 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
     }
     if detail {
         v["body"] = json!(t.body);
+        let edits = crate::taskedit::history(d, t.id.0);
+        if let Some(last) = edits.last() {
+            v["edited"] = json!({"count": edits.len(), "at": last["at"], "who": last["who"],
+                "reason": last["reason"], "original_title": edits[0]["title"], "original_body": edits[0]["body"]});
+        }
         v["owner_notes"] = json!(crate::ownernotes::list(&d.task_dir(t.id)));
         v["priority"] = json!(format!("{:?}", t.priority).to_lowercase());
         v["attempts"] = json!(t
@@ -1359,6 +1364,35 @@ async fn task_priority(
         .await
         .map_err(pool_err)??;
     Ok(Json(json!({"ok": true, "reranked": reranked})))
+}
+
+/// `mason task edit` (owner only, task 989): the title and body of a task that has started or
+/// failed. The next step reads the new text; one already running keeps its prompt.
+async fn task_edit(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<u64>,
+    Json(b): Json<Value>,
+) -> Res {
+    let who = who_of(&headers);
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || {
+            owner_only(&d2, &who, "edit a task's text")?;
+            crate::taskedit::edit(
+                &d2,
+                &who,
+                id,
+                b["title"].as_str(),
+                b["body"].as_str(),
+                b["reason"].as_str().unwrap_or_default(),
+            )
+            .map_err(|(c, m)| fail(code(c), m))
+        })
+        .await
+        .map_err(pool_err)??;
+    Ok(Json(v))
 }
 
 fn parse_priority(name: &str) -> Result<(Priority, u8), (StatusCode, Json<Value>)> {
@@ -4196,6 +4230,7 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/tasks/{id}/explore-anyway", post(explore_anyway))
         .route("/tasks/{id}/overrides", post(task_override))
         .route("/tasks/{id}/priority", post(task_priority))
+        .route("/tasks/{id}/edit", post(task_edit))
         .route("/tasks/{id}/run_on", post(task_run_on))
         .route("/projects/{name}/definition", get(project_definition))
         .route("/projects/{name}/extensions", get(extensions_list))
