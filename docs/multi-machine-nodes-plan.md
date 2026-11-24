@@ -229,7 +229,7 @@ for the moment the owner needs the machine back right now.
 | `POST /node/jobs` `{id, project, sha, run_json, limit_s, lease_s}` | Start a job. `201 {job}`, or `409 {why}` (no room), or `412 {missing}` (sha not in the mirror). |
 | `GET /node/jobs/{id}` | `{state: running\|done\|cancelled\|lost, started_ms, ended_ms, code?}`. **Each call renews the job's lease.** |
 | `GET /node/jobs/{id}/log?from=<byte>` | Output so far, as raw bytes from the offset. This gives live counts (§3.8). |
-| `GET /node/jobs/{id}/artifact` | A tar of `output.log`, `result.json` and `results/`, with **the same members as the GitHub artifact**. |
+| `GET /node/jobs/{id}/artifact` | `{result, results: [{path, b64}]}`: what `result.json` and `results/` of the GitHub artifact hold. **Built as JSON, not a tar** (the coordinator never extracts an archive from a node); `output.log` comes from `/log`. |
 | `DELETE /node/jobs/{id}` | Cancel. |
 | `POST /node/jobs/{id}/ack` | The result was collected, so the node may delete the job directory. |
 
@@ -313,9 +313,9 @@ Write a new `node_exec.rs` that mirrors `remote::execute` (`remote.rs:1587`):
 3. While the job runs, poll `GET /node/jobs/{id}` (which also renews the lease) and tail
    `/log?from=`. Feed the live output to the same live-count hook that `hostedcheck` uses, so
    progress shows up while the job runs, which GitHub runs can't do.
-4. When it is done, fetch the artifact and extract it with the same member allow-list as
-   `read_artifact` (`remote.rs:1508`: regular files only, three named members). The tar is
-   untrusted input. Build a `Finished` with `ran_on = "ran on node studio (arm64), picked up at
+4. When it is done, fetch the artifact. Its results files are written only under plain relative
+   paths (no `..`, nothing absolute); the artifact is JSON, so nothing is extracted (the plan first
+   said a tar read with `read_artifact`'s allow-list). Build a `Finished` with `ran_on = "ran on node studio (arm64), picked up at
    once, 3 min"`, then `ack`.
 5. If `stop()` asks to stop, send `DELETE` and return `Outcome::Stopped`.
 6. If the node can't be reached for `[nodes] lost_after_polls` polls in a row (a count, not a
@@ -411,7 +411,9 @@ the local one. This is phase 3.
   - `clients/features.toml` (client parity) is protected. Agree with the owner which clients
     must get the toggle.
 - **Alerts:** "node studio went away", and "node studio incompatible". Use the existing alert
-  plumbing, and `say` only, following the owner's notification choice.
+  plumbing, and `say` only, following the owner's notification choice. *Built:* `nodes::alerts`.
+  *Not hooked up:* the alert table is `attention::alerts_now`, a protected path that §8 does not
+  list, so the one line that adds `nodes::alerts(d)` there waits for the owner's approval.
 
 ### 3.12 Security of the work machine
 
