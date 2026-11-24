@@ -756,5 +756,6 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s1038**: scripts/run-exit-scripts.sh now prints a failed script's last 40 lines and marks limit kills `(over N s)` in the `FAILED scripts:` list.
 - **s1039**: s782 now clears the inherited shard and plan variables, and the first failing assertion of s249 and s782 in run 45143216377 is still open.
 - **s1040**: check-exit-portability.sh no longer uses gawk-only `\x27` escapes, so its refusals also fire under mawk on ubuntu-latest (s669).
+- **s1042**: A step run recovered after a masond restart no longer merges the base into its worktree; a recovered test step keeps its tree so finished suites are reused.
 - **s1045**: The exit-script runner repeats each failed script's first panic or failing line as a `cause` line before the closing `FAILED scripts:` line.
 <!-- status:end -->
