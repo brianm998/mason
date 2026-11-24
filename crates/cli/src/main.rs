@@ -1200,6 +1200,12 @@ fn main() {
                     .pos()
                     .unwrap_or_else(|| die("rename it to what? mason project rename OLD NEW"));
                 finish(&a);
+                // Renaming is the owner's act: say who, as `remote` does.
+                if std::env::var("MASON_AS").is_err() {
+                    if let Ok(u) = std::env::var("USER") {
+                        std::env::set_var("MASON_AS", u);
+                    }
+                }
                 let r = or_die(d.call(
                     "POST",
                     &format!("/projects/{old}/rename"),
