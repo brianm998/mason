@@ -13,16 +13,17 @@ for t in bash env git mktemp rm cat tee sleep kill pkill pgrep awk sed grep head
 done
 echo "== a passing script returns at once"
 printf '#!/usr/bin/env bash\necho fast OK\n' > "$tmp/fx/s11.sh"
-env MASON_EXIT_SCRIPT_LIMIT_S=600 PATH="$tmp/bin" MASON_EXIT_DIR="$tmp/fx" MASON_EXIT_WEIGHTS=/dev/null \
+env -u MASON_EXIT_SHARD -u MASON_EXIT_PLAN MASON_EXIT_SCRIPT_LIMIT_S=600 PATH="$tmp/bin" MASON_EXIT_DIR="$tmp/fx" MASON_EXIT_WEIGHTS=/dev/null \
   bash scripts/run-exit-scripts.sh >"$tmp/out1" 2>&1 || { cat "$tmp/out1"; echo "FAILED: fast script" >&2; exit 1; }
+grep -q 'fast OK' "$tmp/out1" || { cat "$tmp/out1"; echo "FAILED: the fixture did not run" >&2; exit 1; }
 
 echo "== a script over the limit is killed with its children"
 marker=s1076-marker-$$
 printf '#!/usr/bin/env bash\nbash -c "sleep 600 # %s"\n' "$marker" > "$tmp/fx/s11.sh"
 rc=0
-env MASON_EXIT_SCRIPT_LIMIT_S=1 PATH="$tmp/bin" MASON_EXIT_DIR="$tmp/fx" MASON_EXIT_WEIGHTS=/dev/null \
+env -u MASON_EXIT_SHARD -u MASON_EXIT_PLAN MASON_EXIT_SCRIPT_LIMIT_S=1 PATH="$tmp/bin" MASON_EXIT_DIR="$tmp/fx" MASON_EXIT_WEIGHTS=/dev/null \
   bash scripts/run-exit-scripts.sh >"$tmp/out2" 2>&1 || rc=$?
-[ "$rc" -eq 1 ] || { cat "$tmp/out2"; echo "FAILED: expected exit 1, got $rc" >&2; exit 1; }
+[ "$rc" -eq 1 ] || { ls -l "$tmp/bin" "$tmp/fx"; cat "$tmp/out2"; echo "FAILED: expected exit 1, got $rc" >&2; exit 1; }
 grep -q '(over 1 s)' "$tmp/out2" || { cat "$tmp/out2"; echo "FAILED: no over-limit message" >&2; exit 1; }
 if pgrep -f "$marker" >/dev/null 2>&1; then
   pkill -f "$marker" || true
