@@ -85,6 +85,15 @@ struct TopBar: View {
                 .labelsHidden()
                 .frame(width: 120 * min(CGFloat(theme.scale), 1.4))
                 .onChange(of: model.project) { _, _ in model.subscribe?() }
+
+                #if os(macOS)
+                // Desktop only: the iOS app shares this view and offers no way to add a project.
+                if model.canAddProject {
+                    Button { model.openAddProject() } label: { Image(systemName: "plus") }
+                        .buttonStyle(.bordered)
+                        .touchTarget().hint("Add a project").accessibilityIdentifier("add-project")
+                }
+                #endif
             }
 
             TopBarUsage(model: model)
@@ -128,6 +137,11 @@ struct TopBar: View {
         .background(theme.surface)
         .sheet(isPresented: $adding) { AddTaskSheet(model: model, isPresented: $adding) }
         .sheet(isPresented: $improving) { ImproveSheet(model: model, isPresented: $improving) }
+        #if os(macOS)
+        .sheet(isPresented: Binding(get: { model.addProject != nil }, set: { if !$0 { model.closeAddProject() } })) {
+            AddProjectSheet(model: model)
+        }
+        #endif
     }
 }
 

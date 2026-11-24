@@ -424,7 +424,13 @@ pub fn make_remote(
     spec.suite = "covmap".into();
     spec.results_file = Some(RESULTS.into());
     let spec = rm::with_site_env(spec, site);
-    let out = match rm::execute(site, &spec, log_dir, stop) {
+    let out = match rm::execute(
+        site,
+        &spec,
+        log_dir,
+        stop,
+        &rm::Grant::unplumbed("covmap: a background run outside the pipeline's slots"),
+    ) {
         Ok(o) => o,
         Err(rm::Fail::Environmental(e)) | Err(rm::Fail::Error(e)) => return Err(e),
     };
