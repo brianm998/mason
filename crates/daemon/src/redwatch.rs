@@ -163,8 +163,20 @@ pub fn held_text(held: &[(u64, String)]) -> Option<String> {
 /// The condition alerts: tasks held by a red develop while that is true, and a task still
 /// behind a fix half an hour after it was told.
 pub fn alerts(d: &Daemon) -> Vec<(String, String, String)> {
-    let Ok(w) = d.world() else { return vec![] };
-    let mut out = vec![];
+    alerts_at(d, now_ms())
+}
+
+/// A task whose last check's failures are all red on develop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Held {
+    pub suite: String,
+    pub tests: Vec<String>,
+    pub fix: Option<u64>,
+}
+
+/// The tasks held by a red develop: developing, and every test their last check of a suite
+/// failed is red on develop (in the newest baseline that says anything of it). Keyed by task.
+pub fn held(d: &Daemon, w: &mason_engine::World, now: u64) -> BTreeMap<u64, Held> {
     let red = |suite: &str, test: &str| {
         d.store
             .latest_baseline(suite)
@@ -172,24 +184,65 @@ pub fn alerts(d: &Daemon) -> Vec<(String, String, String)> {
             .flatten()
             .is_some_and(|(_, r)| r.iter().any(|t| t == test))
     };
-    let held: Vec<(u64, String)> = d
+    let mut by: BTreeMap<(u64, String), Vec<String>> = BTreeMap::new();
+    for (task, suite, test, _) in d
         .store
-        .red_sightings_since(now_ms().saturating_sub(WINDOW_MS))
+        .red_sightings_since(now.saturating_sub(WINDOW_MS))
         .unwrap_or_default()
+    {
+        if w.tasks
+            .get(&TaskId(task))
+            .is_some_and(|t| t.state == State::Developing)
+        {
+            by.entry((task, suite)).or_default().push(test);
+        }
+    }
+    let mut out: BTreeMap<u64, Held> = BTreeMap::new();
+    for ((task, suite), tests) in by {
+        if !tests.iter().all(|t| red(&suite, t)) {
+            continue;
+        }
+        let head = format!("`{suite}` is red on ");
+        let fix = w
+            .tasks
+            .values()
+            .filter(|t| !t.state.is_terminal() && t.title.starts_with(&head))
+            .map(|t| t.id.0)
+            .min();
+        let e = out.entry(task).or_insert_with(|| Held {
+            suite: suite.clone(),
+            tests: vec![],
+            fix,
+        });
+        e.tests.extend(tests);
+    }
+    out
+}
+
+/// What a task held by a red develop is waiting for, as its wait line.
+pub fn held_sentence(h: &Held) -> String {
+    format!(
+        "`{}` is red on develop: {} fail{} in your checks and on develop too{}",
+        h.suite,
+        h.tests.join(", "),
+        if h.tests.len() == 1 { "s" } else { "" },
+        h.fix
+            .map_or(String::new(), |t| format!("; the fix is task #{t}")),
+    )
+}
+
+/// [`alerts`] on a given clock.
+pub fn alerts_at(d: &Daemon, now: u64) -> Vec<(String, String, String)> {
+    let Ok(w) = d.world() else { return vec![] };
+    let mut out = vec![];
+    let held: Vec<(u64, String)> = held(d, &w, now)
         .into_iter()
-        .filter(|(task, suite, test, _)| {
-            w.tasks
-                .get(&TaskId(*task))
-                .is_some_and(|t| t.state == State::Developing)
-                && red(suite, test)
-        })
-        .map(|(task, _, test, _)| (task, test))
+        .flat_map(|(t, h)| h.tests.into_iter().map(move |x| (t, x)))
         .collect();
     if let Some(text) = held_text(&held) {
         out.push(("red-develop".to_string(), "landing".to_string(), text));
     }
     let pending = d.store.red_fix_pending().unwrap_or_default();
-    let now = now_ms();
     let ids: Vec<(u64, u64)> = pending.iter().map(|p| (p.0, p.4)).collect();
     let late = overdue(&ids, now);
     out.extend(
@@ -236,13 +289,12 @@ fn deliver(
     pid: mason_core::ProjectId,
     suite: &str,
     tests: &[String],
-    old: &str,
-    new: &str,
+    (old, new): (&str, &str),
     only: Option<&[u64]>,
+    now: u64,
 ) {
     let Some(p) = d.project(pid) else { return };
     let base = p.base_ref();
-    let now = now_ms();
     let sightings = d.store.red_sightings_since(0).unwrap_or_default();
     let live = developing(d, pid);
     for task in live {
@@ -326,7 +378,7 @@ fn probe(
     let log_dir = d.cfg.worktrees_dir().join(&p.id).join("redwatch-logs");
     let result = (|| {
         crate::jobs::setup_checkout(&def, &wt).ok()?;
-        let spec = crate::hostedcheck::CheckSpec {
+        let mut spec = crate::hostedcheck::CheckSpec {
             id_prefix: format!("redwatch-{}-{}", suite.name, short(tip)),
             log_dir: log_dir.clone(),
             cmd,
@@ -341,11 +393,38 @@ fn probe(
             place: None,
             global: true,
         };
-        let o = crate::hostedcheck::run(d, &spec).ok()?;
-        if o.stopped.is_some() {
-            return None;
+        // Placed as any run is (the project's mode, through the one function that decides): a
+        // run bound for GitHub waits in the broker for its runner units and is pushed once they
+        // are granted, behind every ranked request; one that runs here takes the suite's slots
+        // as owed work. Nothing runs outside the queue.
+        let units = crate::hostedcheck::pool_units(d, &spec)
+            .filter(|_| !crate::hostedcheck::pending(d, &spec));
+        let mut uses = suite.uses.clone();
+        if suite.build.is_some() {
+            *uses
+                .entry(mason_scheduler::COMPILE.to_string())
+                .or_insert(0) += 1;
         }
-        let failing = crate::rerun::failing_names(&o.full);
+        let local = units.is_none();
+        let ask = units.unwrap_or_else(|| uses.clone());
+        let lease = crate::remote::fallback_lease(d, &p.id, None, &ask, &spec.label).ok()?;
+        // Bound for GitHub the lease is the push's grant; here it is held while the run lasts.
+        let (_slots, grant) = if local {
+            (lease, crate::remote::Grant::attached())
+        } else {
+            (
+                None,
+                lease.map_or_else(crate::remote::Grant::attached, crate::remote::Grant::of),
+            )
+        };
+        spec.holds = if local { uses } else { Default::default() };
+        let o = crate::hostedcheck::run(d, &spec, &grant).ok()?;
+        drop(grant);
+        // Only the tests asked for count: a run that named others proves nothing about them.
+        let failing: Vec<String> = crate::rerun::failing_names(&o.full)
+            .into_iter()
+            .filter(|f| tests.contains(f))
+            .collect();
         // A run that did not run the tests, or that failed without naming one, proves nothing
         // about them either way.
         if o.passed {
@@ -396,6 +475,11 @@ fn file_once(d: &Arc<Daemon>, pid: mason_core::ProjectId, suite: &str, tip: &str
 
 /// One pass over every project.
 pub fn pass(d: &Arc<Daemon>) {
+    pass_at(d, now_ms());
+}
+
+/// [`pass`] on a given clock.
+pub fn pass_at(d: &Arc<Daemon>, now: u64) {
     for (pid, p) in d.projects() {
         let Ok(tip) = git::rev_parse(&p.path, &p.base_ref()) else {
             continue;
@@ -407,7 +491,6 @@ pub fn pass(d: &Arc<Daemon>) {
             .into_iter()
             .cloned()
             .collect();
-        let now = now_ms();
         // 1 and 2: a stale red baseline, and the tasks it held up.
         for suite in &suites {
             let Some((base, red)) = d.store.latest_baseline(&suite.name).ok().flatten() else {
@@ -421,10 +504,10 @@ pub fn pass(d: &Arc<Daemon>) {
             };
             let _ = d
                 .store
-                .put_partial_baseline(&tip, &suite.name, &failing, &red, now_ms());
+                .put_partial_baseline(&tip, &suite.name, &failing, &red, now);
             let ok = fixed(&red, &failing);
             if !ok.is_empty() {
-                deliver(d, pid, &suite.name, &ok, &base, &tip, None);
+                deliver(d, pid, &suite.name, &ok, (&base, &tip), None, now);
             }
         }
         // 3: the same unexplained failure in several tasks.
@@ -464,11 +547,11 @@ pub fn pass(d: &Arc<Daemon>) {
             };
             let _ = d
                 .store
-                .put_partial_baseline(&tip, &s.suite, &failing, &one, now_ms());
+                .put_partial_baseline(&tip, &s.suite, &failing, &one, now);
             if failing.contains(&s.test) {
                 file_once(d, pid, &s.suite, &tip, &s.test);
             } else {
-                deliver(d, pid, &s.suite, &one, "", &tip, Some(&s.tasks));
+                deliver(d, pid, &s.suite, &one, ("", &tip), Some(&s.tasks), now);
             }
         }
     }

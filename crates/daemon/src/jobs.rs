@@ -2356,6 +2356,10 @@ impl TestChecks {
                                 return r;
                             }
                         }
+                        // develop was folded in under the build: made again on the new tree.
+                        if stopped_by_fold(&res) {
+                            return self.run_suites(dev, scope, light);
+                        }
                         let ok = matches!(&res, Ok(o) if o.passed);
                         if !ok {
                             lines.push(match &res {
@@ -2448,6 +2452,12 @@ impl TestChecks {
                 if let Some(r) = self.skipped_run(&name) {
                     return r;
                 }
+            }
+            // develop was folded in under a run that began before it: that answer is about the
+            // old tree, so it is dropped and the check is made again on the new one (#1023). The
+            // agent sees one result.
+            if stopped_by_fold(&res) {
+                return self.run_suites(dev, scope, light);
             }
             match &res {
                 Ok(o) if o.passed => {
@@ -2732,10 +2742,17 @@ impl TestChecks {
             self.slots.test_step.clone(),
         );
         let suite = suite.to_string();
+        // Also stopped when the red-develop watch folds develop in under the run (#1023).
+        let folds = d.store.red_folds(task.0).unwrap_or(0);
         Arc::new(move || {
-            let step = step.as_deref()?;
-            crate::suites::skip_for(&d, task, &suite, step)
-                .map(|debt| format!("skipped by the owner (debt #{debt})"))
+            let skipped = step.as_deref().and_then(|step| {
+                crate::suites::skip_for(&d, task, &suite, step)
+                    .map(|debt| format!("skipped by the owner (debt #{debt})"))
+            });
+            skipped.or_else(|| {
+                (d.store.red_folds(task.0).unwrap_or(folds) != folds)
+                    .then(|| FOLDED_STOP.to_string())
+            })
         })
     }
 
@@ -3024,6 +3041,9 @@ impl TestChecks {
         });
         drop(grant);
         self.slots.take_agent_slot_back();
+        if stopped_by_fold(&res) {
+            return self.check_unskipped(name, scope, light);
+        }
         // The build ran inside this run: what it says of the build is recorded for the tree.
         if let (Some(build), Ok(o), Some(t)) = (&folded, &res, &ctree) {
             let bk = crate::cmdreuse::build_key(build);
@@ -3165,6 +3185,14 @@ fn credit_remote_wait<T>(
     credit_wait_with(&|d| extra.add_remote(d), every, wait)
 }
 
+/// The stop note of a check that ran on a tree from before develop was folded in (#1023).
+const FOLDED_STOP: &str = "stopped: develop was merged into your branch while the check ran";
+
+/// Was this run stopped because the red-develop watch folded develop in under it?
+fn stopped_by_fold(res: &Result<crate::hostedcheck::CheckOutcome, String>) -> bool {
+    matches!(res, Ok(o) if o.stopped.as_deref() == Some(FOLDED_STOP))
+}
+
 /// The note a check's stop hook gives (#823): `Some` once the task's open run is no longer the
 /// check's own (`open` is `Some(false)`); `None` while it is open or the world cannot be read.
 fn run_over_note(open: Option<bool>, task: u64) -> Option<String> {
@@ -3199,11 +3227,19 @@ impl CheckSlots {
     /// GitHub is cancelled then and not left holding a runner until a restart.
     fn run_over(&self) -> crate::hostedcheck::StopFn {
         let (d, task, run) = (self.d.clone(), self.task, self.run);
+        // The folds of the red-develop watch when this run was set up: one more means develop was
+        // merged into the tree under a run that started before it (#1023), so the run is stopped
+        // and made again on the folded tree.
+        let folds = d.store.red_folds(task.0).unwrap_or(0);
         std::sync::Arc::new(move || {
             run_over_note(
                 d.world().map(|w| w.open_run(task) == Some(run)).ok(),
                 task.0,
             )
+            .or_else(|| {
+                (d.store.red_folds(task.0).unwrap_or(folds) != folds)
+                    .then(|| FOLDED_STOP.to_string())
+            })
         })
     }
 

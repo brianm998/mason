@@ -2031,9 +2031,9 @@ impl Store {
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                 )
                 .optional()?;
-            let Some((base, failing, at)) = whole else {
-                return Ok(None);
-            };
+            // With no whole-suite row, partial rows alone still say what they found red (a test
+            // seen failing at the tip by the red-develop watch); they are never a whole suite.
+            let (base, failing, at) = whole.unwrap_or_else(|| (String::new(), String::new(), -1));
             let mut red: Vec<String> = failing.lines().map(str::to_string).collect();
             let mut shown = base;
             let mut st = c.prepare(
@@ -2063,7 +2063,7 @@ impl Store {
                     shown = pbase;
                 }
             }
-            Ok(Some((shown, red)))
+            Ok((!shown.is_empty()).then_some((shown, red)))
         })
     }
 

@@ -27,7 +27,15 @@ Decision:
 - Home's alert list says "N tasks held by a red develop (tests)" while a developing task's last
   check failed a test that is red on develop.
 - A check waiting for slots when such a merge happens builds its spec again on the folded tree:
-  `TestChecks::merges` adds the watch's folds (`red_folds`) to the session's own.
+  `TestChecks::merges` adds the watch's folds (`red_folds`) to the session's own. A check that is
+  already running on the old tree is stopped by its stop hook once the fold count changes and is
+  made again on the folded tree, so the agent gets one result.
+- The probe is placed as any run is and queued as any run is: a run bound for GitHub takes its
+  runner units from the broker, ranked as owed work, before it is pushed; one that runs here takes
+  the suite's slots the same way. It does not bypass the ranked queue.
+- A developing task whose last check failed only tests that are red on develop shows the wait
+  class `base-red` in the task view and the sidebar, with the test names and the fix task. It is a
+  view over the sightings, not a recorded wait, so it does not enter the wait totals.
 
 Why it is safe: no test is skipped, excused or weakened; a develop-red test still runs in every
 check and still fails it. Only what the agent is told and when its branch catches up change. The

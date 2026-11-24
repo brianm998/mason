@@ -1287,6 +1287,34 @@ fn a_partial_baseline_that_passes_a_test_takes_it_off_develops_reds() {
 }
 
 #[test]
+fn a_partial_baseline_alone_names_what_it_found_red_and_is_not_a_whole_suite() {
+    let (_d, p) = db();
+    let s = Store::open(&p).unwrap();
+    let t = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    // Nothing at all: nothing is red on develop.
+    assert_eq!(s.latest_baseline("cargo").unwrap(), None);
+    // A test found passing says nothing by itself.
+    s.put_partial_baseline("A", "cargo", &[], &t(&["x"]), 10)
+        .unwrap();
+    assert_eq!(s.latest_baseline("cargo").unwrap(), None);
+    // A test found red at the tip is red on develop there, with no whole baseline at all.
+    s.put_partial_baseline("B", "cargo", &t(&["y"]), &t(&["y"]), 20)
+        .unwrap();
+    assert_eq!(
+        s.latest_baseline("cargo").unwrap(),
+        Some(("B".to_string(), t(&["y"])))
+    );
+    assert!(s.baseline("B", "cargo").unwrap().is_none());
+    // A later partial that passes it clears it again.
+    s.put_partial_baseline("C", "cargo", &[], &t(&["y"]), 30)
+        .unwrap();
+    assert_eq!(
+        s.latest_baseline("cargo").unwrap(),
+        Some(("C".to_string(), vec![]))
+    );
+}
+
+#[test]
 fn red_sightings_notes_folds_and_pending_fixes_are_kept() {
     let (_d, p) = db();
     let s = Store::open(&p).unwrap();

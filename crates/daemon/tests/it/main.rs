@@ -76,6 +76,7 @@ mod protocol;
 mod pty;
 mod push_auth;
 mod red_base;
+mod red_develop;
 mod registration;
 mod remote_runs;
 mod rename;
