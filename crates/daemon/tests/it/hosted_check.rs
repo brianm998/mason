@@ -7,7 +7,7 @@
 //! limit is enforced from the host's start.
 
 use crate::support;
-use mason_daemon::hostedcheck::{pending, run, CheckSpec};
+use mason_daemon::hostedcheck::{answered, hold_results, pending, run, CheckSpec};
 use serde_json::json;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -353,4 +353,65 @@ fn a_check_id_names_its_task_and_run() {
     assert_eq!(check_owner("t0r1-check0"), Some((0, 1)));
     assert_eq!(check_owner("b3-retest0"), None);
     assert_eq!(check_owner("t5r7-1"), None);
+}
+
+#[test]
+fn a_held_result_is_reused_by_a_replay_until_the_agent_has_the_answer() {
+    // A takeover cuts a `run_check` call off after one suite finished. The replay of the call
+    // takes that suite's result instead of running it again, and the other suite likewise;
+    // once the agent has the answer, a new call on the same tree runs them again (#1051).
+    let s = Scratch::new("true", happy_script());
+    let d = s.start();
+    let work = tempfile::tempdir().unwrap();
+    let (ma, mb) = (work.path().join("a"), work.path().join("b"));
+    let suite = |prefix: &str, marker: &Path| {
+        let mut sp = spec(
+            &d,
+            work.path(),
+            &format!("echo x >> {}; echo done", marker.display()),
+            "tree-a",
+            60,
+        );
+        sp.id_prefix = prefix.into();
+        sp
+    };
+    let (a, b) = (suite("t3r4-check-a", &ma), suite("t3r4-check-b", &mb));
+    let call = || {
+        let _hold = hold_results(3, 4);
+        let ra = run(&d, &a).unwrap();
+        let rb = run(&d, &b).unwrap();
+        (ra.id, rb.id)
+    };
+    let first = call();
+    assert!(
+        pending(&d, &a),
+        "finished, not yet answered: a replay takes it"
+    );
+    let replay = call();
+    assert_eq!(first, replay, "the replay took both results");
+    assert_eq!((lines(&ma), lines(&mb)), (1, 1), "each ran once");
+    answered(3, 4);
+    assert!(!pending(&d, &a), "answered: nothing left to take");
+    let again = call();
+    assert_ne!(first, again, "a new call on the same tree runs again");
+    assert_eq!((lines(&ma), lines(&mb)), (2, 2));
+}
+
+#[test]
+fn a_call_without_a_hold_delivers_at_once_as_before() {
+    let s = Scratch::new("true", happy_script());
+    let d = s.start();
+    let work = tempfile::tempdir().unwrap();
+    let marker = work.path().join("ran");
+    let sp = spec(
+        &d,
+        work.path(),
+        &format!("echo x >> {}", marker.display()),
+        "tree-a",
+        60,
+    );
+    let r1 = run(&d, &sp).unwrap();
+    let r2 = run(&d, &sp).unwrap();
+    assert_ne!(r1.id, r2.id);
+    assert_eq!(lines(&marker), 2);
 }

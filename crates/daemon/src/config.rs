@@ -111,6 +111,8 @@ pub struct DaemonConfig {
     pub idle_end_h: u64,
     /// The pipeline health check (`[health]` in `daemon.toml`, s432).
     pub health: HealthCfg,
+    /// Where Add Project looks for repositories (`[onboarding] roots` in `daemon.toml`).
+    pub onboarding: OnboardingCfg,
     /// The commit of the runtime this process is (set when started from
     /// `runtimes/<sha>/`); `None` when run from a build directory.
     pub runtime_sha: Option<String>,
@@ -373,6 +375,84 @@ pub fn parse_idle_end_h(text: &str) -> Result<Option<u64>, String> {
     }
 }
 
+/// `[onboarding]` in `daemon.toml`: the directories whose children Add Project offers.
+///
+/// ```toml
+/// [onboarding]
+/// roots = ["~/git"]
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OnboardingCfg {
+    /// Each root with `~` already expanded to the home directory.
+    pub roots: Vec<PathBuf>,
+}
+
+impl Default for OnboardingCfg {
+    fn default() -> Self {
+        OnboardingCfg {
+            roots: vec![expand_home("~/git", &home_dir())],
+        }
+    }
+}
+
+fn home_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default()
+}
+
+/// `~` and `~/x` mean the home directory; anything else is taken as written.
+pub fn expand_home(p: &str, home: &Path) -> PathBuf {
+    if p == "~" {
+        home.to_path_buf()
+    } else if let Some(rest) = p.strip_prefix("~/") {
+        home.join(rest)
+    } else {
+        PathBuf::from(p)
+    }
+}
+
+/// `[onboarding]`: `roots`, a list of directories (`~` expanded against `home`).
+pub fn parse_onboarding(text: &str, home: &Path) -> Result<OnboardingCfg, String> {
+    let doc: toml_edit::DocumentMut = text.parse().map_err(|e| format!("daemon.toml: {e}"))?;
+    let mut c = OnboardingCfg {
+        roots: vec![expand_home("~/git", home)],
+    };
+    let Some(t) = doc.get("onboarding") else {
+        return Ok(c);
+    };
+    let t = t
+        .as_table_like()
+        .ok_or("daemon.toml: [onboarding] must be a table")?;
+    for (k, v) in t.iter() {
+        match k {
+            "roots" => {
+                let bad =
+                    "daemon.toml: onboarding.roots must be a list of directories, e.g. [\"~/git\"]";
+                let arr = v.as_array().ok_or(bad)?;
+                c.roots.clear();
+                for e in arr.iter() {
+                    let r = e.as_str().filter(|r| !r.trim().is_empty()).ok_or(bad)?;
+                    let r = expand_home(r.trim(), home);
+                    if !c.roots.contains(&r) {
+                        c.roots.push(r);
+                    }
+                }
+            }
+            other => return Err(format!("daemon.toml: unknown setting onboarding.{other}")),
+        }
+    }
+    Ok(c)
+}
+
+pub fn load_onboarding(config_dir: &Path) -> Result<OnboardingCfg, String> {
+    match std::fs::read_to_string(config_dir.join("daemon.toml")) {
+        Ok(t) => parse_onboarding(&t, &home_dir()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(OnboardingCfg::default()),
+        Err(e) => Err(format!("daemon.toml: {e}")),
+    }
+}
+
 /// `[health]` in `daemon.toml`: how often the pipeline checks itself and its thresholds.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HealthCfg {
@@ -459,7 +539,7 @@ pub fn parse_daemon_port(text: &str) -> Result<Option<u16>, String> {
     let doc: toml_edit::DocumentMut = text.parse().map_err(|e| format!("daemon.toml: {e}"))?;
     let mut port = None;
     for (key, item) in doc.iter() {
-        if key == "lan" || key == "targets" || key == "sessions" {
+        if key == "lan" || key == "targets" || key == "sessions" || key == "onboarding" {
             continue; // read by `parse_lan` and `parse_targets`
         }
         let table = item
@@ -566,6 +646,7 @@ impl DaemonConfig {
                 .unwrap_or_else(|_| "owner".into())],
             idle_end_h: DEFAULT_IDLE_END_H,
             health: HealthCfg::default(),
+            onboarding: OnboardingCfg::default(),
         }
     }
 
@@ -633,6 +714,10 @@ pub struct ProjectCfg {
     /// Run a diagnosis session for a task that fails on its own code (`diagnose`, default true;
     /// s250).
     pub diagnose: bool,
+    /// The model of the diagnosis session (`diagnose_model`), if the registration names one.
+    pub diagnose_model: Option<String>,
+    /// Its effort (`diagnose_effort`), one of the provider's efforts.
+    pub diagnose_effort: Option<String>,
     /// Retry a failure outside the code by itself (`auto_retry`, default true; s247).
     pub auto_retry: bool,
     /// Test rounds before the task fails, if the overlay sets one (layer 3).
@@ -1358,6 +1443,14 @@ impl ProjectCfg {
             ("test_reruns", self.test_reruns.to_string()),
             ("auto_retry", self.auto_retry.to_string()),
             ("diagnose", self.diagnose.to_string()),
+            (
+                "diagnose_model",
+                self.diagnose_model.clone().unwrap_or_default(),
+            ),
+            (
+                "diagnose_effort",
+                self.diagnose_effort.clone().unwrap_or_default(),
+            ),
             ("priority_jump", self.priority_jump.to_string()),
             ("reuse_green", self.reuse_green.to_string()),
         ]
@@ -1412,6 +1505,30 @@ pub fn parse_project(id: &str, text: &str) -> Result<ProjectCfg, String> {
         ));
     }
     let agent = parse_agent(id, &doc)?;
+    let diagnose_model = match doc.get("diagnose_model") {
+        None => None,
+        Some(v) => match v.as_str().map(str::trim).filter(|m| !m.is_empty()) {
+            Some(m) => Some(m.to_string()),
+            None => return Err(format!("{id}: `diagnose_model` must be a non-empty string")),
+        },
+    };
+    let diagnose_effort = match doc.get("diagnose_effort") {
+        None => None,
+        Some(v) => {
+            let efforts = crate::tiermap::effort_levels(agent.provider);
+            match v.as_str() {
+                Some(e) if efforts.iter().any(|x| x == e) => Some(e.to_string()),
+                Some(e) => {
+                    return Err(mason_definition::tiers::bad_effort(
+                        &format!("{id}: `diagnose_effort`"),
+                        e,
+                        &efforts,
+                    ))
+                }
+                None => return Err(format!("{id}: `diagnose_effort` must be a string")),
+            }
+        }
+    };
     crate::proposals::parse_cfg(id, &doc)?;
     crate::introspect::parse_cfg(id, &doc)?;
     crate::schedule::parse(id, &doc)?;
@@ -1446,6 +1563,8 @@ pub fn parse_project(id: &str, text: &str) -> Result<ProjectCfg, String> {
             .get("diagnose")
             .and_then(|v| v.as_bool())
             .unwrap_or(true),
+        diagnose_model,
+        diagnose_effort,
         auto_retry: doc
             .get("auto_retry")
             .and_then(|v| v.as_bool())
@@ -2017,6 +2136,19 @@ mod tests {
     #[test]
     fn lan_is_off_by_default_and_bad_values_name_the_file() {
         use super::{parse_lan, LanCfg};
+        let h = std::path::Path::new("/h");
+        assert_eq!(
+            super::parse_onboarding("", h).unwrap().roots,
+            [std::path::PathBuf::from("/h/git")]
+        );
+        assert_eq!(
+            super::parse_onboarding("[onboarding]\nroots = [\"~\", \"/a\", \"~/x\"]\n", h)
+                .unwrap()
+                .roots,
+            ["/h", "/a", "/h/x"].map(std::path::PathBuf::from)
+        );
+        assert!(super::parse_onboarding("[onboarding]\nroots = \"x\"\n", h).is_err());
+        assert!(super::parse_onboarding("[onboarding]\nfoo = 1\n", h).is_err());
         assert_eq!(parse_lan("").unwrap(), LanCfg::default());
         assert!(!LanCfg::default().enabled);
         assert_eq!(
