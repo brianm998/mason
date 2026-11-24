@@ -102,6 +102,35 @@ pub fn parse_speed_limit(text: &str) -> Option<u32> {
     })
 }
 
+/// The macOS thermal pressure level from `notifyutil -g com.apple.system.thermalpressurelevel`
+/// (0 nominal, 1 light, 2 moderate, 3 heavy, 4 sleeping). Apple Silicon Macs have no SMC die
+/// key of the Intel layout this module reads, so a node there is judged by this level too.
+pub fn parse_pressure_level(text: &str) -> Option<u32> {
+    text.lines().find_map(|l| {
+        let (k, v) = l.split_once(' ')?;
+        (k.trim() == "com.apple.system.thermalpressurelevel").then(|| v.trim().parse().ok())?
+    })
+}
+
+/// A pressure level at which a node takes no new work: "heavy" or worse.
+pub const PRESSURE_HOT: u32 = 3;
+
+/// The current thermal pressure level, `None` off macOS or if `notifyutil` says nothing.
+pub fn pressure_level() -> Option<u32> {
+    #[cfg(target_os = "macos")]
+    {
+        let o = std::process::Command::new("/usr/bin/notifyutil")
+            .args(["-g", "com.apple.system.thermalpressurelevel"])
+            .output()
+            .ok()?;
+        parse_pressure_level(&String::from_utf8_lossy(&o.stdout))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
 /// The lowest reading within the last `hold_ms`, from `(ms, pct)` samples, oldest first.
 pub fn held_low(samples: &VecDeque<(u64, u32)>, now_ms: u64, hold_ms: u64) -> Option<u32> {
     samples
@@ -479,6 +508,20 @@ mod tests {
                  \tCPU_Speed_Limit \t= 27\n";
         assert_eq!(parse_speed_limit(t), Some(27));
         assert_eq!(parse_speed_limit("nothing here\n"), None);
+    }
+
+    #[test]
+    fn the_pressure_level_is_read_from_notifyutil() {
+        assert_eq!(
+            parse_pressure_level("com.apple.system.thermalpressurelevel 1\n"),
+            Some(1)
+        );
+        assert_eq!(
+            parse_pressure_level("com.apple.system.thermalpressurelevel 3"),
+            Some(3)
+        );
+        assert_eq!(parse_pressure_level("other 3\n"), None);
+        assert_eq!(parse_pressure_level(""), None);
     }
 
     #[test]

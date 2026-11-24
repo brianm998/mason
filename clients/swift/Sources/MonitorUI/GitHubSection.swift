@@ -3,7 +3,7 @@
 import MonitorCore
 import SwiftUI
 
-/// Home's GitHub section (#767): every run MASON has on GitHub, full width under CPU and Disk.
+/// Home's Remote runs section (#767): every run MASON has on GitHub or on a node, full width under CPU and Disk.
 /// The page (`mason://section/github`) adds every shard's job.
 struct GitHubSection: View {
     @Environment(\.theme) var theme
@@ -13,7 +13,7 @@ struct GitHubSection: View {
     var detail = false
 
     var body: some View {
-        section("GitHub", theme: theme, open: open) {
+        section("Remote runs", theme: theme, open: open) {
             Text(GitHubRuns.header(g)).font(theme.body()).foregroundStyle(theme.muted)
                 .accessibilityIdentifier("github:header")
             if g.runs.isEmpty {
