@@ -461,6 +461,37 @@ impl BuildSystemAdapter for CommandCi {
         Ok(parse_status(&out))
     }
 
+    /// A pending answer may list its jobs: `running: a, b` and `queued: 2` lines after
+    /// `pending`. Reporting only (the stuck-run alert reads it).
+    fn status_detail(&self, run: &str) -> Result<(CiState, Vec<CiRunJobs>), ApiError> {
+        let out = self.run(&self.status, &[("MASON_RUN", run)])?;
+        let state = parse_status(&out);
+        if state != CiState::Pending {
+            return Ok((state, vec![]));
+        }
+        let mut jobs = CiJobCounts::default();
+        for l in out.lines().skip(1) {
+            if let Some(names) = l.trim().strip_prefix("running:") {
+                for n in names.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+                    jobs.add(n, "in_progress", None);
+                }
+            } else if let Some(n) = l.trim().strip_prefix("queued:") {
+                for _ in 0..n.trim().parse::<u64>().unwrap_or(0) {
+                    jobs.add("", "queued", None);
+                }
+            }
+        }
+        let detail = if jobs.total == 0 {
+            vec![]
+        } else {
+            vec![CiRunJobs {
+                workflow: "ci".into(),
+                jobs,
+            }]
+        };
+        Ok((state, detail))
+    }
+
     fn doctor(&self, _repo: &Path) -> Vec<Problem> {
         vec![]
     }
