@@ -155,7 +155,7 @@ fn project_cfg(d: &Daemon, project: &str) -> Option<ProjectCfg> {
         .cloned()
 }
 
-fn remote_cfg(d: &Daemon, project: &str) -> Option<RemoteCfg> {
+pub fn remote_cfg(d: &Daemon, project: &str) -> Option<RemoteCfg> {
     project_cfg(d, project).and_then(|p| p.services.remote)
 }
 

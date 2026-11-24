@@ -4753,9 +4753,20 @@ fn debt_wait_goes_on(d: &Daemon, debt: u64) -> bool {
     }
 }
 
+/// A debt's suites run as at most `debt_units` shards; the shard lists are made from `shards`.
+fn cap_debt_shards(suites: &mut [Suite], debt_units: u32) {
+    for s in suites.iter_mut() {
+        s.shards = s.shards.min(debt_units.max(1));
+    }
+}
+
+/// `[remote_runs] debt_units` when a project has no `[remote_runs]`.
+const DEFAULT_DEBT_UNITS: u32 = 4;
+
 /// Hold what the definition's test step `uses` (`compile` and `test-suite` for MASON) while a
 /// debt runs, ranked in the debts band (behind all task work), so a payment queues like a
 /// test step and never runs beside a full set of them, nor ahead of any task (#835). Nothing to hold gives `Ok(None)`.
+#[allow(clippy::too_many_arguments)]
 fn hold_for_debt(
     d: &Arc<Daemon>,
     def: &Definition,
@@ -4764,6 +4775,7 @@ fn hold_for_debt(
     debt: u64,
     at: u64,
     suite: Option<&Suite>,
+    debt_units: u32,
 ) -> Result<Option<crate::sched::Lease>, String> {
     let Some(step) = def
         .steps
@@ -4795,11 +4807,24 @@ fn hold_for_debt(
         }
         None => needs,
     };
+    // Debt payments together hold at most `debt_units` runner units: each asks for its `gha`
+    // units from the `gha-debt` pool too, which has that size.
+    let mut needs = needs;
+    if let Some(g) = needs.amounts.get(mason_scheduler::GHA).copied() {
+        d.broker
+            .set_pool_units(mason_scheduler::GHA_DEBT, debt_units);
+        needs
+            .amounts
+            .insert(mason_scheduler::GHA_DEBT.to_string(), g.min(debt_units));
+    }
     if needs.amounts.keys().any(|n| n.starts_with("device:")) {
         d.targets.declare_all(d);
     }
     for name in needs.amounts.keys() {
-        if !name.starts_with("llm:") && !name.starts_with("device:") {
+        if !name.starts_with("llm:")
+            && !name.starts_with("device:")
+            && name != mason_scheduler::GHA_DEBT
+        {
             d.broker
                 .declare(name, def.resources.get(name).copied().unwrap_or(1));
         }
@@ -5183,6 +5208,11 @@ fn pay_with(d: &Arc<Daemon>, debt: u64, only: Option<&str>) -> Result<String, St
     if suites.is_empty() {
         return Err("the debt's suite no longer exists in the definition".into());
     }
+    // A debt never waits for more runner units than `debt_units`: a sharded suite runs as at
+    // most that many shards, and its shard lists are made for that many.
+    let debt_units =
+        crate::remote::remote_cfg(d, &row.project).map_or(DEFAULT_DEBT_UNITS, |r| r.debt_units);
+    cap_debt_shards(&mut suites, debt_units);
     // One payment at a time in this daemon. The wait ends when the daemon shuts down or the
     // debt is closed meanwhile; there is no fixed timeout.
     let _one = loop {
@@ -5223,6 +5253,7 @@ fn pay_with(d: &Arc<Daemon>, debt: u64, only: Option<&str>) -> Result<String, St
         debt,
         row.at,
         suites.first(),
+        debt_units,
     )?;
     if p.remote.is_some() {
         let _ = d.fetch_remote(pid);
@@ -7282,5 +7313,31 @@ mod attempts_tests {
         assert_ne!(a, run_key_for(d.path(), "cargo test -p x"));
         std::fs::write(d.path().join("a"), "2").unwrap();
         assert_ne!(a, run_key_for(d.path(), "cargo test"));
+    }
+}
+
+#[cfg(test)]
+mod debt_units_tests {
+    use super::*;
+
+    #[test]
+    fn a_debt_of_eight_shards_runs_as_four_and_the_lists_are_made_for_four() {
+        let mut s = Suite::new(
+            "cargo-workspace",
+            "cargo test",
+            mason_testing::ParserKind::Tap,
+        );
+        s.shards = 8;
+        let mut v = vec![s];
+        cap_debt_shards(&mut v, 4);
+        assert_eq!(v[0].shards, 4);
+        let names: std::collections::BTreeSet<String> = (0..20).map(|i| format!("t{i}")).collect();
+        let weights = std::collections::BTreeMap::new();
+        let lists = crate::shards::assign(&names, &weights, v[0].shards);
+        assert_eq!(lists.len(), 4);
+        let mut small = vec![Suite::new("a", "b", mason_testing::ParserKind::Tap)];
+        small[0].shards = 2;
+        cap_debt_shards(&mut small, 4);
+        assert_eq!(small[0].shards, 2, "a smaller suite is not raised");
     }
 }

@@ -194,6 +194,17 @@ pub const GHA: &str = "gha";
 /// holds one unit of each pool.
 pub const GHA_MACOS: &str = "gha-macos";
 
+/// The pool of the runner units debt payments hold at most (`[remote_runs] debt_units`): a debt
+/// asks for it beside its `gha` units, so debts together never hold more than its size.
+pub const GHA_DEBT: &str = "gha-debt";
+
+/// Whether `n` asks for runner units and nothing else (a debt's cap pool counts as one).
+pub fn is_runner_request(n: &Needs) -> bool {
+    !n.exclusive
+        && !n.amounts.is_empty()
+        && n.amounts.keys().all(|k| is_gha_pool(k) || k == GHA_DEBT)
+}
+
 /// Whether `name` is one of the two GitHub runner pools.
 pub fn is_gha_pool(name: &str) -> bool {
     name == GHA || name == GHA_MACOS
@@ -244,7 +255,7 @@ impl Usage {
 
 /// A request for the GitHub runner pools and nothing else: a remote run.
 fn only_gha_pools(n: &Needs) -> bool {
-    !n.exclusive && !n.amounts.is_empty() && n.amounts.keys().all(|k| is_gha_pool(k))
+    is_runner_request(n)
 }
 
 fn kind_of(capacity: &BTreeMap<String, Capacity>, r: &str) -> Option<Kind> {
@@ -516,9 +527,16 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
     let capacity = world.capacity;
     // A request that has waited long enough is ranked as aged. Everything
     // else, capacity, gates and the passing rule, is as for a younger one.
-    let rank_of = |r: &Request| match world.max_wait {
-        Some(m) if world.now.saturating_sub(r.since) >= m => r.rank.aged(r.since),
-        _ => r.rank,
+    // A request for runner units only is ordered by kind, urgency and wait (2026-11-21).
+    let rank_of = |r: &Request| {
+        let aged = matches!(world.max_wait, Some(m) if world.now.saturating_sub(r.since) >= m);
+        if is_runner_request(&r.needs) {
+            r.rank.for_runners(r.since, aged)
+        } else if aged {
+            r.rank.aged(r.since)
+        } else {
+            r.rank
+        }
     };
     let mut order: Vec<&Request> = waiting.iter().collect();
     order.sort_by_key(|r| (rank_of(r), r.id));
@@ -814,7 +832,9 @@ fn build_wait(
         None
     };
     let pool = match &cause {
-        WaitCause::Full { resource } | WaitCause::Behind { resource } if is_gha_pool(resource) => {
+        WaitCause::Full { resource } | WaitCause::Behind { resource }
+            if is_gha_pool(resource) || resource == GHA_DEBT =>
+        {
             capacity.get(resource).map(|c| {
                 let used: u32 = holders
                     .iter()
@@ -825,8 +845,19 @@ fn build_wait(
         }
         _ => None,
     };
+    let mut runs_ahead = [0u32; 4];
+    if matches!(&cause, WaitCause::Full { resource } | WaitCause::Behind { resource }
+        if is_gha_pool(resource) || resource == GHA_DEBT)
+    {
+        for (o, _) in &ahead_of_me {
+            if is_runner_request(&o.needs) {
+                runs_ahead[o.rank.runner_kind() as usize] += 1;
+            }
+        }
+    }
     Wait {
         pool,
+        runs_ahead,
         blocker,
         kind: match &cause {
             WaitCause::Full { resource }
