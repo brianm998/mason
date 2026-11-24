@@ -43,7 +43,7 @@ pub struct Daemon {
     /// leaked (a reload of a registration file replaces it with a new one), so a
     /// borrow stays valid while a later reload swaps the entry: the few KB left
     /// behind per reload are the price of not threading a guard through every reader.
-    registry: std::sync::RwLock<BTreeMap<ProjectId, &'static ProjectCfg>>,
+    pub(crate) registry: std::sync::RwLock<BTreeMap<ProjectId, &'static ProjectCfg>>,
     /// The LLM provider accounts, in providers.toml order.
     pub accounts: Vec<crate::providers::Account>,
     /// Blocking work for the async layer (the store, git).
