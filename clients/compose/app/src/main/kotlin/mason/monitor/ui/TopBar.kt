@@ -75,6 +75,10 @@ fun TopBar(model: MonitorModel) {
             }
             InfoStatus(model)
             ProjectFilter(model)
+            // Desktop monitors only; the Android app draws its own bar and never this one.
+            if (model.canAct && model.addProjectAvailable) {
+                NavButton("+", "add-project", true) { model.openAddProject() }
+            }
         }
 
         Column(Modifier.weight(1f, fill = true)) {
