@@ -32,6 +32,21 @@ fn demo() -> (Arc<Daemon>, u16, tempfile::TempDir) {
     (d, port, dir)
 }
 
+/// A non-demo daemon, whose dedupe of unchanged views is the production one.
+fn live() -> (Arc<Daemon>, u16, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = DaemonConfig::new(
+        dir.path().join("d"),
+        dir.path().join("c"),
+        bin("mason-step-host", "step-host"),
+        bin("mason-adapters", "mason-mcp"),
+    );
+    std::fs::create_dir_all(&cfg.data_dir).unwrap();
+    let d = Daemon::start(cfg).unwrap();
+    let port = serve(&d);
+    (d, port, dir)
+}
+
 fn serve(d: &Arc<Daemon>) -> u16 {
     let d2 = d.clone();
     std::thread::spawn(move || {
@@ -1332,7 +1347,7 @@ fn sidebar_views(msgs: &[ServerMessage]) -> Vec<mason_protocol::SidebarView> {
 
 #[test]
 fn an_unchanged_view_is_not_sent_again_and_a_changed_one_is() {
-    let (d, port, _dir) = demo();
+    let (d, port, _dir) = live();
     let mut c = Client::connect(port, Encoding::Protobuf).unwrap();
     c.hello(0, true).unwrap();
     let kinds = [ViewKind::Sidebar, ViewKind::Usage];
