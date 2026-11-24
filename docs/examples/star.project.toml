@@ -30,6 +30,10 @@ token = "file:/Users/OWNER/.config/mason/star-github-token"   # a reference, nev
 workflow = "pr-gate.yml"
 poll_s = 60
 timeout_s = 14400
+# Alert (kind `landing`) when a pending run's jobs have not changed for this long: a job stuck
+# in a test, or jobs that never get a runner. "30m" is the default, 0 turns it off. It only
+# observes: nothing is cancelled and the verdict is unchanged.
+stuck_after = "30m"
 
 # Importing GitHub issues. star is a public repository, so an outsider's issue must never start work:
 # `import_as = "proposed"` makes every imported issue wait for `mason task approve N`. With
