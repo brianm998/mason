@@ -49,6 +49,26 @@ pub enum Executor {
     Local,
     /// On GitHub Actions, on a runner of this kind.
     GitHub { runs_on: String },
+    /// On another Mac running `masond` as a node: `nid` is its stable id, `name` what the owner
+    /// calls it. Nothing produces it until placement can (the multi-machine plan, phase 2).
+    Node { nid: String, name: String },
+}
+
+impl Executor {
+    /// Does the run leave this machine, so that it needs none of this Mac's `compile` or
+    /// `test-suite` slots and no CPU or heat gate?
+    pub fn is_off_machine(&self) -> bool {
+        !matches!(self, Executor::Local)
+    }
+
+    /// The executor a placement decision names.
+    pub fn of_place(p: crate::place::Place) -> Executor {
+        match p {
+            crate::place::Place::GitHub { runs_on, .. } => Executor::GitHub { runs_on },
+            crate::place::Place::Node { nid, name, .. } => Executor::Node { nid, name },
+            crate::place::Place::Local { .. } => Executor::Local,
+        }
+    }
 }
 
 /// What is being run, for the decision.
@@ -82,10 +102,13 @@ pub fn executor_for(
         Kind::Suite => "suite",
         Kind::Check => "check",
     };
-    match crate::place::place_of(d, project, task.map(|t| t.0), suite, kind) {
-        crate::place::Place::GitHub { runs_on, .. } => Executor::GitHub { runs_on },
-        crate::place::Place::Local { .. } => Executor::Local,
-    }
+    Executor::of_place(crate::place::place_of(
+        d,
+        project,
+        task.map(|t| t.0),
+        suite,
+        kind,
+    ))
 }
 
 /// Where a check no task owns and no suite describes (a landing lint or re-test) goes: the global
@@ -96,10 +119,7 @@ pub fn executor_global(d: &Daemon, project: &str) -> Executor {
             return Executor::GitHub { runs_on: r.runs_on };
         }
     }
-    match crate::place::global_place(d, project) {
-        crate::place::Place::GitHub { runs_on, .. } => Executor::GitHub { runs_on },
-        crate::place::Place::Local { .. } => Executor::Local,
-    }
+    Executor::of_place(crate::place::global_place(d, project))
 }
 
 /// Where a whole step of `task` goes (`pool_needs`): the task's mode, else the project's, else
@@ -110,10 +130,7 @@ pub fn executor_task(d: &Daemon, project: &str, task: Option<u64>) -> Executor {
             return Executor::GitHub { runs_on: r.runs_on };
         }
     }
-    match crate::place::plain_place(d, project, task) {
-        crate::place::Place::GitHub { runs_on, .. } => Executor::GitHub { runs_on },
-        crate::place::Place::Local { .. } => Executor::Local,
-    }
+    Executor::of_place(crate::place::plain_place(d, project, task))
 }
 
 fn forced_for_tests() -> bool {
@@ -2657,6 +2674,9 @@ pub fn pool_needs(
     let runs_on = match executor_task(d, project, task.map(|t| t.0)) {
         Executor::GitHub { runs_on } => runs_on,
         Executor::Local => return None,
+        // A node's resource (`node:<nid>`) is phase 2; until placement produces one, a step
+        // that would go to a node keeps what it asked for.
+        Executor::Node { .. } => return None,
     };
     Some(with_units(needs, units_for(&runs_on, 1)))
 }
@@ -2671,10 +2691,7 @@ pub fn suite_goes_remote(
     task: Option<mason_core::TaskId>,
     suite: &mason_testing::Suite,
 ) -> bool {
-    matches!(
-        executor_for(d, project, Kind::Suite, Some((task, suite))),
-        Executor::GitHub { .. }
-    )
+    executor_for(d, project, Kind::Suite, Some((task, suite))).is_off_machine()
 }
 
 /// A landing batch as the owner of broker requests it makes during its run (s943): the first
