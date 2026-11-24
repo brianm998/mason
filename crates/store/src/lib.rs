@@ -2029,7 +2029,7 @@ impl Store {
         self.read(move |c| {
             let mut st = c.prepare(
                 "SELECT base, failing, names, executed FROM baselines
-                 WHERE suite = ?1 AND def_hash = ?2 AND def_hash != '' ORDER BY at DESC LIMIT ?3",
+                 WHERE suite = ?1 AND def_hash = ?2 AND def_hash != '' AND partial = 0 ORDER BY at DESC LIMIT ?3",
             )?;
             let rows = st.query_map(params![s, h, limit as i64], |r| {
                 Ok((
@@ -2053,21 +2053,342 @@ impl Store {
         })
     }
 
-    /// The newest recorded baseline of `suite`: `(base, failing tests)`. These are runs of
-    /// the suite on the tree develop had, so it says what is red on develop (s520).
+    /// What is red on develop for `suite`: `(base, failing tests)`. The newest whole-suite
+    /// baseline says which tests failed on the tree develop had (s520). A partial baseline
+    /// (#1023) taken later, at a newer tip, says more about the tests it ran: one that passes a
+    /// test takes it off the list, and one that still fails it moves the base to that tip.
     pub fn latest_baseline(
         &self,
         suite: &str,
     ) -> Result<Option<(String, Vec<String>)>, StoreError> {
         let s = suite.to_string();
         self.read(move |c| {
+            let whole: Option<(String, String, i64)> = c
+                .query_row(
+                    "SELECT base, failing, at FROM baselines
+                     WHERE suite = ?1 AND partial = 0 ORDER BY at DESC LIMIT 1",
+                    params![s],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()?;
+            // With no whole-suite row, partial rows alone still say what they found red (a test
+            // seen failing at the tip by the red-develop watch); they are never a whole suite.
+            let (base, failing, at) = whole.unwrap_or_else(|| (String::new(), String::new(), -1));
+            let mut red: Vec<String> = failing.lines().map(str::to_string).collect();
+            let mut shown = base;
+            let mut st = c.prepare(
+                "SELECT base, failing, names FROM baselines
+                 WHERE suite = ?1 AND partial = 1 AND at > ?2 ORDER BY at ASC",
+            )?;
+            let rows = st.query_map(params![s, at], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?;
+            for row in rows {
+                let (pbase, pfailing, ptested) = row?;
+                let tested: Vec<&str> = ptested.lines().collect();
+                let failed: Vec<&str> = pfailing.lines().collect();
+                let before = red.clone();
+                // A newer partial row overrides an older one: they come in time order.
+                red.retain(|t| !tested.contains(&t.as_str()) || failed.contains(&t.as_str()));
+                for f in &failed {
+                    if !red.iter().any(|t| t == f) {
+                        red.push((*f).to_string());
+                    }
+                }
+                if red != before || !failed.is_empty() {
+                    shown = pbase;
+                }
+            }
+            Ok((!shown.is_empty()).then_some((shown, red)))
+        })
+    }
+
+    /// Note that the red-develop watch probed `tests` of `suite` of `project` at `tip`.
+    pub fn put_red_probe(
+        &self,
+        project: &str,
+        suite: &str,
+        tip: &str,
+        tests: &[String],
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        let (p, s, t, k) = (
+            project.to_string(),
+            suite.to_string(),
+            tip.to_string(),
+            probe_key(tests),
+        );
+        self.write(move |c| {
+            c.execute(
+                "INSERT OR REPLACE INTO red_probes(project, suite, tip, tests, at_ms)
+                 VALUES (?1,?2,?3,?4,?5)",
+                params![p, s, t, k, now_ms as i64],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// Was this set of tests probed at `tip` already?
+    pub fn red_probed(
+        &self,
+        project: &str,
+        suite: &str,
+        tip: &str,
+        tests: &[String],
+    ) -> Result<bool, StoreError> {
+        let (p, s, t, k) = (
+            project.to_string(),
+            suite.to_string(),
+            tip.to_string(),
+            probe_key(tests),
+        );
+        self.read(move |c| {
             c.query_row(
-                "SELECT base, failing FROM baselines WHERE suite = ?1 ORDER BY at DESC LIMIT 1",
-                params![s],
+                "SELECT 1 FROM red_probes WHERE project=?1 AND suite=?2 AND tip=?3 AND tests=?4",
+                params![p, s, t, k],
+                |_| Ok(()),
+            )
+            .optional()
+            .map(|o| o.is_some())
+        })
+    }
+
+    /// `(failing, tested)` of the partial baseline at `base`, if one was taken.
+    #[allow(clippy::type_complexity)]
+    pub fn partial_baseline(
+        &self,
+        base: &str,
+        suite: &str,
+    ) -> Result<Option<(Vec<String>, Vec<String>)>, StoreError> {
+        let (b, s) = (base.to_string(), suite.to_string());
+        self.read(move |c| {
+            c.query_row(
+                "SELECT failing, names FROM baselines WHERE base = ?1 AND suite = ?2 AND partial = 1",
+                params![b, s],
                 |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
             )
             .optional()
-            .map(|o| o.map(|(b, f)| (b, f.lines().map(String::from).collect())))
+            .map(|o| {
+                o.map(|(f, n)| {
+                    (
+                        f.lines().map(String::from).collect(),
+                        n.lines().map(String::from).collect(),
+                    )
+                })
+            })
+        })
+    }
+
+    /// A partial baseline (#1023): `tested` are the tests run at `base` (a rerun narrowed to a
+    /// stale baseline's reds) and `failing` those that failed. An existing whole-suite row of the
+    /// same base is kept: it already says more.
+    pub fn put_partial_baseline(
+        &self,
+        base: &str,
+        suite: &str,
+        failing: &[String],
+        tested: &[String],
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        let (b, s, f, n) = (
+            base.to_string(),
+            suite.to_string(),
+            failing.join("\n"),
+            tested.join("\n"),
+        );
+        self.write(move |c| {
+            c.execute(
+                "INSERT INTO baselines(base, suite, failing, names, executed, at, partial)
+                 VALUES (?1,?2,?3,?4,0,?5,1)
+                 ON CONFLICT(base, suite) DO UPDATE SET failing = excluded.failing,
+                     names = excluded.names, at = excluded.at WHERE baselines.partial = 1",
+                params![b, s, f, n, now_ms as i64],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// The tests a task's last check of `suite` failed (replacing what was there for the suite).
+    pub fn put_red_sightings(
+        &self,
+        task: u64,
+        suite: &str,
+        tests: &[String],
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        let (s, t) = (suite.to_string(), tests.to_vec());
+        self.write(move |c| {
+            c.execute(
+                "DELETE FROM red_sightings WHERE task = ?1 AND suite = ?2",
+                params![task as i64, s],
+            )?;
+            for test in &t {
+                c.execute(
+                    "INSERT OR REPLACE INTO red_sightings(task, suite, test, at_ms) VALUES (?1,?2,?3,?4)",
+                    params![task as i64, s, test, now_ms as i64],
+                )?;
+            }
+            Ok(())
+        })
+    }
+
+    /// `(task, suite, test, at_ms)` of every sighting since `since_ms`.
+    pub fn red_sightings_since(
+        &self,
+        since_ms: u64,
+    ) -> Result<Vec<(u64, String, String, u64)>, StoreError> {
+        self.read(move |c| {
+            let mut st = c.prepare(
+                "SELECT task, suite, test, at_ms FROM red_sightings WHERE at_ms >= ?1 ORDER BY task, suite, test",
+            )?;
+            let rows = st.query_map(params![since_ms as i64], |r| {
+                Ok((
+                    r.get::<_, i64>(0)? as u64,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)? as u64,
+                ))
+            })?;
+            rows.collect()
+        })
+    }
+
+    /// Forget a task's sightings of these tests of `suite`, or all of the task's (`None`).
+    pub fn clear_red_sightings(
+        &self,
+        task: u64,
+        suite: &str,
+        tests: Option<&[String]>,
+    ) -> Result<(), StoreError> {
+        let (s, t) = (suite.to_string(), tests.map(<[String]>::to_vec));
+        self.write(move |c| {
+            match &t {
+                None => c.execute(
+                    "DELETE FROM red_sightings WHERE task = ?1 AND suite = ?2",
+                    params![task as i64, s],
+                )?,
+                Some(ts) => {
+                    for test in ts {
+                        c.execute(
+                            "DELETE FROM red_sightings WHERE task = ?1 AND suite = ?2 AND test = ?3",
+                            params![task as i64, s, test],
+                        )?;
+                    }
+                    0
+                }
+            };
+            Ok(())
+        })
+    }
+
+    /// Something to tell the agent of `task` at its next tool result.
+    pub fn push_red_note(&self, task: u64, text: &str, now_ms: u64) -> Result<(), StoreError> {
+        let t = text.to_string();
+        self.write(move |c| {
+            c.execute(
+                "INSERT INTO red_notes(task, text, at_ms) VALUES (?1,?2,?3)",
+                params![task as i64, t, now_ms as i64],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// The notes waiting for `task`, oldest first; they are removed as they are read.
+    pub fn take_red_notes(&self, task: u64) -> Result<Vec<String>, StoreError> {
+        self.write(move |c| {
+            let mut st = c.prepare("SELECT text FROM red_notes WHERE task = ?1 ORDER BY id")?;
+            let out: Vec<String> = st
+                .query_map(params![task as i64], |r| r.get(0))?
+                .collect::<Result<_, _>>()?;
+            drop(st);
+            c.execute(
+                "DELETE FROM red_notes WHERE task = ?1",
+                params![task as i64],
+            )?;
+            Ok(out)
+        })
+    }
+
+    /// Develop was merged into the task's worktree from outside the session: count it, so a
+    /// check that waited on the old tree builds again on the new one.
+    pub fn bump_red_folds(&self, task: u64) -> Result<(), StoreError> {
+        self.write(move |c| {
+            c.execute(
+                "INSERT INTO red_folds(task, n) VALUES (?1, 1)
+                 ON CONFLICT(task) DO UPDATE SET n = n + 1",
+                params![task as i64],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn red_folds(&self, task: u64) -> Result<u64, StoreError> {
+        self.read(move |c| {
+            Ok(c.query_row(
+                "SELECT n FROM red_folds WHERE task = ?1",
+                params![task as i64],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?
+            .unwrap_or(0) as u64)
+        })
+    }
+
+    /// A fix develop has that this task's branch could not take: `(tests, base, why, since_ms)`.
+    pub fn put_red_fix_pending(
+        &self,
+        task: u64,
+        tests: &[String],
+        base: &str,
+        why: &str,
+        since_ms: u64,
+    ) -> Result<(), StoreError> {
+        let (t, b, w) = (tests.join("\n"), base.to_string(), why.to_string());
+        self.write(move |c| {
+            c.execute(
+                "INSERT INTO red_fix_pending(task, tests, base, why, since_ms) VALUES (?1,?2,?3,?4,?5)
+                 ON CONFLICT(task) DO UPDATE SET tests = excluded.tests, base = excluded.base,
+                     why = excluded.why",
+                params![task as i64, t, b, w, since_ms as i64],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn clear_red_fix_pending(&self, task: u64) -> Result<(), StoreError> {
+        self.write(move |c| {
+            c.execute(
+                "DELETE FROM red_fix_pending WHERE task = ?1",
+                params![task as i64],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// `(task, tests, base, why, since_ms)` of every fix still waiting.
+    #[allow(clippy::type_complexity)]
+    pub fn red_fix_pending(
+        &self,
+    ) -> Result<Vec<(u64, Vec<String>, String, String, u64)>, StoreError> {
+        self.read(|c| {
+            let mut st = c.prepare(
+                "SELECT task, tests, base, why, since_ms FROM red_fix_pending ORDER BY task",
+            )?;
+            let rows = st.query_map([], |r| {
+                let t: String = r.get(1)?;
+                Ok((
+                    r.get::<_, i64>(0)? as u64,
+                    t.lines().map(str::to_string).collect(),
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, i64>(4)? as u64,
+                ))
+            })?;
+            rows.collect()
         })
     }
 
@@ -2081,7 +2402,7 @@ impl Store {
         let (b, s) = (base.to_string(), suite.to_string());
         self.read(move |c| {
             c.query_row(
-                "SELECT failing, names FROM baselines WHERE base = ?1 AND suite = ?2",
+                "SELECT failing, names FROM baselines WHERE base = ?1 AND suite = ?2 AND partial = 0",
                 params![b, s],
                 |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
             )
@@ -4770,4 +5091,12 @@ pub fn batch_run_key(tasks: &[(u64, String)]) -> String {
         .map(|(i, h)| format!("{i}@{h}"))
         .collect::<Vec<_>>()
         .join(",")
+}
+
+/// The key of a set of tests: sorted, one per line.
+fn probe_key(tests: &[String]) -> String {
+    let mut v = tests.to_vec();
+    v.sort();
+    v.dedup();
+    v.join("\n")
 }
