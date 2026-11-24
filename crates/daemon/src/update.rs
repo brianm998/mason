@@ -455,7 +455,7 @@ fn shell_deadline() -> std::time::Duration {
 }
 
 /// Run `cmd`, keeping everything it said in `log`. An error carries its last lines.
-fn shell(cwd: &Path, cmd: &str, log: &Path, env: &[(&str, &str)]) -> Result<(), String> {
+pub(crate) fn shell(cwd: &Path, cmd: &str, log: &Path, env: &[(&str, &str)]) -> Result<(), String> {
     let limit = shell_deadline();
     let out = match mason_landing::proc::output(
         Command::new("sh")

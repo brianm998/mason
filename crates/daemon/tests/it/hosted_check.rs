@@ -13,6 +13,11 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 use support::*;
 
+/// A check that holds nothing new: these runs attach to or start local work.
+fn grant() -> mason_daemon::remote::Grant {
+    mason_daemon::remote::Grant::attached()
+}
+
 fn spec(
     d: &std::sync::Arc<mason_daemon::daemon::Daemon>,
     dir: &Path,
@@ -51,9 +56,9 @@ fn a_second_call_attaches_and_a_different_tree_runs_afresh() {
     let cmd = format!("echo x >> {}; sleep 2; echo done", marker.display());
     let sp = spec(&d, work.path(), &cmd, "tree-a", 60);
     let (r1, r2) = std::thread::scope(|sc| {
-        let a = sc.spawn(|| run(&d, &sp));
+        let a = sc.spawn(|| run(&d, &sp, &grant()));
         std::thread::sleep(Duration::from_millis(700));
-        let b = sc.spawn(|| run(&d, &sp));
+        let b = sc.spawn(|| run(&d, &sp, &grant()));
         (a.join().unwrap().unwrap(), b.join().unwrap().unwrap())
     });
     assert!(r1.passed && r2.passed);
@@ -63,7 +68,7 @@ fn a_second_call_attaches_and_a_different_tree_runs_afresh() {
 
     // Another tree does not reuse the old result.
     let other = spec(&d, work.path(), &cmd, "tree-b", 60);
-    let r3 = run(&d, &other).unwrap();
+    let r3 = run(&d, &other, &grant()).unwrap();
     assert_ne!(r3.id, r1.id);
     assert_eq!(lines(&marker), 2);
 }
@@ -80,7 +85,7 @@ fn a_run_in_flight_is_pending_until_given_and_then_a_call_runs_afresh() {
     let sp = spec(&d, work.path(), "sleep 2; echo done", "tree-a", 60);
     assert!(!pending(&d, &sp), "nothing has run yet");
     std::thread::scope(|sc| {
-        let a = sc.spawn(|| run(&d, &sp));
+        let a = sc.spawn(|| run(&d, &sp, &grant()));
         let end = Instant::now() + Duration::from_secs(30);
         while !pending(&d, &sp) {
             assert!(Instant::now() < end, "the run never showed as pending");
@@ -108,7 +113,7 @@ fn a_hung_check_ends_at_the_limit() {
     let work = tempfile::tempdir().unwrap();
     let sp = spec(&d, work.path(), "sleep 120", "t", 2);
     let t = Instant::now();
-    let r = run(&d, &sp).unwrap();
+    let r = run(&d, &sp, &grant()).unwrap();
     assert!(!r.passed && r.timed_out, "{r:?}");
     assert!(t.elapsed() < Duration::from_secs(30), "{:?}", t.elapsed());
 }
@@ -118,7 +123,12 @@ fn a_check_that_exits_red_is_red() {
     let s = Scratch::new("true", happy_script());
     let d = s.start();
     let work = tempfile::tempdir().unwrap();
-    let r = run(&d, &spec(&d, work.path(), "echo bad; exit 3", "t", 30)).unwrap();
+    let r = run(
+        &d,
+        &spec(&d, work.path(), "echo bad; exit 3", "t", 30),
+        &grant(),
+    )
+    .unwrap();
     assert!(!r.passed && !r.timed_out);
     assert!(r.output.contains("bad"));
 }
@@ -186,7 +196,7 @@ fn a_running_check_records_the_slots_it_holds_beside_its_host_until_it_ends() {
     sp.label = "#9 check".into();
     let hosts = d.cfg.hosts_dir();
     std::thread::scope(|sc| {
-        let a = sc.spawn(|| run(&d, &sp));
+        let a = sc.spawn(|| run(&d, &sp, &grant()));
         let end = Instant::now() + Duration::from_secs(60);
         let held = loop {
             let h = mason_daemon::hostedcheck::running_holds(&hosts);
@@ -241,7 +251,7 @@ fn a_check_feeds_the_develop_runs_counts_and_phases() {
         name: "check s".into(),
         suite: Some(Suite::new("s", "true", ParserKind::Tap)),
     };
-    let r = run_with(&d, &sp, Some(&pr)).unwrap();
+    let r = run_with(&d, &sp, Some(&pr), &grant()).unwrap();
     assert!(!r.passed);
     let p = d.progress_of(run_id.0).unwrap();
     let sub = p.subs.iter().find(|s| s.name == "check s").expect("a sub");
@@ -307,7 +317,7 @@ fn a_call_on_a_new_tree_stops_an_uncollected_run_on_an_older_tree() {
     let work = tempfile::tempdir().unwrap();
     let sp = spec(&d, work.path(), "echo done", "tree-b", 60);
     start_left_behind(&d, Some(&sp.log_dir), "t0r1-check0", "an older tree");
-    let r = run(&d, &sp).unwrap();
+    let r = run(&d, &sp, &grant()).unwrap();
     assert!(r.passed, "{r:?}");
     assert_ne!(r.id, "t0r1-check0", "the new tree ran afresh");
     wait_for("the older run to stop", 60, || {
@@ -378,8 +388,8 @@ fn a_held_result_is_reused_by_a_replay_until_the_agent_has_the_answer() {
     let (a, b) = (suite("t3r4-check-a", &ma), suite("t3r4-check-b", &mb));
     let call = || {
         let _hold = hold_results(3, 4);
-        let ra = run(&d, &a).unwrap();
-        let rb = run(&d, &b).unwrap();
+        let ra = run(&d, &a, &grant()).unwrap();
+        let rb = run(&d, &b, &grant()).unwrap();
         (ra.id, rb.id)
     };
     let first = call();
@@ -410,8 +420,8 @@ fn a_call_without_a_hold_delivers_at_once_as_before() {
         "tree-a",
         60,
     );
-    let r1 = run(&d, &sp).unwrap();
-    let r2 = run(&d, &sp).unwrap();
+    let r1 = run(&d, &sp, &grant()).unwrap();
+    let r2 = run(&d, &sp, &grant()).unwrap();
     assert_ne!(r1.id, r2.id);
     assert_eq!(lines(&marker), 2);
 }

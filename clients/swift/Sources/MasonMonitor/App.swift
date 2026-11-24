@@ -180,6 +180,11 @@ struct MasonMonitorApp: App {
         }
         .defaultSize(width: 1360, height: 860)
         .commands {
+            CommandGroup(after: .newItem) {
+                Button("Add Project…") { session.model.openAddProject() }
+                    .keyboardShortcut("n", modifiers: [.command, .shift])
+                    .disabled(!session.model.canAddProject)
+            }
             CommandMenu("View") {
                 Button("Bigger Text") { session.model.zoomIn() }.keyboardShortcut("+", modifiers: .command)
                 Button("Bigger Text") { session.model.zoomIn() }.keyboardShortcut("=", modifiers: .command)

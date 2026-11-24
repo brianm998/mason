@@ -128,6 +128,9 @@ struct HomePage: View {
                     PlacementControl(model: model, scope: .global)
                     if let p = model.home?.project, !p.isEmpty { PlacementControl(model: model, scope: .project(p)) }
                 }
+                // Read in views of their own, so the polling does not redraw this page.
+                NodeAcceptToggle(model: model)
+                NodesPoller(model: model)
                 let pair = compact
                     ? AnyLayout(VStackLayout(alignment: .leading, spacing: theme.spacingLarge))
                     : AnyLayout(HStackLayout(alignment: .top, spacing: theme.spacingLarge * 2))
@@ -180,6 +183,8 @@ struct HomePage: View {
                 if let g = model.home?.github, g.enabled {
                     GitHubSection(model: model, g: g, open: { model.go(.section("github")) })
                 }
+
+                NodesSection(model: model)
 
                 if let h = model.home, h.hasCompilation {
                     CompilationSection(model: model, c: h.compilation, open: { model.go(.section("compilation")) })

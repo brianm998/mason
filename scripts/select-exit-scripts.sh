@@ -6,6 +6,10 @@
 # file's name when it is under scripts/), the `-p <package>` of a changed crate, or `--test <target>`
 # of a changed integration-test target, except that a changed file under crates/<c>/tests/ selects
 # only scripts naming its module stem as a whole word (s785). Docs-only changes select nothing.
+# A changed crates/<c>/src/**/<x>.rs (or src/bin/<x>.rs) is scoped the same way (s669/s785): a
+# script must run the crate (`-p <name>`) AND name the module stem as a whole word. Crate roots
+# (lib.rs, main.rs, build.rs, Cargo.toml) select only scripts naming the path; the workspace suite
+# builds everything. 2026-11-24: crate-wide -p selection picked ~300 of 648 scripts per change.
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)"
 base=${1-}
@@ -21,6 +25,13 @@ pick() { # pick FIXED_STRING | pick -E REGEX
   local s
   while IFS= read -r s; do
     if [ "$1" = "-E" ]; then grep -Eq -- "$2" "$s" && echo "$s"; else grep -Fq -- "$1" "$s" && echo "$s"; fi
+  done <<< "$all" >> "$sel"
+  return 0
+}
+pick2() { # pick2 REGEX1 REGEX2: scripts matching both
+  local s
+  while IFS= read -r s; do
+    grep -Eq -- "$1" "$s" && grep -Eq -- "$2" "$s" && echo "$s"
   done <<< "$all" >> "$sel"
   return 0
 }
@@ -47,8 +58,16 @@ while IFS= read -r f; do
           pick -E "(^|[^A-Za-z0-9_])$stem([^A-Za-z0-9_-]|$)"
           continue ;;
       esac
-      name=$(sed -n 's/^name *= *"\(.*\)"/\1/p' "crates/$c/Cargo.toml" 2>/dev/null | head -n 1)
-      [ -n "$name" ] && pick -E "(-p|--package)[ =]+$name([^A-Za-z0-9_-]|$)"
+      # Crate roots: only the path pick above applies.
+      case "$f" in crates/$c/Cargo.toml|crates/$c/build.rs|crates/$c/src/lib.rs|crates/$c/src/main.rs) continue ;; esac
+      case "$f" in
+        crates/$c/src/*.rs)
+          stem=$(basename "$f" .rs)
+          case "$stem" in mod) stem=$(basename "$(dirname "$f")") ;; esac
+          name=$(sed -n 's/^name *= *"\(.*\)"/\1/p' "crates/$c/Cargo.toml" 2>/dev/null | head -n 1)
+          [ -n "$name" ] && pick2 "(-p|--package)[ =]+$name([^A-Za-z0-9_-]|$)" "(^|[^A-Za-z0-9_-])$stem([^A-Za-z0-9_-]|$)"
+          ;;
+      esac
       ;;
   esac
 done <<< "$changed"

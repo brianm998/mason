@@ -1008,7 +1008,7 @@ pub(crate) fn acquire_needs_while(
     needs: mason_scheduler::Needs,
     wanted: &dyn Fn() -> bool,
 ) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
-    acquire_needs_as(c, needs, wanted, false, None, None)
+    acquire_needs_as(c, needs, wanted, false, None, None, None)
 }
 
 /// [`acquire_needs_while`] with how long the work is expected to hold the lease (s385);
@@ -1020,8 +1020,9 @@ pub(crate) fn acquire_needs_expecting(
     wanted: &dyn Fn() -> bool,
     beside: bool,
     expected_ms: Option<u64>,
+    suite: Option<&mason_testing::Suite>,
 ) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
-    acquire_needs_as(c, needs, wanted, beside, expected_ms, None)
+    acquire_needs_as(c, needs, wanted, beside, expected_ms, None, suite)
 }
 
 /// [`acquire_needs_expecting`] with a `label` that starts the wait text ("small run, est. 70 s").
@@ -1032,8 +1033,9 @@ pub(crate) fn acquire_needs_labeled(
     beside: bool,
     expected_ms: Option<u64>,
     label: Option<&str>,
+    suite: Option<&mason_testing::Suite>,
 ) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
-    acquire_needs_as(c, needs, wanted, beside, expected_ms, label)
+    acquire_needs_as(c, needs, wanted, beside, expected_ms, label, suite)
 }
 
 fn acquire_needs_as(
@@ -1043,13 +1045,20 @@ fn acquire_needs_as(
     beside: bool,
     expected_ms: Option<u64>,
     label: Option<&str>,
+    suite: Option<&mason_testing::Suite>,
 ) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
     let d = &c.d;
     // A project whose runs go to GitHub holds runner pool units for them, not this machine's
     // slots (#700). A daemon that restarted counted the units of its run still out: they are
     // this step's, and its lease takes them over.
     let mut _waiting = None;
-    let needs = match crate::remote::pool_needs(d, &c.project.id, &needs, Some(c.task)) {
+    // Where a suite goes is its own placement, and what it holds is the units of the jobs it
+    // starts (#818); only a step with no suite follows the task's mode as a whole.
+    let pooled = match suite {
+        Some(s) => crate::remote::suite_pool_needs(d, &c.project.id, Some(c.task), &needs, s),
+        None => crate::remote::pool_needs(d, &c.project.id, &needs, Some(c.task)),
+    };
+    let needs = match pooled {
         Some(n) => {
             d.broker.take_over_remote(&format!("task {}", c.task.0));
             // On the monitor's GitHub section until a pool unit is granted (#767).
@@ -2295,13 +2304,16 @@ impl TestChecks {
                             ),
                             &suite,
                         );
-                        let queue = !crate::hostedcheck::pending(&self.slots.d, &bspec)
-                            && !crate::hostedcheck::goes_remote(&self.slots.d, &bspec);
+                        let want = want_of(&self.slots.d, &bspec);
                         self.phase(mason_core::checks::CheckPhase::Waiting);
                         let merges = self.reds.merges();
                         let swapped = self.queued(|| {
-                            self.slots
-                                .swap_for(queue, &build_uses(), self.estimate(&name, "build"))
+                            self.slots.swap_for(
+                                want,
+                                &bspec.id_prefix,
+                                &build_uses(),
+                                self.estimate(&name, "build"),
+                            )
                         });
                         let Ok(lease) = swapped else {
                             return over();
@@ -2321,8 +2333,9 @@ impl TestChecks {
                         };
                         self.phase(mason_core::checks::CheckPhase::Building);
                         self.phase(mason_core::checks::CheckPhase::Building);
-                        let res = crate::hostedcheck::run(&self.slots.d, &bspec);
-                        drop(lease);
+                        let grant = grant_of(lease);
+                        let res = crate::hostedcheck::run(&self.slots.d, &bspec, &grant);
+                        drop(grant);
                         if matches!(&res, Ok(o) if o.stopped.is_some()) {
                             if let Some(r) = self.skipped_run(&name) {
                                 return r;
@@ -2382,13 +2395,12 @@ impl TestChecks {
                 ),
                 &suite,
             );
-            let queue = !crate::hostedcheck::pending(&self.slots.d, &rspec)
-                && !crate::hostedcheck::goes_remote(&self.slots.d, &rspec);
+            let want = want_of(&self.slots.d, &rspec);
             self.phase(mason_core::checks::CheckPhase::Waiting);
             let merges = self.reds.merges();
             let swapped = self.queued(|| {
                 self.slots
-                    .swap_for(queue, &uses, self.estimate(&name, "run"))
+                    .swap_for(want, &rspec.id_prefix, &uses, self.estimate(&name, "run"))
             });
             let Ok(lease) = swapped else {
                 return over();
@@ -2410,10 +2422,11 @@ impl TestChecks {
             let usual = self.estimate(&name, "run").unwrap_or(0);
             self.edit_check(|c, _| c.usual_ms = usual);
             let pr = self.check_progress(&format!("check {name}"), Some(suite.clone()));
+            let grant = grant_of(lease);
             let res = self.remote_credited(&rspec, || {
-                crate::hostedcheck::run_with(&self.slots.d, &rspec, pr.as_ref())
+                crate::hostedcheck::run_with(&self.slots.d, &rspec, pr.as_ref(), &grant)
             });
-            drop(lease);
+            drop(grant);
             // The owner skipped testing while it waited or ran: the same answer as a call made
             // after the skip (#873).
             if matches!(&res, Ok(o) if o.stopped.is_some()) {
@@ -2889,10 +2902,12 @@ impl TestChecks {
             }
             Some(build) => {
                 let bspec = spec(format!("{}build", self.id_prefix), build, &build_uses());
-                let queue = !crate::hostedcheck::pending(&self.slots.d, &bspec)
-                    && !crate::hostedcheck::goes_remote(&self.slots.d, &bspec);
+                let want = want_of(&self.slots.d, &bspec);
                 self.phase(mason_core::checks::CheckPhase::Waiting);
-                let swapped = self.queued(|| self.slots.swap_for(queue, &build_uses(), None));
+                let swapped = self.queued(|| {
+                    self.slots
+                        .swap_for(want, &bspec.id_prefix, &build_uses(), None)
+                });
                 let Ok(lease) = swapped else {
                     return over();
                 };
@@ -2903,8 +2918,9 @@ impl TestChecks {
                     spec(format!("{}build", self.id_prefix), build, &build_uses())
                 };
                 self.phase(mason_core::checks::CheckPhase::Building);
-                let res = crate::hostedcheck::run(&self.slots.d, &bspec);
-                drop(lease);
+                let grant = grant_of(lease);
+                let res = crate::hostedcheck::run(&self.slots.d, &bspec, &grant);
+                drop(grant);
                 if let Some(t) = ctree.as_deref() {
                     let bk = crate::cmdreuse::build_key(build);
                     match &res {
@@ -2960,12 +2976,12 @@ impl TestChecks {
         // The same call sent again after a restart attaches to the run already
         // going (or takes its result) at once: it starts nothing, so it does not
         // queue behind other work for a slot the run it joins already took.
-        let queue = !crate::hostedcheck::pending(&self.slots.d, &tspec)
-            && !crate::hostedcheck::goes_remote(&self.slots.d, &tspec);
-        let swapped = self.queued(|| self.slots.swap_for(queue, &uses, None));
+        let want = want_of(&self.slots.d, &tspec);
+        let swapped = self.queued(|| self.slots.swap_for(want, &tspec.id_prefix, &uses, None));
         let Ok(test_lease) = swapped else {
             return over();
         };
+        let grant = grant_of(test_lease);
         let tspec = if self.reds.merges() == merges {
             tspec
         } else {
@@ -2975,9 +2991,9 @@ impl TestChecks {
         self.phase(mason_core::checks::CheckPhase::Running);
         let pr = self.check_progress("check tests", None);
         let res = self.remote_credited(&tspec, || {
-            crate::hostedcheck::run_with(&self.slots.d, &tspec, pr.as_ref())
+            crate::hostedcheck::run_with(&self.slots.d, &tspec, pr.as_ref(), &grant)
         });
-        drop(test_lease);
+        drop(grant);
         self.slots.take_agent_slot_back();
         // The build ran inside this run: what it says of the build is recorded for the tree.
         if let (Some(build), Ok(o), Some(t)) = (&folded, &res, &ctree) {
@@ -3220,9 +3236,19 @@ impl CheckSlots {
         let mut waited = false;
         // With how long it is expected to hold the slots, a check may run while the machine
         // drains for an exclusive request, if it will be done in time (s385, s422).
+        // A check waiting for runner units says so in its label, for `mason resources`.
+        let label = if asked
+            .amounts
+            .keys()
+            .any(|k| mason_scheduler::is_gha_pool(k))
+        {
+            format!("#{} check", self.task)
+        } else {
+            format!("#{}", self.task)
+        };
         let lease = d.broker.acquire_expecting(
             self.task,
-            &format!("#{}", self.task),
+            &label,
             rank,
             needs,
             &alive,
@@ -3256,14 +3282,22 @@ impl CheckSlots {
         lease
     }
 
-    /// Give the agent's slot back (if it still holds it) and, if `queue`,
-    /// queue for `uses`: what the tests use, or a build's `compile` slot.
+    /// Give the agent's slot back (if it still holds it) and queue for what `want` says: the
+    /// slots of `uses` (what the tests use, or a build's `compile` slot) for a run here, the
+    /// runner units for a run that goes to GitHub (#818), or nothing for a run that attaches
+    /// to one already out.
     fn swap_for(
         &self,
-        queue: bool,
+        want: Want,
+        run_prefix: &str,
         uses: &std::collections::BTreeMap<String, u32>,
         expected_ms: Option<u64>,
     ) -> Result<Option<crate::sched::Lease>, crate::sched::Cancelled> {
+        let (queue, pool) = match want {
+            Want::Nothing => (false, None),
+            Want::Slots => (true, None),
+            Want::Pool(u) => (true, Some(u)),
+        };
         let held = self.lease.lock().unwrap_or_else(|e| e.into_inner()).take();
         if held.is_some() {
             // Parked on a check: the session is free for others while it waits (#765).
@@ -3271,9 +3305,23 @@ impl CheckSlots {
             drop(held);
             self.d.admit();
         }
-        if !queue || uses.is_empty() {
+        if !queue || (pool.is_none() && uses.is_empty()) {
             return Ok(None);
         }
+        // A check bound for GitHub takes no slot of this machine, but it waits here for its
+        // runner units and is pushed once they are granted. A daemon that restarted counted the
+        // units of this check's run still out: they are its own, and its lease takes them over.
+        let pooled: std::collections::BTreeMap<String, u32>;
+        let uses = match pool {
+            Some(units) => {
+                pooled = units;
+                self.d
+                    .broker
+                    .take_over_remote_where(&|k| run_of_prefix(k, run_prefix));
+                &pooled
+            }
+            None => uses,
+        };
         for name in uses.keys() {
             self.d
                 .broker
@@ -3305,6 +3353,41 @@ impl CheckSlots {
             *self.lease.lock().unwrap_or_else(|e| e.into_inner()) = Some(l);
         }
     }
+}
+
+/// What a check's phase asks the broker for before it runs (#818).
+pub(crate) enum Want {
+    /// Attaches to a run of the same tree already out: nothing.
+    Nothing,
+    /// Runs here: the slots it uses.
+    Slots,
+    /// Goes to GitHub: these runner units, and no slot of this machine.
+    Pool(std::collections::BTreeMap<String, u32>),
+}
+
+/// What `spec` asks for: nothing if it attaches to a pending run, the runner units of its jobs
+/// if it goes to GitHub, else its local slots.
+fn want_of(d: &Arc<Daemon>, spec: &crate::hostedcheck::CheckSpec) -> Want {
+    if crate::hostedcheck::pending(d, spec) {
+        Want::Nothing
+    } else if let Some(u) = crate::hostedcheck::pool_units(d, spec) {
+        Want::Pool(u)
+    } else {
+        Want::Slots
+    }
+}
+
+/// The grant a check pushes with: its lease, or nothing new when it attaches to a run out.
+fn grant_of(lease: Option<crate::sched::Lease>) -> crate::remote::Grant {
+    lease.map_or_else(crate::remote::Grant::attached, crate::remote::Grant::of)
+}
+
+/// Is `key` the id of a run numbered after `prefix` (`t5r7-check` then `t5r7-check0`)?
+pub(crate) fn run_of_prefix(key: &str, prefix: &str) -> bool {
+    !prefix.is_empty()
+        && key
+            .strip_prefix(prefix)
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// The step a `run_check` is ranked as: the agent's own, never the test step it

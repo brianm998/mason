@@ -158,10 +158,15 @@ pub const GHA_MACOS_CEILING: &str = "gha_macos_ceiling";
 /// repository the projects name (#819). Read by one poller; the broker only holds the numbers.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct OtherJobs {
-    /// Jobs of every kind, macOS ones included.
-    pub gha: u32,
-    /// Of those, the jobs on macOS runners.
-    pub macos: u32,
+    /// Jobs running, of every kind, macOS ones included. Only these hold `gha` units: GitHub's
+    /// concurrency limit applies to running jobs, and a queued one occupies no runner.
+    pub gha_running: u32,
+    /// Jobs queued, of every kind. Shown, never booked.
+    pub gha_queued: u32,
+    /// Of the running ones, the jobs on macOS runners.
+    pub macos_running: u32,
+    /// Of the queued ones, the jobs on macOS runners. Shown, never booked.
+    pub macos_queued: u32,
     /// A short label: `mason CI 5 running, star pr-gate 2 queued`.
     pub label: String,
     /// Repositories the token cannot read: their jobs are not counted.
@@ -170,6 +175,17 @@ pub struct OtherJobs {
     pub read_at_ms: u64,
     /// The last look failed, so the count is the one from `read_at_ms`.
     pub stale: bool,
+}
+
+impl OtherJobs {
+    /// Running and queued jobs together, for the display.
+    pub fn gha(&self) -> u32 {
+        self.gha_running + self.gha_queued
+    }
+    /// Of those, the macOS ones.
+    pub fn macos(&self) -> u32 {
+        self.macos_running + self.macos_queued
+    }
 }
 
 /// The default `thermal_max_c`. On 2026-11-18/19 the owner's iMac Pro sat at 90 °C or more for
@@ -677,11 +693,22 @@ pub struct Lease {
     id: u64,
     task: Option<TaskId>,
     held: Option<Held>,
+    /// What the lease was asked for, so a remote run can name the units it holds (#818).
+    amounts: BTreeMap<String, u32>,
 }
 
 impl Lease {
     pub fn id(&self) -> u64 {
         self.id
+    }
+
+    /// The runner units (`gha`, `gha-macos`) this lease holds.
+    pub fn units(&self) -> BTreeMap<String, u32> {
+        self.amounts
+            .iter()
+            .filter(|(k, n)| **n > 0 && mason_scheduler::is_gha_pool(k))
+            .map(|(k, n)| (k.clone(), *n))
+            .collect()
     }
 }
 
@@ -1069,13 +1096,16 @@ impl Broker {
         }
         let now = crate::daemon::now_ms();
         let label = if st.other.label.is_empty() {
-            format!("other workflows: {} jobs", st.other.gha)
+            format!(
+                "other workflows: {} running, {} queued",
+                st.other.gha_running, st.other.gha_queued
+            )
         } else {
             st.other.label.clone()
         };
         for (pool, jobs, ceiling) in [
-            (GHA, st.other.gha, st.gha_ceiling),
-            (GHA_MACOS, st.other.macos, st.gha_macos_ceiling),
+            (GHA, st.other.gha_running, st.gha_ceiling),
+            (GHA_MACOS, st.other.macos_running, st.gha_macos_ceiling),
         ] {
             let limit = st.ledger.capacity(pool).map_or(0, |c| c.units);
             let slack = limit.saturating_sub(ceiling);
@@ -1104,13 +1134,38 @@ impl Broker {
             .filter(|h| !matches!(st.meta.get(&h.id), Some(Meta::Other)))
             .filter_map(|h| h.needs.amounts.get(GHA))
             .sum();
+        let now = crate::daemon::now_ms();
+        let waiters: Vec<_> = snap
+            .waiting
+            .iter()
+            .filter(|r| {
+                r.needs
+                    .amounts
+                    .keys()
+                    .any(|k| mason_scheduler::is_gha_pool(k))
+            })
+            .enumerate()
+            .map(|(i, r)| {
+                let (label, _) = mason_scheduler::label_parts(&r.label);
+                serde_json::json!({
+                    "position": i + 1,
+                    "label": label,
+                    "kind": gha_kind(&r.label),
+                    "waited_ms": now.saturating_sub(r.since),
+                    "uses": r.needs.amounts,
+                })
+            })
+            .collect();
         serde_json::json!({
             "mason": used,
-            "other": st.other.gha,
+            "other": st.other.gha_running,
+            "other_queued": st.other.gha_queued,
             "other_label": st.other.label,
             "ceiling": st.gha_ceiling,
+            "waiters": waiters,
             "macos": {
-                "other": st.other.macos,
+                "other": st.other.macos_running,
+                "other_queued": st.other.macos_queued,
                 "ceiling": st.gha_macos_ceiling,
             },
             "not_counted": st.other.not_counted,
@@ -1994,6 +2049,25 @@ impl Broker {
         !ids.is_empty()
     }
 
+    /// [`Broker::take_over_remote`] for every adopted run whose key `matches`: a check's key is
+    /// its run id, which the caller knows only by its prefix (#818).
+    pub fn take_over_remote_where(&self, matches: &dyn Fn(&str) -> bool) -> bool {
+        let mut st = lock(&self.st);
+        let ids: Vec<u64> = st
+            .meta
+            .iter()
+            .filter_map(|(id, m)| match m {
+                Meta::Remote { key: k, .. } if matches(k) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        for id in &ids {
+            st.ledger.release(*id);
+            st.meta.remove(id);
+        }
+        !ids.is_empty()
+    }
+
     /// Give back the units of an adopted remote run that has ended.
     fn release_ended_remote(st: &mut State) -> bool {
         let ended: Vec<u64> = st
@@ -2147,6 +2221,7 @@ impl Broker {
         expected_ms: Option<u64>,
         nowait: bool,
     ) -> Result<Lease, Cancelled> {
+        let granted = needs.amounts.clone();
         let id = {
             let mut st = lock(&self.st);
             let rank = order(&st, rank);
@@ -2303,6 +2378,7 @@ impl Broker {
             id,
             task: Some(task),
             held: Some(held),
+            amounts: granted,
         })
     }
 
@@ -3329,6 +3405,20 @@ impl Broker {
             },
             "now_ms": now,
         })
+    }
+}
+
+/// What kind of work a request for runner units is, from its label (#818): a landing batch, an
+/// agent's check, a debt payment, else a test step.
+pub fn gha_kind(label: &str) -> &'static str {
+    if label.starts_with("batch") {
+        "landing"
+    } else if label.starts_with("debt") {
+        "debt"
+    } else if label.contains(" check") {
+        "check"
+    } else {
+        "test step"
     }
 }
 
@@ -4831,7 +4921,7 @@ pub(crate) mod tests {
         let b = runner_broker(dir.path(), 16, 4, 0);
         b.set_limit("gha_ceiling", 4).unwrap();
         b.set_other_jobs(OtherJobs {
-            gha: 3,
+            gha_running: 3,
             label: "develop CI: 3 jobs".into(),
             ..Default::default()
         });
@@ -4980,13 +5070,166 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_check_bound_for_github_waits_in_the_broker_until_a_unit_is_free() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let b = runner_broker(dir.path(), 2, 1, 0);
+        // Two test-step runs hold both units.
+        let one = queue_task(&b, 1, &gha(1));
+        let two = queue_task(&b, 2, &gha(1));
+        assert!(held(&b, one) && held(&b, two));
+        let pushed = AtomicBool::new(false);
+        std::thread::scope(|sc| {
+            let check = sc.spawn(|| {
+                let rank = Rank::new(false, 3, 0, 3, 3, false);
+                let lease = b
+                    .acquire(
+                        TaskId(3),
+                        "#3 check",
+                        rank,
+                        needs_of(&gha(1), None),
+                        &|| true,
+                        &mut |_| {},
+                    )
+                    .unwrap();
+                // The fake GitHub records a push only here, after the grant.
+                pushed.store(true, Ordering::SeqCst);
+                crate::remote::Grant::of(lease).units()
+            });
+            while b.gha_waiting() == 0 {
+                std::thread::yield_now();
+            }
+            assert!(
+                !pushed.load(Ordering::SeqCst),
+                "nothing is pushed while it waits"
+            );
+            let view = Broker::gha_view(&lock(&b.st));
+            assert_eq!(view["waiters"][0]["kind"], "check");
+            assert_eq!(view["waiters"][0]["position"], 1);
+            // One of the runs ends: the check is granted, then pushed.
+            b.release(one, Some(TaskId(1)));
+            let units = check.join().unwrap();
+            assert!(pushed.load(Ordering::SeqCst));
+            assert_eq!(units, gha(1));
+        });
+    }
+
+    #[test]
+    fn a_run_that_falls_back_gives_its_runner_units_back_before_taking_local_slots() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = runner_broker(dir.path(), 1, 1, 0);
+        let rank = Rank::new(false, 3, 0, 1, 1, false);
+        let lease = b
+            .acquire(
+                TaskId(1),
+                "#1 check",
+                rank,
+                needs_of(&gha(1), None),
+                &|| true,
+                &mut |_| {},
+            )
+            .unwrap();
+        let grant = crate::remote::Grant::of(lease);
+        assert_eq!(grant.units(), gha(1));
+        let next = queue_task(&b, 2, &gha(1));
+        assert!(!held(&b, next), "the only unit is held");
+        // fallback = "local": the units go back, so the next run gets them.
+        assert!(grant.give_back());
+        drop(b.pass(lock(&b.st)));
+        assert!(held(&b, next));
+        assert!(grant.units().is_empty());
+        // Local slots are then asked of the broker like any local run's.
+        let local = BTreeMap::from([("compile".to_string(), 1)]);
+        assert!(held(&b, queue_task(&b, 3, &local)));
+    }
+
+    #[test]
+    fn a_check_asking_again_after_a_restart_takes_over_its_adopted_hold_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = runner_broker(dir.path(), 1, 1, 0);
+        let record = dir.path().join("c.remote");
+        mason_step_host::registry::write_kv(
+            &record,
+            &[("sha", "abc".to_string()), ("collected", "0".to_string())],
+        )
+        .unwrap();
+        // A check's hold is keyed by its run id.
+        b.adopt_remote(&[crate::remote::RemoteHold {
+            key: "t5r7-check-cargo-workspace0".into(),
+            label: "t5r7-check-cargo-workspace0".into(),
+            units: gha(1),
+            record,
+            ..Default::default()
+        }]);
+        let next = queue_task(&b, 6, &gha(1));
+        assert!(!held(&b, next), "the adopted units are counted");
+        // Another task's check does not match; this check's prefix does.
+        assert!(!b.take_over_remote_where(&|k| crate::jobs::run_of_prefix(
+            k,
+            "t5r8-check-cargo-workspace"
+        )));
+        assert!(!b.take_over_remote_where(&|k| crate::jobs::run_of_prefix(k, "t5r7-check-cargo")));
+        assert!(b.take_over_remote_where(&|k| crate::jobs::run_of_prefix(
+            k,
+            "t5r7-check-cargo-workspace"
+        )));
+        drop(b.pass(lock(&b.st)));
+        assert!(
+            held(&b, next),
+            "its lease replaces the adopted hold: counted once"
+        );
+        assert!(!b.take_over_remote_where(&|k| crate::jobs::run_of_prefix(
+            k,
+            "t5r7-check-cargo-workspace"
+        )));
+    }
+
+    /// Other workflows' queued jobs occupy no runner (GitHub's limit is on running jobs), so
+    /// they are shown but never booked (#818).
+    #[test]
+    fn only_other_workflows_running_jobs_hold_units_not_their_queued_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = runner_broker(dir.path(), 20, 5, 0);
+        b.set_limit("gha_ceiling", 20).unwrap();
+        let other = |running: u32, queued: u32| OtherJobs {
+            gha_running: running,
+            gha_queued: queued,
+            label: format!("other {running} running, {queued} queued"),
+            ..Default::default()
+        };
+        // 3 running, 28 queued: 8 units are granted at once.
+        b.set_other_jobs(other(3, 28));
+        let id = queue_ranked(&b, 1, false, &gha(8));
+        assert!(held(&b, id), "queued jobs of others take no unit");
+        let view = Broker::gha_view(&lock(&b.st));
+        assert_eq!(view["other"].as_u64(), Some(3));
+        assert_eq!(view["other_queued"].as_u64(), Some(28));
+        lock(&b.st).ledger.release(id);
+        // 20 running: nothing is left, a request waits.
+        b.set_other_jobs(other(20, 0));
+        let id = queue_ranked(&b, 2, false, &gha(8));
+        assert!(
+            !held(&b, id),
+            "the account's 20 running jobs fill the limit"
+        );
+        lock(&b.st).ledger.release(id);
+        // 12 running, 30 queued: 8 fit, 9 do not.
+        b.set_other_jobs(other(12, 30));
+        let nine = queue_ranked(&b, 3, false, &gha(9));
+        assert!(!held(&b, nine));
+        lock(&b.st).ledger.release(nine);
+        let eight = queue_ranked(&b, 4, false, &gha(8));
+        assert!(held(&b, eight));
+    }
+
+    #[test]
     fn macos_jobs_of_other_workflows_count_against_both_pools_and_the_macos_ceiling() {
         let dir = tempfile::tempdir().unwrap();
         let b = runner_broker(dir.path(), 16, 5, 0);
         b.set_limit("gha_macos_ceiling", 5).unwrap();
         b.set_other_jobs(OtherJobs {
-            gha: 2,
-            macos: 2,
+            gha_running: 2,
+            macos_running: 2,
             label: "star pr-gate 2 running".into(),
             ..Default::default()
         });

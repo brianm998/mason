@@ -2455,18 +2455,12 @@ impl Runner {
                     // A build first, as the test step does, holding one `compile`
                     // slot; the re-test then holds the rest of what the test step uses.
                     if let Some(build) = &cmds.build {
-                        let _lease = match self.hold(
+                        match self.check_through_outage(
                             &def,
+                            d,
+                            &spec("rebuild", build, false),
                             crate::sched::needs_of(&crate::jobs::build_uses(), None),
-                            true,
                         ) {
-                            Ok(l) => l,
-                            Err(e) => {
-                                self.fail_service(e);
-                                return false;
-                            }
-                        };
-                        match self.check_through_outage(d, &spec("rebuild", build, false)) {
                             Ok(o) if o.stopped.is_some() => {
                                 tracing::info!(
                                     batch = batch_id,
@@ -2512,19 +2506,13 @@ impl Runner {
                     }
                     // The re-test holds what the test step uses, as any test does; the
                     // wait for it is outside the command's timeout.
-                    let _lease = match self.hold(
-                        &def,
-                        self.test_step_needs(&def, cmds.build.is_some()),
-                        true,
-                    ) {
-                        Ok(l) => l,
-                        Err(e) => {
-                            self.fail_service(e);
-                            return false;
-                        }
-                    };
                     let spec = spec("retest", &cmds.test, true);
-                    return match self.check_through_outage(d, &spec) {
+                    return match self.check_through_outage(
+                        &def,
+                        d,
+                        &spec,
+                        self.test_step_needs(&def, cmds.build.is_some()),
+                    ) {
                         Ok(o) if o.stopped.is_some() => {
                             tracing::info!(
                                 batch = batch_id,
@@ -3362,16 +3350,6 @@ impl Runner {
             let Some(cmd) = suite.fast_command.clone() else {
                 continue;
             };
-            let _lease =
-                match self.hold(def, self.test_step_needs(def, suite.build.is_some()), true) {
-                    Ok(l) => l,
-                    Err(e) => {
-                        self.fail_service(e.clone());
-                        out.green = false;
-                        out.notes.push(e);
-                        return out;
-                    }
-                };
             let spec = crate::hostedcheck::CheckSpec {
                 id_prefix: format!("{prefix}-fast-{name}"),
                 log_dir: log_dir.to_path_buf(),
@@ -3390,7 +3368,12 @@ impl Runner {
                 place: Some((None, Box::new(crate::hostedcheck::without_build(suite)))),
                 global: false,
             };
-            match self.check_through_outage(d, &spec) {
+            match self.check_through_outage(
+                def,
+                d,
+                &spec,
+                self.test_step_needs(def, suite.build.is_some()),
+            ) {
                 Ok(o) if o.stopped.is_some() => out.notes.push(format!(
                     "{name}: fast tier not run to the end: {}",
                     o.stopped.unwrap_or_default()
@@ -3560,15 +3543,6 @@ impl Runner {
         }
         let members = self.members(def);
         for (name, cmd, only) in runs {
-            let _lease = match self.hold(def, self.test_step_needs(def, false), true) {
-                Ok(l) => l,
-                Err(e) => {
-                    self.fail_service(e.clone());
-                    out.green = false;
-                    out.notes.push(e);
-                    return out;
-                }
-            };
             let spec = crate::hostedcheck::CheckSpec {
                 id_prefix: format!("{prefix}-new-{name}"),
                 log_dir: log_dir.to_path_buf(),
@@ -3587,7 +3561,7 @@ impl Runner {
                 place: None,
                 global: true,
             };
-            match crate::hostedcheck::run(d, &spec) {
+            match self.run_held(def, d, &spec, self.test_step_needs(def, false)) {
                 Ok(o) if o.stopped.is_some() => out.notes.push(format!(
                     "{name}: the new tests were not run to the end: {}",
                     o.stopped.unwrap_or_default()
@@ -3764,24 +3738,7 @@ impl Runner {
                 global: false,
             };
             let remote = github && crate::hostedcheck::goes_remote(d, &spec);
-            // Work that goes to GitHub holds no local slot while it waits there.
-            let _lease = if remote {
-                None
-            } else {
-                match self.hold(
-                    def,
-                    crate::sched::needs_of(&crate::jobs::build_uses(), None),
-                    true,
-                ) {
-                    Ok(l) => l,
-                    Err(e) => {
-                        self.fail_service(e.clone());
-                        out.green = false;
-                        out.notes.push(e);
-                        return out;
-                    }
-                }
-            };
+            // Work that goes to GitHub holds runner units, not a local slot, while it waits (#818).
             let began = std::time::Instant::now();
             let ran_on = if remote { "on GitHub" } else { "on this Mac" };
             let took = |s: u64| {
@@ -3791,7 +3748,12 @@ impl Runner {
                     format!("{s}s")
                 }
             };
-            match self.check_through_outage(d, &spec) {
+            match self.check_through_outage(
+                def,
+                d,
+                &spec,
+                crate::sched::needs_of(&crate::jobs::build_uses(), None),
+            ) {
                 Ok(o) if o.stopped.is_some() => out.notes.push(format!(
                     "{name}: not run to the end: {}",
                     o.stopped.unwrap_or_default()
@@ -3950,19 +3912,7 @@ impl Runner {
                 out.notes.push(format!("{name}: {what} not built: {why}"));
                 continue;
             }
-            let _lease = match self.hold(
-                def,
-                crate::sched::needs_of(&crate::jobs::build_uses(), None),
-                true,
-            ) {
-                Ok(l) => l,
-                Err(e) => {
-                    self.fail_service(e.clone());
-                    out.green = false;
-                    out.notes.push(e);
-                    return out;
-                }
-            };
+            let floor_needs = crate::sched::needs_of(&crate::jobs::build_uses(), None);
             // #816: the floor builds on this Mac (warm target directory, no runner queue) unless
             // `floor_where = "github"`, or the suite names a runner of another OS than this
             // Mac's. Then the suite's own placement (#815) decides, as before.
@@ -4007,7 +3957,7 @@ impl Runner {
                 }
             };
             let mut ran_on = ran_on;
-            let mut result = self.check_through_outage(d, &spec);
+            let mut result = self.check_through_outage(def, d, &spec, floor_needs.clone());
             // #962: no GitHub runner took the floor build within the outage limit, three times
             // over. A build is the same anywhere, so it is built on this Mac rather than failing
             // the batch for GitHub's queue.
@@ -4021,7 +3971,7 @@ impl Runner {
                 ));
                 ran_on = "on this Mac";
                 let local = mk(format!("{prefix}-floor-{name}-here"), false);
-                result = self.check_through_outage(d, &local);
+                result = self.check_through_outage(def, d, &local, floor_needs);
             }
             match result {
                 Ok(o) if o.stopped.is_some() => out.notes.push(format!(
@@ -4122,8 +4072,10 @@ impl Runner {
     /// error, which the caller raises as a service failure (#772).
     fn check_through_outage(
         &self,
+        def: &mason_definition::Definition,
         d: &Arc<Daemon>,
         spec: &crate::hostedcheck::CheckSpec,
+        local: mason_scheduler::Needs,
     ) -> Result<crate::hostedcheck::CheckOutcome, String> {
         let key = self.alert_key("service");
         let r = retry_outage(
@@ -4139,7 +4091,7 @@ impl Runner {
                         phase: None,
                     });
                 }
-                crate::hostedcheck::run(d, spec)
+                self.run_held(def, d, spec, local.clone())
             },
             |waited, why| {
                 self.d.landing.raise(
@@ -4231,6 +4183,39 @@ impl Runner {
             .map_err(|_| "every task of the batch left the landing step while it waited".into())
     }
 
+    /// Hold what `spec` needs, ranked as the batch's first task, then run it: a check that goes
+    /// to GitHub takes the runner units of its jobs and no slot of this machine, and is pushed
+    /// once they are granted (#818); one that runs here takes `local`. A run that attaches to
+    /// one already out takes the local slots as before and pushes nothing new. The wait is
+    /// outside the command's timeout, and the hold ends with the run.
+    fn run_held(
+        &self,
+        def: &mason_definition::Definition,
+        d: &Arc<Daemon>,
+        spec: &crate::hostedcheck::CheckSpec,
+        local: mason_scheduler::Needs,
+    ) -> Result<crate::hostedcheck::CheckOutcome, String> {
+        let units = crate::hostedcheck::pool_units(d, spec)
+            .filter(|_| !crate::hostedcheck::pending(d, spec));
+        let (lease, grant) = match units {
+            Some(u) => {
+                let lease = self.hold(def, hold_needs(Default::default(), u), true)?;
+                (
+                    None,
+                    lease.map_or_else(crate::remote::Grant::attached, crate::remote::Grant::of),
+                )
+            }
+            None => (
+                self.hold(def, local, true)?,
+                crate::remote::Grant::attached(),
+            ),
+        };
+        let out = crate::hostedcheck::run(d, spec, &grant);
+        drop(grant);
+        drop(lease);
+        out
+    }
+
     /// The batch as the owner of its broker requests, ranked as its first task (`None`: no
     /// member). `watch`: a wait ends if all the batch's tasks have left the landing step.
     fn owner(
@@ -4296,9 +4281,32 @@ impl Runner {
         names: &[String],
         watch: bool,
     ) -> Result<(Option<crate::sched::Lease>, crate::suites::BatchCover), String> {
-        let (here, _) = self.by_placement(def, names);
+        let (here, there) = self.by_placement(def, names);
         let needs = suites_needs(def, &here);
-        let lease = self.hold(def, needs.clone(), watch)?;
+        // A suite bound for GitHub asks the broker for the runner units of the jobs it starts
+        // (its shards, and `gha-macos` on a macOS runner) at the batch's landing rank, and
+        // takes no slot of this machine (#818). One hold covers both.
+        let project = self.project().id.clone();
+        let mut units: std::collections::BTreeMap<String, u32> = Default::default();
+        for n in &there {
+            let Some(s) = def.testing.suite(n) else {
+                continue;
+            };
+            if let crate::remote::RunPlace::GitHub { units: u, .. } = crate::remote::run_place(
+                &self.d,
+                &project,
+                None,
+                Some(s),
+                &s.command,
+                crate::remote::Kind::Suite,
+            ) {
+                for (k, v) in u {
+                    let have = units.entry(k).or_insert(0);
+                    *have = (*have).max(v);
+                }
+            }
+        }
+        let lease = self.hold(def, hold_needs(needs.clone(), units), watch)?;
         let cover = crate::suites::BatchCover {
             owner: self.owner(def, watch)?.map(Arc::new),
             held: lease.as_ref().map(|_| needs),
@@ -4544,6 +4552,85 @@ impl Runner {
         }
     }
 
+    /// Record one look at a pending run and raise or clear the "CI has not changed" alert.
+    /// `at` is (CI branch, run id, run URL or empty).
+    fn watch_stuck(
+        &self,
+        looks: &mut Vec<mason_core::ci_stuck::Look>,
+        key: &str,
+        now_s: u64,
+        after_s: u64,
+        at: (&str, &str, &str),
+        detail: &[CiRunJobs],
+    ) {
+        use mason_core::ci_stuck::{span, stuck_for, Look};
+        let mut sum = CiJobCounts::default();
+        for w in detail {
+            sum.merge(&w.jobs);
+        }
+        let mut names = sum.running_names.clone();
+        names.sort();
+        let signature = format!(
+            "q{} r{} ok{} bad{} {}",
+            sum.queued,
+            sum.running,
+            sum.succeeded,
+            sum.failed,
+            names.join("|")
+        );
+        // No job detail at all: the run is pending, so something is unfinished.
+        let unfinished = sum.total == 0 || sum.queued + sum.running > 0;
+        // Only the stretch of the last signature matters: keep its first and latest look.
+        if looks.last().is_some_and(|l| l.signature != signature) {
+            looks.clear();
+        }
+        looks.push(Look {
+            at_s: now_s,
+            signature,
+            unfinished,
+        });
+        if looks.len() > 2 {
+            let (first, last) = (looks[0].clone(), looks[looks.len() - 1].clone());
+            *looks = vec![first, last];
+        }
+        let Some(quiet) = stuck_for(looks, after_s) else {
+            self.d.landing.clear(self.pid, key);
+            return;
+        };
+        let (branch, run, url) = at;
+        let jobs = if sum.total == 0 {
+            "the CI gave no job detail".to_string()
+        } else {
+            let mut parts = vec![];
+            if sum.running > 0 {
+                parts.push(format!(
+                    "{} running ({})",
+                    sum.running,
+                    sum.running_names.join(", ")
+                ));
+            }
+            if sum.queued > 0 {
+                parts.push(format!("{} queued, no runner yet", sum.queued));
+            }
+            parts.join("; ")
+        };
+        let batch = self.batch_id.load(std::sync::atomic::Ordering::SeqCst);
+        let page = if url.is_empty() { run } else { url };
+        let help = if url.is_empty() {
+            "see `mason landing`"
+        } else {
+            "`gh run cancel <id>` for the run, or `mason landing` for the batch"
+        };
+        let text = format!(
+            "{}: batch {batch}: CI on {branch} ({page}) has not changed for {}: {jobs}; {help}",
+            self.project().id,
+            // In steps of `stuck_after`, so the text (and any announcement of it) holds still.
+            span(quiet - quiet % after_s)
+        );
+        self.d.landing.raise(self.pid, key, "landing", &text);
+        self.d.poke();
+    }
+
     /// `direct-ci` and `local-only-ci`: push `mason/ci/<project>-b<batch>-<n>`, run CI
     /// on it, take the answer, delete the ref. `(green, notes, failed job names)`.
     fn ci_verify(&self, wt: &Path) -> Result<(bool, Vec<String>, Vec<String>), String> {
@@ -4557,6 +4644,8 @@ impl Runner {
         self.d.landing.ci.start(batch, &name, now_ms());
         self.say(&format!("waiting for CI on {name}"));
         let skipped = std::cell::Cell::new(false);
+        let looks = std::cell::RefCell::new(Vec::<mason_core::ci_stuck::Look>::new());
+        let stuck_key = self.alert_key("ci-stuck");
         let r = (|| {
             let run = self.ask("CI trigger", started, cfg.timeout_s, cfg.poll_s, || {
                 ci.trigger(&name, &sha).map(Some)
@@ -4572,15 +4661,33 @@ impl Runner {
                     CiState::Pending => {
                         self.ci_jobs(&name, &detail);
                         // For the landing view only; a failed read changes nothing.
+                        let mut url = String::new();
                         if let Ok(p) = ci.progress(&run) {
                             self.d.landing.ci.update(batch, &p);
+                            url = p
+                                .workflows
+                                .iter()
+                                .map(|w| w.url.clone())
+                                .find(|u| !u.is_empty())
+                                .unwrap_or_default();
                         }
+                        // Only looks: nothing is cancelled and no verdict changes.
+                        self.watch_stuck(
+                            &mut looks.borrow_mut(),
+                            &stuck_key,
+                            started.elapsed().as_secs(),
+                            cfg.stuck_after_s,
+                            (&name, &run, &url),
+                            &detail,
+                        );
                         None
                     }
                     done => Some(done),
                 })
             })
         })();
+        // The alert never outlives the run: finished, red, yielded, timed out or failed.
+        self.d.landing.clear(self.pid, &stuck_key);
         match &r {
             Ok(CiState::Green) => self.d.landing.ci.finish(batch, "green"),
             Ok(CiState::Red { .. }) => self.d.landing.ci.finish(batch, "red"),
@@ -5211,7 +5318,8 @@ impl Runner {
             k.sort_unstable();
             runs.push((k, notes));
         };
-        // Both halves of a split at once, when every suite it can run goes to GitHub (#702).
+        // Both halves of a split at once, when every suite it can run goes off this machine, to
+        // GitHub or a node (#702).
         // The verdicts are the ones the one-at-a-time search gets; only the wall time differs.
         let side_by_side = {
             let mut names: std::collections::BTreeSet<&String> = failed.iter().collect();
@@ -5220,15 +5328,13 @@ impl Runner {
             !names.is_empty()
                 && names.into_iter().all(|n| {
                     def.testing.suite(n).is_some_and(|s| {
-                        matches!(
-                            crate::remote::executor_for(
-                                &self.d,
-                                &self.project().id,
-                                crate::remote::Kind::Suite,
-                                Some((None, s))
-                            ),
-                            crate::remote::Executor::GitHub { .. }
+                        crate::remote::executor_for(
+                            &self.d,
+                            &self.project().id,
+                            crate::remote::Kind::Suite,
+                            Some((None, s)),
                         )
+                        .is_off_machine()
                     })
                 })
         };
@@ -5481,6 +5587,19 @@ impl Runner {
         d.landing.wake();
         d.poke();
     }
+}
+
+/// A hold for suites that run here (`local`) and on GitHub (`units`): the local slots plus the
+/// runner units, and nothing of this machine for a suite that runs on GitHub.
+fn hold_needs(
+    mut local: mason_scheduler::Needs,
+    units: std::collections::BTreeMap<String, u32>,
+) -> mason_scheduler::Needs {
+    for (k, v) in units {
+        let have = local.amounts.entry(k).or_insert(0);
+        *have = (*have).max(v);
+    }
+    local
 }
 
 /// What running these suites holds: each suite's `uses` and its environment's,
@@ -5879,5 +5998,20 @@ mod tests {
             plan::form_batch(&[cand(0)], clock, window, 0, 1),
             Formation::Wait(_)
         ));
+    }
+
+    #[test]
+    fn a_hold_takes_runner_units_for_a_github_suite_and_local_slots_for_the_rest() {
+        use crate::remote::units_for;
+        use std::collections::BTreeMap;
+        // The cargo workspace goes to GitHub sharded 3 ways (3 units); lint runs here and takes
+        // one `compile`: the hold is both, and no `test-suite`.
+        let lint = crate::sched::needs_of(&BTreeMap::from([("compile".to_string(), 1)]), None);
+        let needs = hold_needs(lint, units_for("ubuntu-latest", 3));
+        assert_eq!(
+            needs.amounts,
+            BTreeMap::from([("compile".to_string(), 1), ("gha".to_string(), 3)])
+        );
+        assert!(!needs.amounts.contains_key("test-suite"));
     }
 }

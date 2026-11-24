@@ -476,6 +476,16 @@ pub fn show(d: &Daemon, json_out: bool) -> Result<(), String> {
             for l in gha_run_lines(&v["gha"]) {
                 println!("      {l}");
             }
+            for l in gha_waiter_lines(&v["gha"], now) {
+                println!("      {l}");
+            }
+        } else if r["name"].as_str() == Some("gha-macos") {
+            for l in gha_waiter_lines(&v["gha"], now)
+                .into_iter()
+                .filter(|l| l.contains("gha-macos"))
+            {
+                println!("      {l}");
+            }
         }
         for (i, s) in r["slots"].as_array().into_iter().flatten().enumerate() {
             if let Some(by) = s["held_by"].as_str() {
@@ -583,25 +593,33 @@ pub fn github_api_line(g: &Value, _now: u64) -> Option<String> {
     ))
 }
 
-/// The `gha` pool's split (#766, #819): `MASON 11, other 7 (mason CI 5 running, star pr-gate 2
-/// queued), ceiling 20; macOS: other 2, ceiling 5`, then what is not counted or how old the count is.
+/// The `gha` pool's split (#766, #819): `MASON 11, other 5 running, 2 queued (mason CI 5 running,
+/// star pr-gate 2 queued), ceiling 20; macOS: other 2 running, 0 queued, ceiling 5`, then what is not counted or how old the count is.
 pub fn gha_line(g: &Value, now: u64) -> Option<String> {
     let mason = g["mason"].as_u64()?;
     let other = g["other"].as_u64().unwrap_or(0);
     let label = g["other_label"].as_str().unwrap_or("");
-    let label = if label.is_empty() || other == 0 {
+    let any = other + g["other_queued"].as_u64().unwrap_or(0);
+    let label = if label.is_empty() || any == 0 {
         String::new()
     } else {
         format!(" ({label})")
     };
+    let queued = g["other_queued"].as_u64().unwrap_or(0);
+    let queued = if queued > 0 {
+        format!(", {queued} queued")
+    } else {
+        String::new()
+    };
     let mut line = format!(
-        "MASON {mason}, other {other}{label}, ceiling {}",
+        "MASON {mason}, other {other} running{queued}{label}, ceiling {}",
         g["ceiling"].as_u64().unwrap_or(0)
     );
     if g["macos"].is_object() {
         line.push_str(&format!(
-            "; macOS: other {}, ceiling {}",
+            "; macOS: other {} running, {} queued, ceiling {}",
             g["macos"]["other"].as_u64().unwrap_or(0),
+            g["macos"]["other_queued"].as_u64().unwrap_or(0),
             g["macos"]["ceiling"].as_u64().unwrap_or(0)
         ));
     }
@@ -622,6 +640,35 @@ pub fn gha_line(g: &Value, now: u64) -> Option<String> {
         line.push_str(&format!("; GitHub could not be read, count is {age}"));
     }
     Some(line)
+}
+
+/// The requests waiting for runner units, in line order (#818): `1. landing batch #7: 3 gha,
+/// waited 4m`. The same list backs `gha-macos`, where only those that ask for it are shown.
+pub fn gha_waiter_lines(g: &Value, now: u64) -> Vec<String> {
+    g["waiters"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|w| {
+            let uses: Vec<String> = w["uses"]
+                .as_object()
+                .into_iter()
+                .flatten()
+                .map(|(k, n)| format!("{n} {k}"))
+                .collect();
+            format!(
+                "{}. {} {}: {}, waited {}",
+                w["position"],
+                w["kind"].as_str().unwrap_or("?"),
+                w["label"].as_str().unwrap_or("?"),
+                uses.join(" + "),
+                ago(
+                    now,
+                    now.saturating_sub(w["waited_ms"].as_u64().unwrap_or(0))
+                )
+            )
+        })
+        .collect()
 }
 
 /// One waiter of `mason resources`: an outside pipeline's reads

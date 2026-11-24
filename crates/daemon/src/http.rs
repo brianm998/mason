@@ -116,6 +116,11 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
     }
     if detail {
         v["body"] = json!(t.body);
+        let edits = crate::taskedit::history(d, t.id.0);
+        if let Some(last) = edits.last() {
+            v["edited"] = json!({"count": edits.len(), "at": last["at"], "who": last["who"],
+                "reason": last["reason"], "original_title": edits[0]["title"], "original_body": edits[0]["body"]});
+        }
         v["owner_notes"] = json!(crate::ownernotes::list(&d.task_dir(t.id)));
         v["priority"] = json!(format!("{:?}", t.priority).to_lowercase());
         v["attempts"] = json!(t
@@ -1398,6 +1403,35 @@ async fn task_update_priority(
         .await
         .map_err(pool_err)??;
     Ok(Json(json!({"ok": true, "urgent": urgent})))
+}
+
+/// `mason task edit` (owner only, task 989): the title and body of a task that has started or
+/// failed. The next step reads the new text; one already running keeps its prompt.
+async fn task_edit(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<u64>,
+    Json(b): Json<Value>,
+) -> Res {
+    let who = who_of(&headers);
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || {
+            owner_only(&d2, &who, "edit a task's text")?;
+            crate::taskedit::edit(
+                &d2,
+                &who,
+                id,
+                b["title"].as_str(),
+                b["body"].as_str(),
+                b["reason"].as_str().unwrap_or_default(),
+            )
+            .map_err(|(c, m)| fail(code(c), m))
+        })
+        .await
+        .map_err(pool_err)??;
+    Ok(Json(v))
 }
 
 fn parse_priority(name: &str) -> Result<(Priority, u8), (StatusCode, Json<Value>)> {
@@ -4200,6 +4234,21 @@ async fn debug_wait_repo(Shared(d): Shared<Arc<Daemon>>) -> Res {
 pub fn api_router(d: Arc<Daemon>) -> Router {
     Router::new()
         .route("/status", get(status))
+        .route("/node/status", get(crate::node_serve::local_status))
+        .route("/node/pair-code", post(crate::node_serve::issue_code))
+        .route("/node/accept", post(crate::node_serve::accept))
+        .route("/node/coordinators", get(crate::node_serve::coordinators))
+        .route(
+            "/node/coordinators/remove",
+            post(crate::node_serve::coordinator_remove),
+        )
+        .route("/node/stop-jobs", post(crate::node_serve::stop_jobs))
+        .route("/node/jobs", get(crate::node_serve::jobs))
+        .route("/node/doctor", post(crate::node_serve::doctor))
+        .route("/nodes", get(crate::nodes::list))
+        .route("/nodes/add", post(crate::nodes::add))
+        .route("/nodes/remove", post(crate::nodes::remove))
+        .route("/nodes/use", post(crate::nodes::use_nodes))
         .route("/lan", get(crate::lan::status))
         .route("/pair/codes", post(crate::lan::issue_code))
         .route("/devices", get(crate::lan::devices))
@@ -4224,6 +4273,7 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/tasks/{id}/overrides", post(task_override))
         .route("/tasks/{id}/priority", post(task_priority))
         .route("/tasks/{id}/update-priority", post(task_update_priority))
+        .route("/tasks/{id}/edit", post(task_edit))
         .route("/tasks/{id}/run_on", post(task_run_on))
         .route("/projects/{name}/definition", get(project_definition))
         .route("/projects/{name}/extensions", get(extensions_list))
@@ -4510,8 +4560,18 @@ pub async fn serve_until(
     } else {
         None
     };
+    let node_port = if d.cfg.node.serve {
+        Some(crate::node_serve::start(d.clone()).await?)
+    } else {
+        None
+    };
+    crate::nodes::start(&d);
     let tmp = info.with_extension("tmp");
     let mut announce = json!({"pid": std::process::id(), "port": port, "started_ms": now_ms()});
+    if let (Some(p), Some(i)) = (node_port, d.node.info()) {
+        announce["node_port"] = json!(p);
+        announce["node_fingerprint"] = json!(i.fingerprint);
+    }
     if let (Some(p), Some(i)) = (lan_port, d.lan.info()) {
         announce["lan_port"] = json!(p);
         announce["lan_fingerprint"] = json!(i.fingerprint);
