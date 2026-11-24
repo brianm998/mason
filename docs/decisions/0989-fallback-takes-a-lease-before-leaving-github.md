@@ -20,6 +20,10 @@ Decision:
 - `acquire_as` returns `Cancelled` when its request is no longer in the ledger.
 - The pickup clock starts at `created_at` when that lies between the push and now.
 
+- An exclusive request waiting in the broker (`LoadReading::exclusive_waiting`) is no room for
+  `no_room`, `has_room` and `overloaded`, so favor-remote and favor-local do not place work into
+  the convoy behind it (seen 2026-11-23 with a whole-machine test step).
+
 Not done: step 3, moving a queued fallback back to GitHub. With the lease taken first, a run
 that falls back after the room check holds its lease already and never waits in
 `fallback_lease`; only runs with no room function (GitHub down, no `[remote_runs]` spill) queue

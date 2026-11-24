@@ -134,6 +134,9 @@ pub struct LocalLoad {
     pub free: BTreeMap<String, u32>,
     /// Requests already waiting for any of those slots.
     pub waiting: u32,
+    /// A waiting exclusive request (label): everything behind it waits for the machine to
+    /// drain, so there is no room here whatever the free units say (2026-11-23).
+    pub exclusive_waiting: Option<String>,
     /// The longest any of them has waited, in ms.
     pub oldest_wait_ms: u64,
 }
@@ -143,6 +146,7 @@ impl LocalLoad {
     pub fn from_reading(r: &crate::sched::LoadReading, needs: &[String]) -> LocalLoad {
         let mut load = LocalLoad {
             held: r.held.clone(),
+            exclusive_waiting: r.exclusive_waiting.clone(),
             ..LocalLoad::default()
         };
         for n in needs {
@@ -169,6 +173,9 @@ impl LocalLoad {
         if let Some(h) = &self.held {
             return Some(format!("this machine {h}"));
         }
+        if let Some(x) = &self.exclusive_waiting {
+            return Some(format!("an exclusive request ({x}) is waiting here"));
+        }
         let full = !self.free.is_empty() && self.free.values().all(|n| *n == 0);
         if full && self.waiting > 0 {
             let names: Vec<&str> = self.free.keys().map(String::as_str).collect();
@@ -191,7 +198,9 @@ impl LocalLoad {
     /// Whether a run can start here now (#833): no hold is active and, when slots are named, one
     /// of them is free.
     pub fn has_room(&self) -> bool {
-        self.held.is_none() && (self.free.is_empty() || self.free.values().any(|n| *n > 0))
+        self.held.is_none()
+            && self.exclusive_waiting.is_none()
+            && (self.free.is_empty() || self.free.values().any(|n| *n > 0))
     }
 
     /// Why a run that would hold the slots in `free` cannot start here now, or `None` when it
@@ -204,6 +213,13 @@ impl LocalLoad {
         }
         if covered {
             return None;
+        }
+        // An exclusive request at the head of the queue blocks every other request until the
+        // machine drains, so nothing placed here would start.
+        if let Some(x) = &self.exclusive_waiting {
+            return Some(format!(
+                "an exclusive request ({x}) is waiting here and blocks the queue"
+            ));
         }
         // Room means a grant now (#1025): a free unit for each slot beyond the requests already
         // waiting for any of them, which the same gate holds back.
@@ -454,6 +470,12 @@ pub fn balance(mode: Mode, f: &Facts, runs_on: &str, from: Source) -> Place {
                         .local
                         .held
                         .clone()
+                        .or_else(|| {
+                            sp.local
+                                .exclusive_waiting
+                                .as_ref()
+                                .map(|x| format!("has an exclusive request ({x}) waiting"))
+                        })
                         .unwrap_or_else(|| "has no slot free".into());
                     github(format!(
                         "favor-remote, {why}, but this machine {busy}, so it waits on GitHub{suffix}"
@@ -1171,6 +1193,7 @@ mod tests {
             free: BTreeMap::from([("compile".to_string(), free)]),
             waiting,
             oldest_wait_ms: oldest_s * 1000,
+            exclusive_waiting: None,
         }
     }
 
@@ -1431,6 +1454,7 @@ mod tests {
                 (vec!["test-suite".to_string()], 99_000),
             ],
             held: None,
+            ..Default::default()
         };
         let l = LocalLoad::from_reading(&r, &["compile".to_string()]);
         assert_eq!(
@@ -1708,6 +1732,7 @@ mod tests {
             limits: BTreeMap::from([("compile".to_string(), 2), ("test-suite".to_string(), 1)]),
             waiting: vec![],
             held: held.map(String::from),
+            ..Default::default()
         };
         // Free and no hold: room.
         assert_eq!(no_room_for(&reading(None, 1, 0), &uses, false), None);
@@ -1745,11 +1770,42 @@ mod tests {
             limits: BTreeMap::from([("compile".to_string(), 6)]),
             waiting: vec![(vec!["compile".to_string()], 1000); waiting],
             held: None,
+            ..Default::default()
         };
         let why = no_room_for(&reading(5), &uses, false).expect("no room behind 5 waiting");
         assert!(why.contains("compile"), "{why}");
         assert_eq!(no_room_for(&reading(4), &uses, false), None);
         // A batch's covered run is not counted against the queue.
         assert_eq!(no_room_for(&reading(5), &uses, true), None);
+    }
+
+    /// 2026-11-23: an exclusive request waiting at the head of the queue blocks every other
+    /// local request until the machine drains, so there is no room here (and favor-local sees
+    /// the machine as overloaded) whatever the free units say; a covered run is not affected.
+    #[test]
+    fn a_waiting_exclusive_request_is_no_room() {
+        use crate::sched::LoadReading;
+        let uses = BTreeMap::from([("compile".to_string(), 1u32)]);
+        let reading = |x: Option<&str>| LoadReading {
+            used: BTreeMap::from([("compile".to_string(), 0)]),
+            limits: BTreeMap::from([("compile".to_string(), 6)]),
+            exclusive_waiting: x.map(String::from),
+            ..Default::default()
+        };
+        assert_eq!(no_room_for(&reading(None), &uses, false), None);
+        let why = no_room_for(&reading(Some("trd test")), &uses, false).expect("no room");
+        assert!(
+            why.contains("exclusive") && why.contains("trd test"),
+            "{why}"
+        );
+        assert_eq!(no_room_for(&reading(Some("trd test")), &uses, true), None);
+        let load = LocalLoad::from_reading(&reading(Some("trd test")), &["compile".to_string()]);
+        assert!(!load.has_room());
+        assert!(load.overloaded(1_000).is_some());
+        assert!(
+            LocalLoad::from_reading(&reading(None), &["compile".to_string()])
+                .overloaded(1_000)
+                .is_none()
+        );
     }
 }

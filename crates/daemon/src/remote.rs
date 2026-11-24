@@ -2759,6 +2759,11 @@ fn try_take_fallback(
     let Some((needs, rank, who)) = fallback_request(d, project, task, uses) else {
         return Ok(());
     };
+    // A lease nobody collected is given back now, not only when another run asks for one.
+    PRETAKEN
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|p| p.at.elapsed() < PRETAKEN_KEEP);
     let lease = d
         .broker
         .try_acquire_beside(who, "fallback (no GitHub runner, run here)", rank, needs)

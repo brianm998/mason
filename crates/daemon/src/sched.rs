@@ -611,6 +611,10 @@ pub struct LoadReading {
     /// Each waiting request: the resources it asks for and how long it has waited, in ms.
     pub waiting: Vec<(Vec<String>, u64)>,
     pub held: Option<String>,
+    /// The label of a waiting exclusive request (the whole machine, or a converted one that
+    /// drains `compile`), if any: it blocks every other local request until the machine drains,
+    /// so nothing placed here now would start (2026-11-23).
+    pub exclusive_waiting: Option<String>,
 }
 
 /// A hold counts as active until it has been clear for `settle_ms` (#1025): `seen` is when it was
@@ -2528,6 +2532,11 @@ impl Broker {
                 })
                 .collect(),
             held,
+            exclusive_waiting: snap
+                .waiting
+                .iter()
+                .find(|r| r.needs.exclusive || r.drains_compile)
+                .map(|r| r.label.clone()),
         }
     }
 
@@ -4910,6 +4919,56 @@ pub(crate) mod tests {
         b.release(id, None);
         assert!(waiter.join().unwrap(), "the withdrawn wait ended Cancelled");
         drop(first);
+    }
+
+    /// 2026-11-23: a waiting exclusive request shows in the placement reading, with its label,
+    /// so `favor-remote`/`favor-local` do not place work into the convoy behind it.
+    #[test]
+    fn the_load_reading_names_a_waiting_exclusive_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = ResourceCfg {
+            machine: BTreeMap::from([("compile".to_string(), 2)]),
+            ..Default::default()
+        };
+        let b = Broker::new(
+            dir.path().join("locks"),
+            dir.path().join("limits.kv"),
+            &cfg,
+            2,
+            crate::cpu::FakeCpu::new(0),
+            &[],
+        )
+        .unwrap();
+        let rank = |t: u64| Rank::new(false, 1, 2, t, t, false);
+        let held = b
+            .try_acquire_beside(TaskId(1), "a", rank(1), Needs::of(&[("compile", 1)]))
+            .expect("granted");
+        assert_eq!(b.load_reading(1_000).exclusive_waiting, None);
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let b2 = b.clone();
+        let waiter = std::thread::spawn(move || {
+            b2.acquire_beside(
+                TaskId(2),
+                "trd test (exclusive)",
+                rank(2),
+                Needs {
+                    exclusive: true,
+                    amounts: BTreeMap::new(),
+                },
+                &|| true,
+                &mut |_| {
+                    let _ = tx.send(());
+                },
+            )
+            .is_ok()
+        });
+        rx.recv_timeout(Duration::from_secs(60)).expect("it waits");
+        assert_eq!(
+            b.load_reading(2_000).exclusive_waiting.as_deref(),
+            Some("trd test (exclusive)")
+        );
+        drop(held);
+        assert!(waiter.join().unwrap());
     }
 
     #[test]
