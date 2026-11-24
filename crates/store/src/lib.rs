@@ -14,6 +14,7 @@ pub mod devices;
 pub mod health_log;
 pub mod introspect;
 pub mod migrations;
+pub mod nodes;
 pub mod notify;
 pub mod owner_sessions;
 
@@ -29,6 +30,7 @@ use std::thread::JoinHandle;
 pub use codec::{decode as decode_event, encode as encode_event, state_name, CodecError};
 pub use devices::{DeviceRow, PushTarget};
 pub use introspect::{FindingRow, FullTestRow, ScheduleRow, TriageRow};
+pub use nodes::NodeRow;
 pub use notify::{AnnouncementRow, DeliveryRow};
 
 #[derive(Debug)]
