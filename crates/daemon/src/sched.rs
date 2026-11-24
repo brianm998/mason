@@ -158,10 +158,15 @@ pub const GHA_MACOS_CEILING: &str = "gha_macos_ceiling";
 /// repository the projects name (#819). Read by one poller; the broker only holds the numbers.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct OtherJobs {
-    /// Jobs of every kind, macOS ones included.
-    pub gha: u32,
-    /// Of those, the jobs on macOS runners.
-    pub macos: u32,
+    /// Jobs running, of every kind, macOS ones included. Only these hold `gha` units: GitHub's
+    /// concurrency limit applies to running jobs, and a queued one occupies no runner.
+    pub gha_running: u32,
+    /// Jobs queued, of every kind. Shown, never booked.
+    pub gha_queued: u32,
+    /// Of the running ones, the jobs on macOS runners.
+    pub macos_running: u32,
+    /// Of the queued ones, the jobs on macOS runners. Shown, never booked.
+    pub macos_queued: u32,
     /// A short label: `mason CI 5 running, star pr-gate 2 queued`.
     pub label: String,
     /// Repositories the token cannot read: their jobs are not counted.
@@ -170,6 +175,17 @@ pub struct OtherJobs {
     pub read_at_ms: u64,
     /// The last look failed, so the count is the one from `read_at_ms`.
     pub stale: bool,
+}
+
+impl OtherJobs {
+    /// Running and queued jobs together, for the display.
+    pub fn gha(&self) -> u32 {
+        self.gha_running + self.gha_queued
+    }
+    /// Of those, the macOS ones.
+    pub fn macos(&self) -> u32 {
+        self.macos_running + self.macos_queued
+    }
 }
 
 /// The default `thermal_max_c`. On 2026-11-18/19 the owner's iMac Pro sat at 90 °C or more for
@@ -1080,13 +1096,16 @@ impl Broker {
         }
         let now = crate::daemon::now_ms();
         let label = if st.other.label.is_empty() {
-            format!("other workflows: {} jobs", st.other.gha)
+            format!(
+                "other workflows: {} running, {} queued",
+                st.other.gha_running, st.other.gha_queued
+            )
         } else {
             st.other.label.clone()
         };
         for (pool, jobs, ceiling) in [
-            (GHA, st.other.gha, st.gha_ceiling),
-            (GHA_MACOS, st.other.macos, st.gha_macos_ceiling),
+            (GHA, st.other.gha_running, st.gha_ceiling),
+            (GHA_MACOS, st.other.macos_running, st.gha_macos_ceiling),
         ] {
             let limit = st.ledger.capacity(pool).map_or(0, |c| c.units);
             let slack = limit.saturating_sub(ceiling);
@@ -1139,12 +1158,14 @@ impl Broker {
             .collect();
         serde_json::json!({
             "mason": used,
-            "other": st.other.gha,
+            "other": st.other.gha_running,
+            "other_queued": st.other.gha_queued,
             "other_label": st.other.label,
             "ceiling": st.gha_ceiling,
             "waiters": waiters,
             "macos": {
-                "other": st.other.macos,
+                "other": st.other.macos_running,
+                "other_queued": st.other.macos_queued,
                 "ceiling": st.gha_macos_ceiling,
             },
             "not_counted": st.other.not_counted,
@@ -4892,7 +4913,7 @@ pub(crate) mod tests {
         let b = runner_broker(dir.path(), 16, 4, 0);
         b.set_limit("gha_ceiling", 4).unwrap();
         b.set_other_jobs(OtherJobs {
-            gha: 3,
+            gha_running: 3,
             label: "develop CI: 3 jobs".into(),
             ..Default::default()
         });
@@ -5155,14 +5176,52 @@ pub(crate) mod tests {
         )));
     }
 
+    /// Other workflows' queued jobs occupy no runner (GitHub's limit is on running jobs), so
+    /// they are shown but never booked (#818).
+    #[test]
+    fn only_other_workflows_running_jobs_hold_units_not_their_queued_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = runner_broker(dir.path(), 20, 5, 0);
+        b.set_limit("gha_ceiling", 20).unwrap();
+        let other = |running: u32, queued: u32| OtherJobs {
+            gha_running: running,
+            gha_queued: queued,
+            label: format!("other {running} running, {queued} queued"),
+            ..Default::default()
+        };
+        // 3 running, 28 queued: 8 units are granted at once.
+        b.set_other_jobs(other(3, 28));
+        let id = queue_ranked(&b, 1, false, &gha(8));
+        assert!(held(&b, id), "queued jobs of others take no unit");
+        let view = Broker::gha_view(&lock(&b.st));
+        assert_eq!(view["other"].as_u64(), Some(3));
+        assert_eq!(view["other_queued"].as_u64(), Some(28));
+        lock(&b.st).ledger.release(id);
+        // 20 running: nothing is left, a request waits.
+        b.set_other_jobs(other(20, 0));
+        let id = queue_ranked(&b, 2, false, &gha(8));
+        assert!(
+            !held(&b, id),
+            "the account's 20 running jobs fill the limit"
+        );
+        lock(&b.st).ledger.release(id);
+        // 12 running, 30 queued: 8 fit, 9 do not.
+        b.set_other_jobs(other(12, 30));
+        let nine = queue_ranked(&b, 3, false, &gha(9));
+        assert!(!held(&b, nine));
+        lock(&b.st).ledger.release(nine);
+        let eight = queue_ranked(&b, 4, false, &gha(8));
+        assert!(held(&b, eight));
+    }
+
     #[test]
     fn macos_jobs_of_other_workflows_count_against_both_pools_and_the_macos_ceiling() {
         let dir = tempfile::tempdir().unwrap();
         let b = runner_broker(dir.path(), 16, 5, 0);
         b.set_limit("gha_macos_ceiling", 5).unwrap();
         b.set_other_jobs(OtherJobs {
-            gha: 2,
-            macos: 2,
+            gha_running: 2,
+            macos_running: 2,
             label: "star pr-gate 2 running".into(),
             ..Default::default()
         });

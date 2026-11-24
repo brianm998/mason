@@ -617,8 +617,10 @@ impl AccountJobs {
             out.stale |= st.error.is_some();
             let short = repo.rsplit('/').next().unwrap_or(repo);
             for run in st.runs.values() {
-                out.gha += run.running + run.queued;
-                out.macos += run.macos_running + run.macos_queued;
+                out.gha_running += run.running;
+                out.gha_queued += run.queued;
+                out.macos_running += run.macos_running;
+                out.macos_queued += run.macos_queued;
                 let e = by_name.entry(format!("{short} {}", run.name)).or_default();
                 e.0 += run.running;
                 e.1 += run.queued;
@@ -6219,7 +6221,7 @@ mod tests {
         let mut seen = AccountJobs::default();
         let other = seen.poll(&sources, 1000);
         assert_eq!(
-            (other.gha, other.macos),
+            (other.gha(), other.macos()),
             (5, 0),
             "MASON's own run is not counted"
         );
@@ -6244,7 +6246,8 @@ mod tests {
             ids.iter()
                 .filter(|i| crate::sched::tests::is_held(&b, **i))
                 .count(),
-            1
+            4,
+            "ceiling 6 less the 2 running jobs; the 3 queued ones take no unit (#818)"
         );
         // The jobs finish, under a new ETag.
         api.repos.lock().unwrap().get_mut("o/star").unwrap().clear();
@@ -6256,7 +6259,7 @@ mod tests {
             .clear();
         *api.etag.lock().unwrap() = "\"b\"".into();
         let other = seen.poll(&sources, 2000);
-        assert_eq!(other.gha, 0);
+        assert_eq!(other.gha(), 0);
         b.set_other_jobs(other);
         assert_eq!(
             ids.iter()
@@ -6287,12 +6290,12 @@ mod tests {
         let api = fake(vec![("o/r", one(3))]);
         let sources = [source(&api, "o/r", &[])];
         let mut seen = AccountJobs::default();
-        assert_eq!(seen.poll(&sources, 1000).gha, 3);
+        assert_eq!(seen.poll(&sources, 1000).gha(), 3);
         // The lists changed (a new ETag) but the run is in the same list and was read a moment
         // ago: its jobs are not asked for again.
         put(&api, 1, "\"b\"");
         let asked = api.log.lock().unwrap().len();
-        assert_eq!(seen.poll(&sources, 2000).gha, 3);
+        assert_eq!(seen.poll(&sources, 2000).gha(), 3);
         assert_eq!(
             api.log.lock().unwrap().len(),
             asked + 2,
@@ -6300,7 +6303,7 @@ mod tests {
         );
         // Long enough later they are.
         put(&api, 1, "\"c\"");
-        assert_eq!(seen.poll(&sources, 1000 + JOBS_AGAIN_MS).gha, 1);
+        assert_eq!(seen.poll(&sources, 1000 + JOBS_AGAIN_MS).gha(), 1);
     }
 
     #[test]
@@ -6336,7 +6339,7 @@ mod tests {
         )]);
         let mut seen = AccountJobs::default();
         let other = seen.poll(&[source(&api, "o/star", &[])], 1);
-        assert_eq!((other.gha, other.macos), (2, 2));
+        assert_eq!((other.gha(), other.macos()), (2, 2));
     }
 
     #[test]
@@ -6352,12 +6355,12 @@ mod tests {
         )]);
         let sources = [source(&api, "o/r", &[])];
         let mut seen = AccountJobs::default();
-        assert_eq!(seen.poll(&sources, 1).gha, 3);
+        assert_eq!(seen.poll(&sources, 1).gha(), 3);
         api.repos.lock().unwrap().get_mut("o/r").unwrap().clear();
         let asked = api.log.lock().unwrap().len();
         // Nothing changed on GitHub's side: the count stays, and only the two conditional
         // list requests are made, with no job lookups.
-        assert_eq!(seen.poll(&sources, 2).gha, 3);
+        assert_eq!(seen.poll(&sources, 2).gha(), 3);
         assert_eq!(api.log.lock().unwrap().len(), asked + 2);
     }
 
@@ -6375,7 +6378,7 @@ mod tests {
         let sources = [source(&api, "o/r", &[]), source(&api, "o/private", &[])];
         let mut seen = AccountJobs::default();
         let other = seen.poll(&sources, 1);
-        assert_eq!(other.gha, 2);
+        assert_eq!(other.gha(), 2);
         assert_eq!(other.not_counted.len(), 1);
         assert!(
             other.not_counted[0].starts_with("o/private"),
@@ -6400,7 +6403,7 @@ mod tests {
         assert!(!seen.poll(&sources, 100).stale);
         api.repos.lock().unwrap().clear();
         let other = seen.poll(&sources, 200);
-        assert_eq!((other.gha, other.stale, other.read_at_ms), (2, true, 100));
+        assert_eq!((other.gha(), other.stale, other.read_at_ms), (2, true, 100));
     }
 
     #[test]

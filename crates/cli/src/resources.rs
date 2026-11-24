@@ -593,25 +593,33 @@ pub fn github_api_line(g: &Value, _now: u64) -> Option<String> {
     ))
 }
 
-/// The `gha` pool's split (#766, #819): `MASON 11, other 7 (mason CI 5 running, star pr-gate 2
-/// queued), ceiling 20; macOS: other 2, ceiling 5`, then what is not counted or how old the count is.
+/// The `gha` pool's split (#766, #819): `MASON 11, other 5 running, 2 queued (mason CI 5 running,
+/// star pr-gate 2 queued), ceiling 20; macOS: other 2 running, 0 queued, ceiling 5`, then what is not counted or how old the count is.
 pub fn gha_line(g: &Value, now: u64) -> Option<String> {
     let mason = g["mason"].as_u64()?;
     let other = g["other"].as_u64().unwrap_or(0);
     let label = g["other_label"].as_str().unwrap_or("");
-    let label = if label.is_empty() || other == 0 {
+    let any = other + g["other_queued"].as_u64().unwrap_or(0);
+    let label = if label.is_empty() || any == 0 {
         String::new()
     } else {
         format!(" ({label})")
     };
+    let queued = g["other_queued"].as_u64().unwrap_or(0);
+    let queued = if queued > 0 {
+        format!(", {queued} queued")
+    } else {
+        String::new()
+    };
     let mut line = format!(
-        "MASON {mason}, other {other}{label}, ceiling {}",
+        "MASON {mason}, other {other} running{queued}{label}, ceiling {}",
         g["ceiling"].as_u64().unwrap_or(0)
     );
     if g["macos"].is_object() {
         line.push_str(&format!(
-            "; macOS: other {}, ceiling {}",
+            "; macOS: other {} running, {} queued, ceiling {}",
             g["macos"]["other"].as_u64().unwrap_or(0),
+            g["macos"]["other_queued"].as_u64().unwrap_or(0),
             g["macos"]["ceiling"].as_u64().unwrap_or(0)
         ));
     }
