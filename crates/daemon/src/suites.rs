@@ -806,10 +806,17 @@ fn run_remote(
     // run, a run without the known-red tests and the like are not the whole suite and run on one.
     let sharded = watch.and_then(|s| Some((s, rm::shard_command(s, cmd)?)));
     if let Some((s, sc)) = sharded {
-        spec.shards = s.shards;
-        spec.shard_command = Some(sc.to_string());
-        spec.shard_lists = shard_lists(d, project, s);
-        spec.partial_lists = lists_partial(s);
+        // The broker may have granted fewer runner units than the suite has shards (a flexible
+        // request, first in line for what was free): the run then splits that many ways, and a
+        // single unit runs the whole command on one runner.
+        let granted = task.and_then(|t| d.broker.granted_runners(t));
+        let n = rm::shards_granted(s.shards, granted);
+        if n > 1 {
+            spec.shards = n;
+            spec.shard_command = Some(sc.to_string());
+            spec.shard_lists = shard_lists(d, project, s, n);
+            spec.partial_lists = lists_partial(s);
+        }
     }
     let stop = || match check() {
         Stop::No => None,
@@ -959,14 +966,19 @@ pub(crate) fn lists_partial(s: &Suite) -> bool {
 
 /// Which tests go to which shard, from the times and names this daemon has recorded for the
 /// suite (#701). Nothing recorded gives empty lists: every test then runs on its hash shard.
-pub(crate) fn shard_lists(d: &Arc<Daemon>, project: &str, suite: &Suite) -> Vec<Vec<String>> {
+pub(crate) fn shard_lists(
+    d: &Arc<Daemon>,
+    project: &str,
+    suite: &Suite,
+    shards: u32,
+) -> Vec<Vec<String>> {
     let weights = d
         .store
         .test_medians(project, &suite.name)
         .unwrap_or_default();
     let mut names: std::collections::BTreeSet<String> = weights.keys().cloned().collect();
     names.extend(d.store.passing_names(&suite.name).unwrap_or_default());
-    crate::shards::assign(&names, &weights, suite.shards)
+    crate::shards::assign(&names, &weights, shards)
 }
 
 /// `suite`'s `dev_shard_command` filled in with the pick `n`, when one runner's share of it can be
@@ -4780,7 +4792,7 @@ fn hold_for_debt(
     let mut _waiting = None;
     // The units are those of the jobs the debt's suite starts (#818).
     let pooled = match suite {
-        Some(s) => crate::remote::suite_pool_needs(d, project, Some(task), &needs, s),
+        Some(s) => crate::remote::suite_pool_needs(d, project, Some(task), &needs, s, false),
         None => crate::remote::pool_needs(d, project, &needs, Some(task)),
     };
     let needs = match pooled {

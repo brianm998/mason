@@ -817,7 +817,7 @@ fn remote_check(
                 let mut rs = rs;
                 rs.shards = ps.shards;
                 rs.shard_command = Some(sc.to_string());
-                rs.shard_lists = crate::suites::shard_lists(d, &project, ps);
+                rs.shard_lists = crate::suites::shard_lists(d, &project, ps, ps.shards);
                 rs.partial_lists = crate::suites::lists_partial(ps);
                 rs
             }

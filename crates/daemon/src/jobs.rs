@@ -1055,7 +1055,7 @@ fn acquire_needs_as(
     // Where a suite goes is its own placement, and what it holds is the units of the jobs it
     // starts (#818); only a step with no suite follows the task's mode as a whole.
     let pooled = match suite {
-        Some(s) => crate::remote::suite_pool_needs(d, &c.project.id, Some(c.task), &needs, s),
+        Some(s) => crate::remote::suite_pool_needs(d, &c.project.id, Some(c.task), &needs, s, true),
         None => crate::remote::pool_needs(d, &c.project.id, &needs, Some(c.task)),
     };
     let needs = match pooled {

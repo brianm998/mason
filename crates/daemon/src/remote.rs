@@ -2606,17 +2606,30 @@ pub fn run_place(
 /// `needs` of a run of `suite` placed by [`run_place`]: on GitHub the machine's `compile`,
 /// `test-suite` and `test-small` (and the whole machine) become the run's runner units; here
 /// nothing changes (`None`), whatever the global switch says (#766's lesson: decide per suite).
+///
+/// `flexible`: a sharded run asks for 1 to N runner units and is granted what is free (at least
+/// 1), then splits into that many shards ([`shards_granted`]) instead of waiting for all N.
 pub fn suite_pool_needs(
     d: &Daemon,
     project: &str,
     task: Option<mason_core::TaskId>,
     needs: &mason_scheduler::Needs,
     suite: &mason_testing::Suite,
+    flexible: bool,
 ) -> Option<mason_scheduler::Needs> {
     match run_place(d, project, task, Some(suite), &suite.command, Kind::Suite) {
-        RunPlace::GitHub { units, .. } => Some(with_units(needs, units)),
+        RunPlace::GitHub { units, .. } => {
+            let n = with_units(needs, units);
+            Some(if flexible { n.flexible() } else { n })
+        }
         RunPlace::Local => None,
     }
+}
+
+/// How many shards a run of `shards` makes when the broker granted it `granted` runner units
+/// (`None`: not a flexible grant, so all of them). Never more than asked, never fewer than one.
+pub fn shards_granted(shards: u32, granted: Option<u32>) -> u32 {
+    granted.map_or(shards, |g| g.clamp(1, shards.max(1)))
 }
 
 /// `needs` without the machine's slots, plus `units`.
@@ -2633,6 +2646,7 @@ pub fn with_units(
             .filter(|(k, _)| !MACHINE.contains(&k.as_str()))
             .map(|(k, v)| (k.clone(), *v))
             .collect(),
+        flex: false,
     };
     for (k, v) in units {
         let have = out.amounts.entry(k).or_insert(0);

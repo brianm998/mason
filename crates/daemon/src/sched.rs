@@ -474,6 +474,10 @@ struct State {
     by_task: HashMap<TaskId, u64>,
     /// The task a `mason run` lease was opened for, when it names one.
     lease_tasks: HashMap<u64, TaskId>,
+    /// The runner units (`gha`) each flexible request was actually given, by lease (a sharded
+    /// run splits into that many shards). Read through [`Broker::granted_runners`], which only
+    /// counts leases still held.
+    flex_grants: HashMap<u64, (TaskId, u32)>,
     /// Where a `mason run` lease came from (`--origin`, else the caller's working directory),
     /// by lease id (s527).
     origins: HashMap<u64, String>,
@@ -904,6 +908,7 @@ impl Broker {
                 cpu_busy: None,
                 priority_first: cfg.priority_first,
                 lease_tasks: HashMap::new(),
+                flex_grants: HashMap::new(),
                 origins: HashMap::new(),
                 wait_credit: HashMap::new(),
                 idle: HashMap::new(),
@@ -1937,6 +1942,7 @@ impl Broker {
                 let needs = Needs {
                     exclusive: false,
                     amounts: BTreeMap::from([(class.clone(), 1)]),
+                    flex: false,
                 };
                 let id = st
                     .ledger
@@ -1975,6 +1981,7 @@ impl Broker {
             let needs = Needs {
                 exclusive: false,
                 amounts,
+                flex: false,
             };
             let id = st.ledger.adopt(
                 needs,
@@ -2004,6 +2011,7 @@ impl Broker {
                 Needs {
                     exclusive: false,
                     amounts,
+                    flex: false,
                 },
                 &format!("{} (from before the restart)", h.label),
                 now,
@@ -2221,7 +2229,6 @@ impl Broker {
         expected_ms: Option<u64>,
         nowait: bool,
     ) -> Result<Lease, Cancelled> {
-        let granted = needs.amounts.clone();
         let id = {
             let mut st = lock(&self.st);
             let rank = order(&st, rank);
@@ -2300,6 +2307,24 @@ impl Broker {
             }
             let _ = self.cv.wait_timeout(st, Duration::from_millis(100));
         }
+        // What was granted: a flexible request holds what it was given, not what it asked for.
+        let granted = {
+            let mut st = lock(&self.st);
+            let granted = st
+                .ledger
+                .holder(id)
+                .map_or_else(|| needs.amounts.clone(), |h| h.needs.amounts.clone());
+            if needs.flex {
+                let State {
+                    flex_grants,
+                    ledger,
+                    ..
+                } = &mut *st;
+                flex_grants.retain(|i, _| ledger.holds(*i));
+                flex_grants.insert(id, (task, granted.get(GHA).copied().unwrap_or(1).max(1)));
+            }
+            granted
+        };
         // The grant is accounting; the kernel locks make it real.
         let (take, caps) = {
             let st = lock(&self.st);
@@ -2522,6 +2547,18 @@ impl Broker {
         self.quick_pass(&mut st);
         drop(st);
         self.cv.notify_all();
+    }
+
+    /// How many runner units a flexible request of `task` was given and still holds (the fewest,
+    /// if it holds several). `None`: it holds no flexible lease, so its run keeps its own shard
+    /// count.
+    pub fn granted_runners(&self, task: TaskId) -> Option<u32> {
+        let st = lock(&self.st);
+        st.flex_grants
+            .iter()
+            .filter(|(id, (t, _))| *t == task && st.ledger.holds(**id))
+            .map(|(_, (_, n))| *n)
+            .min()
     }
 
     /// Does this task have a lease, waiting or held?
@@ -5044,6 +5081,7 @@ pub(crate) mod tests {
                 Needs {
                     exclusive: true,
                     amounts: BTreeMap::new(),
+                    flex: false,
                 },
                 &|| true,
                 &mut |_| {
@@ -5104,6 +5142,36 @@ pub(crate) mod tests {
             assert!(pushed.load(Ordering::SeqCst));
             assert_eq!(units, gha(1));
         });
+    }
+
+    #[test]
+    fn a_sharded_run_is_granted_the_runner_units_that_are_free_and_splits_that_many_ways() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = runner_broker(dir.path(), 8, 1, 0);
+        // Five of the eight units are in use: a run sharded eight ways gets the other three.
+        let other = queue_task(&b, 1, &gha(5));
+        assert!(held(&b, other));
+        let lease = b
+            .acquire(
+                TaskId(2),
+                "#2 test",
+                Rank::new(false, 3, 0, 2, 2, false),
+                needs_of(&gha(8), None).flexible(),
+                &|| true,
+                &mut |_| {},
+            )
+            .unwrap();
+        assert_eq!(lease.units(), gha(3), "the lease reports what it was given");
+        let granted = b.granted_runners(TaskId(2));
+        assert_eq!(granted, Some(3));
+        assert_eq!(crate::remote::shards_granted(8, granted), 3);
+        // A run that holds no flexible lease keeps all its shards; one unit is a whole run.
+        assert_eq!(crate::remote::shards_granted(8, None), 8);
+        assert_eq!(crate::remote::shards_granted(8, Some(1)), 1);
+        assert_eq!(crate::remote::shards_granted(2, Some(5)), 2);
+        assert_eq!(b.granted_runners(TaskId(1)), None);
+        drop(lease);
+        assert_eq!(b.granted_runners(TaskId(2)), None, "nothing once released");
     }
 
     #[test]
