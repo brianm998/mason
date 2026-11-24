@@ -54,12 +54,19 @@ category = "landing"
 "hello.txt" = ["only"]
 "#;
 
-/// `alpha` fails while `state.txt` says `bad`; `gamma` fails while `gamma-bad.txt` exists. The
-/// lines are libtest's, with the `--report-time` suffix MASON's cargo suites print.
+/// `alpha` fails while `state.txt` says `bad`; `gamma` fails while `gamma-bad.txt` exists. With
+/// names as arguments it runs only those, as a `--exact` rerun does. The lines are libtest's, with
+/// the `--report-time` suffix MASON's cargo suites print.
 const CHECKS: &str = r#"#!/bin/sh
+WANT="$*"
+want() { [ -z "$WANT" ] || case " $WANT " in *" $1 "*) true;; *) false;; esac; }
 r=0
-if [ "$(cat state.txt 2>/dev/null)" = bad ]; then echo "test alpha ... FAILED <0.054s>"; r=1; else echo "test alpha ... ok <0.001s>"; fi
-if [ -f gamma-bad.txt ]; then echo "test gamma ... FAILED <0.054s>"; r=1; else echo "test gamma ... ok <0.001s>"; fi
+if want alpha; then
+  if [ "$(cat state.txt 2>/dev/null)" = bad ]; then echo "test alpha ... FAILED <0.054s>"; r=1; else echo "test alpha ... ok <0.001s>"; fi
+fi
+if want gamma; then
+  if [ -f gamma-bad.txt ]; then echo "test gamma ... FAILED <0.054s>"; r=1; else echo "test gamma ... ok <0.001s>"; fi
+fi
 exit $r
 "#;
 
