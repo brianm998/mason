@@ -143,7 +143,7 @@ fn settle(c: &mut Client, screen: &mut Screen, after: u64) {
             screen.absorb(m);
         }
         let have_views = screen.views.len() >= 3;
-        if have_views && screen.seq >= target {
+        if reached(screen.seq, screen.views.len(), target) {
             return;
         }
         if have_views && prev == (target, screen.seq) {
