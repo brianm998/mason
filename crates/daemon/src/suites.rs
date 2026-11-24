@@ -6931,3 +6931,45 @@ mod merged_branch_tests {
         assert_eq!(merged_branch_commit(d, "mason/mason/t96", "main"), None);
     }
 }
+
+#[cfg(test)]
+mod attempts_tests {
+    use super::{read_attempts, run_key_for, write_attempts};
+
+    #[test]
+    fn attempts_on_record_come_back_in_order_with_their_keys() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("t1r1-u-unit.attempts");
+        assert!(read_attempts(&f).is_empty());
+        let list = vec![
+            ("t1r1-u-unit".to_string(), "k1".to_string()),
+            ("t1r1-u99-unit".to_string(), "k2".to_string()),
+        ];
+        write_attempts(&f, &list);
+        assert_eq!(read_attempts(&f), list);
+    }
+
+    #[test]
+    fn a_directory_that_is_no_worktree_has_no_key_and_a_changed_command_changes_one() {
+        let d = tempfile::tempdir().unwrap();
+        assert_eq!(run_key_for(d.path(), "cargo test"), "");
+        let g = |args: &[&str]| {
+            let o = std::process::Command::new("git")
+                .current_dir(d.path())
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(o.status.success(), "{o:?}");
+        };
+        g(&["init", "-q"]);
+        std::fs::write(d.path().join("a"), "1").unwrap();
+        g(&["add", "a"]);
+        g(&["commit", "-q", "-m", "x"]);
+        let a = run_key_for(d.path(), "cargo test");
+        assert_eq!(a, run_key_for(d.path(), "cargo test"));
+        assert_ne!(a, run_key_for(d.path(), "cargo test -p x"));
+        std::fs::write(d.path().join("a"), "2").unwrap();
+        assert_ne!(a, run_key_for(d.path(), "cargo test"));
+    }
+}

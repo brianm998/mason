@@ -4595,6 +4595,63 @@ mod tests {
         assert_eq!(gh.runs_seen.lock().unwrap().len(), 1);
     }
 
+    #[test]
+    fn a_collected_run_is_reused_only_for_the_tree_it_ran_on() {
+        token();
+        let r = repo();
+        let t = tempfile::tempdir().unwrap();
+        let zip = artifact(t.path(), GREEN, 0, None);
+        let logs = tempfile::tempdir().unwrap();
+        let gh = FakeGh::new(&r, &zip, Mode::Normal);
+        let s = site(&r, gh.clone(), clock(), false);
+        let a = spec("tk1");
+        assert!(matches!(execute(&s, &a, logs.path(), &|| None).unwrap(), Outcome::Done(_)));
+        assert_eq!(gh.dispatches.lock().unwrap().len(), 1);
+        // The same tree: answered from the record, nothing pushed or dispatched.
+        assert!(matches!(execute(&s, &a, logs.path(), &|| None).unwrap(), Outcome::Done(_)));
+        assert_eq!(gh.dispatches.lock().unwrap().len(), 1);
+        // Another tree: A's result is not B's.
+        let mut b = spec("tk1");
+        b.tree_key = "treekey+other".into();
+        assert!(matches!(execute(&s, &b, logs.path(), &|| None).unwrap(), Outcome::Done(_)));
+        assert_eq!(gh.dispatches.lock().unwrap().len(), 2, "a new run was made");
+        assert_eq!(State::load(&record_path(logs.path(), "tk1")).unwrap().tree_key, "treekey+other");
+        // A record from before keys were kept counts as another tree.
+        let mut old = State::load(&record_path(logs.path(), "tk1")).unwrap();
+        old.tree_key = String::new();
+        old.save(&record_path(logs.path(), "tk1"));
+        assert!(matches!(execute(&s, &b, logs.path(), &|| None).unwrap(), Outcome::Done(_)));
+        assert_eq!(gh.dispatches.lock().unwrap().len(), 3);
+        assert_eq!(refs(&r.bare), "");
+    }
+
+    #[test]
+    fn a_run_in_flight_on_another_tree_is_cancelled_and_started_again() {
+        token();
+        let r = repo();
+        let t = tempfile::tempdir().unwrap();
+        let zip = artifact(t.path(), GREEN, 0, None);
+        let logs = tempfile::tempdir().unwrap();
+        let gh = FakeGh::new(&r, &zip, Mode::Normal);
+        *gh.die_at.lock().unwrap() = Some(2);
+        let s = site(&r, gh.clone(), clock(), false);
+        let died = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = execute(&s, &spec("tk2"), logs.path(), &|| None);
+        }));
+        assert!(died.is_err());
+        *gh.die_at.lock().unwrap() = None;
+        let mut b = spec("tk2");
+        b.tree_key = "treekey+other".into();
+        let s2 = site(&r, gh.clone(), clock(), false);
+        let Outcome::Done(f) = execute(&s2, &b, logs.path(), &|| None).unwrap() else {
+            panic!("not done")
+        };
+        assert_eq!(f.output, GREEN);
+        assert_eq!(gh.cancels.lock().unwrap().len(), 1, "the old run was cancelled");
+        assert_eq!(gh.dispatches.lock().unwrap().len(), 2, "and a new one made");
+        assert_eq!(refs(&r.bare), "");
+    }
+
     /// The inputs of the one dispatch the fake saw, as JSON.
     fn dispatched_inputs(gh: &FakeGh) -> serde_json::Value {
         let d = gh.dispatches.lock().unwrap();
