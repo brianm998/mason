@@ -70,3 +70,9 @@ passed it. `.claude/settings.json` now registers `mason hook bash`; it wraps a b
 test command found anywhere in a compound command, and the rewritten command names the
 CLI by its own path so it works where `mason` is not on `PATH`. The wrapped run takes a
 `compile` slot, so it waits for CPU below `compile_cpu_max` (default 50%) like any other.
+
+**Update (2026-11-23): the hook allows.** It answers `permissionDecision: "allow"` with the
+rewritten command instead of `"ask"`. An "ask" from a hook prompts even in bypass mode, so
+every build of a long agent session waited for the owner to click "Allow once", and a session
+working while the owner was away sat stalled. The owner chose to drop the prompt. The rewrite
+is unchanged: a build still runs under `mason run --needs compile` and waits for its slot.
