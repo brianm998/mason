@@ -5,6 +5,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.MenuBar
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
@@ -60,7 +61,10 @@ fun main(args: Array<String>) = application {
         // The daemon may not be up yet: look for it until it is.
         while (true) {
             // daemon.json is read on an IO thread, not the UI's.
-            if (kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { Discovery.info(args.toList()) } != null) {
+            val found = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { Discovery.info(args.toList()) }
+            if (found != null) {
+                // A daemon found through its own daemon.json is on this machine, so a folder picker can name its paths.
+                if (found.pid != null) model.chooseDirectory = { chooseLocalDirectory() }
                 MonitorConnection(model, { Discovery.info(args.toList()) }, ui = java.util.concurrent.Executor { javax.swing.SwingUtilities.invokeLater(it) }).start()
                 break
             }
@@ -84,8 +88,28 @@ fun main(args: Array<String>) = application {
             }
             0
         }
+        MenuBar {
+            Menu("File") {
+                val mac = System.getProperty("os.name").lowercase().contains("mac")
+                Item(
+                    "Add Project…",
+                    shortcut = KeyShortcut(Key.N, meta = mac, ctrl = !mac, shift = true),
+                    enabled = model.canAct,
+                    onClick = { model.openAddProject() },
+                )
+            }
+        }
         RootView(model)
     }
+}
+
+/** A directory picker (JFileChooser); null when cancelled. Runs on the UI thread, from a click. */
+internal fun chooseLocalDirectory(): String? {
+    val c = javax.swing.JFileChooser().apply {
+        fileSelectionMode = javax.swing.JFileChooser.DIRECTORIES_ONLY
+        dialogTitle = "Choose a git repository"
+    }
+    return if (c.showOpenDialog(null) == javax.swing.JFileChooser.APPROVE_OPTION) c.selectedFile.absolutePath else null
 }
 
 /** Put the MASON icon in the macOS Dock and app switcher; a no-op where the platform has none. */
