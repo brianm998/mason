@@ -605,6 +605,25 @@ final class MonitorCoreTests: XCTestCase {
         XCTAssertEqual(m.lastSeq, 13)
     }
 
+    func testLastViewSeqMovesOnViewsNotOnEvents() {
+        let m = MonitorModel()
+        var hv = Mason_V1_View()
+        hv.header = .with { $0.status = "All quiet" }
+        var ev = Mason_V1_ServerMessage()
+        ev.events = .with { $0.events = [.with { $0.seq = 12 }] }
+        m.apply(ev)
+        XCTAssertEqual(m.lastSeq, 12)
+        XCTAssertEqual(m.lastViewSeq, 0, "events alone do not mean the views arrived")
+        var v = Mason_V1_ServerMessage()
+        v.view = .with { $0.seq = 12; $0.view = hv }
+        m.apply(v)
+        XCTAssertEqual(m.lastViewSeq, 12)
+        var old = Mason_V1_ServerMessage()
+        old.view = .with { $0.seq = 5; $0.view = hv }
+        m.apply(old)
+        XCTAssertEqual(m.lastViewSeq, 12, "a stale view never moves it back")
+    }
+
     // MARK: commands (the client sends what the daemon allows; it decides nothing)
 
     func testCommandsAreBuiltForTheDaemon() {
