@@ -454,6 +454,8 @@ fn run_hosted_resuming(
     // as its own step here has none when it goes remote: the build comes first in the command.
     // Held until this function returns, so for the whole local run.
     let mut fallback: Option<crate::sched::Lease> = None;
+    // An `Executor::Node` is not produced yet: `run_on_node` joins `run_remote` here in phase 2
+    // of the multi-machine plan, returning the same `Ran`.
     if let crate::remote::Executor::GitHub { runs_on } =
         crate::remote::executor_for(d, project, crate::remote::Kind::Suite, place)
     {
@@ -3534,10 +3536,10 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
                 .build
                 .as_ref()
                 .filter(|b| !reused && !built.contains(b))
-                // On GitHub the build is the first part of the suite's own command.
+                // On GitHub or a node the build is the first part of the suite's own command.
                 .filter(|_| {
                     !crate::place::place_of(d, &c.project.id, Some(c.task.0), &suite, "suite")
-                        .is_github()
+                        .is_off_machine()
                 })
             {
                 let needs = needs_of(&crate::jobs::build_uses(), None);
@@ -4564,7 +4566,7 @@ fn mark_tried_covering(d: &Arc<Daemon>, project: &str, suite: &str) {
     }
 }
 
-/// Whether the project's runs go to GitHub and the `gha` pool has no idle unit: a debt run
+/// Whether the project's runs go to GitHub (a node uses no `gha` unit) and the `gha` pool has no idle unit: a debt run
 /// then waits for the next pass instead of queueing behind every task.
 fn gha_full(d: &Arc<Daemon>, project: &str) -> bool {
     matches!(

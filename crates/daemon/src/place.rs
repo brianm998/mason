@@ -368,11 +368,25 @@ pub enum Place {
         /// For a balancing mode: why GitHub ("favor-remote, GitHub had room"). Empty otherwise.
         why: String,
     },
+    /// On another Mac running `masond` as a node (the multi-machine plan). Nothing produces it
+    /// yet: `decide` reaches GitHub or here only.
+    Node {
+        nid: String,
+        name: String,
+        from: Source,
+        why: String,
+    },
 }
 
 impl Place {
     pub fn is_github(&self) -> bool {
         matches!(self, Place::GitHub { .. })
+    }
+
+    /// Does the run leave this machine (GitHub or a node)? What decides that a run needs none
+    /// of this Mac's `compile` or `test-suite` slots and no CPU or heat gate.
+    pub fn is_off_machine(&self) -> bool {
+        !matches!(self, Place::Local { .. })
     }
 
     /// "this Mac, because ..." / "GitHub (macos-15), from the global switch".
@@ -385,12 +399,22 @@ impl Place {
             Place::GitHub { runs_on, from, why } => {
                 format!("on GitHub ({runs_on}), from the {}: {why}", from.label())
             }
+            Place::Node {
+                name, from, why, ..
+            } if why.is_empty() => {
+                format!("on node {name}, from the {}", from.label())
+            }
+            Place::Node {
+                name, from, why, ..
+            } => format!("on node {name}, from the {}: {why}", from.label()),
         }
     }
 
     pub fn from(&self) -> Source {
         match self {
-            Place::Local { from, .. } | Place::GitHub { from, .. } => *from,
+            Place::Local { from, .. } | Place::GitHub { from, .. } | Place::Node { from, .. } => {
+                *from
+            }
         }
     }
 }
@@ -455,10 +479,46 @@ pub fn balance(mode: Mode, f: &Facts, runs_on: &str, from: Source) -> Place {
     }
 }
 
-/// The one decision. The mode comes from the task, else the project, else the global switch. A
-/// run that would go to GitHub stays here when the project has no `[remote_runs]`, the suite says
-/// `remote = false`, its environment leases a device, it uses `exclusive`, or the remote setup
-/// check failed. The reason is always given.
+/// May this run leave this machine at all? `Err` names why it stays: the project has no
+/// `[remote_runs]` section, the suite says `remote = false`, its environment leases a device, it
+/// uses `exclusive`, or the remote setup check failed. These are the rules every off-machine
+/// target shares.
+fn may_leave(f: &Facts) -> Result<&String, String> {
+    let Some(project_runs_on) = &f.project_runs_on else {
+        return Err("the project has no [remote_runs] section".into());
+    };
+    if !f.suite_remote {
+        return Err("the suite says remote = false".into());
+    }
+    if f.device {
+        return Err("its environment leases a device, simulator or emulator".into());
+    }
+    if f.exclusive {
+        return Err("it uses `exclusive`, which only this machine can give".into());
+    }
+    if let Some(why) = &f.setup_failed {
+        return Err(format!("the project's remote setup check failed: {why}"));
+    }
+    Ok(project_runs_on)
+}
+
+/// Where a run that may leave this machine goes. GitHub is the only target so far; nodes join
+/// it here (the multi-machine plan, §3.9).
+fn off_machine(f: &Facts, project_runs_on: &String, mode: Mode, from: Source) -> Place {
+    let runs_on = f.suite_runs_on.as_ref().unwrap_or(project_runs_on);
+    match mode {
+        Mode::Remote => Place::GitHub {
+            runs_on: runs_on.clone(),
+            from,
+            why: String::new(),
+        },
+        _ => balance(mode, f, runs_on, from),
+    }
+}
+
+/// The one decision. The mode comes from the task, else the project, else the global switch.
+/// Two questions follow, in this order: may the run leave this machine (`may_leave`), and where
+/// off it (`off_machine`). The reason is always given.
 pub fn decide(f: &Facts) -> Place {
     let (mode, from) = f.effective();
     if mode == Mode::Local {
@@ -471,33 +531,12 @@ pub fn decide(f: &Facts) -> Place {
             from,
         };
     }
-    let stay = |why: String| Place::Local {
-        why,
-        from: Source::Suite,
-    };
-    let Some(project_runs_on) = &f.project_runs_on else {
-        return stay("the project has no [remote_runs] section".into());
-    };
-    if !f.suite_remote {
-        return stay("the suite says remote = false".into());
-    }
-    if f.device {
-        return stay("its environment leases a device, simulator or emulator".into());
-    }
-    if f.exclusive {
-        return stay("it uses `exclusive`, which only this machine can give".into());
-    }
-    if let Some(why) = &f.setup_failed {
-        return stay(format!("the project's remote setup check failed: {why}"));
-    }
-    let runs_on = f.suite_runs_on.as_ref().unwrap_or(project_runs_on);
-    match mode {
-        Mode::Remote => Place::GitHub {
-            runs_on: runs_on.clone(),
-            from,
-            why: String::new(),
+    match may_leave(f) {
+        Err(why) => Place::Local {
+            why,
+            from: Source::Suite,
         },
-        _ => balance(mode, f, runs_on, from),
+        Ok(project_runs_on) => off_machine(f, project_runs_on, mode, from),
     }
 }
 
@@ -784,7 +823,7 @@ pub fn plain_place(d: &Daemon, project: &str, task: Option<u64>) -> Place {
 /// Do the checks of `task` in `project` go to GitHub (#704)? Whether a suite then stays here
 /// for its own reasons does not matter: the agent is told to use `run_check` either way.
 pub fn task_checks_on_github(d: &Daemon, project: &str, task: u64) -> bool {
-    plain_place(d, project, Some(task)).is_github()
+    plain_place(d, project, Some(task)).is_off_machine()
 }
 
 /// "runs on: GitHub (task choice)" / "runs on: this Mac (global switch)": the place a task's
@@ -988,7 +1027,7 @@ pub fn note(project: &str, task: Option<u64>, name: &str, kind: &'static str, pl
 fn seen_json(s: &Seen) -> Value {
     json!({
         "project": s.project, "task": s.task, "name": s.name, "kind": s.kind,
-        "where": if s.place.is_github() { "github" } else { "local" },
+        "where": match &s.place { Place::GitHub { .. } => "github", Place::Node { .. } => "node", Place::Local { .. } => "local" },
         "runs_on": match &s.place { Place::GitHub { runs_on, .. } => json!(runs_on), _ => Value::Null },
         "why": s.place.text(), "from": s.place.from().label(), "at": s.at,
     })
@@ -1148,7 +1187,7 @@ pub fn config_view(d: &Daemon, project: &str) -> Vec<Value> {
         .iter()
         .map(|s| {
             let p = decide(&facts_for(d, project, None, s));
-            json!({"suite": s.name, "where": if p.is_github() {"github"} else {"local"},
+            json!({"suite": s.name, "where": match &p { Place::GitHub { .. } => "github", Place::Node { .. } => "node", Place::Local { .. } => "local" },
                    "text": p.text(), "from": p.from().label()})
         })
         .collect()
@@ -1469,6 +1508,88 @@ mod tests {
             from,
             why: String::new(),
         }
+    }
+
+    /// The two questions `decide` asks: the rules that keep a run on this machine are the same
+    /// for every off-machine target, and what is left is where it goes.
+    #[test]
+    fn a_run_that_may_not_leave_stays_and_one_that_may_goes_off_machine() {
+        let ok = || Facts {
+            project_runs_on: Some("ubuntu-latest".into()),
+            ..Facts::plain(Mode::Remote)
+        };
+        assert_eq!(may_leave(&ok()).map(String::as_str), Ok("ubuntu-latest"));
+        let rows: Vec<(&str, Facts, &str)> = vec![
+            (
+                "no [remote_runs]",
+                Facts {
+                    project_runs_on: None,
+                    ..ok()
+                },
+                "no [remote_runs]",
+            ),
+            (
+                "remote = false",
+                Facts {
+                    suite_remote: false,
+                    ..ok()
+                },
+                "remote = false",
+            ),
+            (
+                "device",
+                Facts {
+                    device: true,
+                    ..ok()
+                },
+                "leases a device",
+            ),
+            (
+                "exclusive",
+                Facts {
+                    exclusive: true,
+                    ..ok()
+                },
+                "`exclusive`",
+            ),
+            (
+                "setup failed",
+                Facts {
+                    setup_failed: Some("no token".into()),
+                    ..ok()
+                },
+                "setup check failed: no token",
+            ),
+        ];
+        for (name, f, want) in rows {
+            let why = may_leave(&f).expect_err(name);
+            assert!(why.contains(want), "{name}: {why}");
+            let got = decide(&f);
+            assert!(!got.is_off_machine(), "{name}: {got:?}");
+            assert_eq!(got.text(), format!("on this Mac: {why}"), "{name}");
+            assert_eq!(got.from(), Source::Suite, "{name}");
+        }
+        let got = decide(&ok());
+        assert!(got.is_off_machine() && got.is_github(), "{got:?}");
+    }
+
+    #[test]
+    fn a_node_placement_is_off_machine_and_says_so() {
+        let n = |why: &str| Place::Node {
+            nid: "n1".into(),
+            name: "studio".into(),
+            from: Source::Global,
+            why: why.into(),
+        };
+        assert!(n("").is_off_machine() && !n("").is_github());
+        assert_eq!(n("").text(), "on node studio, from the global switch");
+        assert_eq!(
+            n("room").text(),
+            "on node studio, from the global switch: room"
+        );
+        assert_eq!(n("").from(), Source::Global);
+        assert!(!local("x", Source::Global).is_off_machine());
+        assert!(gh("m", Source::Global).is_off_machine());
     }
 
     #[test]
