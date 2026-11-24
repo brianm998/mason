@@ -2557,6 +2557,9 @@ pub fn run_place(
             RunPlace::GitHub { runs_on, units }
         }
         Executor::Local => RunPlace::Local,
+        // Nothing produces a node yet (the multi-machine plan's phase 2); until a node run has
+        // its own units, it is placed as a run here would be.
+        Executor::Node { .. } => RunPlace::Local,
     }
 }
 
