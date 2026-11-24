@@ -1,0 +1,6 @@
+.mason/run.json
+clients/compose/app/src/main/kotlin/mason/monitor/Tool.kt
+clients/compose/core/src/main/kotlin/mason/monitor/Model.kt
+crates/conformance/src/main.rs
+docs/decisions/1026-compose-conformance-signal-settle.md
+docs/stages/s1033.md
