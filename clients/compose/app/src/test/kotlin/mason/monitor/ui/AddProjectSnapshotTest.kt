@@ -83,6 +83,7 @@ class AddProjectSnapshotTest {
         m.openAddProject()
         val w = m.addProject!!
         w.planArrived(plan(null, files = true))
+        w.continueFromDetected()
         setContent { CompositionLocalProvider(LocalTheme provides Theme(false, 1.0)) { AddProjectStepView(m, w) } }
         onNodeWithTag("add-project-step:review").assertIsDisplayed()
         onNodeWithTag("add-project-file:.mason/mason.toml").assertIsDisplayed()
