@@ -382,6 +382,56 @@ fn kill_9_in_the_middle_of_an_agent_session_loses_nothing() {
 }
 
 #[test]
+fn a_recovered_develop_step_keeps_its_tree_when_the_base_moved() {
+    let s = Scratch::new("test -f hello.txt", slow_develop_script(60_000));
+    let mut m = s.masond(&[], &[]);
+    s.wait_daemon(&mut m);
+    s.mason_ok(&["task", "add", "Slow develop"]);
+    s.wait_task(0, "developing", 60);
+    wait_for("the agent's commit", 30, || {
+        mason_landing::git::commits_ahead(&s.repo, "origin/main", "mason/scratch/t0").unwrap_or(0)
+            >= 1
+    });
+    wait_for("the agent's step host to be running", 60, || {
+        !running_hosts(&s).is_empty()
+    });
+    let head = |s: &Scratch| sh(&s.repo, &["rev-parse", "mason/scratch/t0"]);
+    let before = head(&s);
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(m.child.id() as i32),
+        nix::sys::signal::Signal::SIGKILL,
+    )
+    .unwrap();
+    let _ = m.child.wait();
+    s.push_files(&[("moved.txt", "develop moved\n")], "develop moves");
+
+    let mut m2 = s.masond(&[], &[]);
+    s.wait_daemon(&mut m2);
+    s.wait_task(0, "developing", 60);
+    fn resumed(dir: &std::path::Path) -> bool {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return false;
+        };
+        rd.flatten().any(|e| {
+            let p = e.path();
+            if p.is_dir() {
+                return resumed(&p);
+            }
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("progress-") && n.ends_with(".jsonl"))
+                && std::fs::read_to_string(&p).is_ok_and(|t| t.contains("resumed after a restart"))
+        })
+    }
+    wait_for("the recovered step to say it resumed", 60, || {
+        resumed(&s.data_dir)
+    });
+    assert_eq!(head(&s), before, "a recovered step must keep its HEAD");
+    drop(m2);
+    kill_hosts(&s.data_dir);
+}
+
+#[test]
 fn kill_9_in_the_middle_of_a_test_run_loses_nothing() {
     // The test command takes a few seconds; the daemon dies while it runs.
     let s = Scratch::new("sleep 4; test -f hello.txt", happy_script());
