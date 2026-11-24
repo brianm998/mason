@@ -776,4 +776,5 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s1061**: s759 clears the CI shard env and s664 finds its test binary from cargo's JSON output, fixing two of the five red shard-3 exit scripts.
 - **s1063**: scripts/exit/s899.sh now checks the current 304 test and its source() helper, so CI/exit-scripts stops failing on a stale test name.
 - **s1066**: s43 now expects the daemon's real ceiling (9999) and s49 picks the highest-numbered checkpoint, fixing two of the exit scripts red on shard 6.
+- **s1068**: The Compose conformance settle now waits until the model's last applied view reaches the daemon's seq (as step() and the Rust capturer do), and both capturers print a stderr line when they leave on the quiet fallback.
 <!-- status:end -->
