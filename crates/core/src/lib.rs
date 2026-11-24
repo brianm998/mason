@@ -8,6 +8,7 @@
 pub mod access;
 pub mod checks;
 pub mod ci_schedule;
+pub mod ci_stuck;
 pub mod ci_watch;
 mod entities;
 mod event;

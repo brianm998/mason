@@ -345,10 +345,16 @@ pub fn cancel_task(d: &Daemon, task: u64) -> usize {
 }
 
 fn run_key(spec: &CheckSpec) -> String {
+    key_of(&spec.tree, &spec.cmd)
+}
+
+/// The key a run is filed under: the tree it runs on and the command. A suite's run records and
+/// local hosts use the same shape, so a run is only ever reused for what it ran.
+pub fn key_of(tree: &str, cmd: &str) -> String {
     let mut h = Sha256::new();
-    h.update(spec.tree.as_bytes());
+    h.update(tree.as_bytes());
     h.update([0]);
-    h.update(spec.cmd.as_bytes());
+    h.update(cmd.as_bytes());
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
