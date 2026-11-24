@@ -2713,7 +2713,10 @@ impl Grant {
     }
     /// The units of a lease someone else keeps (the test step's): this grant can give them
     /// back and ask for them again, but does not own the lease (#820).
-    pub fn borrowed(giver: Option<crate::sched::Giver>, units: std::collections::BTreeMap<String, u32>) -> Self {
+    pub fn borrowed(
+        giver: Option<crate::sched::Giver>,
+        units: std::collections::BTreeMap<String, u32>,
+    ) -> Self {
         Grant {
             inner: Arc::new(std::sync::Mutex::new(GrantInner {
                 giver,
@@ -6086,13 +6089,23 @@ mod tests {
         let waiter = queue_gha(&b, 9);
         assert!(!is_held(&b, waiter));
         // The run is left as soon as the waiter is granted, with two shards still running.
+        // The hold file is read then, while the run (and its record) is still out.
         let b2 = b.clone();
-        let stop = move || is_held(&b2, waiter).then_some(StopWhy::Skipped);
+        let seen: Mutex<Vec<RemoteHold>> = Mutex::new(vec![]);
+        let stop = || {
+            is_held(&b2, waiter).then(|| {
+                *seen.lock().unwrap() = running_holds(&holds);
+                StopWhy::Skipped
+            })
+        };
         let out = execute(&s, &sp, logs.path(), &stop, &grant).unwrap();
         assert!(matches!(out, Outcome::Stopped(StopWhy::Skipped)));
-        assert!(is_held(&b, waiter), "granted while shards 1 and 3 still ran");
+        assert!(
+            is_held(&b, waiter),
+            "granted while shards 1 and 3 still ran"
+        );
         assert_eq!(grant.units(), units_of(2));
-        let kept = running_holds(&holds);
+        let kept = seen.lock().unwrap().clone();
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].units, units_of(2));
         // A daemon started with that hold file counts two units: of three, one more is free.
@@ -6102,7 +6115,10 @@ mod tests {
         let first = queue_gha(&b3, 1);
         let second = queue_gha(&b3, 2);
         assert!(is_held(&b3, first));
-        assert!(!is_held(&b3, second), "two of the three units are the run's");
+        assert!(
+            !is_held(&b3, second),
+            "two of the three units are the run's"
+        );
     }
 
     #[test]
@@ -6128,16 +6144,16 @@ mod tests {
         assert!(is_held(&b, first));
         // A younger request of the same kind queues; then the missing shard asks again.
         let younger = queue_gha(&b, 9);
-        let stop = || None;
-        std::thread::scope(|sc| {
-            let again = sc.spawn(|| grant.ask_again(units_of(1), &stop));
-            while b.gha_waiting() < 2 {
-                std::thread::yield_now();
-            }
-            assert!(!is_held(&b, younger));
-            b.release_for_test(first, mason_core::TaskId(8));
-            assert!(again.join().unwrap());
-        });
+        let g2 = grant.clone();
+        let again = std::thread::spawn(move || g2.ask_again(units_of(1), &|| None));
+        let began = std::time::Instant::now();
+        while b.gha_waiting() < 2 {
+            assert!(began.elapsed().as_secs() < 60, "the rerun never queued");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!is_held(&b, younger));
+        b.release_for_test(first, mason_core::TaskId(8));
+        assert!(again.join().unwrap());
         assert_eq!(grant.units(), units_of(1));
         assert!(
             !is_held(&b, younger),
