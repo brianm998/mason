@@ -414,7 +414,9 @@ fn diagnosis_problems(a: &Value, p: &mut Vec<String>) {
         )),
     }
     let Some(opts) = a.get("options").and_then(Value::as_array) else {
-        p.push("options: required, 2 to 4 options (a single `verdict` is no longer accepted)".into());
+        p.push(
+            "options: required, 2 to 4 options (a single `verdict` is no longer accepted)".into(),
+        );
         return;
     };
     if !(2..=4).contains(&opts.len()) {
@@ -1316,45 +1318,75 @@ mod tests {
     #[test]
     fn a_diagnosis_is_a_card_of_two_to_four_options_with_one_recommended() {
         let ok = |v: Value| validate("submit_diagnosis", &v).is_ok();
-        let retry = |rec: bool| json!({"label": "Retry with a note", "recommended": rec,
-                                        "action": "retry", "note": "use the fixture"});
-        let explore = |rec: bool| json!({"label": "Re-scope", "recommended": rec,
-                                          "action": "explore", "reason": "the plan names a gone file"});
+        let retry = |rec: bool| {
+            json!({"label": "Retry with a note", "recommended": rec,
+                                        "action": "retry", "note": "use the fixture"})
+        };
+        let explore = |rec: bool| {
+            json!({"label": "Re-scope", "recommended": rec,
+                                          "action": "explore", "reason": "the plan names a gone file"})
+        };
         let close = json!({"label": "Close it", "recommended": false, "action": "close",
                            "kind": "already_done", "evidence": "commit abc"});
         let cancel = json!({"label": "Cancel it", "recommended": false, "action": "cancel"});
         let card = |o: Vec<Value>| json!({"summary": "s", "options": o});
         assert!(ok(card(vec![retry(true), explore(false)])));
-        assert!(ok(card(vec![retry(true), explore(false), close.clone(), cancel.clone()])));
+        assert!(ok(card(vec![
+            retry(true),
+            explore(false),
+            close.clone(),
+            cancel.clone()
+        ])));
         assert!(!ok(card(vec![retry(true)])), "one option");
         assert!(
-            !ok(card(vec![retry(true), explore(false), close.clone(), cancel.clone(), cancel.clone()])),
+            !ok(card(vec![
+                retry(true),
+                explore(false),
+                close.clone(),
+                cancel.clone(),
+                cancel.clone()
+            ])),
             "five options"
         );
-        assert!(!ok(card(vec![retry(false), explore(false)])), "none recommended");
-        assert!(!ok(card(vec![retry(true), explore(true)])), "two recommended");
+        assert!(
+            !ok(card(vec![retry(false), explore(false)])),
+            "none recommended"
+        );
+        assert!(
+            !ok(card(vec![retry(true), explore(true)])),
+            "two recommended"
+        );
         assert!(!ok(card(vec![
             retry(true),
             json!({"label": "x", "recommended": false, "action": "rm_rf"})
         ])));
-        assert!(!ok(card(vec![
-            retry(true),
-            json!({"label": "x", "recommended": false, "action": "close", "kind": "duplicate", "evidence": "same"})
-        ])), "a duplicate names its task");
+        assert!(
+            !ok(card(vec![
+                retry(true),
+                json!({"label": "x", "recommended": false, "action": "close", "kind": "duplicate", "evidence": "same"})
+            ])),
+            "a duplicate names its task"
+        );
         assert!(ok(card(vec![
             retry(true),
             json!({"label": "x", "recommended": false, "action": "close", "kind": "duplicate", "duplicate_of": 4, "evidence": "same"})
         ])));
-        assert!(!ok(card(vec![
-            json!({"label": "x", "recommended": true, "action": "retry"}),
-            explore(false)
-        ])), "a retry needs a note");
+        assert!(
+            !ok(card(vec![
+                json!({"label": "x", "recommended": true, "action": "retry"}),
+                explore(false)
+            ])),
+            "a retry needs a note"
+        );
         let long = "x".repeat(crate::card::OPTION_MAX + 1);
         assert!(!ok(card(vec![
             json!({"label": long, "recommended": true, "action": "cancel"}),
             cancel.clone()
         ])));
-        assert!(!ok(json!({"verdict": "retry", "summary": "s", "note": "n"})), "old shape");
+        assert!(
+            !ok(json!({"verdict": "retry", "summary": "s", "note": "n"})),
+            "old shape"
+        );
         // Only a diagnosis session has the tool, and it changes nothing.
         assert_eq!(StepKind::Diagnose.terminal_tools(), &["submit_diagnosis"]);
         assert!(StepKind::Diagnose.read_only());

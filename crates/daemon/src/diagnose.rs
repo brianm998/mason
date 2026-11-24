@@ -26,10 +26,10 @@
 //! shape stay readable.
 
 use crate::daemon::{now_ms, Daemon};
+use mason_adapter_api::card::{OPTION_MAX, WHY_MAX};
 use mason_adapter_api::contract::{ContractHandle, NoChecks};
 use mason_adapter_api::{SessionSpec, StepKind};
 use mason_adapters::runner::{RunnerConfig, StepEnd, StepRunner};
-use mason_adapter_api::card::{OPTION_MAX, WHY_MAX};
 use mason_core::*;
 use mason_store::DiagnosisRow;
 use serde_json::{json, Value};
@@ -150,7 +150,10 @@ impl Drop for RunMark {
 /// is its own verdict and arguments.
 pub fn recommended(a: &Value) -> (String, Value) {
     let Some(opts) = a["options"].as_array() else {
-        return (a["verdict"].as_str().unwrap_or("none").to_string(), a.clone());
+        return (
+            a["verdict"].as_str().unwrap_or("none").to_string(),
+            a.clone(),
+        );
     };
     let Some(o) = opts
         .iter()
@@ -168,7 +171,9 @@ pub fn recommended(a: &Value) -> (String, Value) {
 /// The decision card of a submission with options: `Card::to_json`, each option carrying its
 /// action arguments under `action`. `None` for an older single-verdict submission.
 pub fn build_card(id: u64, task: u64, a: &Value) -> Option<Value> {
-    use mason_adapter_api::card::{truncate, Card, CardOption, Origin, EVIDENCE_LINES, EVIDENCE_LINE_MAX};
+    use mason_adapter_api::card::{
+        truncate, Card, CardOption, Origin, EVIDENCE_LINES, EVIDENCE_LINE_MAX,
+    };
     let opts = a["options"].as_array()?;
     let card = Card {
         ask: format!("Task #{task} failed: what should happen next?"),
@@ -197,7 +202,15 @@ pub fn build_card(id: u64, task: u64, a: &Value) -> Option<Value> {
     let mut v = card.to_json();
     for (i, o) in opts.iter().enumerate() {
         let mut act = serde_json::Map::new();
-        for k in ["action", "step", "note", "reason", "kind", "duplicate_of", "evidence"] {
+        for k in [
+            "action",
+            "step",
+            "note",
+            "reason",
+            "kind",
+            "duplicate_of",
+            "evidence",
+        ] {
             if !o[k].is_null() {
                 act.insert(k.into(), o[k].clone());
             }
@@ -417,10 +430,7 @@ pub fn start(d: &Arc<Daemon>, task: TaskId, run: StepRunId, manual: bool) -> Res
     };
     // Counted before the session, and the mark taken before the thread: two callers do not start
     // two sessions.
-    let rows = d
-        .store
-        .diagnoses(Some(task.0))
-        .map_err(|e| e.to_string())?;
+    let rows = d.store.diagnoses(Some(task.0)).map_err(|e| e.to_string())?;
     budget(&rows, failed_at)?;
     let mark = RunMark::take(task.0).ok_or("a diagnosis is already running")?;
     let d = d.clone();
@@ -892,7 +902,10 @@ mod tests {
     fn a_running_mark_is_taken_once_and_given_back() {
         let m = RunMark::take(990_001).expect("first");
         m.ran_on("model x on high");
-        assert_eq!(running(990_001).map(|r| r.1), Some("model x on high".into()));
+        assert_eq!(
+            running(990_001).map(|r| r.1),
+            Some("model x on high".into())
+        );
         assert!(RunMark::take(990_001).is_none(), "refused while running");
         drop(m);
         assert!(running(990_001).is_none());
@@ -934,7 +947,10 @@ mod tests {
         assert!(build_card(1, 1, &old).is_none());
         assert_eq!(recommended(&old).0, "retry");
         let t = card_text(4, 9, "retry", &submission("retry"));
-        assert!(t.contains("1. Retry with the fixture (recommended) / 2. Re-scope"), "{t}");
+        assert!(
+            t.contains("1. Retry with the fixture (recommended) / 2. Re-scope"),
+            "{t}"
+        );
     }
 
     #[test]
@@ -951,7 +967,10 @@ mod tests {
             assert_eq!(decide(f), Action::Card, "{rec} {class:?}");
         }
         let (verdict, _) = recommended(&submission("retry"));
-        assert_eq!(decide(facts(false, FailClass::Outside, &verdict)), Action::Apply);
+        assert_eq!(
+            decide(facts(false, FailClass::Outside, &verdict)),
+            Action::Apply
+        );
     }
 
     #[test]

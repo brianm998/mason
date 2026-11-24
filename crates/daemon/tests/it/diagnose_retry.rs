@@ -9,8 +9,8 @@
 use crate::support;
 use mason_core::*;
 use serde_json::{json, Value};
-use std::sync::Arc;
 use std::os::unix::fs::PermissionsExt;
+use std::sync::Arc;
 use support::*;
 
 fn auto_retries(d: &std::sync::Arc<mason_daemon::Daemon>, t: TaskId) -> usize {
@@ -111,13 +111,15 @@ fn the_owner_can_ask_for_a_diagnosis_and_it_ends_in_a_card_once_per_failure() {
     );
     let hook = s.origin.join("hooks/pre-receive");
     std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
-    std::fs::write(&hook, "#!/bin/sh\necho 'rejected by the hook' >&2\nexit 1\n").unwrap();
+    std::fs::write(
+        &hook,
+        "#!/bin/sh\necho 'rejected by the hook' >&2\nexit 1\n",
+    )
+    .unwrap();
     std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
     let d = s.start();
     let t = file_task(&d, "Push is rejected");
-    wait_for("the failure", 180, || {
-        task_of(&d, t).state == State::Failed
-    });
+    wait_for("the failure", 180, || task_of(&d, t).state == State::Failed);
     let path = format!("/tasks/{}/diagnose", t.0);
     assert_eq!(post(&d, "stranger", path.clone()).0, 403, "not the owner");
     assert_eq!(post(&d, "owner", path.clone()).0, 200);
@@ -158,9 +160,6 @@ fn a_task_that_is_not_failed_is_not_diagnosed() {
     let d = s.start();
     mason_daemon::attention::pause(&d, "", "claims", "test", 3600).unwrap();
     let t = file_task(&d, "Waits");
-    assert_eq!(
-        post(&d, "owner", format!("/tasks/{}/diagnose", t.0)).0,
-        409
-    );
+    assert_eq!(post(&d, "owner", format!("/tasks/{}/diagnose", t.0)).0, 409);
     assert_eq!(post(&d, "owner", "/tasks/9999/diagnose".into()).0, 404);
 }

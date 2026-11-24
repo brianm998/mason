@@ -114,9 +114,10 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
             v["next_auto_retry_ms"] = json!(next);
         }
         // A diagnosis session is running: when it started and on what model and effort.
-        v["diagnosis_running"] = crate::diagnose::running(t.id.0).map_or(Value::Null, |(at, on)| {
-            json!({"started_ms": at, "ran_on": on})
-        });
+        v["diagnosis_running"] = crate::diagnose::running(t.id.0).map_or(
+            Value::Null,
+            |(at, on)| json!({"started_ms": at, "ran_on": on}),
+        );
     }
     if detail {
         v["body"] = json!(t.body);
