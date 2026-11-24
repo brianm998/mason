@@ -11,6 +11,7 @@
 #                                 MASON_EXIT_DEFAULT_WEIGHT (60).
 #   MASON_EXIT_SCRIPT_LIMIT_S=N   kill a script after N seconds and report it as
 #                                 `FAILED: scripts/exit/sNN.sh (over N s)`. 0 or unset: no limit.
+#   MASON_EXIT_FALLBACK=1         use the watcher even where timeout(1) exists (tests).
 #   MASON_EXIT_PLAN=1             print the scripts of the shard and exit.
 #   MASON_EXIT_DIR, MASON_EXIT_WEIGHTS   other script directory / weights file (tests).
 #   MASON_EXIT_REPEAT=N           read by the repetition scripts (s80, s99, s169, s170, s482,
@@ -62,20 +63,28 @@ run_limited() {
   if [ "$limit" -le 0 ] 2>/dev/null; then bash "$s"; [ $? -eq 0 ] && return 0 || return 1; fi
   local t=""
   if command -v timeout >/dev/null; then t=timeout; elif command -v gtimeout >/dev/null; then t=gtimeout; fi
+  [ -n "${MASON_EXIT_FALLBACK:-}" ] && t=""
   if [ -n "$t" ]; then
     "$t" -k 10 "$limit" bash "$s"; rc=$?
     [ $rc -eq 0 ] && return 0
     { [ $rc -eq 124 ] || [ $rc -eq 137 ]; } && return 2
     return 1
   fi
-  # No timeout(1) (macOS): a watcher kills the script and its children.
+  # No timeout(1) (macOS): a watcher kills the script's whole process group. The script
+  # leads its own group (set -m), and the watcher keeps no stdio, so neither it nor its
+  # sleep can hold the pipe into tee open after the script ends (decision 1064).
   local flag; flag=$(mktemp); rm -f "$flag"
+  set -m
   bash "$s" & local pid=$!
-  ( sleep "$limit"; if kill -0 "$pid" 2>/dev/null; then : > "$flag"; pkill -P "$pid" 2>/dev/null; kill "$pid" 2>/dev/null; fi ) &
+  set +m
+  ( sleep "$limit"
+    if kill -0 "$pid" 2>/dev/null; then : > "$flag"; kill -TERM -- "-$pid" 2>/dev/null; sleep 2; kill -KILL -- "-$pid" 2>/dev/null; fi
+  ) >/dev/null 2>&1 &
   local watcher=$!
   wait "$pid"; rc=$?
+  pkill -P "$watcher" 2>/dev/null
   kill "$watcher" 2>/dev/null; wait "$watcher" 2>/dev/null
-  if [ -e "$flag" ]; then rm -f "$flag"; return 2; fi
+  if [ -e "$flag" ]; then kill -KILL -- "-$pid" 2>/dev/null; rm -f "$flag"; return 2; fi
   [ $rc -eq 0 ] && return 0 || return 1
 }
 
