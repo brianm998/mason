@@ -52,6 +52,7 @@ fun RootView(model: MonitorModel, dark: Boolean = isSystemInDarkTheme()) {
                 }
             }
         }
+        model.addProject?.let { AddProjectDialog(model, it) }
     }
 }
 

@@ -112,7 +112,7 @@ struct Tool {
     /// Let the views settle: wait until the model reaches the daemon's seq (from GET /status),
     /// giving up on it after 1.5 s with no new sequence number; 60 s is a hard limit.
     @MainActor
-    static func settle(_ model: MonitorModel) async {
+    static func settle(_ model: MonitorModel, atLeast floor: UInt64 = 0) async {
         var target: UInt64 = 0
         var got = false
         model.onResult = { r in
@@ -128,6 +128,7 @@ struct Tool {
         c.raw = .with { $0.method = "GET"; $0.path = "/status" }
         model.send(c)
         await until("the daemon's status") { got }
+        target = max(target, floor)
         let end = Date().addingTimeInterval(60)
         var last = model.lastSeq
         var quiet = 0
@@ -142,9 +143,11 @@ struct Tool {
     @MainActor
     static func step(_ model: MonitorModel) async -> Bool {
         var advanced: Bool?
+        var seq: UInt64 = 0
         model.onResult = { r in
             if r.id == "step" {
                 let v = (try? JSONSerialization.jsonObject(with: Data(r.json.utf8))) as? [String: Any]
+                seq = (v?["seq"] as? NSNumber)?.uint64Value ?? 0
                 advanced = v?["advanced"] as? Bool ?? false
             }
         }
@@ -153,7 +156,7 @@ struct Tool {
         c.raw = .with { $0.method = "POST"; $0.path = "/demo/next" }
         model.send(c)
         await until("the demo to advance") { advanced != nil }
-        await settle(model)
+        await settle(model, atLeast: seq)
         return advanced ?? false
     }
 

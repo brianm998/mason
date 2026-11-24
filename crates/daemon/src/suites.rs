@@ -454,6 +454,8 @@ fn run_hosted_resuming(
     // as its own step here has none when it goes remote: the build comes first in the command.
     // Held until this function returns, so for the whole local run.
     let mut fallback: Option<crate::sched::Lease> = None;
+    // An `Executor::Node` is not produced yet: `run_on_node` joins `run_remote` here in phase 2
+    // of the multi-machine plan, returning the same `Ran`.
     if let crate::remote::Executor::GitHub { runs_on } =
         crate::remote::executor_for(d, project, crate::remote::Kind::Suite, place)
     {
@@ -468,16 +470,7 @@ fn run_hosted_resuming(
         // machine's slots (#761), so it takes what the definition's test step `uses` before it
         // starts, under the same limits and CPU and thermal holds as a local test step.
         if !d.cfg.hosts_dir().join(id).join("host.kv").exists() {
-            let uses = d
-                .project_id_by_name(project)
-                .map(|p| d.current_def(p))
-                .and_then(|def| {
-                    def.steps
-                        .iter()
-                        .find(|s| s.kind == mason_definition::StepType::Test)
-                        .map(|s| s.uses.clone())
-                })
-                .unwrap_or_default();
+            let uses = test_step_uses(d, project);
             let task = place.and_then(|(t, _)| t);
             let label = format!(
                 "{} {id} (no GitHub runner, run here)",
@@ -577,6 +570,19 @@ fn run_hosted_resuming(
     }
 }
 
+/// What the definition's test step `uses`: the slots a run that falls back to this machine takes.
+fn test_step_uses(d: &Arc<Daemon>, project: &str) -> std::collections::BTreeMap<String, u32> {
+    d.project_id_by_name(project)
+        .map(|p| d.current_def(p))
+        .and_then(|def| {
+            def.steps
+                .iter()
+                .find(|s| s.kind == mason_definition::StepType::Test)
+                .map(|s| s.uses.clone())
+        })
+        .unwrap_or_default()
+}
+
 /// A suite command run on GitHub Actions. `covered`: the caller holds this machine's slots for
 /// the run, so a fallback's room check does not count them against it. `Ok(None)`: it could not
 /// go remote and the project's `fallback` is `local`, so the caller runs it here. An outage or a missing runner is an `Err`
@@ -600,7 +606,8 @@ fn run_remote(
 ) -> Result<Option<Ran>, String> {
     use crate::remote as rm;
     let task = run.and_then(|r| d.world().ok().and_then(|w| w.task_of_open_run(r)));
-    let uses = watch.map(|s| s.uses.clone()).unwrap_or_default();
+    // The slots a fallback takes when it is placed here: the same ones `run_one` asks for.
+    let uses = test_step_uses(d, project);
     let Some(site) = rm::site_for_run(d, project, cwd, task.map(|t| t.0), &uses, covered) else {
         return Err(rm::env_err("the project has no [remote_runs] section"));
     };
@@ -3534,10 +3541,10 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
                 .build
                 .as_ref()
                 .filter(|b| !reused && !built.contains(b))
-                // On GitHub the build is the first part of the suite's own command.
+                // On GitHub or a node the build is the first part of the suite's own command.
                 .filter(|_| {
                     !crate::place::place_of(d, &c.project.id, Some(c.task.0), &suite, "suite")
-                        .is_github()
+                        .is_off_machine()
                 })
             {
                 let needs = needs_of(&crate::jobs::build_uses(), None);
@@ -4564,7 +4571,7 @@ fn mark_tried_covering(d: &Arc<Daemon>, project: &str, suite: &str) {
     }
 }
 
-/// Whether the project's runs go to GitHub and the `gha` pool has no idle unit: a debt run
+/// Whether the project's runs go to GitHub (a node uses no `gha` unit) and the `gha` pool has no idle unit: a debt run
 /// then waits for the next pass instead of queueing behind every task.
 fn gha_full(d: &Arc<Daemon>, project: &str) -> bool {
     matches!(
