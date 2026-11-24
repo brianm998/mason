@@ -62,6 +62,7 @@ fn needs(j: &Job, caps: &[u32; 5]) -> Needs {
     Needs {
         exclusive: j.exclusive,
         amounts,
+        flex: false,
     }
 }
 
@@ -718,6 +719,7 @@ fn an_exclusive_request_at_the_back_is_first_once_it_has_waited_max_wait() {
         Needs {
             exclusive: true,
             amounts: Needs::of(&[("compile", 1)]).amounts,
+            flex: false,
         },
         "star#1",
         0,
@@ -1077,6 +1079,7 @@ fn draining(holder_estimate: Option<u64>) -> (Ledger, u64) {
         Needs {
             exclusive: true,
             amounts: BTreeMap::new(),
+            flex: false,
         },
         "exclusive",
         50,
