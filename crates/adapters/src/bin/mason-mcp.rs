@@ -8,7 +8,8 @@
 //! (default 30) before failing, so the agent is not disturbed. A `run_check`
 //! whose controller goes away before answering is sent again once it is back
 //! (a check has no effect of its own): a self-update must not cost the agent its
-//! result.
+//! result. The replay carries the same `call_id`, so the controller continues the call
+//! (no new fold, finished suites kept) instead of starting another.
 
 use mason_adapter_api::contract::{tool_spec, StepKind};
 use mason_platform::net::UnixStream;
@@ -18,6 +19,20 @@ use std::time::{Duration, Instant};
 
 /// How long a `run_check` waits for a controller that went away mid-check.
 const CHECK_RECONNECT: Duration = Duration::from_secs(180);
+
+/// A new id for a `run_check` call: this process, the clock and a count.
+fn call_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    format!(
+        "{}-{nanos:x}-{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::SeqCst)
+    )
+}
 
 fn send(v: &Value) {
     let mut o = std::io::stdout().lock();
@@ -107,7 +122,14 @@ fn main() {
             }
             Some("tools/call") => {
                 let name = m["params"]["name"].as_str().unwrap_or_default();
-                let args = m["params"].get("arguments").cloned().unwrap_or(json!({}));
+                let mut args = m["params"].get("arguments").cloned().unwrap_or(json!({}));
+                // One id for the call, kept across the replays `forward` makes, so that the
+                // controller knows a replay for the same call and continues it (#1051).
+                if name == "run_check" {
+                    if let Some(o) = args.as_object_mut() {
+                        o.insert("call_id".into(), json!(call_id()));
+                    }
+                }
                 let (ok, text) = match forward(&sock, name, &args, retry) {
                     Ok(r) => r,
                     Err(e) => (false, e),

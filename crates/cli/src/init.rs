@@ -203,9 +203,7 @@ fn fail(msg: &str) -> i32 {
     1
 }
 
-/// The text of the harmless task.
-pub const PROOF_TITLE: &str = "Add a file that proves MASON works";
-pub const PROOF_BODY: &str = "Create a file named MASON-WORKS.md at the top of the repository containing one line, `MASON landed this task.`, and nothing else. Change no other file.\n\n## Acceptance criteria\n- MASON-WORKS.md exists with exactly that one line.\n\n## Approach\nCreate MASON-WORKS.md (new) with the line above and commit it. This task exists only to show the pipeline works end to end; delete the file afterwards if you like.\n";
+pub use mason_onboard::{PROOF_BODY, PROOF_TITLE};
 
 /// Question 8: file one small task, if a daemon that knows this project is running.
 pub fn prove(d: &Detected, id: &str, base: &str, data_dir: &Path) -> Result<(), String> {

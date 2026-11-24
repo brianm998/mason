@@ -764,6 +764,7 @@ fn run_remote(
         spec.shards = s.shards;
         spec.shard_command = Some(sc.to_string());
         spec.shard_lists = shard_lists(d, project, s);
+        spec.partial_lists = lists_partial(s);
     }
     let stop = || match check() {
         Stop::No => None,
@@ -810,9 +811,26 @@ fn run_remote(
     })
 }
 
+/// Do the shard lists name more than this run's own tests (#873)? A narrowed run takes its
+/// share of the whole suite's lists, and a shard command that is not `scripts/test-shard.py`
+/// (the exit scripts pick their share on the runner) does not read them at all. A shard that ran
+/// none of the listed tests is then no defect.
+pub(crate) fn lists_partial(s: &Suite) -> bool {
+    let narrowed_cmd = s
+        .dev_shard_command
+        .as_deref()
+        .is_some_and(|c| !c.contains('{'));
+    s.narrowed
+        || narrowed_cmd
+        || !s
+            .shard_command
+            .as_deref()
+            .is_some_and(|c| c.contains("test-shard.py"))
+}
+
 /// Which tests go to which shard, from the times and names this daemon has recorded for the
 /// suite (#701). Nothing recorded gives empty lists: every test then runs on its hash shard.
-fn shard_lists(d: &Arc<Daemon>, project: &str, suite: &Suite) -> Vec<Vec<String>> {
+pub(crate) fn shard_lists(d: &Arc<Daemon>, project: &str, suite: &Suite) -> Vec<Vec<String>> {
     let weights = d
         .store
         .test_medians(project, &suite.name)
@@ -823,13 +841,14 @@ fn shard_lists(d: &Arc<Daemon>, project: &str, suite: &Suite) -> Vec<Vec<String>
 }
 
 /// `suite`'s `dev_shard_command` filled in with the pick `n`, when one runner's share of it can be
-/// run by scripts/test-shard.py: the packages, or one whole test target. A pick of several groups
-/// (a compound shell command) or one filtered by name stays on one runner, so `None` (#880).
+/// run by scripts/test-shard.py: the packages, or whole test targets (several are a compound shell
+/// command with the shard script in front of each cargo command, #873). A pick filtered by name
+/// stays on one runner, so `None` (#880).
 pub fn dev_shard_for(suite: &Suite, n: &crate::scope::Narrow) -> Option<String> {
     use crate::scope::Narrow;
     let t = suite.dev_shard_command.as_deref()?;
     match n {
-        Narrow::Targets(g) if g.len() != 1 || g[0].contains(" -- ") => None,
+        Narrow::Targets(g) if g.is_empty() || g.iter().any(|x| x.contains(" -- ")) => None,
         _ => Some(crate::scope::expand(t, n, false)),
     }
 }
@@ -6875,6 +6894,59 @@ mod batch_cover_tests {
             exclusive: true,
             ..Default::default()
         }));
+    }
+}
+
+#[cfg(test)]
+mod narrowed_shard_tests {
+    use super::*;
+    use crate::scope::Narrow;
+
+    fn suite() -> Suite {
+        let mut s = Suite::new(
+            "cargo-workspace",
+            "cargo test",
+            mason_testing::ParserKind::Tap,
+        );
+        s.shards = 2;
+        s.shard_command = Some("python3 -I scripts/test-shard.py -- cargo test".into());
+        s.dev_shard_command =
+            Some("python3 -I scripts/test-shard.py -- cargo test {tests_for_change}".into());
+        s
+    }
+
+    fn targets(n: usize) -> Narrow {
+        Narrow::Targets((0..n).map(|i| format!("-p c{i} --lib")).collect())
+    }
+
+    #[test]
+    fn three_targets_split_with_the_shard_script_in_front_of_each_cargo_command() {
+        let cmd = dev_shard_for(&suite(), &targets(3)).expect("split");
+        for i in 0..3 {
+            assert!(cmd.contains(&format!("-p c{i} --lib")), "{cmd}");
+        }
+        assert_eq!(cmd.matches("test-shard.py").count(), 3, "{cmd}");
+        assert!(!cmd.contains('{'), "{cmd}");
+    }
+
+    #[test]
+    fn a_name_filtered_pick_or_a_suite_without_the_key_stays_on_one_runner() {
+        let filtered = Narrow::Targets(vec!["-p a --lib -- some::module".into()]);
+        assert_eq!(dev_shard_for(&suite(), &filtered), None);
+        let mut s = suite();
+        s.dev_shard_command = None;
+        assert_eq!(dev_shard_for(&s, &targets(3)), None);
+    }
+
+    #[test]
+    fn shard_lists_are_partial_for_a_narrowed_run_and_for_a_command_that_does_not_read_them() {
+        let mut s = suite();
+        assert!(!lists_partial(&s));
+        s.narrowed = true;
+        assert!(lists_partial(&s));
+        s.narrowed = false;
+        s.shard_command = Some("MASON_EXIT_SHARD=1/2 bash x.sh".into());
+        assert!(lists_partial(&s));
     }
 }
 

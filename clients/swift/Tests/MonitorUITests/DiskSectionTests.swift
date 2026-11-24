@@ -101,41 +101,27 @@ final class DiskSectionTests: XCTestCase {
         XCTAssertEqual(diskChart(h, hidden: ["a", "b"]).series.count, 0)
     }
 
-    // A red 30x20-ish box and a blue one stand for CPU and disk.
-    private func row(stacked: Bool) -> some View {
-        CpuDiskRow(stacked: stacked, spacing: 10) {
-            // Exact sRGB primaries: the system red and blue are tuned per macOS release.
-            Color(.sRGB, red: 1, green: 0, blue: 0).frame(maxWidth: .infinity).frame(height: 40)
-            Color(.sRGB, red: 0, green: 0, blue: 1).frame(maxWidth: .infinity).frame(height: 40)
-        }
-    }
-
-    private func isColour(_ px: [UInt8], _ x: Int, _ y: Int, width: Int, red: Bool) -> Bool {
-        let i = y * width * 4 + x * 4
-        guard i + 3 < px.count else { return false }
-        return red ? (px[i] > 200 && px[i + 2] < 60) : (px[i + 2] > 200 && px[i] < 60)
-    }
-
     func testSideBySideAtAWideWidthWithDiskRightOfCpuAtThreeToTwo() {
-        let w = 1000
-        let px = pixels(row(stacked: false), size: CGSize(width: w, height: 90))
-        // Stacked would be 90 tall with blue below red; side by side puts both on the top row.
-        XCTAssertTrue(isColour(px, 100, 45, width: w, red: true))
-        XCTAssertTrue(isColour(px, 900, 45, width: w, red: false))
-        // CPU takes 3/5 of 990: red up to 594, gap, blue after 604.
-        XCTAssertTrue(isColour(px, 590, 45, width: w, red: true))
-        XCTAssertTrue(isColour(px, 610, 45, width: w, red: false))
-        XCTAssertFalse(isColour(px, 100, 80, width: w, red: true))
+        // CPU takes 3/5 of 990: x 0..594, gap 10, disk from 604 to 1000.
+        let f = CpuDiskRow.placement(width: 1000, heights: (40, 40), stacked: false, spacing: 10)
+        XCTAssertEqual(f.cpu, CGRect(x: 0, y: 0, width: 594, height: 40))
+        XCTAssertEqual(f.disk, CGRect(x: 604, y: 0, width: 396, height: 40))
+        XCTAssertEqual(f.cpu.minY, f.disk.minY, "both on the top row")
+        XCTAssertEqual(f.disk.minX - f.cpu.maxX, 10, "one spacing between them")
+        XCTAssertEqual(f.disk.maxX, 1000, "the disk reaches the right edge")
+        XCTAssertEqual(f.cpu.width / f.disk.width, 1.5, accuracy: 0.001, "3:2")
     }
 
     func testStackedAtANarrowWidthCpuFirst() {
-        let w = 500
-        let px = pixels(row(stacked: false), size: CGSize(width: w, height: 90))
-        XCTAssertTrue(isColour(px, 400, 20, width: w, red: true), "CPU on top at full width")
-        XCTAssertTrue(isColour(px, 400, 70, width: w, red: false), "disk below it")
+        let f = CpuDiskRow.placement(width: 500, heights: (40, 40), stacked: false, spacing: 10)
+        XCTAssertEqual(f.cpu, CGRect(x: 0, y: 0, width: 500, height: 40), "CPU on top at full width")
+        XCTAssertEqual(f.disk, CGRect(x: 0, y: 50, width: 500, height: 40), "disk below it")
         // A phone stacks even at a wide width.
-        let wide = pixels(row(stacked: true), size: CGSize(width: 1000, height: 90))
-        XCTAssertTrue(isColour(wide, 900, 70, width: 1000, red: false))
+        let wide = CpuDiskRow.placement(width: 1000, heights: (40, 40), stacked: true, spacing: 10)
+        XCTAssertEqual(wide.cpu, CGRect(x: 0, y: 0, width: 1000, height: 40))
+        XCTAssertEqual(wide.disk, CGRect(x: 0, y: 50, width: 1000, height: 40))
+        XCTAssertEqual(f.disk.minY, f.cpu.maxY + 10, "one spacing below the CPU")
+        XCTAssertEqual(wide.disk.minX, 0)
     }
 
     func testTheCpuSectionStillRendersAtTheNarrowerWidth() {

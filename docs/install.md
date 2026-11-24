@@ -88,3 +88,14 @@ A phone paired on the home Wi-Fi finds the daemon as `<host>.local` (mDNS), whic
 3. Restart `masond`, run `mason lan status` to see the hosts and listening addresses, and pair the phone again with `mason pair`. The pairing URL now carries `host=<host>.local` and one `alt=` for each extra host, and the phone tries the local name first, then the others.
 
 To listen on the Tailscale interface and loopback only, set `bind = ["127.0.0.1", "100.101.102.103"]`. The listener serves paired devices only, whichever address it is on.
+
+## Where Add Project looks for repositories
+
+The monitors' Add Project offers the git repositories one level under each root in `daemon.toml`. The default is `~/git`; `~` is your home directory. A root that cannot be read is reported next to the list and does not stop the others.
+
+```toml
+[onboarding]
+roots = ["~/git", "~/work"]
+```
+
+Restart `masond` to apply a change.

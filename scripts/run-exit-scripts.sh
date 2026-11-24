@@ -79,19 +79,42 @@ run_limited() {
   [ $rc -eq 0 ] && return 0 || return 1
 }
 
-fail=0; failed=""
+# The first panic (with its message line) or failing line of a script's log, for the summary.
+cause_of() {
+  local clean; clean=$(mktemp)
+  sed $'s/\x1b\\[[0-9;]*[A-Za-z]//g' "$1" > "$clean"
+  local n c=""
+  n=$(grep -naE 'panicked at|FAIL|[Ee]rror|not ok' "$clean" | head -n 1 | cut -d: -f1)
+  if [ -n "$n" ]; then
+    c=$(sed -n "${n}p" "$clean")
+    case $c in *"panicked at"*) c="$c $(sed -n "$((n + 1))p" "$clean")" ;; esac
+  else
+    c=$(grep -av '^[[:space:]]*$' "$clean" | tail -n 1)
+    if [ -n "$c" ]; then c="last output: $c"; else c="no output"; fi
+  fi
+  rm -f "$clean"
+  printf '%s' "$c" | tr '\r\n' '  ' | sed 's/[[:space:]][[:space:]]*/ /g' | cut -c1-200
+}
+
+fail=0; failed=""; causes=""
 while IFS= read -r -u 3 s; do
   [ -n "$s" ] || continue
   name=$(basename "$s" .sh)
   echo "== $s"
   start=$SECONDS
-  run_limited "$s"; rc=$?
+  log=$(mktemp)
+  run_limited "$s" 2>&1 | tee "$log"; rc=${PIPESTATUS[0]}
   echo "$name: $((SECONDS - start)) s"
   case $rc in
     0) ;;
-    2) echo "FAILED: $s (over $limit s)" >&2; fail=1; failed="$failed $s" ;;
-    *) echo "FAILED: $s" >&2; fail=1; failed="$failed $s" ;;
+    2) echo "FAILED: $s (over $limit s)" >&2; fail=1; failed="$failed $s (over $limit s)"
+       echo "-- last 40 lines of $name" >&2; tail -n 40 "$log" >&2 ;;
+    *) echo "FAILED: $s" >&2; fail=1; failed="$failed $s"
+       echo "-- last 40 lines of $name" >&2; tail -n 40 "$log" >&2 ;;
   esac
+  [ "$rc" -eq 0 ] || causes="$causes  cause $name: $(cause_of "$log")"$'\n'
+  rm -f "$log"
 done 3< <(plan)
+[ "$fail" -eq 0 ] || printf '%s' "$causes" >&2
 [ "$fail" -eq 0 ] || echo "FAILED scripts:$failed" >&2
 exit $fail
