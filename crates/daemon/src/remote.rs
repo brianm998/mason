@@ -4252,7 +4252,6 @@ mod tests {
             }
             if u.contains("/actions/runs/4242/jobs") {
                 let (_, job) = self.phase();
-                let started = (job != "queued").then_some("2026-11-20T10:00:06Z");
                 // The jobs the workflow makes from the dispatch's inputs, as GitHub lists them.
                 let last = self.dispatches.lock().unwrap().last().cloned();
                 let inputs: serde_json::Value = last

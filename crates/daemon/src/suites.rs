@@ -621,8 +621,21 @@ fn run_hosted_resuming(
         let build = place.and_then(|(_, s)| s.build.as_deref());
         let ran = match &exec {
             crate::remote::Executor::GitHub { runs_on } => run_remote(
-                d, project, id, build, cmd, cwd, limit, log_dir, &check, run, watch, &env, runs_on,
-                covered, cover.giver.clone(),
+                d,
+                project,
+                id,
+                build,
+                cmd,
+                cwd,
+                limit,
+                log_dir,
+                &check,
+                run,
+                watch,
+                &env,
+                runs_on,
+                covered,
+                cover.giver.clone(),
             )?,
             crate::remote::Executor::Node { nid, .. } => run_on_node(
                 d, project, id, build, cmd, cwd, limit, log_dir, &check, run, watch, &env, nid,
@@ -839,13 +852,7 @@ fn run_remote(
         task.map_or(0, |t| t.0),
     );
     Ok(
-        match rm::run_or_fallback(
-            &site,
-            &spec,
-            log_dir,
-            &stop,
-            &grant,
-        )? {
+        match rm::run_or_fallback(&site, &spec, log_dir, &stop, &grant)? {
             None => None,
             Some(rm::Outcome::Stopped(why)) => Some(Ran {
                 code: -1,
