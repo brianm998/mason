@@ -4458,6 +4458,7 @@ fn hold_for_debt(
     task: TaskId,
     debt: u64,
     at: u64,
+    suite: Option<&Suite>,
 ) -> Result<Option<crate::sched::Lease>, String> {
     let Some(step) = def
         .steps
@@ -4472,7 +4473,12 @@ fn hold_for_debt(
     }
     // A payment that runs on GitHub holds runner pool units, not this machine's slots (#761).
     let mut _waiting = None;
-    let needs = match crate::remote::pool_needs(d, project, &needs, Some(task)) {
+    // The units are those of the jobs the debt's suite starts (#818).
+    let pooled = match suite {
+        Some(s) => crate::remote::suite_pool_needs(d, project, Some(task), &needs, s),
+        None => crate::remote::pool_needs(d, project, &needs, Some(task)),
+    };
+    let needs = match pooled {
         Some(n) => {
             _waiting = Some(crate::remote_runs::waiting(
                 d,
@@ -4904,7 +4910,15 @@ fn pay_with(d: &Arc<Daemon>, debt: u64, only: Option<&str>) -> Result<String, St
     {
         return Ok("already paid".into());
     }
-    let _lease = hold_for_debt(d, &def, &row.project, TaskId(row.task), debt, row.at)?;
+    let _lease = hold_for_debt(
+        d,
+        &def,
+        &row.project,
+        TaskId(row.task),
+        debt,
+        row.at,
+        suites.first(),
+    )?;
     if p.remote.is_some() {
         let _ = d.fetch_remote(pid);
     }

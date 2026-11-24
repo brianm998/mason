@@ -2455,18 +2455,12 @@ impl Runner {
                     // A build first, as the test step does, holding one `compile`
                     // slot; the re-test then holds the rest of what the test step uses.
                     if let Some(build) = &cmds.build {
-                        let _lease = match self.hold(
+                        match self.check_through_outage(
                             &def,
+                            d,
+                            &spec("rebuild", build, false),
                             crate::sched::needs_of(&crate::jobs::build_uses(), None),
-                            true,
                         ) {
-                            Ok(l) => l,
-                            Err(e) => {
-                                self.fail_service(e);
-                                return false;
-                            }
-                        };
-                        match self.check_through_outage(d, &spec("rebuild", build, false)) {
                             Ok(o) if o.stopped.is_some() => {
                                 tracing::info!(
                                     batch = batch_id,
@@ -2512,19 +2506,13 @@ impl Runner {
                     }
                     // The re-test holds what the test step uses, as any test does; the
                     // wait for it is outside the command's timeout.
-                    let _lease = match self.hold(
-                        &def,
-                        self.test_step_needs(&def, cmds.build.is_some()),
-                        true,
-                    ) {
-                        Ok(l) => l,
-                        Err(e) => {
-                            self.fail_service(e);
-                            return false;
-                        }
-                    };
                     let spec = spec("retest", &cmds.test, true);
-                    return match self.check_through_outage(d, &spec) {
+                    return match self.check_through_outage(
+                        &def,
+                        d,
+                        &spec,
+                        self.test_step_needs(&def, cmds.build.is_some()),
+                    ) {
                         Ok(o) if o.stopped.is_some() => {
                             tracing::info!(
                                 batch = batch_id,
@@ -3362,16 +3350,6 @@ impl Runner {
             let Some(cmd) = suite.fast_command.clone() else {
                 continue;
             };
-            let _lease =
-                match self.hold(def, self.test_step_needs(def, suite.build.is_some()), true) {
-                    Ok(l) => l,
-                    Err(e) => {
-                        self.fail_service(e.clone());
-                        out.green = false;
-                        out.notes.push(e);
-                        return out;
-                    }
-                };
             let spec = crate::hostedcheck::CheckSpec {
                 id_prefix: format!("{prefix}-fast-{name}"),
                 log_dir: log_dir.to_path_buf(),
@@ -3390,7 +3368,12 @@ impl Runner {
                 place: Some((None, Box::new(crate::hostedcheck::without_build(suite)))),
                 global: false,
             };
-            match self.check_through_outage(d, &spec) {
+            match self.check_through_outage(
+                def,
+                d,
+                &spec,
+                self.test_step_needs(def, suite.build.is_some()),
+            ) {
                 Ok(o) if o.stopped.is_some() => out.notes.push(format!(
                     "{name}: fast tier not run to the end: {}",
                     o.stopped.unwrap_or_default()
@@ -3560,15 +3543,6 @@ impl Runner {
         }
         let members = self.members(def);
         for (name, cmd, only) in runs {
-            let _lease = match self.hold(def, self.test_step_needs(def, false), true) {
-                Ok(l) => l,
-                Err(e) => {
-                    self.fail_service(e.clone());
-                    out.green = false;
-                    out.notes.push(e);
-                    return out;
-                }
-            };
             let spec = crate::hostedcheck::CheckSpec {
                 id_prefix: format!("{prefix}-new-{name}"),
                 log_dir: log_dir.to_path_buf(),
@@ -3587,11 +3561,7 @@ impl Runner {
                 place: None,
                 global: true,
             };
-            match crate::hostedcheck::run(
-                d,
-                &spec,
-                &crate::remote::Grant::unplumbed("landing re-test: the batch hold"),
-            ) {
+            match self.run_held(def, d, &spec, self.test_step_needs(def, false)) {
                 Ok(o) if o.stopped.is_some() => out.notes.push(format!(
                     "{name}: the new tests were not run to the end: {}",
                     o.stopped.unwrap_or_default()
@@ -3768,24 +3738,7 @@ impl Runner {
                 global: false,
             };
             let remote = github && crate::hostedcheck::goes_remote(d, &spec);
-            // Work that goes to GitHub holds no local slot while it waits there.
-            let _lease = if remote {
-                None
-            } else {
-                match self.hold(
-                    def,
-                    crate::sched::needs_of(&crate::jobs::build_uses(), None),
-                    true,
-                ) {
-                    Ok(l) => l,
-                    Err(e) => {
-                        self.fail_service(e.clone());
-                        out.green = false;
-                        out.notes.push(e);
-                        return out;
-                    }
-                }
-            };
+            // Work that goes to GitHub holds runner units, not a local slot, while it waits (#818).
             let began = std::time::Instant::now();
             let ran_on = if remote { "on GitHub" } else { "on this Mac" };
             let took = |s: u64| {
@@ -3795,7 +3748,12 @@ impl Runner {
                     format!("{s}s")
                 }
             };
-            match self.check_through_outage(d, &spec) {
+            match self.check_through_outage(
+                def,
+                d,
+                &spec,
+                crate::sched::needs_of(&crate::jobs::build_uses(), None),
+            ) {
                 Ok(o) if o.stopped.is_some() => out.notes.push(format!(
                     "{name}: not run to the end: {}",
                     o.stopped.unwrap_or_default()
@@ -3954,19 +3912,7 @@ impl Runner {
                 out.notes.push(format!("{name}: {what} not built: {why}"));
                 continue;
             }
-            let _lease = match self.hold(
-                def,
-                crate::sched::needs_of(&crate::jobs::build_uses(), None),
-                true,
-            ) {
-                Ok(l) => l,
-                Err(e) => {
-                    self.fail_service(e.clone());
-                    out.green = false;
-                    out.notes.push(e);
-                    return out;
-                }
-            };
+            let floor_needs = crate::sched::needs_of(&crate::jobs::build_uses(), None);
             // #816: the floor builds on this Mac (warm target directory, no runner queue) unless
             // `floor_where = "github"`, or the suite names a runner of another OS than this
             // Mac's. Then the suite's own placement (#815) decides, as before.
@@ -4011,7 +3957,7 @@ impl Runner {
                 }
             };
             let mut ran_on = ran_on;
-            let mut result = self.check_through_outage(d, &spec);
+            let mut result = self.check_through_outage(def, d, &spec, floor_needs.clone());
             // #962: no GitHub runner took the floor build within the outage limit, three times
             // over. A build is the same anywhere, so it is built on this Mac rather than failing
             // the batch for GitHub's queue.
@@ -4025,7 +3971,7 @@ impl Runner {
                 ));
                 ran_on = "on this Mac";
                 let local = mk(format!("{prefix}-floor-{name}-here"), false);
-                result = self.check_through_outage(d, &local);
+                result = self.check_through_outage(def, d, &local, floor_needs);
             }
             match result {
                 Ok(o) if o.stopped.is_some() => out.notes.push(format!(
@@ -4126,8 +4072,10 @@ impl Runner {
     /// error, which the caller raises as a service failure (#772).
     fn check_through_outage(
         &self,
+        def: &mason_definition::Definition,
         d: &Arc<Daemon>,
         spec: &crate::hostedcheck::CheckSpec,
+        local: mason_scheduler::Needs,
     ) -> Result<crate::hostedcheck::CheckOutcome, String> {
         let key = self.alert_key("service");
         let r = retry_outage(
@@ -4143,11 +4091,7 @@ impl Runner {
                         phase: None,
                     });
                 }
-                crate::hostedcheck::run(
-                    d,
-                    spec,
-                    &crate::remote::Grant::unplumbed("landing check: the batch hold"),
-                )
+                self.run_held(def, d, spec, local.clone())
             },
             |waited, why| {
                 self.d.landing.raise(
@@ -4237,6 +4181,39 @@ impl Runner {
             )
             .map(Some)
             .map_err(|_| "every task of the batch left the landing step while it waited".into())
+    }
+
+    /// Hold what `spec` needs, ranked as the batch's first task, then run it: a check that goes
+    /// to GitHub takes the runner units of its jobs and no slot of this machine, and is pushed
+    /// once they are granted (#818); one that runs here takes `local`. A run that attaches to
+    /// one already out takes the local slots as before and pushes nothing new. The wait is
+    /// outside the command's timeout, and the hold ends with the run.
+    fn run_held(
+        &self,
+        def: &mason_definition::Definition,
+        d: &Arc<Daemon>,
+        spec: &crate::hostedcheck::CheckSpec,
+        local: mason_scheduler::Needs,
+    ) -> Result<crate::hostedcheck::CheckOutcome, String> {
+        let units = crate::hostedcheck::pool_units(d, spec)
+            .filter(|_| !crate::hostedcheck::pending(d, spec));
+        let (lease, grant) = match units {
+            Some(u) => {
+                let lease = self.hold(def, hold_needs(Default::default(), u), true)?;
+                (
+                    None,
+                    lease.map_or_else(crate::remote::Grant::attached, crate::remote::Grant::of),
+                )
+            }
+            None => (
+                self.hold(def, local, true)?,
+                crate::remote::Grant::attached(),
+            ),
+        };
+        let out = crate::hostedcheck::run(d, spec, &grant);
+        drop(grant);
+        drop(lease);
+        out
     }
 
     /// The batch as the owner of its broker requests, ranked as its first task (`None`: no

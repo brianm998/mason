@@ -5313,7 +5313,13 @@ mod tests {
             s.local_room = Some(take(units.clone()));
             let logs = tempfile::tempdir().unwrap();
             let id = format!("two{i}");
-            let out = run_or_fallback(&s, &spec(&id), logs.path(), &give_up_after_many_looks());
+            let out = run_or_fallback(
+                &s,
+                &spec(&id),
+                logs.path(),
+                &give_up_after_many_looks(),
+                &Grant::test(),
+            );
             outs.push((out, gh.cancels.lock().unwrap().len()));
         }
         assert!(matches!(outs[0], (Ok(None), 1)), "the first came back");
@@ -5344,7 +5350,13 @@ mod tests {
             }));
             let logs = tempfile::tempdir().unwrap();
             let id = format!("rs{i}");
-            let out = run_or_fallback(&s, &spec(&id), logs.path(), &give_up_after_many_looks());
+            let out = run_or_fallback(
+                &s,
+                &spec(&id),
+                logs.path(),
+                &give_up_after_many_looks(),
+                &Grant::test(),
+            );
             assert!(matches!(out, Ok(Some(Outcome::Done(_)))), "run {i}");
             assert!(gh.cancels.lock().unwrap().is_empty(), "run {i}");
         }
