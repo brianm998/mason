@@ -1,0 +1,14 @@
+.mason/run.json
+crates/adapter-api/src/card.rs
+crates/adapter-api/src/contract.rs
+crates/cli/src/main.rs
+crates/daemon/src/diagnose.rs
+crates/daemon/src/health.rs
+crates/daemon/src/http.rs
+crates/daemon/src/jobs.rs
+crates/daemon/tests/it/diagnose_retry.rs
+crates/store/src/lib.rs
+crates/store/src/migrations.rs
+docs/decisions/1041-diagnosis-decision-card.md
+docs/stages/s1048.md
+scripts/exit/s1048.sh
