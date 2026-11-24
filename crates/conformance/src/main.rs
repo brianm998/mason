@@ -163,6 +163,12 @@ fn settle(c: &mut Client, screen: &mut Screen, after: u64) {
             ));
         }
     }
+    if !reached(screen.seq, screen.views.len(), target) {
+        eprintln!(
+            "settle: quiet exit, screen at #{}, daemon seq #{target}",
+            screen.seq
+        );
+    }
 }
 
 fn main() {
