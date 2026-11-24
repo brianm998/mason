@@ -750,6 +750,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s1015**: Unit-test narrowing no longer pushes a line into `Group.notes`, which is per directory target, so `the_note_says_how_the_modules_were_picked` passes again.
 - **s1021**: The notification-details feature row records a platform_reason for its iOS todo, so the develop lint passes.
 - **s1022**: s249 clears the shard variables for its temporary repository and s782 accepts both the busy and the quiet next-trigger text.
+- **s1023**: `[feature.notification-details]` in clients/features.toml gets a `platform_reason`, so the client parity check passes while iOS stays "todo".
 - **s1026**: s13.sh now prints the per-checkpoint id diff when the Compose conformance check fails, and Compose's step() reports a quiet exit before the views reached the daemon's seq, so the next red of run 45005421555's kind can be diagnosed.
 - **s1027**: CpuDiskRow's layout arithmetic is a pure `placement` function and the DiskSectionTests layout tests assert its exact frames instead of sampling ImageRenderer pixels, so CI/monitor-swift stops failing on runner rendering differences.
 - **s1028**: The Compose and Swift conformance tools now read the daemon's seq from GET /status before each capture and wait for the model to reach it, as the Rust capturer does.
@@ -760,6 +761,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s1038**: scripts/run-exit-scripts.sh now prints a failed script's last 40 lines and marks limit kills `(over N s)` in the `FAILED scripts:` list.
 - **s1039**: s782 now clears the inherited shard and plan variables, and the first failing assertion of s249 and s782 in run 45143216377 is still open.
 - **s1040**: check-exit-portability.sh no longer uses gawk-only `\x27` escapes, so its refusals also fire under mawk on ubuntu-latest (s669).
+- **s1041**: A remote run record and a local suite host are reused only for the tree and command they ran on, and a test step records every attempt it starts so a recovered step reattaches to the latest one and cancels the rest.
 - **s1042**: A step run recovered after a masond restart no longer merges the base into its worktree; a recovered test step keeps its tree so finished suites are reused.
 - **s1043**: a pending CI run whose job states do not change for `[ci] stuck_after` (default 30 minutes, 0 = off) raises a `landing` alert naming the batch, run and jobs, cleared when the run moves or ends.
 - **s1044**: The `retrying` test helper in remote.rs now sets the hook's executable bit only under `#[cfg(unix)]`, so the Windows CI build compiles again.
@@ -771,4 +773,6 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s1056**: A suite run, a `run_check` and a landing batch's test runs can go to a paired node: placement picks a node with room before GitHub, the coordinator sends a git bundle of what the node lacks and starts the job, follows its output, and gets back the same `Finished` a local or GitHub run gives, so every verdict is judged as before.
 - **s1057**: Turning a node's switch off lets its running jobs finish and takes no new ones (or, with `on_switch_off = "cancel"` or `mason node stop-jobs`, ends them so the run is placed again), a node that goes away is given up on after `lost_after_polls` and its orphan is killed when its lease runs out, a restarted coordinator takes up the job its record names, and the failure table of the plan is a test for each row.
 - **s1058**: The Mac monitor has an "Accept work from other Macs" switch on Home and in Settings (on a Mac that serves as a node) and a Nodes section on a coordinator, the GitHub section is now "Remote runs" and a run on a node is a row in it, and `docs/nodes.md` says how to reach a node daemon of another macOS user.
+- **s1061**: s759 clears the CI shard env and s664 finds its test binary from cargo's JSON output, fixing two of the five red shard-3 exit scripts.
+- **s1066**: s43 now expects the daemon's real ceiling (9999) and s49 picks the highest-numbered checkpoint, fixing two of the exit scripts red on shard 6.
 <!-- status:end -->
