@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Warn before the stage and exit-script numbers run out (s101) exit test: a real masond with the
 # scripted agent (fake-claude) and a bare origin.
-#  1. A daemon whose ad-hoc range starts at 960: a filed task takes s960, and `mason alerts` shows
-#     a `numbers` alert saying 39 are left (999 - 960), the highest and the ceiling.
+#  1. A daemon whose ad-hoc range starts at 9960: a filed task takes s9960, and `mason alerts` shows
+#     a `numbers` alert saying 39 are left (9999 - 9960), the highest and the ceiling.
 #  2. A daemon starting well below (at 100) shows no such alert after a task takes s100.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
@@ -96,16 +96,16 @@ take() {  # a filed task takes its number
   echo "$t"
 }
 
-echo "== 1. range starts at 960: the first task takes s960 and the warning counts what is left"
-MASON_ADHOC_EXIT_START=960 start_daemon
+echo "== 1. range starts at 9960: the first task takes s9960 and the warning counts what is left"
+MASON_ADHOC_EXIT_START=9960 start_daemon
 t=$(take "near the end")
-[ "$(num "$t" exit)" = 960 ] || fail "expected s960, got $(num "$t" exit)"
+[ "$(num "$t" exit)" = 9960 ] || fail "expected s9960, got $(num "$t" exit)"
 end=$((SECONDS + 30)); until m alerts | grep -q 'numbers'; do [ $SECONDS -lt $end ] || fail "no numbers alert"; sleep 0.2; done
 line=$(m alerts | grep 'numbers' | head -1)
 echo "   $line"
 echo "$line" | grep -q '39 stage and exit-script numbers left' || fail "wrong count: $line"
-echo "$line" | grep -q 'highest handed out is 960' || fail "no highest: $line"
-echo "$line" | grep -q 'ceiling is 999' || fail "no ceiling: $line"
+echo "$line" | grep -q 'highest handed out is 9960' || fail "no highest: $line"
+echo "$line" | grep -q 'ceiling is 9999' || fail "no ceiling: $line"
 echo "$line" | grep -q 'scripts/run-exit-scripts.sh' || fail "no pointer to the scripts: $line"
 stop_daemon
 
