@@ -33,6 +33,11 @@ pub enum EventKind {
         project: ProjectId,
         name: String,
     },
+    /// Give a registered project a new name. Its id and history stay.
+    ProjectRenamed {
+        project: ProjectId,
+        name: String,
+    },
     /// File a task. The reducer allocates its id (see [`Effect::TaskCreated`]).
     TaskFiled {
         project: ProjectId,
