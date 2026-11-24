@@ -55,12 +55,15 @@ private fun settle(model: MonitorModel) {
     var last = model.lastSeq
     var quiet = 0
     while (true) {
-        val reached = model.lastSeq >= target
+        val reached = model.lastViewSeq >= target
         // Reached: a short quiet for trailing views. Not reached: the full 1.5 s fallback.
         if (quiet >= (if (reached) 6 else QUIET_TICKS)) break
         if (System.currentTimeMillis() > end) fail("the screen did not reach the daemon's seq $target within 60 s")
         Thread.sleep(50)
         if (model.lastSeq == last) quiet++ else { quiet = 0; last = model.lastSeq }
+    }
+    if (model.lastViewSeq < target) {
+        System.err.println("settle: quiet exit, views at #${model.lastViewSeq}, daemon seq #$target")
     }
 }
 
