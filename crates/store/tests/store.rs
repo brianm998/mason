@@ -1531,3 +1531,17 @@ fn a_rename_survives_reopening_and_keeps_the_tasks() {
     assert_eq!(s.suite_green("b", "unit", "x").unwrap(), Some(1));
     s.verify().unwrap();
 }
+
+#[test]
+fn a_probe_is_remembered_for_its_project_suite_tip_and_tests() {
+    let (_d, p) = db();
+    let s = Store::open(&p).unwrap();
+    let t = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    assert!(!s.red_probed("p", "cargo", "T", &t(&["a", "b"])).unwrap());
+    s.put_red_probe("p", "cargo", "T", &t(&["b", "a"]), 1)
+        .unwrap();
+    assert!(s.red_probed("p", "cargo", "T", &t(&["a", "b"])).unwrap());
+    assert!(!s.red_probed("p", "cargo", "T2", &t(&["a", "b"])).unwrap());
+    assert!(!s.red_probed("q", "cargo", "T", &t(&["a", "b"])).unwrap());
+    assert!(!s.red_probed("p", "cargo", "T", &t(&["a"])).unwrap());
+}

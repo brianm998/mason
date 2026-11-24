@@ -60,6 +60,10 @@ category = "landing"
 const CHECKS: &str = r#"#!/bin/sh
 WANT="$*"
 want() { [ -z "$WANT" ] || case " $WANT " in *" $1 "*) true;; *) false;; esac; }
+if [ -n "$WANT" ] && want delta; then
+  case "$PWD" in *redwatch*) echo x >> "$PWD/../probe-count";; esac
+  exit 1
+fi
 r=0
 if want alpha; then
   if [ "$(cat state.txt 2>/dev/null)" = bad ]; then echo "test alpha ... FAILED <0.054s>"; r=1; else echo "test alpha ... ok <0.001s>"; fi
@@ -431,4 +435,102 @@ fn a_run_check_on_the_old_tree_is_stopped_when_develop_is_folded_and_made_again(
     assert_eq!(runs(), 2, "one run on the old tree, one on the folded tree");
     let logs = mason_daemon::http::render_logs(&d, t.0);
     assert!(!logs.contains("alpha ... FAILED"), "{logs}");
+}
+
+fn probed(d: &Arc<mason_daemon::Daemon>, tip: &str, tests: &[&str]) -> bool {
+    let t: Vec<String> = tests.iter().map(|x| x.to_string()).collect();
+    d.store.red_probed("scratch", "only", tip, &t).unwrap()
+}
+
+#[test]
+fn a_baseline_of_pseudo_tests_only_is_never_probed() {
+    let (s, d, pid) = start(sleeping(), &[]);
+    let a = tip(&d, pid);
+    let junk = vec![
+        "** BUILD FAILED **".to_string(),
+        "build".to_string(),
+        "/Volumes/x/SIFTDetector.h:15:10: fatal error: 'opencv2/core.hpp' file not found"
+            .to_string(),
+    ];
+    d.store
+        .put_baseline(&a, "only", &junk, &junk, 0, mason_daemon::daemon::now_ms())
+        .unwrap();
+    s.push_files(&[("state.txt", "good\n")], "move develop");
+    fetch(&s);
+    let b = tip(&d, pid);
+    redwatch::pass_at(&d, mason_daemon::daemon::now_ms());
+    assert!(d.store.partial_baseline(&b, "only").unwrap().is_none());
+    assert!(!probed(&d, &b, &["build"]));
+    assert!(!probed(
+        &d,
+        &b,
+        &junk.iter().map(String::as_str).collect::<Vec<_>>()
+    ));
+}
+
+#[test]
+fn an_inconclusive_probe_is_not_repeated_at_a_tip_and_is_tried_once_at_the_next() {
+    let (s, d, pid) = start(sleeping(), &[]);
+    let a = tip(&d, pid);
+    // `delta` fails without printing its name when it is asked for: no answer.
+    d.store
+        .put_baseline(
+            &a,
+            "only",
+            &["delta".into()],
+            &["delta".into()],
+            1,
+            mason_daemon::daemon::now_ms(),
+        )
+        .unwrap();
+    let count = d
+        .cfg
+        .worktrees_dir()
+        .join(&d.project(pid).unwrap().id)
+        .join("probe-count");
+    let runs = || {
+        std::fs::read_to_string(&count)
+            .map(|t| t.lines().count())
+            .unwrap_or(0)
+    };
+    s.push_files(&[("state.txt", "good\n")], "move develop");
+    fetch(&s);
+    let b = tip(&d, pid);
+    redwatch::pass_at(&d, mason_daemon::daemon::now_ms());
+    assert_eq!(runs(), 1);
+    assert!(probed(&d, &b, &["delta"]));
+    redwatch::pass_at(&d, mason_daemon::daemon::now_ms());
+    redwatch::pass_at(&d, mason_daemon::daemon::now_ms());
+    assert_eq!(runs(), 1, "the same tip is not probed again");
+    // The tip moves: one more try.
+    s.push_files(&[("state.txt", "better\n")], "move develop again");
+    fetch(&s);
+    let c = tip(&d, pid);
+    assert_ne!(b, c);
+    redwatch::pass_at(&d, mason_daemon::daemon::now_ms());
+    redwatch::pass_at(&d, mason_daemon::daemon::now_ms());
+    assert_eq!(runs(), 2);
+    assert!(probed(&d, &c, &["delta"]));
+}
+
+#[test]
+fn a_baseline_from_another_repository_is_not_probed() {
+    let (s, d, pid) = start(sleeping(), &[]);
+    // Same suite name, a base that is not a commit of this project.
+    d.store
+        .put_baseline(
+            "0123456789abcdef0123456789abcdef01234567",
+            "only",
+            &["alpha".into()],
+            &["alpha".into()],
+            1,
+            mason_daemon::daemon::now_ms(),
+        )
+        .unwrap();
+    s.push_files(&[("state.txt", "good\n")], "move develop");
+    fetch(&s);
+    let b = tip(&d, pid);
+    redwatch::pass_at(&d, mason_daemon::daemon::now_ms());
+    assert!(!probed(&d, &b, &["alpha"]));
+    assert!(d.store.partial_baseline(&b, "only").unwrap().is_none());
 }

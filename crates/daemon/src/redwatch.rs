@@ -473,6 +473,60 @@ fn file_once(d: &Arc<Daemon>, pid: mason_core::ProjectId, suite: &str, tip: &str
     });
 }
 
+/// Of a baseline's red entries, the ones that can be a test name. A broken build is recorded
+/// under pseudo-tests (`build`, `** BUILD FAILED **`, a compiler line such as
+/// `/x/Y.h:15:10: fatal error: 'z.h' file not found`): none of them is something a narrowed run
+/// can run, so none is probed.
+pub fn probeable(red: &[String]) -> Vec<String> {
+    red.iter()
+        .filter(|t| {
+            !crate::baselift::is_pseudo(t)
+                && mason_testing::gates::is_test_name(t)
+                && !t.contains("error:")
+                && !t.contains("fatal error")
+                && !t.contains("BUILD FAILED")
+                && !has_location(t)
+        })
+        .cloned()
+        .collect()
+}
+
+/// Does `t` carry a `:<line>:` source location (`file.h:15:10:`, `file.rs:3:`)?
+fn has_location(t: &str) -> bool {
+    let parts: Vec<&str> = t.split(':').collect();
+    parts.windows(2).skip(1).any(|w| {
+        !w[0].is_empty()
+            && w[0].bytes().all(|c| c.is_ascii_digit())
+            && (w[1].is_empty()
+                || w[1].starts_with(' ')
+                || w[1].bytes().all(|c| c.is_ascii_digit()))
+    })
+}
+
+/// [`probe`], at most once for each (project, suite, tip, tests): the attempt is recorded
+/// whatever it found, so a run that could say nothing is not repeated until the tip moves.
+fn probe_once(
+    d: &Arc<Daemon>,
+    pid: mason_core::ProjectId,
+    suite: &mason_testing::Suite,
+    tip: &str,
+    tests: &[String],
+    now: u64,
+) -> Option<Vec<String>> {
+    let project = d.project(pid)?.id.clone();
+    if d.store
+        .red_probed(&project, &suite.name, tip, tests)
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let r = probe(d, pid, suite, tip, tests);
+    let _ = d
+        .store
+        .put_red_probe(&project, &suite.name, tip, tests, now);
+    r
+}
+
 /// One pass over every project.
 pub fn pass(d: &Arc<Daemon>) {
     pass_at(d, now_ms());
@@ -496,16 +550,22 @@ pub fn pass_at(d: &Arc<Daemon>, now: u64) {
             let Some((base, red)) = d.store.latest_baseline(&suite.name).ok().flatten() else {
                 continue;
             };
-            if red.is_empty() || base == tip {
+            // Baselines are keyed by suite name, not project: one from another repository (its
+            // base is not a commit of this one) is not this project's.
+            if red.is_empty() || base == tip || !git::is_ancestor(&p.path, &base, &tip) {
                 continue;
             }
-            let Some(failing) = probe(d, pid, suite, &tip, &red) else {
+            let real = probeable(&red);
+            if real.is_empty() {
+                continue;
+            }
+            let Some(failing) = probe_once(d, pid, suite, &tip, &real, now) else {
                 continue;
             };
             let _ = d
                 .store
-                .put_partial_baseline(&tip, &suite.name, &failing, &red, now);
-            let ok = fixed(&red, &failing);
+                .put_partial_baseline(&tip, &suite.name, &failing, &real, now);
+            let ok = fixed(&real, &failing);
             if !ok.is_empty() {
                 deliver(d, pid, &suite.name, &ok, (&base, &tip), None, now);
             }
@@ -542,7 +602,10 @@ pub fn pass_at(d: &Arc<Daemon>, now: u64) {
                 continue;
             }
             let one = [s.test.clone()];
-            let Some(failing) = probe(d, pid, suite, &tip, &one) else {
+            if probeable(&one).is_empty() {
+                continue;
+            }
+            let Some(failing) = probe_once(d, pid, suite, &tip, &one, now) else {
                 continue;
             };
             let _ = d
@@ -566,6 +629,21 @@ mod tests {
     }
     fn sight(task: u64, test: &str, at: u64) -> (u64, String, String, u64) {
         (task, "cargo".into(), test.into(), at)
+    }
+
+    #[test]
+    fn only_real_test_names_are_probed() {
+        let red = s(&[
+            "a::b::works",
+            "build",
+            "** BUILD FAILED **",
+            "/Volumes/x/SIFTDetector.h:15:10: fatal error: 'opencv2/core.hpp' file not found",
+            "src/View.swift:42",
+            "error: linking with `cc` failed",
+            "-[Suite testThing]",
+        ]);
+        assert_eq!(probeable(&red), s(&["a::b::works", "-[Suite testThing]"]));
+        assert!(probeable(&s(&["build", "** BUILD FAILED **"])).is_empty());
     }
 
     #[test]

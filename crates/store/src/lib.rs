@@ -2067,6 +2067,56 @@ impl Store {
         })
     }
 
+    /// Note that the red-develop watch probed `tests` of `suite` of `project` at `tip`.
+    pub fn put_red_probe(
+        &self,
+        project: &str,
+        suite: &str,
+        tip: &str,
+        tests: &[String],
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        let (p, s, t, k) = (
+            project.to_string(),
+            suite.to_string(),
+            tip.to_string(),
+            probe_key(tests),
+        );
+        self.write(move |c| {
+            c.execute(
+                "INSERT OR REPLACE INTO red_probes(project, suite, tip, tests, at_ms)
+                 VALUES (?1,?2,?3,?4,?5)",
+                params![p, s, t, k, now_ms as i64],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// Was this set of tests probed at `tip` already?
+    pub fn red_probed(
+        &self,
+        project: &str,
+        suite: &str,
+        tip: &str,
+        tests: &[String],
+    ) -> Result<bool, StoreError> {
+        let (p, s, t, k) = (
+            project.to_string(),
+            suite.to_string(),
+            tip.to_string(),
+            probe_key(tests),
+        );
+        self.read(move |c| {
+            c.query_row(
+                "SELECT 1 FROM red_probes WHERE project=?1 AND suite=?2 AND tip=?3 AND tests=?4",
+                params![p, s, t, k],
+                |_| Ok(()),
+            )
+            .optional()
+            .map(|o| o.is_some())
+        })
+    }
+
     /// `(failing, tested)` of the partial baseline at `base`, if one was taken.
     #[allow(clippy::type_complexity)]
     pub fn partial_baseline(
@@ -5001,4 +5051,12 @@ pub fn batch_run_key(tasks: &[(u64, String)]) -> String {
         .map(|(i, h)| format!("{i}@{h}"))
         .collect::<Vec<_>>()
         .join(",")
+}
+
+/// The key of a set of tests: sorted, one per line.
+fn probe_key(tests: &[String]) -> String {
+    let mut v = tests.to_vec();
+    v.sort();
+    v.dedup();
+    v.join("\n")
 }

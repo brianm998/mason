@@ -33,6 +33,16 @@ Decision:
 - The probe is placed as any run is and queued as any run is: a run bound for GitHub takes its
   runner units from the broker, ranked as owed work, before it is pushed; one that runs here takes
   the suite's slots the same way. It does not bypass the ranked queue.
+- Only real test names are probed. A baseline also lists pseudo-tests for a broken build
+  (`build`, `** BUILD FAILED **`, compiler lines such as `.../X.h:15:10: fatal error: ...`);
+  `redwatch::probeable` drops them (`baselift::is_pseudo`, `gates::is_test_name`, `error:`,
+  `fatal error`, a `:<line>:` location). A baseline with nothing real left is not probed, and the
+  pseudo entries stay red.
+- Each (project, suite, tip, test set) is probed at most once, whatever the probe found, recorded in
+  the store (`red_probes`, so a restart does not probe the fleet again). A probe that could say
+  nothing is tried again only when the tip moves. The suspect path (step 3) uses the same record.
+- Baselines are keyed by suite name only, with no project. A baseline whose base is not an
+  ancestor of this project's tip (another repository's, or rewritten history) is skipped.
 - A developing task whose last check failed only tests that are red on develop shows the wait
   class `base-red` in the task view and the sidebar, with the test names and the fix task. It is a
   view over the sightings, not a recorded wait, so it does not enter the wait totals.

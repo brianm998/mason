@@ -891,6 +891,17 @@ const STEPS: &[&str] = &[
          why      TEXT NOT NULL,
          since_ms INTEGER NOT NULL
      );",
+    // Each (project, suite, tip, test set) the red-develop watch looked at (#1023), whether or
+    // not the run could say anything, so a probe that gave no answer is not repeated until the
+    // tip moves, and a restart does not probe the fleet again. Additive.
+    "CREATE TABLE red_probes (
+         project TEXT NOT NULL,
+         suite   TEXT NOT NULL,
+         tip     TEXT NOT NULL,
+         tests   TEXT NOT NULL,
+         at_ms   INTEGER NOT NULL,
+         PRIMARY KEY (project, suite, tip, tests)
+     );",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;
