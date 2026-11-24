@@ -118,11 +118,12 @@ fn the_owner_can_ask_for_a_diagnosis_and_it_ends_in_a_card_once_per_failure() {
     .unwrap();
     std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
     let d = s.start();
+    let owner = d.cfg.owner_names[0].clone();
     let t = file_task(&d, "Push is rejected");
     wait_for("the failure", 180, || task_of(&d, t).state == State::Failed);
     let path = format!("/tasks/{}/diagnose", t.0);
     assert_eq!(post(&d, "stranger", path.clone()).0, 403, "not the owner");
-    assert_eq!(post(&d, "owner", path.clone()).0, 200);
+    assert_eq!(post(&d, &owner, path.clone()).0, 200);
     wait_for("the first diagnosis", 120, || {
         d.store.diagnoses(Some(t.0)).unwrap().len() == 1
     });
@@ -138,16 +139,16 @@ fn the_owner_can_ask_for_a_diagnosis_and_it_ends_in_a_card_once_per_failure() {
     assert_eq!(card["key"], format!("diagnosis:{}", rows[0].id));
     assert_eq!(rows[0].status, "pending", "a recommended cancel waits");
     // The same failure is not diagnosed twice.
-    assert_eq!(post(&d, "owner", path.clone()).0, 409);
+    assert_eq!(post(&d, &owner, path.clone()).0, 409);
     // Not failed: refused.
     let first_entered = task_of(&d, t).state_entered_at;
-    let (code, _) = post(&d, "owner", format!("/tasks/{}/retry", t.0));
+    let (code, _) = post(&d, &owner, format!("/tasks/{}/retry", t.0));
     assert_eq!(code, 200);
     wait_for("the second failure", 180, || {
         let k = task_of(&d, t);
         k.state == State::Failed && k.state_entered_at != first_entered
     });
-    assert_eq!(post(&d, "owner", path).0, 200);
+    assert_eq!(post(&d, &owner, path).0, 200);
     wait_for("the second diagnosis", 120, || {
         d.store.diagnoses(Some(t.0)).unwrap().len() == 2
     });
@@ -159,7 +160,8 @@ fn a_task_that_is_not_failed_is_not_diagnosed() {
     s.write_project("scratch", "true", "");
     let d = s.start();
     mason_daemon::attention::pause(&d, "", "claims", "test", 3600).unwrap();
+    let owner = d.cfg.owner_names[0].clone();
     let t = file_task(&d, "Waits");
-    assert_eq!(post(&d, "owner", format!("/tasks/{}/diagnose", t.0)).0, 409);
-    assert_eq!(post(&d, "owner", "/tasks/9999/diagnose".into()).0, 404);
+    assert_eq!(post(&d, &owner, format!("/tasks/{}/diagnose", t.0)).0, 409);
+    assert_eq!(post(&d, &owner, "/tasks/9999/diagnose".into()).0, 404);
 }
