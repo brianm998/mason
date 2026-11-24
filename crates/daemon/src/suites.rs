@@ -3326,7 +3326,7 @@ pub fn run(c: &Ctx) {
 /// that finished the first pass's command is not mistaken for this pass's.
 fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
     // As for a test command: test what would land, with the base folded in.
-    match crate::jobs::prepare(c) {
+    match crate::jobs::prepare_for(c, pass == 0) {
         Ok(None) => {}
         Ok(Some(files)) => {
             let base = c.project.base_ref();

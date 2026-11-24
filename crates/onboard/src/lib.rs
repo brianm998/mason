@@ -22,6 +22,10 @@ use questions::{
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
+/// The text of the harmless first task, filed by `mason init` and by the daemon's Add Project.
+pub const PROOF_TITLE: &str = "Add a file that proves MASON works";
+pub const PROOF_BODY: &str = "Create a file named MASON-WORKS.md at the top of the repository containing one line, `MASON landed this task.`, and nothing else. Change no other file.\n\n## Acceptance criteria\n- MASON-WORKS.md exists with exactly that one line.\n\n## Approach\nCreate MASON-WORKS.md (new) with the line above and commit it. This task exists only to show the pipeline works end to end; delete the file afterwards if you like.\n";
+
 /// Checks a rendered project overlay `(id, text)` before anything is written.
 pub type Validator<'a> = &'a dyn Fn(&str, &str) -> Result<(), String>;
 
