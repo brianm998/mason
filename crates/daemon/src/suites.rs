@@ -622,7 +622,7 @@ fn run_hosted_resuming(
         let ran = match &exec {
             crate::remote::Executor::GitHub { runs_on } => run_remote(
                 d, project, id, build, cmd, cwd, limit, log_dir, &check, run, watch, &env, runs_on,
-                covered,
+                covered, cover.giver.clone(),
             )?,
             crate::remote::Executor::Node { nid, .. } => run_on_node(
                 d, project, id, build, cmd, cwd, limit, log_dir, &check, run, watch, &env, nid,
@@ -784,6 +784,7 @@ fn run_remote(
     env: &[(String, String)],
     runs_on: &str,
     covered: bool,
+    giver: Option<crate::sched::Giver>,
 ) -> Result<Option<Ran>, String> {
     use crate::remote as rm;
     let task = run.and_then(|r| d.world().ok().and_then(|w| w.task_of_open_run(r)));
@@ -821,6 +822,8 @@ fn run_remote(
         Some(t) => (format!("task {}", t.0), format!("#{}", t.0)),
         None => (id.to_string(), id.to_string()),
     };
+    let grant = rm::Grant::borrowed(giver, rm::units_for(&spec.runs_on, spec.shards.max(1)));
+    grant.note_hold(&rm::holds_dir(&d.cfg.hosts_dir()), &spec.id);
     let _hold = rm::HoldGuard::new(
         &d.cfg.hosts_dir(),
         &spec,
@@ -841,7 +844,7 @@ fn run_remote(
             &spec,
             log_dir,
             &stop,
-            &rm::Grant::unplumbed("run_remote: the enclosing step, debt or batch hold"),
+            &grant,
         )? {
             None => None,
             Some(rm::Outcome::Stopped(why)) => Some(Ran {
@@ -1366,6 +1369,9 @@ pub struct Cover {
     /// A landing batch's own run that its lease does not hold: the batch, and what the suite
     /// needs here. Such a run takes its slots, as the batch, when it comes to run here.
     batch: Option<(Arc<crate::remote::BatchOwner>, Needs)>,
+    /// The lease the suite's run holds its runner units in: a run on GitHub gives back the unit
+    /// of each job as it finishes, and asks again for the shards it runs again (#820).
+    giver: Option<crate::sched::Giver>,
 }
 
 /// What a landing batch holds, for the suites it runs: the batch (to rank what its runs take
@@ -1397,6 +1403,7 @@ impl BatchCover {
         Cover {
             covered,
             batch: self.owner.clone().map(|o| (o, needs)),
+            giver: None,
         }
     }
 }
@@ -3540,6 +3547,7 @@ fn run_side_by_side(
                             }
                         }
                     };
+                    who.cover.giver = lease.as_ref().map(|l| l.giver());
                     let ran = run_suite(
                         &who,
                         &c.project.path,
@@ -3969,6 +3977,12 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
                 }
             }
         }
+        who.cover.giver = c
+            .lease
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|l| l.giver());
         let ran = match ran_beside {
             Some(r) => r,
             None if reused_whole.is_some() => SuiteRun::Done {

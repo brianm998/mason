@@ -840,6 +840,7 @@ fn remote_check(
         },
         place.and_then(|(t, _)| t).map_or(0, |t| t.0),
     );
+    grant.note_hold(&rm::holds_dir(&d.cfg.hosts_dir()), &rs.id);
     let note: Mutex<Option<String>> = Mutex::new(None);
     let stop = || {
         let asked = cancel_requests()

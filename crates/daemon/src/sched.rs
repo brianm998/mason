@@ -695,6 +695,10 @@ pub struct Lease {
     held: Option<Held>,
     /// What the lease was asked for, so a remote run can name the units it holds (#818).
     amounts: BTreeMap<String, u32>,
+    /// Where its request stood in line, so a request made again keeps its place (#820).
+    rank: Rank,
+    asked_ms: u64,
+    label: String,
 }
 
 impl Lease {
@@ -709,6 +713,65 @@ impl Lease {
             .filter(|(k, n)| **n > 0 && mason_scheduler::is_gha_pool(k))
             .map(|(k, n)| (k.clone(), *n))
             .collect()
+    }
+}
+
+/// What can give a lease's runner units back and ask for them again, without owning the lease
+/// (#820): the test step's lease is kept by the step, and the run that uses it only gives back
+/// the units of its jobs as they finish.
+#[derive(Clone)]
+pub struct Giver {
+    b: Arc<Broker>,
+    id: u64,
+    task: TaskId,
+    /// Where the lease's request stood in line, so a request made again keeps its place.
+    rank: Rank,
+    asked_ms: u64,
+    label: String,
+}
+
+impl Giver {
+    /// Give back `give` units; the next in line is granted at once.
+    pub fn shrink(&self, give: &BTreeMap<String, u32>) {
+        self.b.shrink(self.id, give);
+    }
+
+    /// Ask again for `units`, at the lease's rank and from when it first began to wait.
+    /// Waits as [`Broker::acquire`] does.
+    pub fn ask_again(
+        &self,
+        units: BTreeMap<String, u32>,
+        alive: &dyn Fn() -> bool,
+        on_wait: &mut dyn FnMut(&str),
+    ) -> Result<Lease, Cancelled> {
+        self.b.acquire_at(
+            self.task,
+            &self.label,
+            self.rank,
+            Needs {
+                exclusive: false,
+                amounts: units,
+            },
+            alive,
+            on_wait,
+            true,
+            None,
+            false,
+            Some((self.rank, self.asked_ms)),
+        )
+    }
+}
+
+impl Lease {
+    pub fn giver(&self) -> Giver {
+        Giver {
+            b: self.b.clone(),
+            id: self.id,
+            task: self.task.unwrap_or(TaskId(0)),
+            rank: self.rank,
+            asked_ms: self.asked_ms,
+            label: self.label.clone(),
+        }
     }
 }
 
@@ -2221,13 +2284,48 @@ impl Broker {
         expected_ms: Option<u64>,
         nowait: bool,
     ) -> Result<Lease, Cancelled> {
+        self.acquire_at(
+            task,
+            label,
+            rank,
+            needs,
+            alive,
+            on_wait,
+            beside,
+            expected_ms,
+            nowait,
+            None,
+        )
+    }
+
+    /// [`Broker::acquire_as`]. `again`: a request made again for a lease that gave its units
+    /// back (#820): its rank as the first request had it, and when that began waiting, so it
+    /// keeps its place in line.
+    #[allow(clippy::too_many_arguments)]
+    fn acquire_at(
+        self: &Arc<Self>,
+        task: TaskId,
+        label: &str,
+        rank: Rank,
+        needs: Needs,
+        alive: &dyn Fn() -> bool,
+        on_wait: &mut dyn FnMut(&str),
+        beside: bool,
+        expected_ms: Option<u64>,
+        nowait: bool,
+        again: Option<(Rank, u64)>,
+    ) -> Result<Lease, Cancelled> {
         let granted = needs.amounts.clone();
+        let (rank, asked_ms) = {
+            let st = lock(&self.st);
+            match again {
+                Some((r, since)) => (r, since),
+                None => (order(&st, rank), crate::daemon::now_ms()),
+            }
+        };
         let id = {
             let mut st = lock(&self.st);
-            let rank = order(&st, rank);
-            let id = st
-                .ledger
-                .submit(rank, needs.clone(), label, crate::daemon::now_ms());
+            let id = st.ledger.submit(rank, needs.clone(), label, asked_ms);
             st.ledger.set_expected(id, expected_ms);
             st.meta.insert(id, Meta::Task);
             if beside {
@@ -2379,6 +2477,9 @@ impl Broker {
             task: Some(task),
             held: Some(held),
             amounts: granted,
+            rank,
+            asked_ms,
+            label: label.to_string(),
         })
     }
 
@@ -2507,6 +2608,11 @@ impl Broker {
             .kernel_says_after
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = after;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn release_for_test(&self, id: u64, task: TaskId) {
+        self.release(id, Some(task));
     }
 
     fn release(&self, id: u64, task: Option<TaskId>) {
@@ -2994,6 +3100,17 @@ impl Broker {
                 })
                 .unwrap_or_else(|| "Waiting".into()),
         }
+    }
+
+    /// Give back `give` units of what lease `id` holds, and grant the next in line at once
+    /// (#820). Left with nothing, the lease is released whole.
+    pub fn shrink(&self, id: u64, give: &BTreeMap<String, u32>) -> bool {
+        let mut st = lock(&self.st);
+        let had = st.ledger.shrink(id, give);
+        st = self.pass(st);
+        drop(st);
+        self.cv.notify_all();
+        had
     }
 
     pub fn lease_close(&self, id: u64) -> bool {

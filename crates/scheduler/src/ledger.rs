@@ -329,6 +329,25 @@ impl Ledger {
         before != self.holders.len() + self.waiting.len()
     }
 
+    /// Give back part of what holder `id` holds: `give` units of each named resource (at most
+    /// what it holds). What is left is its needs from now on. A holder left with nothing is
+    /// released. `false` if there is no such holder.
+    pub fn shrink(&mut self, id: u64, give: &std::collections::BTreeMap<String, u32>) -> bool {
+        let Some(h) = self.holders.iter_mut().find(|h| h.id == id) else {
+            return false;
+        };
+        for (r, n) in give {
+            if let Some(have) = h.needs.amounts.get_mut(r) {
+                *have = have.saturating_sub(*n);
+            }
+        }
+        h.needs.amounts.retain(|_, n| *n > 0);
+        if h.needs.amounts.is_empty() && !h.needs.exclusive {
+            self.holders.retain(|h| h.id != id);
+        }
+        true
+    }
+
     pub fn holds(&self, id: u64) -> bool {
         self.holders.iter().any(|h| h.id == id)
     }
@@ -456,6 +475,26 @@ mod tests {
         );
         l.release(b);
         assert_eq!(l.schedule(3, None, None).grants, vec![c]);
+    }
+
+    #[test]
+    fn shrinking_a_holder_frees_exactly_those_units_and_to_nothing_is_a_release() {
+        let mut l = Ledger::new();
+        l.set_capacity("gha", 3, Kind::Pool);
+        let a = l.submit(rank(1, 1, 1), Needs::of(&[("gha", 3)]), "run", 0);
+        let w = l.submit(rank(1, 2, 2), Needs::of(&[("gha", 1)]), "waiter", 1);
+        l.schedule(10, None, None);
+        assert!(l.holds(a) && l.is_waiting(w));
+        let give = |n: u32| std::collections::BTreeMap::from([("gha".to_string(), n)]);
+        assert!(l.shrink(a, &give(1)));
+        assert_eq!(l.holder(a).unwrap().needs.amounts["gha"], 2);
+        l.schedule(11, None, None);
+        assert!(l.holds(w), "the freed unit goes to the waiter");
+        assert_eq!(l.snapshot().used["gha"], 3);
+        assert!(l.shrink(a, &give(5)));
+        assert!(!l.holds(a), "shrunk to nothing is a release");
+        assert!(!l.shrink(a, &give(1)));
+        assert_eq!(l.snapshot().used["gha"], 1);
     }
 
     #[test]
