@@ -1,0 +1,11 @@
+.mason/run.json
+clients/swift/Sources/MasonMonitor/App.swift
+clients/swift/Sources/MonitorCore/AddProject.swift
+clients/swift/Sources/MonitorCore/Model.swift
+clients/swift/Sources/MonitorUI/AddProjectSheet.swift
+clients/swift/Sources/MonitorUI/TopBar.swift
+clients/swift/Tests/MonitorCoreTests/AddProjectTests.swift
+clients/swift/Tests/MonitorUITests/AddProjectSnapshotTests.swift
+docs/decisions/1045-add-project-desktop-only.md
+docs/stages/s1052.md
+scripts/exit/s1052.sh
