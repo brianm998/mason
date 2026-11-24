@@ -634,8 +634,10 @@ impl AccountJobs {
             out.stale |= st.error.is_some();
             let short = repo.rsplit('/').next().unwrap_or(repo);
             for run in st.runs.values() {
-                out.gha += run.running + run.queued;
-                out.macos += run.macos_running + run.macos_queued;
+                out.gha_running += run.running;
+                out.gha_queued += run.queued;
+                out.macos_running += run.macos_running;
+                out.macos_queued += run.macos_queued;
                 let e = by_name.entry(format!("{short} {}", run.name)).or_default();
                 e.0 += run.running;
                 e.1 += run.queued;
@@ -1627,6 +1629,7 @@ pub fn execute(
     spec: &RunSpec,
     dir: &Path,
     stop: &dyn Fn() -> Option<StopWhy>,
+    _grant: &Grant,
 ) -> Result<Outcome, Fail> {
     let _caller = github_budget::as_caller("remote-run");
     let _ = std::fs::create_dir_all(dir);
@@ -2428,9 +2431,10 @@ pub fn execute_sharded(
     spec: &RunSpec,
     dir: &Path,
     stop: &dyn Fn() -> Option<StopWhy>,
+    grant: &Grant,
 ) -> Result<Outcome, Fail> {
     if !spec.sharded() {
-        return execute(site, spec, dir, stop);
+        return execute(site, spec, dir, stop, grant);
     }
     let mut kept: Vec<Part> = vec![];
     let mut attempt_spec = spec.clone();
@@ -2438,7 +2442,7 @@ pub fn execute_sharded(
         if attempt > 0 {
             attempt_spec.id = format!("{}-s{attempt}", spec.id);
         }
-        let f = match execute(site, &attempt_spec, dir, stop)? {
+        let f = match execute(site, &attempt_spec, dir, stop, grant)? {
             Outcome::Done(f) => f,
             stopped => return Ok(stopped),
         };
@@ -2498,6 +2502,161 @@ pub fn units_for(runs_on: &str, shards: u32) -> std::collections::BTreeMap<Strin
     u
 }
 
+/// The command a suite's whole run is split with across runners (#701), when `cmd` is that
+/// whole run: a narrowed run, a run without the known-red tests and the like are not the whole
+/// suite and run on one runner. [`suites`](crate::suites) splits by this rule and
+/// [`run_place`] counts units by it, so what a run holds is how many jobs it starts.
+pub fn shard_command<'a>(s: &'a mason_testing::Suite, cmd: &str) -> Option<&'a str> {
+    if s.shards > 1 && !s.narrowed && cmd == s.command {
+        return s.shard_command.as_deref();
+    }
+    // A narrowed run split the same way (#880): its `dev_shard_command` was filled in with the
+    // same pick as `command`; one still holding a `{...}` was not, and runs whole.
+    let sc = s.dev_shard_command.as_deref()?;
+    (s.shards > 1 && s.narrowed && cmd == s.command && !sc.contains('{')).then_some(sc)
+}
+
+/// How many jobs `cmd` of `suite` starts on GitHub: its shards, else one.
+pub fn jobs_of(suite: Option<&mason_testing::Suite>, cmd: &str) -> u32 {
+    suite
+        .filter(|s| shard_command(s, cmd).is_some())
+        .map_or(1, |s| s.shards)
+}
+
+/// Where a run goes and what it holds there (#818).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RunPlace {
+    /// On this machine: it takes the slots of `uses`, as ever.
+    Local,
+    /// On GitHub: it takes no slot of this machine, and one `gha` unit per job it starts (and as
+    /// many `gha-macos` when the runner is macOS).
+    GitHub {
+        runs_on: String,
+        units: std::collections::BTreeMap<String, u32>,
+    },
+}
+
+/// The one function that says, for a run, where it goes and what it holds. Placement is the
+/// run's own (`place_of` with the suite and the task); only a run with no suite follows the
+/// global switch. `cmd` decides the sharding, by the rule `run_remote` uses.
+pub fn run_place(
+    d: &Daemon,
+    project: &str,
+    task: Option<mason_core::TaskId>,
+    suite: Option<&mason_testing::Suite>,
+    cmd: &str,
+    kind: Kind,
+) -> RunPlace {
+    let exec = match suite {
+        Some(s) => executor_for(d, project, kind, Some((task, s))),
+        None => executor_global(d, project),
+    };
+    match exec {
+        Executor::GitHub { runs_on } => {
+            let units = units_for(&runs_on, jobs_of(suite, cmd));
+            RunPlace::GitHub { runs_on, units }
+        }
+        Executor::Local => RunPlace::Local,
+        // Nothing produces a node yet (the multi-machine plan's phase 2); until a node run has
+        // its own units, it is placed as a run here would be.
+        Executor::Node { .. } => RunPlace::Local,
+    }
+}
+
+/// `needs` of a run of `suite` placed by [`run_place`]: on GitHub the machine's `compile`,
+/// `test-suite` and `test-small` (and the whole machine) become the run's runner units; here
+/// nothing changes (`None`), whatever the global switch says (#766's lesson: decide per suite).
+pub fn suite_pool_needs(
+    d: &Daemon,
+    project: &str,
+    task: Option<mason_core::TaskId>,
+    needs: &mason_scheduler::Needs,
+    suite: &mason_testing::Suite,
+) -> Option<mason_scheduler::Needs> {
+    match run_place(d, project, task, Some(suite), &suite.command, Kind::Suite) {
+        RunPlace::GitHub { units, .. } => Some(with_units(needs, units)),
+        RunPlace::Local => None,
+    }
+}
+
+/// `needs` without the machine's slots, plus `units`.
+pub fn with_units(
+    needs: &mason_scheduler::Needs,
+    units: std::collections::BTreeMap<String, u32>,
+) -> mason_scheduler::Needs {
+    const MACHINE: [&str; 3] = ["compile", "test-suite", "test-small"];
+    let mut out = mason_scheduler::Needs {
+        exclusive: false,
+        amounts: needs
+            .amounts
+            .iter()
+            .filter(|(k, _)| !MACHINE.contains(&k.as_str()))
+            .map(|(k, v)| (k.clone(), *v))
+            .collect(),
+    };
+    for (k, v) in units {
+        let have = out.amounts.entry(k).or_insert(0);
+        *have = (*have).max(v);
+    }
+    out
+}
+
+/// Proof that the caller holds the runner units of the run it is about to push, and the hold
+/// itself. Only a broker lease makes one ([`Grant::of`]), so `execute` cannot be reached
+/// without asking the broker first (#818). A run that attaches to a run already out, or that
+/// goes to a local slot, holds nothing new ([`Grant::attached`]); a caller whose lease is not
+/// passed down to the push yet says so by name ([`Grant::unplumbed`]) so each is findable.
+/// Clones share one hold, which is released when the last is dropped or by [`Grant::give_back`].
+#[derive(Clone, Default)]
+pub struct Grant {
+    lease: Arc<std::sync::Mutex<Option<crate::sched::Lease>>>,
+}
+
+impl std::fmt::Debug for Grant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Grant({:?})", self.units())
+    }
+}
+
+impl Grant {
+    /// The grant of a lease the broker made; it keeps the lease until it is dropped.
+    pub fn of(lease: crate::sched::Lease) -> Self {
+        Grant {
+            lease: Arc::new(std::sync::Mutex::new(Some(lease))),
+        }
+    }
+    /// A run that is already out (its record exists) or is collected, or one that takes local
+    /// slots: nothing new is pushed.
+    pub fn attached() -> Self {
+        Grant::default()
+    }
+    /// A caller whose lease is not passed down to the push yet: its units are held by an
+    /// enclosing hold that this function cannot see. Each use is a remaining gap of #818.
+    pub fn unplumbed(_why: &'static str) -> Self {
+        Grant::default()
+    }
+    /// The runner units this grant holds.
+    pub fn units(&self) -> std::collections::BTreeMap<String, u32> {
+        self.lease
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|l| l.units())
+            .unwrap_or_default()
+    }
+    /// Give the units back: the run is not going to GitHub after all (`fallback = "local"`).
+    /// Returns whether it held any.
+    pub fn give_back(&self) -> bool {
+        let held = self.lease.lock().unwrap_or_else(|e| e.into_inner()).take();
+        held.is_some_and(|l| !l.units().is_empty())
+    }
+    /// For the tests of the push itself.
+    #[cfg(test)]
+    pub fn test() -> Self {
+        Grant::attached()
+    }
+}
+
 /// A lease request for `needs` of a project whose suites run on GitHub: the machine's
 /// `compile`, `test-suite` and `test-small` (and the whole machine) are replaced by the runner
 /// pool units, so the run waits for no machine gate and holds none of the machine. `None`: the
@@ -2522,19 +2681,7 @@ pub fn pool_needs(
         // that would go to a node keeps what it asked for.
         Executor::Node { .. } => return None,
     };
-    let mut out = mason_scheduler::Needs {
-        exclusive: false,
-        amounts: needs
-            .amounts
-            .iter()
-            .filter(|(k, _)| !MACHINE.contains(&k.as_str()))
-            .map(|(k, v)| (k.clone(), *v))
-            .collect(),
-    };
-    for (k, v) in units_for(&runs_on, 1) {
-        out.amounts.insert(k, v);
-    }
-    Some(out)
+    Some(with_units(needs, units_for(&runs_on, 1)))
 }
 
 /// Does `suite`, run for `task` (`None`: no task owns the run, a landing batch's), go to GitHub?
@@ -3453,11 +3600,15 @@ pub fn run_or_fallback(
     spec: &RunSpec,
     dir: &Path,
     stop: &dyn Fn() -> Option<StopWhy>,
+    grant: &Grant,
 ) -> Result<Option<Outcome>, String> {
-    match execute_sharded(site, spec, dir, stop) {
+    match execute_sharded(site, spec, dir, stop, grant) {
         Ok(o) => Ok(Some(o)),
         Err(Fail::Environmental(why)) if site.fallback_local => {
             tracing::warn!(run = %spec.id, "{why}; running it here instead (fallback = local)");
+            // The run is not going to GitHub: its runner units go back before it takes local
+            // slots (#818).
+            grant.give_back();
             Ok(None)
         }
         Err(Fail::Environmental(why)) => Err(env_err(&why)),
@@ -3499,6 +3650,7 @@ pub fn run_retrying(
     dir: &Path,
     stop: &dyn Fn() -> Option<StopWhy>,
     said: &dyn Fn(&str),
+    grant: &Grant,
 ) -> Result<(Option<Outcome>, Vec<String>), String> {
     let mut notes: Vec<String> = vec![];
     let mut whys: Vec<String> = vec![];
@@ -3517,7 +3669,7 @@ pub fn run_retrying(
             said(&note);
             notes.push(note);
         }
-        let r = execute_sharded(site, &attempt, dir, stop);
+        let r = execute_sharded(site, &attempt, dir, stop, grant);
         match no_result(&r, spec.limit) {
             None => {
                 return match r {
@@ -3530,6 +3682,7 @@ pub fn run_retrying(
             // answer, not a miss to retry on GitHub.
             Some(why) if n == 0 && site.fallback_local && why.contains("(favor-remote:") => {
                 said(&format!("{why}; running it on this Mac"));
+                grant.give_back();
                 return Ok((None, notes));
             }
             Some(why) => whys.push(why),
@@ -3540,6 +3693,7 @@ pub fn run_retrying(
         let note = format!("no result from two runs on GitHub ({both}); running it on this Mac");
         tracing::warn!(run = %spec.id, "{note}");
         said(&note);
+        grant.give_back();
         return Ok((None, notes));
     }
     Err(env_err(&both))
@@ -4213,7 +4367,9 @@ mod tests {
         let mut s = site(&r, gh, clock(), false);
         s.workflow = "other.yml".into();
         let d = tempfile::tempdir().unwrap();
-        let e = execute(&s, &spec("x2"), d.path(), &|| None).err().unwrap();
+        let e = execute(&s, &spec("x2"), d.path(), &|| None, &Grant::test())
+            .err()
+            .unwrap();
         assert!(matches!(e, Fail::Environmental(_)), "{e:?}");
     }
 
@@ -4287,7 +4443,9 @@ mod tests {
             let gh = FakeGh::new(&r, &zip, Mode::Normal);
             let s = site(&r, gh, clock(), false);
             let logs = tempfile::tempdir().unwrap();
-            let Outcome::Done(f) = execute(&s, &spec("x3c"), logs.path(), &|| None).unwrap() else {
+            let Outcome::Done(f) =
+                execute(&s, &spec("x3c"), logs.path(), &|| None, &Grant::test()).unwrap()
+            else {
                 panic!("not done")
             };
             assert_eq!(f.code, 1);
@@ -4354,7 +4512,7 @@ mod tests {
         let gh = FakeGh::new(&r, &zip, Mode::Normal);
         let s = site(&r, gh.clone(), clock(), false);
         let logs = tempfile::tempdir().unwrap();
-        let out = execute(&s, &spec("x4"), logs.path(), &|| None).unwrap();
+        let out = execute(&s, &spec("x4"), logs.path(), &|| None, &Grant::test()).unwrap();
         let Outcome::Done(f) = out else {
             panic!("not done")
         };
@@ -4412,7 +4570,8 @@ mod tests {
         let logs = tempfile::tempdir().unwrap();
         let mut sp = spec("x5");
         sp.results_file = Some("build/res/*.xml".into());
-        let Outcome::Done(f) = execute(&s, &sp, logs.path(), &|| None).unwrap() else {
+        let Outcome::Done(f) = execute(&s, &sp, logs.path(), &|| None, &Grant::test()).unwrap()
+        else {
             panic!("not done")
         };
         assert_eq!(f.code, 101);
@@ -4562,9 +4721,13 @@ mod tests {
             let s = site(&r, gh.clone(), clk.clone(), false);
             let logs = tempfile::tempdir().unwrap();
             let start = clk.now_ms();
-            let out = execute(&s, &spec("x6"), logs.path(), &|| {
-                (clk.now_ms() - start >= skip_after_s * 1000).then_some(StopWhy::Skipped)
-            })
+            let out = execute(
+                &s,
+                &spec("x6"),
+                logs.path(),
+                &|| (clk.now_ms() - start >= skip_after_s * 1000).then_some(StopWhy::Skipped),
+                &Grant::test(),
+            )
             .unwrap();
             assert!(matches!(out, Outcome::Stopped(StopWhy::Skipped)));
             assert_eq!(gh.cancels.lock().unwrap().len(), 1, "after {skip_after_s}");
@@ -4907,7 +5070,9 @@ mod tests {
         let gh = FakeGh::new(&r, &zip, Mode::Hung);
         let s = site(&r, gh.clone(), clock(), false);
         let logs = tempfile::tempdir().unwrap();
-        let Outcome::Done(f) = execute(&s, &spec("x9"), logs.path(), &|| None).unwrap() else {
+        let Outcome::Done(f) =
+            execute(&s, &spec("x9"), logs.path(), &|| None, &Grant::test()).unwrap()
+        else {
             panic!("not done");
         };
         assert!(f.timed_out);
@@ -4933,7 +5098,9 @@ mod tests {
         let gh = FakeGh::new(&r, &zip, Mode::HungNoArtifact);
         let s = site(&r, gh, clock(), false);
         let logs = tempfile::tempdir().unwrap();
-        let Outcome::Done(f) = execute(&s, &spec("x10"), logs.path(), &|| None).unwrap() else {
+        let Outcome::Done(f) =
+            execute(&s, &spec("x10"), logs.path(), &|| None, &Grant::test()).unwrap()
+        else {
             panic!("not done");
         };
         assert!(f.timed_out);
@@ -4954,7 +5121,7 @@ mod tests {
         let s = site(&r, gh.clone(), clk.clone(), false);
         let logs = tempfile::tempdir().unwrap();
         let start = clk.now_ms();
-        let e = run_or_fallback(&s, &spec("x7"), logs.path(), &|| None)
+        let e = run_or_fallback(&s, &spec("x7"), logs.path(), &|| None, &Grant::test())
             .err()
             .unwrap();
         let why = environmental(&e).expect("environmental").to_string();
@@ -4967,7 +5134,7 @@ mod tests {
         let r2 = repo();
         let gh2 = FakeGh::new(&r2, &zip, Mode::NeverPicked);
         let s2 = site(&r2, gh2, clock(), true);
-        let out = run_or_fallback(&s2, &spec("x7"), logs.path(), &|| None).unwrap();
+        let out = run_or_fallback(&s2, &spec("x7"), logs.path(), &|| None, &Grant::test()).unwrap();
         assert!(out.is_none());
     }
 
@@ -5015,7 +5182,13 @@ mod tests {
             let logs = tempfile::tempdir().unwrap();
             let start = clk.now_ms();
             // Plain `remote` is not spilled and, with no fallback, ends at the timeout.
-            let out = run_or_fallback(&s, &spec("x9"), logs.path(), &give_up_after_many_looks());
+            let out = run_or_fallback(
+                &s,
+                &spec("x9"),
+                logs.path(),
+                &give_up_after_many_looks(),
+                &Grant::test(),
+            );
             assert_eq!(matches!(out, Ok(None)), local, "{fallback} {no_for}");
             let waited = clk.now_ms() - start;
             assert_eq!(
@@ -5044,7 +5217,13 @@ mod tests {
         let (room, asked) = room_after(40);
         s.local_room = Some(room);
         let logs = tempfile::tempdir().unwrap();
-        let out = run_or_fallback(&s, &spec("x10"), logs.path(), &give_up_after_many_looks());
+        let out = run_or_fallback(
+            &s,
+            &spec("x10"),
+            logs.path(),
+            &give_up_after_many_looks(),
+            &Grant::test(),
+        );
         assert!(matches!(out, Ok(None)), "it came back to this machine");
         assert!(
             asked.load(Ordering::SeqCst) > 40,
@@ -5070,7 +5249,13 @@ mod tests {
         let (room, asked) = room_after(usize::MAX);
         s.local_room = Some(room);
         let logs = tempfile::tempdir().unwrap();
-        let out = run_or_fallback(&s, &spec("x11"), logs.path(), &give_up_after_many_looks());
+        let out = run_or_fallback(
+            &s,
+            &spec("x11"),
+            logs.path(),
+            &give_up_after_many_looks(),
+            &Grant::test(),
+        );
         assert!(matches!(out, Ok(Some(Outcome::Done(_)))), "ran on GitHub");
         assert!(
             asked.load(Ordering::SeqCst) > 0,
@@ -5095,7 +5280,13 @@ mod tests {
         assert!(s.local_room.is_none());
         let logs = tempfile::tempdir().unwrap();
         let start = clk.now_ms();
-        let out = run_or_fallback(&s, &spec("x12"), logs.path(), &give_up_after_many_looks());
+        let out = run_or_fallback(
+            &s,
+            &spec("x12"),
+            logs.path(),
+            &give_up_after_many_looks(),
+            &Grant::test(),
+        );
         assert!(matches!(out, Ok(None)));
         // Not before the timeout: spill needs a room function to say yes.
         assert!(clk.now_ms() - start >= s.pickup_timeout.as_millis() as u64);
@@ -5144,7 +5335,13 @@ mod tests {
             s.local_room = Some(take(units.clone()));
             let logs = tempfile::tempdir().unwrap();
             let id = format!("two{i}");
-            let out = run_or_fallback(&s, &spec(&id), logs.path(), &give_up_after_many_looks());
+            let out = run_or_fallback(
+                &s,
+                &spec(&id),
+                logs.path(),
+                &give_up_after_many_looks(),
+                &Grant::test(),
+            );
             outs.push((out, gh.cancels.lock().unwrap().len()));
         }
         assert!(matches!(outs[0], (Ok(None), 1)), "the first came back");
@@ -5175,7 +5372,13 @@ mod tests {
             }));
             let logs = tempfile::tempdir().unwrap();
             let id = format!("rs{i}");
-            let out = run_or_fallback(&s, &spec(&id), logs.path(), &give_up_after_many_looks());
+            let out = run_or_fallback(
+                &s,
+                &spec(&id),
+                logs.path(),
+                &give_up_after_many_looks(),
+                &Grant::test(),
+            );
             assert!(matches!(out, Ok(Some(Outcome::Done(_)))), "run {i}");
             assert!(gh.cancels.lock().unwrap().is_empty(), "run {i}");
         }
@@ -5194,7 +5397,7 @@ mod tests {
             let clk = clock();
             let s = site(&r, gh, clk.clone(), false);
             let logs = tempfile::tempdir().unwrap();
-            let e = execute(&s, &spec("x8"), logs.path(), &|| None)
+            let e = execute(&s, &spec("x8"), logs.path(), &|| None, &Grant::test())
                 .err()
                 .unwrap();
             assert!(matches!(e, Fail::Environmental(_)), "{code}: {e:?}");
@@ -5211,7 +5414,7 @@ mod tests {
         let gh = FakeGh::new(&r, &zip, Mode::NoArtifact);
         let s = site(&r, gh, clock(), false);
         let logs = tempfile::tempdir().unwrap();
-        let e = execute(&s, &spec("x9"), logs.path(), &|| None)
+        let e = execute(&s, &spec("x9"), logs.path(), &|| None, &Grant::test())
             .err()
             .unwrap();
         assert!(
@@ -5230,7 +5433,7 @@ mod tests {
         let gh = FakeGh::new(&r, &zip, Mode::NoArtifact);
         let s = site(&r, gh, clock(), false);
         let logs = tempfile::tempdir().unwrap();
-        let e = execute(&s, &spec("x9b"), logs.path(), &|| None)
+        let e = execute(&s, &spec("x9b"), logs.path(), &|| None, &Grant::test())
             .err()
             .unwrap();
         assert!(
@@ -5268,7 +5471,8 @@ mod tests {
         let logs = tempfile::tempdir().unwrap();
         let mut sp = spec("x10");
         sp.limit = Duration::from_secs(120);
-        let Outcome::Done(f) = execute(&s, &sp, logs.path(), &|| None).unwrap() else {
+        let Outcome::Done(f) = execute(&s, &sp, logs.path(), &|| None, &Grant::test()).unwrap()
+        else {
             panic!("not done")
         };
         assert!(f.timed_out);
@@ -5287,7 +5491,7 @@ mod tests {
         *gh.die_at.lock().unwrap() = Some(2);
         let s = site(&r, gh.clone(), clock(), false);
         let died = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = execute(&s, &spec("x11"), logs.path(), &|| None);
+            let _ = execute(&s, &spec("x11"), logs.path(), &|| None, &Grant::test());
         }));
         assert!(died.is_err(), "the first daemon died mid-run");
         let first = State::load(&record_path(logs.path(), "x11")).expect("the record survives");
@@ -5296,7 +5500,9 @@ mod tests {
         // A new daemon: nothing in memory but the record.
         *gh.die_at.lock().unwrap() = None;
         let s2 = site(&r, gh.clone(), clock(), false);
-        let Outcome::Done(f) = execute(&s2, &spec("x11"), logs.path(), &|| None).unwrap() else {
+        let Outcome::Done(f) =
+            execute(&s2, &spec("x11"), logs.path(), &|| None, &Grant::test()).unwrap()
+        else {
             panic!("not done")
         };
         assert_eq!(f.output, GREEN);
@@ -5315,7 +5521,7 @@ mod tests {
             "the restarted daemon did not dispatch again"
         );
         // Asked again once collected, it answers from the record and starts nothing.
-        let again = execute(&s2, &spec("x11"), logs.path(), &|| None).unwrap();
+        let again = execute(&s2, &spec("x11"), logs.path(), &|| None, &Grant::test()).unwrap();
         assert!(matches!(again, Outcome::Done(g) if g.output == GREEN));
         assert_eq!(gh.runs_seen.lock().unwrap().len(), 1);
     }
@@ -5349,7 +5555,7 @@ mod tests {
                 .any(|q| q.contains("/jobs"))
                 .then_some(StopWhy::Skipped)
         };
-        let out = execute(&s, &sp, logs.path(), &stop).unwrap();
+        let out = execute(&s, &sp, logs.path(), &stop, &Grant::test()).unwrap();
         assert!(matches!(out, Outcome::Stopped(StopWhy::Skipped)));
         let log = gh.requests();
         let at = |needle: &str| log.iter().position(|q| q.contains(needle));
@@ -5418,7 +5624,7 @@ mod tests {
         let gh = FakeGh::new(&r, &zip, Mode::Normal);
         gh.dispatches.lock().unwrap().push("earlier {}".into());
         let s = site(&r, gh.clone(), clock(), false);
-        let out = execute(&s, &sp, logs.path(), &|| None).unwrap();
+        let out = execute(&s, &sp, logs.path(), &|| None, &Grant::test()).unwrap();
         assert!(matches!(out, Outcome::Done(f) if f.output == GREEN));
         assert_eq!(gh.dispatches.lock().unwrap().len(), 1, "started once only");
         // GitHub has none: the restarted daemon starts it, once.
@@ -5436,7 +5642,7 @@ mod tests {
         .save(&rec(logs2.path()));
         let gh2 = FakeGh::new(&r2, &zip, Mode::Normal);
         let s2 = site(&r2, gh2.clone(), clock(), false);
-        let out = execute(&s2, &sp, logs2.path(), &|| None).unwrap();
+        let out = execute(&s2, &sp, logs2.path(), &|| None, &Grant::test()).unwrap();
         assert!(matches!(out, Outcome::Done(f) if f.output == GREEN));
         assert_eq!(gh2.dispatches.lock().unwrap().len(), 1);
     }
@@ -5450,7 +5656,7 @@ mod tests {
         let gh = FakeGh::new(&r, &zip, Mode::Status(403));
         let s = site(&r, gh, clock(), false);
         let logs = tempfile::tempdir().unwrap();
-        let Err(e) = execute(&s, &spec("d3"), logs.path(), &|| None) else {
+        let Err(e) = execute(&s, &spec("d3"), logs.path(), &|| None, &Grant::test()) else {
             panic!("the run started")
         };
         assert!(matches!(e, Fail::Environmental(m) if m.contains("could not start")));
@@ -5616,7 +5822,8 @@ mod tests {
             sink.lock().unwrap().push(t.to_string())
         }));
         let logs = tempfile::tempdir().unwrap();
-        let Ok(Outcome::Done(_)) = execute(&s, &spec("ph1"), logs.path(), &|| None) else {
+        let Ok(Outcome::Done(_)) = execute(&s, &spec("ph1"), logs.path(), &|| None, &Grant::test())
+        else {
             panic!("not done")
         };
         let said = said.lock().unwrap();
@@ -5794,7 +6001,8 @@ mod tests {
         };
         let dir = r._t.path().join("runs");
         let spec = sharded_spec("sh1", &[&["a", "b"], &["c"], &["d"]]);
-        let Ok(Outcome::Done(f)) = execute_sharded(&site, &spec, &dir, &|| None) else {
+        let Ok(Outcome::Done(f)) = execute_sharded(&site, &spec, &dir, &|| None, &Grant::test())
+        else {
             panic!("the sharded run did not finish");
         };
         (f, gh, r)
@@ -6033,7 +6241,7 @@ mod tests {
         let mut seen = AccountJobs::default();
         let other = seen.poll(&sources, 1000);
         assert_eq!(
-            (other.gha, other.macos),
+            (other.gha(), other.macos()),
             (5, 0),
             "MASON's own run is not counted"
         );
@@ -6058,7 +6266,8 @@ mod tests {
             ids.iter()
                 .filter(|i| crate::sched::tests::is_held(&b, **i))
                 .count(),
-            1
+            4,
+            "ceiling 6 less the 2 running jobs; the 3 queued ones take no unit (#818)"
         );
         // The jobs finish, under a new ETag.
         api.repos.lock().unwrap().get_mut("o/star").unwrap().clear();
@@ -6070,7 +6279,7 @@ mod tests {
             .clear();
         *api.etag.lock().unwrap() = "\"b\"".into();
         let other = seen.poll(&sources, 2000);
-        assert_eq!(other.gha, 0);
+        assert_eq!(other.gha(), 0);
         b.set_other_jobs(other);
         assert_eq!(
             ids.iter()
@@ -6101,12 +6310,12 @@ mod tests {
         let api = fake(vec![("o/r", one(3))]);
         let sources = [source(&api, "o/r", &[])];
         let mut seen = AccountJobs::default();
-        assert_eq!(seen.poll(&sources, 1000).gha, 3);
+        assert_eq!(seen.poll(&sources, 1000).gha(), 3);
         // The lists changed (a new ETag) but the run is in the same list and was read a moment
         // ago: its jobs are not asked for again.
         put(&api, 1, "\"b\"");
         let asked = api.log.lock().unwrap().len();
-        assert_eq!(seen.poll(&sources, 2000).gha, 3);
+        assert_eq!(seen.poll(&sources, 2000).gha(), 3);
         assert_eq!(
             api.log.lock().unwrap().len(),
             asked + 2,
@@ -6114,7 +6323,7 @@ mod tests {
         );
         // Long enough later they are.
         put(&api, 1, "\"c\"");
-        assert_eq!(seen.poll(&sources, 1000 + JOBS_AGAIN_MS).gha, 1);
+        assert_eq!(seen.poll(&sources, 1000 + JOBS_AGAIN_MS).gha(), 1);
     }
 
     #[test]
@@ -6150,7 +6359,7 @@ mod tests {
         )]);
         let mut seen = AccountJobs::default();
         let other = seen.poll(&[source(&api, "o/star", &[])], 1);
-        assert_eq!((other.gha, other.macos), (2, 2));
+        assert_eq!((other.gha(), other.macos()), (2, 2));
     }
 
     #[test]
@@ -6166,12 +6375,12 @@ mod tests {
         )]);
         let sources = [source(&api, "o/r", &[])];
         let mut seen = AccountJobs::default();
-        assert_eq!(seen.poll(&sources, 1).gha, 3);
+        assert_eq!(seen.poll(&sources, 1).gha(), 3);
         api.repos.lock().unwrap().get_mut("o/r").unwrap().clear();
         let asked = api.log.lock().unwrap().len();
         // Nothing changed on GitHub's side: the count stays, and only the two conditional
         // list requests are made, with no job lookups.
-        assert_eq!(seen.poll(&sources, 2).gha, 3);
+        assert_eq!(seen.poll(&sources, 2).gha(), 3);
         assert_eq!(api.log.lock().unwrap().len(), asked + 2);
     }
 
@@ -6189,7 +6398,7 @@ mod tests {
         let sources = [source(&api, "o/r", &[]), source(&api, "o/private", &[])];
         let mut seen = AccountJobs::default();
         let other = seen.poll(&sources, 1);
-        assert_eq!(other.gha, 2);
+        assert_eq!(other.gha(), 2);
         assert_eq!(other.not_counted.len(), 1);
         assert!(
             other.not_counted[0].starts_with("o/private"),
@@ -6214,9 +6423,43 @@ mod tests {
         assert!(!seen.poll(&sources, 100).stale);
         api.repos.lock().unwrap().clear();
         let other = seen.poll(&sources, 200);
-        assert_eq!((other.gha, other.stale, other.read_at_ms), (2, true, 100));
+        assert_eq!((other.gha(), other.stale, other.read_at_ms), (2, true, 100));
     }
 
+    #[test]
+    fn a_suite_holds_one_gha_unit_per_job_and_a_macos_runner_adds_gha_macos() {
+        use std::collections::BTreeMap;
+        let mut s = mason_testing::Suite::new("w", "cargo test", mason_testing::ParserKind::Tap);
+        s.shards = 3;
+        s.shard_command = Some("cargo test --shard {shard}".into());
+        // The whole command is split; a narrowed run or another command is one job.
+        assert_eq!(jobs_of(Some(&s), "cargo test"), 3);
+        assert_eq!(jobs_of(Some(&s), "cargo test one"), 1);
+        assert_eq!(jobs_of(None, "cargo test"), 1);
+        s.narrowed = true;
+        assert_eq!(jobs_of(Some(&s), "cargo test"), 1);
+        assert_eq!(
+            units_for("ubuntu-latest", jobs_of(Some(&s), "cargo test")),
+            BTreeMap::from([("gha".to_string(), 1)])
+        );
+        // A suite on macOS in a project whose runner is ubuntu: 1 gha and 1 gha-macos.
+        assert_eq!(
+            units_for("macos-latest", 1),
+            BTreeMap::from([("gha".to_string(), 1), ("gha-macos".to_string(), 1)])
+        );
+        // The machine's slots are replaced, other needs stay.
+        let needs =
+            mason_scheduler::Needs::of(&[("compile", 1), ("test-suite", 1), ("device:x", 1)]);
+        let out = with_units(&needs, units_for("macos-latest", 1));
+        assert_eq!(
+            out.amounts,
+            BTreeMap::from([
+                ("device:x".to_string(), 1),
+                ("gha".to_string(), 1),
+                ("gha-macos".to_string(), 1)
+            ])
+        );
+    }
     /// `run_retrying` against `mode`, with the pushes in `refuse_first` refused once.
     fn retrying(mode: Mode, refuse_first: bool, fallback: bool) -> Retried {
         let r = repo();
@@ -6235,17 +6478,26 @@ mod tests {
                 ),
             )
             .unwrap();
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+            // Executable bits are Unix-only; the Windows CI job builds these tests but does not run them.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
         }
         let zip = artifact(r._t.path(), GREEN, 0, None);
         let gh = FakeGh::new(&r, &zip, mode);
         let s = site(&r, gh.clone(), clock(), fallback);
         let said = Mutex::new(vec![]);
         let dir = r._t.path().join("runs");
-        let out = run_retrying(&s, &spec("rt1"), &dir, &|| None, &|t| {
-            said.lock().unwrap().push(t.to_string())
-        });
+        let out = run_retrying(
+            &s,
+            &spec("rt1"),
+            &dir,
+            &|| None,
+            &|t| said.lock().unwrap().push(t.to_string()),
+            &Grant::test(),
+        );
         let said = said.into_inner().unwrap();
         (out, gh, said)
     }
@@ -6316,7 +6568,7 @@ mod tests {
         let s = site(&r, gh.clone(), clock(), false);
         let dir = r._t.path().join("runs");
         let (Some(Outcome::Done(f)), notes) =
-            run_retrying(&s, &spec("rt2"), &dir, &|| None, &|_| {}).unwrap()
+            run_retrying(&s, &spec("rt2"), &dir, &|| None, &|_| {}, &Grant::test()).unwrap()
         else {
             panic!("no result");
         };
@@ -6341,6 +6593,7 @@ mod tests {
             &dir,
             &|| (clk.now_ms() - start >= 60_000).then_some(StopWhy::Skipped),
             &|_| {},
+            &Grant::test(),
         )
         .unwrap();
         assert!(matches!(o, Some(Outcome::Stopped(StopWhy::Skipped))));
@@ -6381,7 +6634,7 @@ mod tests {
         sp.shard_command = Some(narrowed.into());
         sp.partial_lists = true;
         let dir = t.join("runs");
-        let Ok(Outcome::Done(f)) = execute_sharded(&s, &sp, &dir, &|| None) else {
+        let Ok(Outcome::Done(f)) = execute_sharded(&s, &sp, &dir, &|| None, &Grant::test()) else {
             panic!("the sharded run did not finish");
         };
         assert_eq!(f.parts.len(), 2);
