@@ -774,5 +774,6 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s1057**: Turning a node's switch off lets its running jobs finish and takes no new ones (or, with `on_switch_off = "cancel"` or `mason node stop-jobs`, ends them so the run is placed again), a node that goes away is given up on after `lost_after_polls` and its orphan is killed when its lease runs out, a restarted coordinator takes up the job its record names, and the failure table of the plan is a test for each row.
 - **s1058**: The Mac monitor has an "Accept work from other Macs" switch on Home and in Settings (on a Mac that serves as a node) and a Nodes section on a coordinator, the GitHub section is now "Remote runs" and a run on a node is a row in it, and `docs/nodes.md` says how to reach a node daemon of another macOS user.
 - **s1061**: s759 clears the CI shard env and s664 finds its test binary from cargo's JSON output, fixing two of the five red shard-3 exit scripts.
+- **s1063**: scripts/exit/s899.sh now checks the current 304 test and its source() helper, so CI/exit-scripts stops failing on a stale test name.
 - **s1066**: s43 now expects the daemon's real ceiling (9999) and s49 picks the highest-numbered checkpoint, fixing two of the exit scripts red on shard 6.
 <!-- status:end -->
