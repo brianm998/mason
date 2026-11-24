@@ -682,7 +682,9 @@ fn runs_on_github(d: &Arc<Daemon>, spec: &CheckSpec) -> Option<String> {
     }
     match executor_of(d, spec)? {
         rm::Executor::GitHub { runs_on } => Some(runs_on),
-        _ => None,
+        // A node run takes none of this Mac's slots either; `goes_remote` learns that in phase 2
+        // when placement can produce one.
+        rm::Executor::Node { .. } | rm::Executor::Local => None,
     }
 }
 

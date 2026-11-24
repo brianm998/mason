@@ -2540,6 +2540,9 @@ pub fn pool_needs(
             std::collections::BTreeMap::from([(crate::nodes::resource(&nid), 1)])
         }
         Executor::Local => return None,
+        // A node's resource (`node:<nid>`) is phase 2; until placement produces one, a step
+        // that would go to a node keeps what it asked for.
+        Executor::Node { .. } => return None,
     };
     let mut out = mason_scheduler::Needs {
         exclusive: false,
