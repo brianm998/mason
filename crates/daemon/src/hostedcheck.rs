@@ -814,12 +814,16 @@ fn remote_check(
             .or(ps.shard_command.as_deref())
         {
             Some(sc) => {
-                let mut rs = rs;
-                rs.shards = ps.shards;
-                rs.shard_command = Some(sc.to_string());
-                rs.shard_lists = crate::suites::shard_lists(d, &project, ps, ps.shards);
-                rs.partial_lists = crate::suites::lists_partial(ps);
-                rs
+                // Split as many ways as the lease was given runner units (a flexible request);
+                // one unit runs the whole command on one runner.
+                rm::split_for_grant(
+                    rs,
+                    ps.shards,
+                    sc,
+                    grant.granted_runners(),
+                    crate::suites::lists_partial(ps),
+                    |n| crate::suites::shard_lists(d, &project, ps, n),
+                )
             }
             None => rs,
         },

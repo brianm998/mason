@@ -3311,6 +3311,8 @@ impl CheckSlots {
         // runner units and is pushed once they are granted. A daemon that restarted counted the
         // units of this check's run still out: they are its own, and its lease takes them over.
         let pooled: std::collections::BTreeMap<String, u32>;
+        // A check bound for GitHub asks for 1 to N runner units and splits into what it is given.
+        let flexible = pool.is_some();
         let uses = match pool {
             Some(units) => {
                 pooled = units;
@@ -3332,8 +3334,10 @@ impl CheckSlots {
         // time; the wait is now added back to the agent's deadline (`extra`), and on
         // 2026-11-13 develop checks tied with test steps and took every compile
         // slot ahead of four tasks already in test.
+        let needs = crate::sched::needs_of(uses, None);
+        let needs = if flexible { needs.flexible() } else { needs };
         self.acquire(
-            crate::sched::needs_of(uses, None),
+            needs,
             check_rank_step(&self.step, self.test_step.as_deref()),
             true,
             expected_ms,

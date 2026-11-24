@@ -621,8 +621,21 @@ fn run_hosted_resuming(
         let build = place.and_then(|(_, s)| s.build.as_deref());
         let ran = match &exec {
             crate::remote::Executor::GitHub { runs_on } => run_remote(
-                d, project, id, build, cmd, cwd, limit, log_dir, &check, run, watch, &env, runs_on,
+                d,
+                project,
+                id,
+                build,
+                cmd,
+                cwd,
+                limit,
+                log_dir,
+                &check,
+                run,
+                watch,
+                &env,
+                runs_on,
                 covered,
+                cover.runners,
             )?,
             crate::remote::Executor::Node { nid, .. } => run_on_node(
                 d, project, id, build, cmd, cwd, limit, log_dir, &check, run, watch, &env, nid,
@@ -784,6 +797,7 @@ fn run_remote(
     env: &[(String, String)],
     runs_on: &str,
     covered: bool,
+    runners: Option<u32>,
 ) -> Result<Option<Ran>, String> {
     use crate::remote as rm;
     let task = run.and_then(|r| d.world().ok().and_then(|w| w.task_of_open_run(r)));
@@ -809,14 +823,9 @@ fn run_remote(
         // The broker may have granted fewer runner units than the suite has shards (a flexible
         // request, first in line for what was free): the run then splits that many ways, and a
         // single unit runs the whole command on one runner.
-        let granted = task.and_then(|t| d.broker.granted_runners(t));
-        let n = rm::shards_granted(s.shards, granted);
-        if n > 1 {
-            spec.shards = n;
-            spec.shard_command = Some(sc.to_string());
-            spec.shard_lists = shard_lists(d, project, s, n);
-            spec.partial_lists = lists_partial(s);
-        }
+        spec = rm::split_for_grant(spec, s.shards, sc, runners, lists_partial(s), |n| {
+            shard_lists(d, project, s, n)
+        });
     }
     let stop = || match check() {
         Stop::No => None,
@@ -1378,6 +1387,9 @@ pub struct Cover {
     /// A landing batch's own run that its lease does not hold: the batch, and what the suite
     /// needs here. Such a run takes its slots, as the batch, when it comes to run here.
     batch: Option<(Arc<crate::remote::BatchOwner>, Needs)>,
+    /// The runner units the run's own flexible lease was given: it splits into that many shards
+    /// (see [`crate::remote::shards_granted`]). `None`: no flexible lease, all its shards.
+    runners: Option<u32>,
 }
 
 /// What a landing batch holds, for the suites it runs: the batch (to rank what its runs take
@@ -1409,6 +1421,7 @@ impl BatchCover {
         Cover {
             covered,
             batch: self.owner.clone().map(|o| (o, needs)),
+            runners: None,
         }
     }
 }
@@ -3552,6 +3565,7 @@ fn run_side_by_side(
                             }
                         }
                     };
+                    who.cover.runners = lease.as_ref().and_then(|l| l.granted_runners());
                     let ran = run_suite(
                         &who,
                         &c.project.path,
@@ -3981,6 +3995,12 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
                 }
             }
         }
+        who.cover.runners = c
+            .lease
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .and_then(|l| l.granted_runners());
         let ran = match ran_beside {
             Some(r) => r,
             None if reused_whole.is_some() => SuiteRun::Done {
