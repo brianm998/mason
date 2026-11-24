@@ -1,0 +1,7 @@
+.mason/run.json
+crates/daemon/src/affected.rs
+crates/daemon/src/suites.rs
+crates/daemon/tests/landing_skip.rs
+docs/decisions/1000-skip-only-test-steps.md
+docs/stages/s1007.md
+scripts/exit/s1007.sh
