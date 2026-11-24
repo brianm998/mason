@@ -1,0 +1,7 @@
+.mason/run.json
+crates/daemon/src/hostedcheck.rs
+crates/daemon/src/remote.rs
+crates/daemon/src/suites.rs
+docs/decisions/1034-reuse-a-run-only-for-its-own-tree.md
+docs/stages/s1041.md
+scripts/exit/s1041.sh
