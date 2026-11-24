@@ -4,6 +4,8 @@
 # .mason/changed-files.txt instead of a merge base; with neither, it still fails as before.
 # The snapshot test in crates/daemon/src/remote.rs covers the file's creation.
 set -euo pipefail
+# The CI shard env must not reach a one-commit repo that has no run-exit-scripts.sh.
+unset MASON_EXIT_SHARD MASON_EXIT_PLAN
 cd "$(dirname "$0")/../.."
 root=$PWD
 tmp=$(mktemp -d)

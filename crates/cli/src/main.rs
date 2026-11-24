@@ -4,6 +4,7 @@
 //!
 //! ```text
 //! mason task add <title> [--project P] [--body TEXT | --body-file F | --body -] [--priority urgent|high|normal|low] [--proposed]
+//! mason task edit <id> [--title T] [--body TEXT | --body-file F | --body -] [--reason R]
 //! mason task list [--state S] [--json]
 //! mason task show <id> [--json] [--watch]
 //! mason task cancel <id> [--delete-branch]
@@ -62,6 +63,10 @@ mason: command-line client for the MASON pipeline
   mason task add <title> [--project P] [--body TEXT | --body-file F | --body -]
                          [--priority urgent|high|normal|low] [--proposed] [--explored]
                          [--after ID[,ID...]]   wait for those tasks to land first
+  mason task edit <id> [--title T] [--body TEXT | --body-file F | --body -] [--reason R]
+                         rewrite a started or failed task's text (owner only); the next step
+                         reads it. Edit when the scope changed, a retry note when a decision
+                         applies to one round
   mason task list [--state S] [--json]
   mason task list --pending-issues    open issues the tracker has not imported, with why
   mason task relink <id> --issue N    tie a live task to issue N whose task was canceled (owner only)
@@ -3179,8 +3184,19 @@ fn main() {
                 "show" => {
                     let id = task_id(&mut a);
                     let watch = a.flag("--watch") || a.flag("-w");
+                    let original = a.flag("--original");
                     finish(&a);
                     let t = or_die(d.call("GET", &format!("/tasks/{id}"), None));
+                    if original {
+                        match t["edited"].as_object() {
+                            Some(e) => {
+                                println!("#{id} {}", e["original_title"].as_str().unwrap_or(""));
+                                println!("{}", e["original_body"].as_str().unwrap_or(""));
+                            }
+                            None => println!("Task #{id} has not been edited."),
+                        }
+                        return;
+                    }
                     if watch {
                         // What is running now, then every push, until the task is over.
                         if json_out {
@@ -3197,6 +3213,17 @@ fn main() {
                     println!("#{} {}", t["id"], t["title"].as_str().unwrap_or(""));
                     println!("  project   {}", t["project"].as_str().unwrap_or("?"));
                     println!("  state     {}", t["state"].as_str().unwrap_or("?"));
+                    if let Some(e) = t["edited"].as_object() {
+                        let why = e["reason"].as_str().filter(|r| !r.is_empty());
+                        println!(
+                            "  edited    {} time(s); last by {} at {} ms{} (the text as filed: mason task show {} --original)",
+                            e["count"],
+                            e["who"].as_str().unwrap_or("?"),
+                            e["at"],
+                            why.map(|r| format!(": {r}")).unwrap_or_default(),
+                            t["id"]
+                        );
+                    }
                     println!("  activity  {}", t["activity"].as_str().unwrap_or("?"));
                     if let Some(m) = t["model"]["display"].as_str() {
                         println!("  model     {m}");
@@ -3846,6 +3873,40 @@ fn main() {
                             );
                         }
                     }
+                }
+                "edit" => {
+                    let id = task_id(&mut a);
+                    let title = a.opt("--title");
+                    let body = if let Some(b) = a.opt("--body") {
+                        Some(if b == "-" {
+                            let mut s = String::new();
+                            let _ = std::io::stdin().read_to_string(&mut s);
+                            s
+                        } else {
+                            b
+                        })
+                    } else {
+                        a.opt("--body-file").map(|f| {
+                            std::fs::read_to_string(&f)
+                                .unwrap_or_else(|e| die(&format!("cannot read {f}: {e}")))
+                        })
+                    };
+                    let reason = a.opt("--reason").unwrap_or_default();
+                    finish(&a);
+                    if std::env::var("MASON_AS").is_err() {
+                        if let Ok(u) = std::env::var("USER") {
+                            std::env::set_var("MASON_AS", u);
+                        }
+                    }
+                    let r = or_die(d.call(
+                        "POST",
+                        &format!("/tasks/{id}/edit"),
+                        Some(&json!({"title": title, "body": body, "reason": reason})),
+                    ));
+                    println!(
+                        "Task #{id} edited ({}). A step already running keeps the prompt it started with; the next step reads the new text.",
+                        r["state"].as_str().unwrap_or("?")
+                    );
                 }
                 "priority" => {
                     let id = task_id(&mut a);

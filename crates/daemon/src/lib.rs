@@ -106,6 +106,7 @@ pub mod sweep;
 pub mod targets;
 pub mod targettimes;
 pub mod taskcache;
+pub mod taskedit;
 pub mod thermal;
 pub mod tiermap;
 pub mod tracker;

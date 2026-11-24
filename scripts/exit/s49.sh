@@ -45,8 +45,8 @@ stop_demo() {
 echo "== 1. the demo's six cases, as the daemon's views say them"
 start_demo; "$bin/conformance" expected --port "$(port_of)" --out "$root/expected" | tail -1; stop_demo
 python3 - "$root/expected" <<'PY'
-import json, sys, glob
-files = sorted(glob.glob(sys.argv[1] + "/checkpoint-*.json"))
+import json, re, sys, glob
+files = sorted(glob.glob(sys.argv[1] + "/checkpoint-*.json"), key=lambda f: int(re.search(r"checkpoint-(\d+)\.json$", f).group(1)))
 items = {i["id"]: i["texts"] for i in json.load(open(files[-1]))}
 def want(task, first, has=(), lacks=()):
     t = items["progress:%d:develop" % task]
