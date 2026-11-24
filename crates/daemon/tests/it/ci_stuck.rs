@@ -5,13 +5,13 @@
 //! red. The scripted CI is held by a file; nothing here asserts how long anything took.
 
 use crate::support;
-use std::path::PathBuf;
+use std::path::Path;
 use support::lw::*;
 use support::*;
 
-fn world(release: &PathBuf) -> W {
+fn world(release: &Path) -> W {
     let toml = "mode = \"direct-ci\"\nwindow = \"30s\"\nmax_size = 2\nmax_fold = 4\n[[tier]]\nname = \"batch\"\nsuites = [\"alpha\"]\n";
-    let release = release.clone();
+    let release = release.to_path_buf();
     world_with(
         toml,
         &move |_| {
