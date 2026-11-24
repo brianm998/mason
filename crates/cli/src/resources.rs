@@ -731,8 +731,10 @@ const WRAPPED: &[&str] = &[
 
 /// The optional Claude Code `PreToolUse` hook for Bash: reads the hook input on
 /// stdin and, for a build or test command, answers with the same command run
-/// under `mason run --needs compile`. It asks rather than allows, so the owner
-/// still sees what will run. Anything else is left alone (no output).
+/// under `mason run --needs compile`. It allows the rewritten command rather than
+/// asking: a prompt for every build stalled long agent sessions until the owner came
+/// back to click it (owner's decision, 2026-11-23). The rewrite is what matters: the
+/// build still waits for a `compile` slot. Anything else is left alone (no output).
 pub fn hook_bash(input: &str, needs: &str, mason: &str) -> Option<Value> {
     let v: Value = serde_json::from_str(input).ok()?;
     if v["tool_name"].as_str() != Some("Bash") {
@@ -757,7 +759,7 @@ pub fn hook_bash(input: &str, needs: &str, mason: &str) -> Option<Value> {
     ));
     Some(json!({"hookSpecificOutput": {
         "hookEventName": "PreToolUse",
-        "permissionDecision": "ask",
+        "permissionDecision": "allow",
         "permissionDecisionReason": "MASON: run through the shared build queue",
         "updatedInput": input,
     }}))
@@ -929,7 +931,7 @@ mod tests {
             cmd,
             "mason run --needs compile --origin hook -- bash -c 'cargo test -p x'"
         );
-        assert_eq!(out["hookSpecificOutput"]["permissionDecision"], "ask");
+        assert_eq!(out["hookSpecificOutput"]["permissionDecision"], "allow");
         let quoted = hook_bash(&input("make it's"), "compile", "mason").unwrap();
         assert!(quoted["hookSpecificOutput"]["updatedInput"]["command"]
             .as_str()

@@ -516,7 +516,8 @@ pub fn pass(d: &std::sync::Arc<crate::daemon::Daemon>) {
         if !due(old.as_ref(), now_secs(), changed_src, hash_text(&main_text)) {
             continue;
         }
-        // With remote runs on, GitHub makes the map and the work leases `gha`, not this Mac's
+        // With remote runs on, GitHub makes the map (a node does not: it is GitHub's own `gha`
+        // pool that is leased here) and the work leases `gha`, not this Mac's
         // `test-suite` (#780). `gha` full: wait for a later pass.
         let remote = matches!(
             crate::remote::executor_global(d, &p.id),
