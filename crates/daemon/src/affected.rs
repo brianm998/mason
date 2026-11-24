@@ -771,12 +771,6 @@ pub fn select_with(
                 g.unit_modules.extend(f.iter().cloned());
                 g.unit_lib = p.lib.is_some();
                 g.unit_bins = !p.bins.is_empty();
-                g.notes.push(format!(
-                    "{} lib: {} of {} modules, by name scan",
-                    p.name,
-                    f.len(),
-                    total.len()
-                ));
             }
             _ => {
                 g.lib |= p.lib.is_some();
@@ -1163,6 +1157,10 @@ mod tests {
             vec!["-p top --test names --test uses"]
         );
         // Outside `.mason/` the bare file name still matches.
+        fx.pkgs[1].tests.push(TestTarget {
+            name: "tpl".into(),
+            src: "crates/top/tests/tpl.rs".into(),
+        });
         fx.files.insert(
             "crates/top/tests/tpl.rs".into(),
             "write(\"mason.toml\");".into(),
@@ -1597,7 +1595,11 @@ mod tests {
                 "x",
                 cov,
             ) {
-                Pick::Some(g) => g.values().flat_map(|g| g.notes.clone()).collect::<Vec<_>>(),
+                Pick::Some(g) => g
+                    .values()
+                    .flat_map(|g| g.notes.clone())
+                    .filter(|n| n.starts_with("it:"))
+                    .collect::<Vec<_>>(),
                 Pick::All { .. } => vec![],
             }
         };

@@ -643,6 +643,18 @@ impl Daemon {
             .clone()
     }
 
+    /// The repository lock for a path no project owns yet (Add Project). Same map, same key
+    /// (the canonical path), so it is the lock a project registered there would take.
+    pub fn repo_lock_at(&self, path: &std::path::Path) -> RepoLock {
+        let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        self.repo_locks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(key)
+            .or_default()
+            .clone()
+    }
+
     /// The per-repository fetch lock (see [`Self::fetch_remote`]).
     pub fn fetch_lock(&self, p: ProjectId) -> Arc<Mutex<Option<std::time::Instant>>> {
         let key = self.project(p).map_or_else(PathBuf::new, |c| {
