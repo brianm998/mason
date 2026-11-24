@@ -860,6 +860,37 @@ const STEPS: &[&str] = &[
          fingerprint TEXT NOT NULL,
          paired_at   INTEGER NOT NULL
      );",
+    // A red develop that gets fixed (#1023). A baseline row may be partial: only the tests of an
+    // earlier red baseline were run at a newer tip, so it says nothing of the rest of the suite
+    // and is never a whole-suite cache. `red_sightings` holds the tests a task's last check of a
+    // suite failed; `red_notes` what the agent is told at its next tool result; `red_folds` how
+    // often a watcher merged develop into its tree; `red_fix_pending` the fixes a branch has
+    // not taken yet. Additive.
+    "ALTER TABLE baselines ADD COLUMN partial INTEGER NOT NULL DEFAULT 0;
+     CREATE TABLE red_sightings (
+         task  INTEGER NOT NULL,
+         suite TEXT NOT NULL,
+         test  TEXT NOT NULL,
+         at_ms INTEGER NOT NULL,
+         PRIMARY KEY (task, suite, test)
+     );
+     CREATE TABLE red_notes (
+         id    INTEGER PRIMARY KEY AUTOINCREMENT,
+         task  INTEGER NOT NULL,
+         text  TEXT NOT NULL,
+         at_ms INTEGER NOT NULL
+     );
+     CREATE TABLE red_folds (
+         task INTEGER PRIMARY KEY,
+         n    INTEGER NOT NULL
+     );
+     CREATE TABLE red_fix_pending (
+         task     INTEGER PRIMARY KEY,
+         tests    TEXT NOT NULL,
+         base     TEXT NOT NULL,
+         why      TEXT NOT NULL,
+         since_ms INTEGER NOT NULL
+     );",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;

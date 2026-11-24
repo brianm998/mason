@@ -1249,6 +1249,79 @@ fn the_latest_baseline_of_a_suite_is_the_newest_by_time() {
 }
 
 #[test]
+fn a_partial_baseline_that_passes_a_test_takes_it_off_develops_reds() {
+    let (_d, p) = db();
+    let s = Store::open(&p).unwrap();
+    let t = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    s.put_baseline("A", "cargo", &t(&["x", "y"]), &t(&["x", "y", "z"]), 3, 10)
+        .unwrap();
+    // At B only x was run: it passes. y was not looked at, so it stays red.
+    s.put_partial_baseline("B", "cargo", &[], &t(&["x"]), 20)
+        .unwrap();
+    assert_eq!(
+        s.latest_baseline("cargo").unwrap(),
+        Some(("B".to_string(), t(&["y"])))
+    );
+    // A partial row is never a whole-suite cache.
+    assert!(s.baseline("B", "cargo").unwrap().is_none());
+    assert!(s.baseline_profile("B", "cargo").unwrap().is_none());
+    // A partial row does not replace a whole one at the same base.
+    s.put_partial_baseline("A", "cargo", &[], &t(&["x"]), 30)
+        .unwrap();
+    assert_eq!(s.baseline("A", "cargo").unwrap().unwrap().0, t(&["x", "y"]));
+    // A test that still fails at a newer tip keeps that tip as the base it is red at, and a
+    // test found red there joins the list.
+    s.put_partial_baseline("C", "cargo", &t(&["y", "w"]), &t(&["y", "w"]), 40)
+        .unwrap();
+    assert_eq!(
+        s.latest_baseline("cargo").unwrap(),
+        Some(("C".to_string(), t(&["y", "w"])))
+    );
+    // A newer whole baseline replaces all of it.
+    s.put_baseline("D", "cargo", &[], &t(&["x", "y", "w"]), 3, 50)
+        .unwrap();
+    assert_eq!(
+        s.latest_baseline("cargo").unwrap(),
+        Some(("D".to_string(), vec![]))
+    );
+}
+
+#[test]
+fn red_sightings_notes_folds_and_pending_fixes_are_kept() {
+    let (_d, p) = db();
+    let s = Store::open(&p).unwrap();
+    let t = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    s.put_red_sightings(1, "cargo", &t(&["a", "b"]), 100)
+        .unwrap();
+    s.put_red_sightings(1, "cargo", &t(&["a"]), 200).unwrap();
+    s.put_red_sightings(2, "cargo", &t(&["a"]), 50).unwrap();
+    let got = s.red_sightings_since(100).unwrap();
+    assert_eq!(got, vec![(1, "cargo".to_string(), "a".to_string(), 200)]);
+    s.clear_red_sightings(1, "cargo", Some(&t(&["a"]))).unwrap();
+    assert!(s.red_sightings_since(0).unwrap().len() == 1);
+    s.push_red_note(1, "one", 1).unwrap();
+    s.push_red_note(1, "two", 2).unwrap();
+    assert_eq!(s.take_red_notes(1).unwrap(), t(&["one", "two"]));
+    assert!(
+        s.take_red_notes(1).unwrap().is_empty(),
+        "a note is told once"
+    );
+    assert_eq!(s.red_folds(1).unwrap(), 0);
+    s.bump_red_folds(1).unwrap();
+    s.bump_red_folds(1).unwrap();
+    assert_eq!(s.red_folds(1).unwrap(), 2);
+    s.put_red_fix_pending(3, &t(&["a"]), "origin/develop", "conflicts", 1000)
+        .unwrap();
+    s.put_red_fix_pending(3, &t(&["a"]), "origin/develop", "conflicts", 9000)
+        .unwrap();
+    let p = s.red_fix_pending().unwrap();
+    assert_eq!(p.len(), 1);
+    assert_eq!(p[0].4, 1000, "the first time it was told is kept");
+    s.clear_red_fix_pending(3).unwrap();
+    assert!(s.red_fix_pending().unwrap().is_empty());
+}
+
+#[test]
 fn task_greens_are_kept_per_task_suite_and_definition_newest_first() {
     let dir = tempfile::tempdir().unwrap();
     let s = Store::open(dir.path().join("s.db")).unwrap();
