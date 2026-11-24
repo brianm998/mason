@@ -8,6 +8,10 @@ public struct OnboardingCandidate: Equatable, Sendable {
     public var name: String
     public var hasMason: Bool
     public var remote: String?
+
+    public init(path: String, name: String, hasMason: Bool, remote: String? = nil) {
+        self.path = path; self.name = name; self.hasMason = hasMason; self.remote = remote
+    }
 }
 
 /// One question from `POST /onboarding/plan` `next`.
@@ -20,6 +24,10 @@ public struct OnboardingQuestion: Equatable, Sendable {
     /// `--tracker`: the answer's key in the flag map is `tracker`.
     public var flag: String
 
+    public init(id: String, text: String, options: [String], recommended: String, flag: String) {
+        self.id = id; self.text = text; self.options = options; self.recommended = recommended; self.flag = flag
+    }
+
     public var key: String { String(flag.drop(while: { $0 == "-" })).replacingOccurrences(of: "-", with: "_") }
     public var isFreeText: Bool { options.isEmpty }
 }
@@ -28,6 +36,8 @@ public struct OnboardingQuestion: Equatable, Sendable {
 public struct OnboardingFile: Equatable, Sendable {
     public var path: String
     public var contents: String
+
+    public init(path: String, contents: String) { self.path = path; self.contents = contents }
 }
 
 /// What `POST /onboarding/plan` said.
