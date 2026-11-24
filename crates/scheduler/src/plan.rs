@@ -28,6 +28,11 @@ pub struct Needs {
     /// The whole machine: nothing else machine-class runs beside it.
     pub exclusive: bool,
     pub amounts: BTreeMap<String, u32>,
+    /// Flexible runner units: the GitHub pool amounts above (`gha`, `gha-macos`) are a most,
+    /// not a need. The request is granted `min(most, free)` of them, at least 1 and the same
+    /// number of every pool, and while it waits it sets aside only 1 unit of each, so it never
+    /// withholds units a later request could use. The other amounts are fixed.
+    pub flex: bool,
 }
 
 impl Needs {
@@ -39,13 +44,35 @@ impl Needs {
                 .filter(|(_, n)| *n > 0)
                 .map(|(r, n)| (r.to_string(), *n))
                 .collect(),
+            flex: false,
         }
+    }
+
+    /// `self` with its runner pool amounts flexible (see [`Needs::flex`]).
+    pub fn flexible(mut self) -> Needs {
+        self.flex = self.amounts.keys().any(|k| is_gha_pool(k));
+        self
+    }
+
+    /// The least a flexible request can be granted: one unit of each runner pool it names.
+    /// Any other request: itself.
+    pub fn least(&self) -> Needs {
+        let mut n = self.clone();
+        if n.flex {
+            for (r, a) in n.amounts.iter_mut() {
+                if is_gha_pool(r) {
+                    *a = 1;
+                }
+            }
+        }
+        n
     }
 
     pub fn exclusive() -> Needs {
         Needs {
             exclusive: true,
             amounts: BTreeMap::new(),
+            flex: false,
         }
     }
 
@@ -203,6 +230,9 @@ pub fn is_gha_pool(name: &str) -> bool {
 pub struct Plan {
     /// In the order they were granted.
     pub grants: Vec<u64>,
+    /// For each flexible request granted, what it was actually given (its `amounts`, with the
+    /// runner pools cut to what was free). Other grants get exactly what they asked for.
+    pub flexed: BTreeMap<u64, BTreeMap<String, u32>>,
     pub waits: BTreeMap<u64, Wait>,
 }
 
@@ -472,6 +502,40 @@ enum Fit {
     Full(WaitCause),
 }
 
+/// What a request is granted if it fits now: itself, or for a flexible one its runner pool
+/// amounts cut to the fewest units free in any of its pools once earlier waiters' reservations
+/// are set aside (never below 1, never above what it asked).
+fn flexed(
+    capacity: &BTreeMap<String, Capacity>,
+    usage: &Usage,
+    blocked: &Blocked,
+    n: &Needs,
+) -> Needs {
+    let mut out = n.clone();
+    if !n.flex {
+        return out;
+    }
+    let free = n
+        .amounts
+        .iter()
+        .filter(|(r, _)| is_gha_pool(r))
+        .map(|(r, a)| {
+            let units = capacity.get(r).map_or(0, |c| c.units);
+            let held = usage.used.get(r).copied().unwrap_or(0)
+                + blocked.reserved.get(r).copied().unwrap_or(0);
+            units.saturating_sub(held).min(*a)
+        })
+        .min()
+        .unwrap_or(1)
+        .max(1);
+    for (r, a) in out.amounts.iter_mut() {
+        if is_gha_pool(r) {
+            *a = (*a).min(free);
+        }
+    }
+    out
+}
+
 fn fit(capacity: &BTreeMap<String, Capacity>, usage: &Usage, n: &Needs) -> Fit {
     for (r, a) in &n.amounts {
         match capacity.get(r) {
@@ -531,19 +595,21 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
     let mut last_compile_start = world.compile_pace.and_then(|p| p.last_start);
 
     for r in order {
-        let compiles = r.needs.amounts.contains_key(COMPILE);
+        // A flexible request is taken at what is free for it now (at least its one unit).
+        let needs = flexed(capacity, &usage, &blocked, &r.needs);
+        let compiles = needs.amounts.contains_key(COMPILE);
         let touch = blocked.touches(
             capacity,
             &usage,
-            &r.needs,
+            &needs,
             world.now,
             r.expected_ms,
             r.drains_compile,
         );
-        let fitted = fit(capacity, &usage, &r.needs);
+        let fitted = fit(capacity, &usage, &needs);
         let low_memory = match (world.free_memory_mb, world.memory_floor_mb) {
             // A remote run uses none of this machine, so memory here does not hold it (#700).
-            (Some(free), Some(floor)) if usage.any && free < floor && !only_gha_pools(&r.needs) => {
+            (Some(free), Some(floor)) if usage.any && free < floor && !only_gha_pools(&needs) => {
                 Some((free, floor))
             }
             _ => None,
@@ -588,7 +654,7 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
                 if g.min_pct > 0
                     && g.speed_pct < g.min_pct
                     && usage.machine_any
-                    && uses_machine(capacity, &r.needs) =>
+                    && uses_machine(capacity, &needs) =>
             {
                 Some(g)
             }
@@ -604,7 +670,7 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
         let low_disk = match world.disk {
             Some(g)
                 if g.free_mb < g.floor_mb
-                    && r.needs
+                    && needs
                         .amounts
                         .keys()
                         .any(|n| n == COMPILE || kind_of(capacity, n) == Some(Kind::Llm)) =>
@@ -666,10 +732,13 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
         };
         match cause {
             None => {
-                usage.add(capacity, &r.needs);
+                usage.add(capacity, &needs);
+                if r.needs.flex {
+                    out.flexed.insert(r.id, needs.amounts.clone());
+                }
                 holders.push(Holder {
                     id: r.id,
-                    needs: r.needs.clone(),
+                    needs: needs.clone(),
                     label: r.label.clone(),
                     since: world.now,
                     expected_ms: r.expected_ms,
@@ -731,7 +800,7 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
                     blocked.add(
                         capacity,
                         &usage,
-                        &r.needs,
+                        &r.needs.least(),
                         &holders,
                         world.now,
                         thaw,

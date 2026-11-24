@@ -412,8 +412,8 @@ the local one. This is phase 3.
     must get the toggle.
 - **Alerts:** "node studio went away", and "node studio incompatible". Use the existing alert
   plumbing, and `say` only, following the owner's notification choice. *Built:* `nodes::alerts`.
-  *Not hooked up:* the alert table is `attention::alerts_now`, a protected path that §8 does not
-  list, so the one line that adds `nodes::alerts(d)` there waits for the owner's approval.
+  *Hooked up* 2026-11-24 with the owner's approval: `attention::alerts_now` (a protected path §8
+  does not list) calls `nodes::alerts(d)` beside `ssh_keys::alerts(d)`, one line.
 
 ### 3.12 Security of the work machine
 

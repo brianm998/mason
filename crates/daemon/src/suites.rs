@@ -400,6 +400,167 @@ fn estimate(who: &Who, suite: &str, phase: &str) -> Option<u64> {
 
 type Check = Arc<dyn Fn() -> Stop + Send + Sync>;
 
+/// The key a run is reused under: the tree it runs on and its command (the shape
+/// `hostedcheck` files its evidence under). Empty where git cannot be asked at all (a directory
+/// that is no worktree), which compares equal to itself and so changes nothing there; in a
+/// worktree whose state git cannot read, the key is one no other run shares.
+fn run_key_for(cwd: &Path, cmd: &str) -> String {
+    if git::run(cwd, &["rev-parse", "--git-dir"]).is_err() {
+        return String::new();
+    }
+    crate::hostedcheck::key_of(&crate::hostedcheck::tree_key(cwd), cmd)
+}
+
+/// The file in a host's directory that says which key it was started for.
+fn host_key_file(dir: &Path) -> PathBuf {
+    dir.join("run.key")
+}
+
+/// Is there a host in `dir` that was not started for `key`? One with no key file was started
+/// before the key was written, and counts as another.
+fn host_is_stale(dir: &Path, key: &str) -> bool {
+    !key.is_empty()
+        && dir.join("host.kv").exists()
+        && std::fs::read_to_string(host_key_file(dir)).ok().as_deref() != Some(key)
+}
+
+/// Stop the host `id` (and its second try) and take its directory away, with the log it wrote
+/// under `log_dir`: a run for another tree is not attached to.
+fn discard_host(hosts: &Path, id: &str, log_dir: &Path) {
+    for on in [id.to_string(), mason_hostloss_id(id)] {
+        let dir = hosts.join(&on);
+        if !dir.exists() {
+            continue;
+        }
+        if let Ok(mut h) = HostClient::connect(&dir.join("sock"), PREVIOUS, CURRENT, "daemon") {
+            let _ = h.stop(1000);
+        }
+        let _ = mason_step_host::registry::reap_dir_by(&dir, "daemon");
+        let _ = std::fs::remove_dir_all(&dir);
+        for ext in ["log", "exit"] {
+            let _ = std::fs::remove_file(log_dir.join(format!("{on}.{ext}")));
+        }
+    }
+}
+
+fn mason_hostloss_id(id: &str) -> String {
+    crate::hostloss::rerun_id(id)
+}
+
+/// Every attempt a step run started for one suite and rung: `<id>\t<key>` per line, written
+/// before the run starts, so a recovered step finds each run it started (#1074).
+fn attempts_file(who: &Who, tag: &str, suite: &str) -> PathBuf {
+    who.log_dir
+        .join(format!("{}-{tag}-{suite}.attempts", who.id_prefix))
+}
+
+fn read_attempts(path: &Path) -> Vec<(String, String)> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| {
+            let (id, key) = l.split_once('\t').unwrap_or((l, ""));
+            (!id.is_empty()).then(|| (id.to_string(), key.to_string()))
+        })
+        .collect()
+}
+
+fn write_attempts(path: &Path, list: &[(String, String)]) {
+    if let Some(p) = path.parent() {
+        let _ = std::fs::create_dir_all(p);
+    }
+    let text: String = list.iter().map(|(i, k)| format!("{i}\t{k}\n")).collect();
+    let _ = std::fs::write(path, text);
+}
+
+/// What a recovered step finds of the runs its earlier job started.
+struct Recovered {
+    /// The latest attempt for the current key, to attach to.
+    attach: Option<String>,
+    /// There were attempts on record, so the plain first id may be a stale one.
+    had_any: bool,
+}
+
+/// What recovery decided about the attempts on record for `key`: the one to attach to (the
+/// latest for this key), the ones to cancel (another key, or replaced by a newer attempt),
+/// and whether any of those was for another key.
+#[derive(Debug, PartialEq, Eq)]
+struct Plan {
+    attach: Option<String>,
+    cancel: Vec<String>,
+    tree_changed: bool,
+}
+
+fn plan_recovery(all: &[(String, String)], key: &str) -> Plan {
+    let latest = all.iter().rposition(|(_, k)| k == key);
+    let mut plan = Plan {
+        attach: latest.map(|i| all[i].0.clone()),
+        cancel: vec![],
+        tree_changed: false,
+    };
+    for (i, (id, k)) in all.iter().enumerate() {
+        if Some(i) == latest {
+            continue;
+        }
+        plan.tree_changed |= k != key;
+        plan.cancel.push(id.clone());
+    }
+    plan
+}
+
+/// A step that starts its job again after a restart: read the attempts on record, cancel every
+/// run that is for another key or was replaced by a newer attempt (giving its runner unit
+/// back), and name the one to attach to. The record keeps only that one.
+fn recover_attempts(who: &Who, tag: &str, suite: &str, key: &str) -> Recovered {
+    let path = attempts_file(who, tag, suite);
+    let all = read_attempts(&path);
+    if all.is_empty() {
+        return Recovered {
+            attach: None,
+            had_any: false,
+        };
+    }
+    let plan = plan_recovery(&all, key);
+    for id in &plan.cancel {
+        tracing::info!(%id, new = %key, "not reusing an earlier run: another tree, command or a newer attempt");
+        crate::remote::cancel_record(&who.d, &who.log_dir.join(format!("{id}.remote")));
+        discard_host(&who.d.cfg.hosts_dir(), id, &who.log_dir);
+    }
+    let keep: Vec<(String, String)> = all
+        .iter()
+        .filter(|(i, _)| plan.attach.as_ref() == Some(i))
+        .cloned()
+        .collect();
+    write_attempts(&path, &keep);
+    if let Some(run) = who.run() {
+        let text = if plan.attach.is_some() {
+            Some(format!("reattached to {suite} (same tree)"))
+        } else if plan.tree_changed {
+            Some(format!("{suite} started again: the tree changed"))
+        } else {
+            None
+        };
+        if let Some(t) = text {
+            who.d.progress_report(run, |p, now| p.set_message(&t, now));
+        }
+    }
+    Recovered {
+        attach: plan.attach,
+        had_any: true,
+    }
+}
+
+/// Record attempt `id` for `key` before it starts.
+fn note_attempt(who: &Who, tag: &str, suite: &str, id: &str, key: &str) {
+    let path = attempts_file(who, tag, suite);
+    let mut all = read_attempts(&path);
+    if all.iter().any(|(i, _)| i == id) {
+        return;
+    }
+    all.push((id.to_string(), key.to_string()));
+    write_attempts(&path, &all);
+}
+
 /// Run a suite command under a step host. If the host is lost before the command
 /// finished, run it once more on a fresh host (`<id>-host1`) and judge that run; a
 /// second loss in a row is an error naming both. A lost host is never a result.
@@ -454,19 +615,50 @@ fn run_hosted_resuming(
     // as its own step here has none when it goes remote: the build comes first in the command.
     // Held until this function returns, so for the whole local run.
     let mut fallback: Option<crate::sched::Lease> = None;
-    // An `Executor::Node` is not produced yet: `run_on_node` joins `run_remote` here in phase 2
-    // of the multi-machine plan, returning the same `Ran`.
-    if let crate::remote::Executor::GitHub { runs_on } =
-        crate::remote::executor_for(d, project, crate::remote::Kind::Suite, place)
-    {
+    // A node returns the same `Ran` GitHub does (`run_on_node`, the multi-machine plan).
+    let exec = crate::remote::executor_for(d, project, crate::remote::Kind::Suite, place);
+    if exec.is_off_machine() {
         let build = place.and_then(|(_, s)| s.build.as_deref());
-        if let Some(ran) = run_remote(
-            d, project, id, build, cmd, cwd, limit, log_dir, &check, run, watch, &env, &runs_on,
-            covered,
-        )? {
+        let ran = match &exec {
+            crate::remote::Executor::GitHub { runs_on } => run_remote(
+                d,
+                project,
+                id,
+                build,
+                cmd,
+                cwd,
+                limit,
+                log_dir,
+                &check,
+                run,
+                watch,
+                &env,
+                runs_on,
+                covered,
+                cover.runners,
+            )?,
+            crate::remote::Executor::Node { nid, .. } => run_on_node(
+                d, project, id, build, cmd, cwd, limit, log_dir, &check, run, watch, &env, nid,
+            )?,
+            crate::remote::Executor::Local => None,
+        };
+        if let Some(ran) = ran {
             return Ok(ran);
         }
-        // `fallback = "local"` sent it here. Its step holds runner pool units, not this
+        // GitHub gave a run back that waited too long for a runner (`favor-remote`): a node with
+        // room takes it before this machine does.
+        if matches!(exec, crate::remote::Executor::GitHub { .. }) {
+            if let Some(room) = crate::nodes::best_room(d, project, place.map(|(_, s)| s)) {
+                let build = place.and_then(|(_, s)| s.build.as_deref());
+                if let Some(ran) = run_on_node(
+                    d, project, id, build, cmd, cwd, limit, log_dir, &check, run, watch, &env,
+                    &room.nid,
+                )? {
+                    return Ok(ran);
+                }
+            }
+        }
+        // `fallback = "local"` (or no node with room) sent it here. Its step holds runner pool units, not this
         // machine's slots (#761), so it takes what the definition's test step `uses` before it
         // starts, under the same limits and CPU and thermal holds as a local test step.
         if !d.cfg.hosts_dir().join(id).join("host.kv").exists() {
@@ -504,6 +696,7 @@ fn run_hosted_resuming(
         }
     }
     let _fallback = fallback;
+    let key = run_key_for(cwd, cmd);
     let hosts = d.cfg.hosts_dir();
     let again_id = hl::rerun_id(id);
     let mut first = None;
@@ -543,6 +736,7 @@ fn run_hosted_resuming(
             watch,
             th,
             env.clone(),
+            &key,
         ) {
             Ok(mut r) => {
                 if let Some(p) = plan.take() {
@@ -603,6 +797,7 @@ fn run_remote(
     env: &[(String, String)],
     runs_on: &str,
     covered: bool,
+    runners: Option<u32>,
 ) -> Result<Option<Ran>, String> {
     use crate::remote as rm;
     let task = run.and_then(|r| d.world().ok().and_then(|w| w.task_of_open_run(r)));
@@ -620,14 +815,17 @@ fn run_remote(
         ),
         &site,
     );
+    spec.tree_key = run_key_for(cwd, cmd);
     // The whole command of a suite that has shards is split across runners (#701); a narrowed
     // run, a run without the known-red tests and the like are not the whole suite and run on one.
     let sharded = watch.and_then(|s| Some((s, rm::shard_command(s, cmd)?)));
     if let Some((s, sc)) = sharded {
-        spec.shards = s.shards;
-        spec.shard_command = Some(sc.to_string());
-        spec.shard_lists = shard_lists(d, project, s);
-        spec.partial_lists = lists_partial(s);
+        // The broker may have granted fewer runner units than the suite has shards (a flexible
+        // request, first in line for what was free): the run then splits that many ways, and a
+        // single unit runs the whole command on one runner.
+        spec = rm::split_for_grant(spec, s.shards, sc, runners, lists_partial(s), |n| {
+            shard_lists(d, project, s, n)
+        });
     }
     let stop = || match check() {
         Stop::No => None,
@@ -682,6 +880,82 @@ fn run_remote(
     )
 }
 
+/// A suite command run on a node: the same `Ran` a step host or a GitHub run gives, so the code
+/// that judges a run never knows where it was. `Ok(None)`: no node had room (or the one chosen
+/// went away), and the caller runs it here with the slots a local run holds. The suite's build
+/// comes first in the job, as its own process.
+#[allow(clippy::too_many_arguments)]
+fn run_on_node(
+    d: &Arc<Daemon>,
+    project: &str,
+    id: &str,
+    build: Option<&str>,
+    cmd: &str,
+    cwd: &Path,
+    limit: Duration,
+    log_dir: &Path,
+    check: &Check,
+    run: Option<StepRunId>,
+    watch: Option<&Suite>,
+    env: &[(String, String)],
+    nid: &str,
+) -> Result<Option<Ran>, String> {
+    use crate::remote as rm;
+    let Some(base_ref) = rm::base_ref_of(d, project) else {
+        return Ok(None);
+    };
+    let spec = rm::with_build(
+        rm::spec_for(project, id, watch, cmd, limit, env, "node", ""),
+        build,
+    );
+    let stop = || match check() {
+        Stop::No => None,
+        Stop::Skipped => Some(rm::StopWhy::Skipped),
+        Stop::Gone => Some(rm::StopWhy::Gone),
+    };
+    // Live counts, for progress only: the verdict is the full parse at the end.
+    let name = watch.map(|w| w.name.clone()).unwrap_or_default();
+    let mut live = watch.and_then(|w| LiveCount::new(w.parser, w));
+    let mut on_output = |_: u64, b: &[u8]| {
+        if let (Some(run), Some(l)) = (run, live.as_mut()) {
+            l.feed(b);
+            suite_counts(d, run, &name, l);
+        }
+    };
+    match crate::node_exec::execute(
+        d,
+        Some(nid),
+        &spec,
+        cwd,
+        &base_ref,
+        log_dir,
+        &stop,
+        &mut on_output,
+    ) {
+        Ok(rm::Outcome::Done(f)) => Ok(Some(remote_ran(f, watch))),
+        Ok(rm::Outcome::Stopped(why)) => Ok(Some(Ran {
+            code: -1,
+            signal: 9,
+            output: String::new(),
+            stop: match why {
+                rm::StopWhy::Skipped => Stop::Skipped,
+                rm::StopWhy::Gone => Stop::Gone,
+            },
+            timed_out: false,
+            stalled: None,
+            ran_ms: None,
+            narrowed: false,
+            resumed: None,
+            ran_on: None,
+        })),
+        Err(rm::Fail::Environmental(why)) => {
+            tracing::warn!(run = %id, "{why}; running it here instead");
+            Ok(None)
+        }
+        Err(rm::Fail::Error(e)) => Err(e),
+    }
+}
+
 /// Do the shard lists name more than this run's own tests (#873)? A narrowed run takes its
 /// share of the whole suite's lists, and a shard command that is not `scripts/test-shard.py`
 /// (the exit scripts pick their share on the runner) does not read them at all. A shard that ran
@@ -701,14 +975,19 @@ pub(crate) fn lists_partial(s: &Suite) -> bool {
 
 /// Which tests go to which shard, from the times and names this daemon has recorded for the
 /// suite (#701). Nothing recorded gives empty lists: every test then runs on its hash shard.
-pub(crate) fn shard_lists(d: &Arc<Daemon>, project: &str, suite: &Suite) -> Vec<Vec<String>> {
+pub(crate) fn shard_lists(
+    d: &Arc<Daemon>,
+    project: &str,
+    suite: &Suite,
+    shards: u32,
+) -> Vec<Vec<String>> {
     let weights = d
         .store
         .test_medians(project, &suite.name)
         .unwrap_or_default();
     let mut names: std::collections::BTreeSet<String> = weights.keys().cloned().collect();
     names.extend(d.store.passing_names(&suite.name).unwrap_or_default());
-    crate::shards::assign(&names, &weights, suite.shards)
+    crate::shards::assign(&names, &weights, shards)
 }
 
 /// `suite`'s `dev_shard_command` filled in with the pick `n`, when one runner's share of it can be
@@ -771,9 +1050,16 @@ fn run_hosted_once(
     watch: Option<&Suite>,
     th: Thresholds,
     env: Vec<(String, String)>,
+    key: &str,
 ) -> Result<Ran, HostedErr> {
     let hosts = d.cfg.hosts_dir();
     let dir = hosts.join(id);
+    // A host started for another tree or command is stopped, not attached to (#1074). One with
+    // no key file was started before the key was written: it counts as another.
+    if host_is_stale(&dir, key) {
+        tracing::info!(%id, "not attaching to the host: it was started for another tree or command");
+        discard_host(&hosts, id, log_dir);
+    }
     if !dir.join("host.kv").exists() {
         let o = SpawnOptions {
             host_bin: d.cfg.host_bin.clone(),
@@ -788,6 +1074,9 @@ fn run_hosted_once(
             heartbeat: d.cfg.heartbeat,
         };
         spawn_host(&o).map_err(|e| HostedErr::Other(format!("cannot start `{cmd}`: {e}")))?;
+        if !key.is_empty() {
+            let _ = std::fs::write(host_key_file(&dir), key);
+        }
     }
     let done = Arc::new(AtomicBool::new(false));
     let why = Arc::new(AtomicU8::new(0)); // 0 none, 1 timed out, 2 skipped, 3 gone
@@ -1098,6 +1387,9 @@ pub struct Cover {
     /// A landing batch's own run that its lease does not hold: the batch, and what the suite
     /// needs here. Such a run takes its slots, as the batch, when it comes to run here.
     batch: Option<(Arc<crate::remote::BatchOwner>, Needs)>,
+    /// The runner units the run's own flexible lease was given: it splits into that many shards
+    /// (see [`crate::remote::shards_granted`]). `None`: no flexible lease, all its shards.
+    runners: Option<u32>,
 }
 
 /// What a landing batch holds, for the suites it runs: the batch (to rank what its runs take
@@ -1129,6 +1421,7 @@ impl BatchCover {
         Cover {
             covered,
             batch: self.owner.clone().map(|o| (o, needs)),
+            runners: None,
         }
     }
 }
@@ -1984,6 +2277,7 @@ fn run_suite(
         .and_then(|t| crate::knownred::skip_command(t, &quarantined));
     let limit = suite.timeout.unwrap_or(Duration::from_secs(1800));
     let mut attempt = 0u32;
+    let mut recovered: Option<Recovered> = None;
     let mut remote_env_fails = 0u32;
     let mut waiting = false;
     loop {
@@ -2057,11 +2351,25 @@ fn run_suite(
             std::thread::sleep(d.cfg.env_retry);
             continue;
         }
-        let id = if attempt == 0 {
-            format!("{}-u-{}", who.id_prefix, suite.name)
-        } else {
-            format!("{}-u{}-{}", who.id_prefix, now_ms(), suite.name)
+        let run_cmd = crate::jobs::pty_wrap(
+            suite.pty,
+            &lifecycle::with_device(
+                skipped_cmd.as_deref().unwrap_or(&suite.command),
+                dev_id(dev.as_ref()),
+            ),
+        );
+        let key = run_key_for(cwd, &run_cmd);
+        // The first time round after a restart: find what the earlier job started (#1074).
+        let recovered =
+            recovered.get_or_insert_with(|| recover_attempts(who, "u", &suite.name, &key));
+        let id = match recovered.attach.take() {
+            Some(id) => id,
+            None if attempt == 0 && !recovered.had_any => {
+                format!("{}-u-{}", who.id_prefix, suite.name)
+            }
+            None => format!("{}-u{}-{}", who.id_prefix, now_ms(), suite.name),
         };
+        note_attempt(who, "u", &suite.name, &id, &key);
         // A whole-suite run with no skips can go on after a lost host from what finished (#621).
         let resume = if skipped_cmd.is_none() && suite.results_file.is_none() && !suite.pty {
             crate::resume::template(suite)
@@ -2072,13 +2380,7 @@ fn run_suite(
             d,
             &who.project,
             &id,
-            &crate::jobs::pty_wrap(
-                suite.pty,
-                &lifecycle::with_device(
-                    skipped_cmd.as_deref().unwrap_or(&suite.command),
-                    dev_id(dev.as_ref()),
-                ),
-            ),
+            &run_cmd,
             cwd,
             limit,
             &who.log_dir,
@@ -2615,11 +2917,37 @@ fn rerun_failing(
     attempt: u32,
     dev: Option<&Dev>,
 ) -> Option<Vec<String>> {
-    let id = if attempt == 0 {
-        format!("{}-r-{}", who.id_prefix, suite.name)
-    } else {
-        format!("{}-r{}-{}", who.id_prefix, now_ms(), suite.name)
+    let cmd = crate::jobs::pty_wrap(
+        suite.pty,
+        &lifecycle::with_device(&rerun_command(suite, failures, false), dev_id(dev)),
+    );
+    let key = run_key_for(cwd, &cmd);
+    // Only the first rung of this suite in this process looks for what an earlier process
+    // started; a later one (after a retry) is a new run.
+    static LOOKED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    let first_here = {
+        let mut l = LOOKED.lock().unwrap_or_else(|e| e.into_inner());
+        let me = format!("{}-{}", who.id_prefix, suite.name);
+        let fresh = !l.contains(&me);
+        if fresh {
+            l.push(me);
+        }
+        fresh
     };
+    let rec = if first_here {
+        recover_attempts(who, "r", &suite.name, &key)
+    } else {
+        Recovered {
+            attach: None,
+            had_any: false,
+        }
+    };
+    let id = match rec.attach {
+        Some(id) => id,
+        None if attempt == 0 && !rec.had_any => format!("{}-r-{}", who.id_prefix, suite.name),
+        None => format!("{}-r{}-{}", who.id_prefix, now_ms(), suite.name),
+    };
+    note_attempt(who, "r", &suite.name, &id, &key);
     run_tests_alone(who, suite, cwd, failures, &id, false, dev)
 }
 
@@ -3237,6 +3565,7 @@ fn run_side_by_side(
                             }
                         }
                     };
+                    who.cover.runners = lease.as_ref().and_then(|l| l.granted_runners());
                     let ran = run_suite(
                         &who,
                         &c.project.path,
@@ -3666,6 +3995,12 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
                 }
             }
         }
+        who.cover.runners = c
+            .lease
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .and_then(|l| l.granted_runners());
         let ran = match ran_beside {
             Some(r) => r,
             None if reused_whole.is_some() => SuiteRun::Done {
@@ -4477,7 +4812,7 @@ fn hold_for_debt(
     let mut _waiting = None;
     // The units are those of the jobs the debt's suite starts (#818).
     let pooled = match suite {
-        Some(s) => crate::remote::suite_pool_needs(d, project, Some(task), &needs, s),
+        Some(s) => crate::remote::suite_pool_needs(d, project, Some(task), &needs, s, false),
         None => crate::remote::pool_needs(d, project, &needs, Some(task)),
     };
     let needs = match pooled {
@@ -6854,5 +7189,130 @@ mod merged_branch_tests {
             Some(work)
         );
         assert_eq!(merged_branch_commit(d, "mason/mason/t96", "main"), None);
+    }
+}
+
+#[cfg(test)]
+mod attempts_tests {
+    use super::{
+        discard_host, host_is_stale, host_key_file, plan_recovery, read_attempts, run_key_for,
+        write_attempts, Plan,
+    };
+
+    fn at(list: &[(&str, &str)]) -> Vec<(String, String)> {
+        list.iter()
+            .map(|(i, k)| (i.to_string(), k.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn a_retry_in_flight_for_this_tree_is_attached_and_the_replaced_attempt_is_cancelled() {
+        // Attempt 1 (the plain id) was replaced by an environmental retry, which was out when
+        // the daemon went: the retry is the one to attach to, the first is cancelled.
+        let all = at(&[("t1r1-u-unit", "A"), ("t1r1-u99-unit", "A")]);
+        assert_eq!(
+            plan_recovery(&all, "A"),
+            Plan {
+                attach: Some("t1r1-u99-unit".into()),
+                cancel: vec!["t1r1-u-unit".into()],
+                tree_changed: false,
+            }
+        );
+    }
+
+    #[test]
+    fn a_local_host_for_another_tree_or_command_is_not_attached_to() {
+        let t = tempfile::tempdir().unwrap();
+        let (hosts, logs) = (t.path().join("hosts"), t.path().join("logs"));
+        std::fs::create_dir_all(&logs).unwrap();
+        let dir = hosts.join("t1r1-u-unit");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("host.kv"), "x=1\n").unwrap();
+        std::fs::write(logs.join("t1r1-u-unit.log"), "old").unwrap();
+        // No key file: started before keys were kept, so it counts as another tree.
+        assert!(host_is_stale(&dir, "A"));
+        std::fs::write(host_key_file(&dir), "A").unwrap();
+        assert!(
+            !host_is_stale(&dir, "A"),
+            "the same tree and command attach"
+        );
+        assert!(host_is_stale(&dir, "B"), "another tree does not");
+        // Where git cannot be asked at all the key is empty and nothing is compared.
+        assert!(!host_is_stale(&dir, ""));
+        discard_host(&hosts, "t1r1-u-unit", &logs);
+        assert!(
+            !dir.exists(),
+            "its directory is gone, so a fresh host starts"
+        );
+        assert!(!logs.join("t1r1-u-unit.log").exists());
+    }
+
+    #[test]
+    fn a_run_for_another_tree_is_cancelled_and_nothing_is_attached() {
+        let all = at(&[("t1r1-u-unit", "A")]);
+        assert_eq!(
+            plan_recovery(&all, "B"),
+            Plan {
+                attach: None,
+                cancel: vec!["t1r1-u-unit".into()],
+                tree_changed: true,
+            }
+        );
+        // Same tree, nothing replaced: attached, nothing cancelled.
+        assert_eq!(
+            plan_recovery(&all, "A"),
+            Plan {
+                attach: Some("t1r1-u-unit".into()),
+                cancel: vec![],
+                tree_changed: false,
+            }
+        );
+        // A run that has no key on record (an empty one) never matches a real key.
+        assert_eq!(plan_recovery(&at(&[("x", "")]), "A").attach, None);
+        // An older attempt for the tree and a later one for another: the older one is still
+        // the one for this tree, and the later is cancelled.
+        let mixed = at(&[("a1", "A"), ("b1", "B")]);
+        let p = plan_recovery(&mixed, "A");
+        assert_eq!(
+            (p.attach.as_deref(), p.cancel),
+            (Some("a1"), vec!["b1".to_string()])
+        );
+    }
+
+    #[test]
+    fn attempts_on_record_come_back_in_order_with_their_keys() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("t1r1-u-unit.attempts");
+        assert!(read_attempts(&f).is_empty());
+        let list = vec![
+            ("t1r1-u-unit".to_string(), "k1".to_string()),
+            ("t1r1-u99-unit".to_string(), "k2".to_string()),
+        ];
+        write_attempts(&f, &list);
+        assert_eq!(read_attempts(&f), list);
+    }
+
+    #[test]
+    fn a_directory_that_is_no_worktree_has_no_key_and_a_changed_command_changes_one() {
+        let d = tempfile::tempdir().unwrap();
+        assert_eq!(run_key_for(d.path(), "cargo test"), "");
+        let g = |args: &[&str]| {
+            let o = std::process::Command::new("git")
+                .current_dir(d.path())
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(o.status.success(), "{o:?}");
+        };
+        g(&["init", "-q"]);
+        std::fs::write(d.path().join("a"), "1").unwrap();
+        g(&["add", "a"]);
+        g(&["commit", "-q", "-m", "x"]);
+        let a = run_key_for(d.path(), "cargo test");
+        assert_eq!(a, run_key_for(d.path(), "cargo test"));
+        assert_ne!(a, run_key_for(d.path(), "cargo test -p x"));
+        std::fs::write(d.path().join("a"), "2").unwrap();
+        assert_ne!(a, run_key_for(d.path(), "cargo test"));
     }
 }

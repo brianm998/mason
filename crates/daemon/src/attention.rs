@@ -890,6 +890,7 @@ pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
     }
     out.extend(fetch_alerts(d));
     out.extend(crate::ssh_keys::alerts(d));
+    out.extend(crate::nodes::alerts(d));
     out.extend(git_stuck_alert(d));
     out.extend(stalled_alert(d, &w));
     for p in d.store.pauses(now_ms()).unwrap_or_default() {
