@@ -2606,17 +2606,51 @@ pub fn run_place(
 /// `needs` of a run of `suite` placed by [`run_place`]: on GitHub the machine's `compile`,
 /// `test-suite` and `test-small` (and the whole machine) become the run's runner units; here
 /// nothing changes (`None`), whatever the global switch says (#766's lesson: decide per suite).
+///
+/// `flexible`: a sharded run asks for 1 to N runner units and is granted what is free (at least
+/// 1), then splits into that many shards ([`shards_granted`]) instead of waiting for all N.
 pub fn suite_pool_needs(
     d: &Daemon,
     project: &str,
     task: Option<mason_core::TaskId>,
     needs: &mason_scheduler::Needs,
     suite: &mason_testing::Suite,
+    flexible: bool,
 ) -> Option<mason_scheduler::Needs> {
     match run_place(d, project, task, Some(suite), &suite.command, Kind::Suite) {
-        RunPlace::GitHub { units, .. } => Some(with_units(needs, units)),
+        RunPlace::GitHub { units, .. } => {
+            let n = with_units(needs, units);
+            Some(if flexible { n.flexible() } else { n })
+        }
         RunPlace::Local => None,
     }
+}
+
+/// How many shards a run of `shards` makes when the broker granted it `granted` runner units
+/// (`None`: not a flexible grant, so all of them). Never more than asked, never fewer than one.
+pub fn shards_granted(shards: u32, granted: Option<u32>) -> u32 {
+    granted.map_or(shards, |g| g.clamp(1, shards.max(1)))
+}
+
+/// `rs` split for a run of `shards` shards that was granted `granted` runner units: that many
+/// ways (`lists` makes the tests of each), with `shard_command` on each runner; one unit runs
+/// `rs`'s own command whole on one runner. Suite runs and agents' checks both split by this.
+pub fn split_for_grant(
+    mut rs: RunSpec,
+    shards: u32,
+    shard_command: &str,
+    granted: Option<u32>,
+    partial_lists: bool,
+    lists: impl FnOnce(u32) -> Vec<Vec<String>>,
+) -> RunSpec {
+    let n = shards_granted(shards, granted);
+    if n > 1 {
+        rs.shards = n;
+        rs.shard_command = Some(shard_command.to_string());
+        rs.shard_lists = lists(n);
+        rs.partial_lists = partial_lists;
+    }
+    rs
 }
 
 /// `needs` without the machine's slots, plus `units`.
@@ -2633,6 +2667,7 @@ pub fn with_units(
             .filter(|(k, _)| !MACHINE.contains(&k.as_str()))
             .map(|(k, v)| (k.clone(), *v))
             .collect(),
+        flex: false,
     };
     for (k, v) in units {
         let have = out.amounts.entry(k).or_insert(0);
@@ -2683,6 +2718,14 @@ impl Grant {
             .as_ref()
             .map(|l| l.units())
             .unwrap_or_default()
+    }
+    /// How many runner units the lease was given when it asked for 1 to N, if it was flexible.
+    pub fn granted_runners(&self) -> Option<u32> {
+        self.lease
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .and_then(|l| l.granted_runners())
     }
     /// Give the units back: the run is not going to GitHub after all (`fallback = "local"`).
     /// Returns whether it held any.
@@ -5989,6 +6032,46 @@ mod tests {
             phase_text(&queued, 0, now, t0),
             "on GitHub: waiting for a runner, 4 min"
         );
+    }
+
+    #[test]
+    fn a_check_granted_fewer_units_than_its_shards_splits_that_many_ways_and_holds_them() {
+        let spec = |id: &str| {
+            spec_for(
+                "p",
+                id,
+                None,
+                "cargo test",
+                Duration::from_secs(60),
+                &[],
+                "ubuntu-latest",
+                "",
+            )
+        };
+        let lists = |n: u32| vec![vec![]; n as usize];
+        let dir = tempfile::tempdir().unwrap();
+        let hosts = dir.path().join("hosts");
+        let logs = dir.path().join("logs");
+        let hold_units = |id: &str| {
+            let kv = read_kv(&hold_file(&holds_dir(&hosts), id)).unwrap();
+            kv.get("units").cloned().unwrap_or_default()
+        };
+        // Granted 3 of 8: three shards, three lists, and the hold records 3 units.
+        let rs = split_for_grant(spec("c1"), 8, "shard-cmd", Some(3), false, lists);
+        assert_eq!((rs.shards, rs.shard_lists.len()), (3, 3));
+        assert_eq!(rs.shard_command.as_deref(), Some("shard-cmd"));
+        let guard = HoldGuard::new(&hosts, &rs, "c1", "c1", rs.shards.max(1), &logs, "check", 1);
+        assert_eq!(hold_units("c1"), "gha=3");
+        drop(guard);
+        // Granted 1: the whole command on one runner, one unit.
+        let rs = split_for_grant(spec("c2"), 8, "shard-cmd", Some(1), false, lists);
+        assert_eq!(rs.shards, 0);
+        assert!(rs.shard_command.is_none() && rs.shard_lists.is_empty());
+        let _guard = HoldGuard::new(&hosts, &rs, "c2", "c2", rs.shards.max(1), &logs, "check", 1);
+        assert_eq!(hold_units("c2"), "gha=1");
+        // Not a flexible lease: all eight.
+        let rs = split_for_grant(spec("c3"), 8, "shard-cmd", None, false, lists);
+        assert_eq!(rs.shards, 8);
     }
 
     #[test]
