@@ -4192,6 +4192,21 @@ async fn debug_wait_repo(Shared(d): Shared<Arc<Daemon>>) -> Res {
 pub fn api_router(d: Arc<Daemon>) -> Router {
     Router::new()
         .route("/status", get(status))
+        .route("/node/status", get(crate::node_serve::local_status))
+        .route("/node/pair-code", post(crate::node_serve::issue_code))
+        .route("/node/accept", post(crate::node_serve::accept))
+        .route("/node/coordinators", get(crate::node_serve::coordinators))
+        .route(
+            "/node/coordinators/remove",
+            post(crate::node_serve::coordinator_remove),
+        )
+        .route("/node/stop-jobs", post(crate::node_serve::stop_jobs))
+        .route("/node/jobs", get(crate::node_serve::jobs))
+        .route("/node/doctor", post(crate::node_serve::doctor))
+        .route("/nodes", get(crate::nodes::list))
+        .route("/nodes/add", post(crate::nodes::add))
+        .route("/nodes/remove", post(crate::nodes::remove))
+        .route("/nodes/use", post(crate::nodes::use_nodes))
         .route("/lan", get(crate::lan::status))
         .route("/pair/codes", post(crate::lan::issue_code))
         .route("/devices", get(crate::lan::devices))
@@ -4502,8 +4517,18 @@ pub async fn serve_until(
     } else {
         None
     };
+    let node_port = if d.cfg.node.serve {
+        Some(crate::node_serve::start(d.clone()).await?)
+    } else {
+        None
+    };
+    crate::nodes::start(&d);
     let tmp = info.with_extension("tmp");
     let mut announce = json!({"pid": std::process::id(), "port": port, "started_ms": now_ms()});
+    if let (Some(p), Some(i)) = (node_port, d.node.info()) {
+        announce["node_port"] = json!(p);
+        announce["node_fingerprint"] = json!(i.fingerprint);
+    }
     if let (Some(p), Some(i)) = (lan_port, d.lan.info()) {
         announce["lan_port"] = json!(p);
         announce["lan_fingerprint"] = json!(i.fingerprint);
