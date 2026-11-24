@@ -130,6 +130,10 @@ pub struct Daemon {
     pub(crate) intro: crate::introspect::Runtime,
     pub(crate) notify: crate::notify::Runtime,
     pub lan: crate::lan::LanState,
+    /// This daemon as a node: its listener, its coordinators, their settings.
+    pub node: crate::node_serve::NodeState,
+    /// This daemon as a coordinator: the nodes it found and the answers of its polls.
+    pub nodes: crate::nodes::Nodes,
     /// Simulators, emulators and phones, leased by capability (Stage 25).
     pub targets: crate::targets::Targets,
     /// Each task's share of the machine's CPU, as the sampling thread last read it.
@@ -344,6 +348,8 @@ impl Daemon {
             intro: Default::default(),
             notify: Default::default(),
             lan: crate::lan::LanState::new(),
+            node: crate::node_serve::NodeState::new(&cfg.data_dir),
+            nodes: crate::nodes::Nodes::new(),
             targets,
             cpu_reading: std::sync::RwLock::new(Arc::new(crate::cputasks::Reading::none())),
             disk_history: std::sync::Mutex::new(crate::diskhistory::DiskRing::load(

@@ -133,6 +133,25 @@ ios = "done"
 android = "todo"
 android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
+
+[feature.node-accept-toggle]
+description = "On a Mac that serves as a node (`[node] serve = true`): an 'Accept work from other Macs' switch on Home and in Settings, one click, with a line saying what the node is doing (off and draining N jobs, on and taking work, or on but held and why); absent on a Mac that does not serve"
+swift = "done"
+compose = "todo"
+ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
+platform_reason = "Owner decision pending (multi-machine nodes plan, phase 4): the Mac monitor, which the owner runs beside the Studio, comes first; the Compose desktop monitor gets it when the owner asks for it"
+
+[feature.home-nodes]
+description = "Home's Nodes section on a coordinator: a 'Send runs to nodes' switch, how many paired nodes take work, and a row per node found or paired with its state (accepting, not accepting and why, lost, incompatible, not paired) and its CPU, die temperature and jobs; hidden until a node is found or nodes are turned on. Home's GitHub section is now called Remote runs, and a run on a node is a row in it"
+swift = "done"
+compose = "todo"
+ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
+platform_reason = "Owner decision pending (multi-machine nodes plan, phase 4): the Mac monitor comes first; the Compose desktop monitor gets it when the owner asks for it"
+
 [feature.syspolicyd-gate]
 description = "Home's Compilation section and the Health page's CPU line show macOS's syspolicyd CPU use and the limit that holds further compiles ('syspolicyd 640% — holding compiles over 300%'); the daemon alerts when it has held compiles for 30 minutes"
 swift = "done"
@@ -363,6 +382,7 @@ android = "done"
 
 [feature.notification-details]
 description = "Each notification is one line; a \"?\" button on a row with more to say opens a dialog with the reason, the choices and an Open task action for each task named"
+platform_reason = "Not in the first pass (#951): the phone layout draws its own banner rows, and the Android phone app has no screen for it yet (stage 469)"
 swift = "done"
 compose = "done"
 ios = "todo"
