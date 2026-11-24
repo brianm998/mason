@@ -68,14 +68,22 @@ mod tests {
 
     #[test]
     fn an_unchanged_signature_past_the_limit_is_stuck() {
-        let l = [look(0, "a", true), look(600, "a", true), look(1800, "a", true)];
+        let l = [
+            look(0, "a", true),
+            look(600, "a", true),
+            look(1800, "a", true),
+        ];
         assert_eq!(stuck_for(&l, 1800), Some(1800));
         assert_eq!(stuck_for(&l, 1801), None);
     }
 
     #[test]
     fn a_changed_signature_resets_the_clock() {
-        let l = [look(0, "a", true), look(1000, "b", true), look(1900, "b", true)];
+        let l = [
+            look(0, "a", true),
+            look(1000, "b", true),
+            look(1900, "b", true),
+        ];
         assert_eq!(stuck_for(&l, 1800), None);
         assert_eq!(stuck_for(&l, 900), Some(900));
     }
