@@ -520,6 +520,9 @@ struct State {
     thermal_read: Option<(u32, u32)>,
     /// Why the gate holds, when it does: "die 97 °C", "power limited" or the speed limit.
     thermal_why: Option<String>,
+    /// When a CPU or thermal hold was last seen in force, and its text (#1025): a hold counts as
+    /// active until it has been clear for `compile_settle_s`.
+    held_seen: Option<(u64, String)>,
     /// The latest die temperature in °C and whether power limiting has lasted long enough.
     thermal_die: Option<f32>,
     thermal_limited_ms: Option<u64>,
@@ -608,6 +611,24 @@ pub struct LoadReading {
     /// Each waiting request: the resources it asks for and how long it has waited, in ms.
     pub waiting: Vec<(Vec<String>, u64)>,
     pub held: Option<String>,
+    /// The label of a waiting exclusive request (the whole machine, or a converted one that
+    /// drains `compile`), if any: it blocks every other local request until the machine drains,
+    /// so nothing placed here now would start (2026-11-23).
+    pub exclusive_waiting: Option<String>,
+}
+
+/// A hold counts as active until it has been clear for `settle_ms` (#1025): `seen` is when it was
+/// last in force and why. A reading that dips below a limit for a moment is still "held". Pure.
+pub fn settled_hold(seen: Option<&(u64, String)>, now: u64, settle_ms: u64) -> Option<String> {
+    let (at, why) = seen?;
+    let clear = now.saturating_sub(*at);
+    (clear < settle_ms).then(|| {
+        format!(
+            "{why}, clear for only {} s of the {} s settle time",
+            clear / 1000,
+            settle_ms / 1000
+        )
+    })
 }
 
 pub struct Broker {
@@ -891,6 +912,7 @@ impl Broker {
                 thermal_max: cfg.thermal_max_c,
                 thermal_read: None,
                 thermal_why: None,
+                held_seen: None,
                 thermal_die: None,
                 thermal_limited_ms: None,
                 ceiling_why: None,
@@ -1418,10 +1440,24 @@ impl Broker {
             _ => st.policy_since = None,
         }
         st.cpu_busy = st.cpu.busy_pct();
+        if let Some(why) = Self::hold_text(st) {
+            st.held_seen = Some((crate::daemon::now_ms(), why));
+        }
         st.cpu_busy.map(|busy_pct| CpuGate {
             busy_pct,
             max_pct: st.cpu_max,
         })
+    }
+
+    /// The hold in force on this reading, if any ("held for heat (die 99 °C)").
+    fn hold_text(st: &State) -> Option<String> {
+        if let Some(why) = st.thermal_why.clone() {
+            Some(format!("held for heat ({why})"))
+        } else {
+            st.cpu_busy
+                .filter(|b| *b >= st.cpu_max && st.cpu_max > 0)
+                .map(|b| format!("held for CPU ({b}% busy, limit {}%)", st.cpu_max))
+        }
     }
 
     /// The `syspolicyd` reading, read afresh: (busy %, limit %, since when it has been at or
@@ -2082,7 +2118,7 @@ impl Broker {
         alive: &dyn Fn() -> bool,
         on_wait: &mut dyn FnMut(&str),
     ) -> Result<Lease, Cancelled> {
-        self.acquire_as(task, label, rank, needs, alive, on_wait, false, None)
+        self.acquire_as(task, label, rank, needs, alive, on_wait, false, None, false)
     }
 
     /// [`Broker::acquire`] with how long the work is expected to hold it (s385), so it may
@@ -2109,6 +2145,7 @@ impl Broker {
             on_wait,
             beside,
             expected_ms,
+            false,
         )
     }
 
@@ -2124,7 +2161,30 @@ impl Broker {
         alive: &dyn Fn() -> bool,
         on_wait: &mut dyn FnMut(&str),
     ) -> Result<Lease, Cancelled> {
-        self.acquire_as(task, label, rank, needs, alive, on_wait, true, None)
+        self.acquire_as(task, label, rank, needs, alive, on_wait, true, None, false)
+    }
+
+    /// [`Broker::acquire_beside`] that never queues (#1025): the lease when it is granted at once,
+    /// else the request is withdrawn and `Err(Cancelled)` comes back. Two callers cannot both
+    /// take the last unit: the grant is decided under the broker's lock.
+    pub fn try_acquire_beside(
+        self: &Arc<Self>,
+        task: TaskId,
+        label: &str,
+        rank: Rank,
+        needs: Needs,
+    ) -> Result<Lease, Cancelled> {
+        self.acquire_as(
+            task,
+            label,
+            rank,
+            needs,
+            &|| true,
+            &mut |_| {},
+            true,
+            None,
+            true,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2138,6 +2198,7 @@ impl Broker {
         on_wait: &mut dyn FnMut(&str),
         beside: bool,
         expected_ms: Option<u64>,
+        nowait: bool,
     ) -> Result<Lease, Cancelled> {
         let granted = needs.amounts.clone();
         let id = {
@@ -2174,6 +2235,20 @@ impl Broker {
             }
             if st.ledger.holds(id) {
                 break;
+            }
+            // Withdrawn from outside (released, or sent back to GitHub, #1025): the wait is over.
+            if !st.ledger.is_waiting(id) {
+                st.meta.remove(&id);
+                st.lease_tasks.remove(&id);
+                if st.by_task.get(&task) == Some(&id) {
+                    st.by_task.remove(&task);
+                }
+                return Err(Cancelled);
+            }
+            if nowait {
+                drop(st);
+                self.release(id, Some(task));
+                return Err(Cancelled);
             }
             if !announced {
                 let (floor, free) = (st.floor_mb, self.free_memory(&mut st));
@@ -2487,13 +2562,13 @@ impl Broker {
         let mut st = lock(&self.st);
         self.cpu_gate(&mut st);
         let snap = st.ledger.snapshot();
-        let held = if let Some(why) = st.thermal_why.clone() {
-            Some(format!("held for heat ({why})"))
-        } else {
-            st.cpu_busy
-                .filter(|b| *b >= st.cpu_max && st.cpu_max > 0)
-                .map(|b| format!("held for CPU ({b}% busy, limit {}%)", st.cpu_max))
-        };
+        let held = Self::hold_text(&st).or_else(|| {
+            settled_hold(
+                st.held_seen.as_ref(),
+                now,
+                u64::from(st.compile_settle_s) * 1000,
+            )
+        });
         LoadReading {
             used: snap.used,
             limits: snap
@@ -2512,6 +2587,11 @@ impl Broker {
                 })
                 .collect(),
             held,
+            exclusive_waiting: snap
+                .waiting
+                .iter()
+                .find(|r| r.needs.exclusive || r.drains_compile)
+                .map(|r| r.label.clone()),
         }
     }
 
@@ -4843,6 +4923,121 @@ pub(crate) mod tests {
             "a fifth job waits at the ceiling"
         );
         assert!(!held(&b, queue_ranked(&b, 6, false, &gha(1))));
+    }
+
+    /// #1025: a hold that cleared a moment ago still counts as held until the settle time has
+    /// passed; the test drives the clock by hand.
+    #[test]
+    fn a_hold_counts_until_it_has_been_clear_for_the_settle_time() {
+        let seen = (100_000u64, "held for heat (die 99 °C)".to_string());
+        let settle = 30_000;
+        let held =
+            settled_hold(Some(&seen), 101_000, settle).expect("one reading clear is not enough");
+        assert!(held.contains("held for heat"), "{held}");
+        assert!(settled_hold(Some(&seen), 129_999, settle).is_some());
+        assert_eq!(settled_hold(Some(&seen), 130_000, settle), None);
+        assert_eq!(settled_hold(None, 1, settle), None);
+        assert_eq!(settled_hold(Some(&seen), 100_001, 0), None);
+    }
+
+    /// #1025: `try_acquire_beside` never queues: with one unit, the first caller is granted and
+    /// the second gets `Cancelled` and leaves no request behind. A request withdrawn from the
+    /// ledger while it waits ends `acquire` with `Cancelled`, not an endless wait.
+    #[test]
+    fn a_try_never_queues_and_a_withdrawn_request_ends_its_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = ResourceCfg {
+            machine: BTreeMap::from([("compile".to_string(), 1)]),
+            ..Default::default()
+        };
+        let b = Broker::new(
+            dir.path().join("locks"),
+            dir.path().join("limits.kv"),
+            &cfg,
+            2,
+            crate::cpu::FakeCpu::new(0),
+            &[],
+        )
+        .unwrap();
+        let rank = |t: u64| Rank::new(false, 1, 2, t, t, false);
+        let first = b
+            .try_acquire_beside(TaskId(1), "a", rank(1), Needs::of(&[("compile", 1)]))
+            .expect("the free unit is granted");
+        assert!(b
+            .try_acquire_beside(TaskId(2), "b", rank(2), Needs::of(&[("compile", 1)]))
+            .is_err());
+        assert_eq!(lock(&b.st).ledger.snapshot().waiting.len(), 0);
+        // A queued request, withdrawn from outside.
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let b2 = b.clone();
+        let waiter = std::thread::spawn(move || {
+            b2.acquire_beside(
+                TaskId(3),
+                "c",
+                rank(3),
+                Needs::of(&[("compile", 1)]),
+                &|| true,
+                &mut |_| {
+                    let _ = tx.send(());
+                },
+            )
+            .is_err()
+        });
+        rx.recv_timeout(Duration::from_secs(60)).expect("it waits");
+        let id = lock(&b.st).ledger.snapshot().waiting[0].id;
+        b.release(id, None);
+        assert!(waiter.join().unwrap(), "the withdrawn wait ended Cancelled");
+        drop(first);
+    }
+
+    /// 2026-11-23: a waiting exclusive request shows in the placement reading, with its label,
+    /// so `favor-remote`/`favor-local` do not place work into the convoy behind it.
+    #[test]
+    fn the_load_reading_names_a_waiting_exclusive_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = ResourceCfg {
+            machine: BTreeMap::from([("compile".to_string(), 2)]),
+            ..Default::default()
+        };
+        let b = Broker::new(
+            dir.path().join("locks"),
+            dir.path().join("limits.kv"),
+            &cfg,
+            2,
+            crate::cpu::FakeCpu::new(0),
+            &[],
+        )
+        .unwrap();
+        let rank = |t: u64| Rank::new(false, 1, 2, t, t, false);
+        let held = b
+            .try_acquire_beside(TaskId(1), "a", rank(1), Needs::of(&[("compile", 1)]))
+            .expect("granted");
+        assert_eq!(b.load_reading(1_000).exclusive_waiting, None);
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let b2 = b.clone();
+        let waiter = std::thread::spawn(move || {
+            b2.acquire_beside(
+                TaskId(2),
+                "trd test (exclusive)",
+                rank(2),
+                Needs {
+                    exclusive: true,
+                    amounts: BTreeMap::new(),
+                },
+                &|| true,
+                &mut |_| {
+                    let _ = tx.send(());
+                },
+            )
+            .is_ok()
+        });
+        rx.recv_timeout(Duration::from_secs(60)).expect("it waits");
+        assert_eq!(
+            b.load_reading(2_000).exclusive_waiting.as_deref(),
+            Some("trd test (exclusive)")
+        );
+        drop(held);
+        assert!(waiter.join().unwrap());
     }
 
     #[test]

@@ -1393,3 +1393,40 @@ fn full_test_rows_survive_a_restart_and_come_back_newest_first() {
         ("red", "https://ci/1")
     );
 }
+
+#[test]
+fn a_rename_survives_reopening_and_keeps_the_tasks() {
+    let (_d, p) = db();
+    {
+        let s = Store::open(&p).unwrap();
+        s.append(ev(
+            1,
+            EventKind::ProjectRegistered {
+                project: ProjectId(4),
+                name: "a".into(),
+            },
+        ))
+        .unwrap();
+        s.append(ev(2, file(4, "t"))).unwrap();
+        s.append(ev(
+            3,
+            EventKind::ProjectRenamed {
+                project: ProjectId(4),
+                name: "b".into(),
+            },
+        ))
+        .unwrap();
+        s.put_suite_green("a", "unit", "x", 1, 1).unwrap();
+        assert!(s.rename_project("a", "b").unwrap() >= 1);
+    }
+    let s = Store::open(&p).unwrap();
+    let w = s.world().unwrap();
+    assert_eq!(w.projects[&ProjectId(4)].name, "b");
+    assert_eq!(w.tasks.values().next().unwrap().project, ProjectId(4));
+    let name: String = s
+        .read(|c| c.query_row("SELECT name FROM projects WHERE id = 4", [], |r| r.get(0)))
+        .unwrap();
+    assert_eq!(name, "b");
+    assert_eq!(s.suite_green("b", "unit", "x").unwrap(), Some(1));
+    s.verify().unwrap();
+}
