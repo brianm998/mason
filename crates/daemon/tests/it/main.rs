@@ -101,6 +101,7 @@ mod takeover_drain;
 mod targets;
 mod task_priority;
 mod taskcache;
+mod taskedit;
 mod testing;
 mod tracker;
 mod update;
