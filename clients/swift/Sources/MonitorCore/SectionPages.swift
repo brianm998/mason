@@ -36,7 +36,7 @@ extension MonitorModel {
         case "queued": return "Queued"
         case "cpu": return "CPU"
         case "disk": return "Disk"
-        case "github": return "GitHub"
+        case "github": return "Remote runs"
         case "compilation": return "Compilation"
         case "exploring": return "Exploring"
         case "developing": return "Developing"

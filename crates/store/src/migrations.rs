@@ -860,6 +860,17 @@ const STEPS: &[&str] = &[
          at_ms    INTEGER NOT NULL,
          PRIMARY KEY (project, suite, base)
      );",
+    // The nodes this coordinator is paired with (docs/multi-machine-nodes-plan.md, §3.3): who
+    // they are and the fingerprint of the certificate each presents. A fingerprint is public;
+    // no secret is kept. Additive, so an older runtime still opens the database.
+    "CREATE TABLE nodes (
+         nid         TEXT PRIMARY KEY,
+         name        TEXT NOT NULL UNIQUE,
+         host        TEXT NOT NULL,
+         port        INTEGER NOT NULL,
+         fingerprint TEXT NOT NULL,
+         paired_at   INTEGER NOT NULL
+     );",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;

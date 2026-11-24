@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The remote runs MASON has on GitHub, for the monitor's "GitHub" section (#767): what owns
+//! The remote runs MASON has on GitHub or on a node, for the monitor's "Remote runs" section
+//! (#767): what owns
 //! each run, where it is (waiting for a pool unit, queued, running, done), its jobs and its last
 //! update. A run is entered here when it asks for a pool unit and when its hold is written, and
 //! kept for ten minutes after it ends. The registry lives in this process; a daemon that
@@ -188,6 +189,33 @@ pub fn set_jobs(record: &Path, jobs: Vec<Job>) {
     }
 }
 
+/// A run that is on a node: `runs_on` is "node <name>".
+fn is_node_run(e: &Entry) -> bool {
+    e.runs_on.starts_with("node ")
+}
+
+/// A run went out to the node `node`: enter it, as [`started`] does for GitHub. It is told apart
+/// by its `runs_on`, "node <name>", and has no GitHub run, so no jobs and no link.
+pub fn node_started(scope: &Path, id: &str, suite: &str, node: &str, record: &Path) {
+    let kind = if crate::sweep::parse_batch_host_id(id).is_some() {
+        "batch"
+    } else if id.contains("check") {
+        "check"
+    } else {
+        "test_step"
+    };
+    started(
+        scope,
+        id,
+        "",
+        kind,
+        suite,
+        &format!("node {node}"),
+        1,
+        record,
+    );
+}
+
 /// The record's stage, for the run's own line.
 fn stage(record: &Path) -> (String, String, Option<u64>) {
     match crate::remote::run_stage(record) {
@@ -204,7 +232,7 @@ fn mins(s: u64) -> String {
     }
 }
 
-/// The section for the home view (empty when no project runs on GitHub).
+/// The section for the home view (empty when no project runs on GitHub or on a node).
 pub fn view(
     d: &Daemon,
     rows: &dyn Fn(u64) -> Option<(String, String, String, String)>,
@@ -212,7 +240,7 @@ pub fn view(
 ) -> GithubRunList {
     let now = now_ms();
     let scope = d.cfg.hosts_dir().display().to_string();
-    let enabled = crate::remote::any_remote(d);
+    let enabled = crate::remote::any_remote(d) || d.nodes.cfg(&d.cfg.config_dir).enabled;
     let mut mine: Vec<Entry> = {
         let mut r = reg();
         r.retain(|e| {
@@ -233,6 +261,8 @@ pub fn view(
         .map(|e| {
             let (title, task_state, activity, project_name) = rows(e.task).unwrap_or_default();
             let (st, url, picked) = match (&e.record, e.waiting) {
+                // A run on a node has no GitHub run to look at: it is running from when it went.
+                _ if is_node_run(e) && !e.waiting => ("running".into(), String::new(), None),
                 (Some(rec), false) => stage(rec),
                 _ => ("waiting".into(), String::new(), None),
             };
