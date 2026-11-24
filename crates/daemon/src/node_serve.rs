@@ -19,11 +19,11 @@
 use crate::config::{NodeSettings, OnSwitchOff};
 use crate::daemon::{now_ms, Daemon};
 use crate::lan::{self, sha256_hex};
-use axum::extract::{Request, State};
+use axum::extract::{Path as UrlPath, RawQuery, Request, State};
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::routing::{get, post, put};
 use axum::{Extension, Json, Router};
 use mason_core::access::{PairError, Pairing, Role};
 use serde_json::{json, Value};
@@ -80,6 +80,8 @@ pub struct NodeState {
     /// The settings each coordinator last sent, by fingerprint. Memory only: a node restarted
     /// has the built-ins until the next poll.
     settings: Mutex<BTreeMap<String, NodeSettings>>,
+    /// The jobs this node runs for its coordinators.
+    pub jobs: Arc<crate::node_run::Jobs>,
 }
 
 impl NodeState {
@@ -90,6 +92,7 @@ impl NodeState {
             info: Mutex::new(None),
             coordinators: Mutex::new(None),
             settings: Mutex::new(BTreeMap::new()),
+            jobs: Arc::new(crate::node_run::Jobs::new(data_dir)),
         }
     }
 
@@ -454,6 +457,13 @@ pub fn xcode_from_app_name(name: &str) -> Option<String> {
 
 /// The toolchains installed here, looked at at most every ten minutes.
 pub fn toolchains() -> Value {
+    // A test says what its node has, whatever the machine it runs on has.
+    if let Some(v) = std::env::var("MASON_NODE_TOOLCHAINS")
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+    {
+        return v;
+    }
     static CACHE: Mutex<Option<(std::time::Instant, Value)>> = Mutex::new(None);
     let mut g = CACHE.lock().unwrap_or_else(|e| e.into_inner());
     if let Some((at, v)) = &*g {
@@ -495,13 +505,23 @@ fn arch() -> &'static str {
     }
 }
 
-/// What this node reports (§3.4): the same JSON for a coordinator's poll and `mason node status`.
-pub fn status_value(d: &Daemon, s: &NodeSettings) -> Value {
+/// What the node's machine says now, for the availability decision and the status.
+struct Gathered {
+    readings: Readings,
+    cpu_pct: Option<u32>,
+    die: Option<f32>,
+    limited_ms: Option<u64>,
+    speed: Option<u32>,
+    pressure: Option<u32>,
+    slots: serde_json::Map<String, Value>,
+    disk_free_gb: Option<u64>,
+    switch: Switch,
+}
+
+fn gather(d: &Daemon, s: &NodeSettings, jobs_running: u32) -> Gathered {
     let switch = read_switch(d);
-    let jobs_running = 0u32;
     let cpu = d.cpu_reading().usage.busy_permille;
     let cpu_pct = (cpu >= 0).then(|| (cpu as u32).div_ceil(10).min(100));
-    let other = other_cpu(cpu_pct, 0);
     let (die, limited_ms, _) = d.broker.thermal_smc();
     let speed = d.broker.thermal_read().map(|(p, _)| p);
     // A daemon whose CPU is injected is a test's: it never reads the machine's real heat.
@@ -525,20 +545,44 @@ pub fn status_value(d: &Daemon, s: &NodeSettings) -> Value {
         None => crate::disk::DiskSource::free_mb(&crate::disk::Statvfs, &d.cfg.data_dir),
     }
     .map(|mb| mb / 1024);
-    let readings = Readings {
-        switch_on: switch.on,
-        jobs_running,
-        hot: hot.clone(),
-        other_cpu_pct: other,
-        compile_free: slot("compile").map(|(f, _)| f),
+    // What this node's own jobs use is not "other work": the whole machine's CPU less the CPU of
+    // the jobs' process trees.
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get()) as u32;
+    let other = other_cpu(cpu_pct, d.node.jobs.cpu_pct(cores));
+    Gathered {
+        readings: Readings {
+            switch_on: switch.on,
+            jobs_running,
+            hot,
+            other_cpu_pct: other,
+            compile_free: slot("compile").map(|(f, _)| f),
+            disk_free_gb,
+        },
+        cpu_pct,
+        die,
+        limited_ms,
+        speed,
+        pressure,
+        slots,
         disk_free_gb,
-    };
-    let why = why_not(&readings, s);
+        switch,
+    }
+}
+
+/// What this node reports (§3.4): the same JSON for a coordinator's poll and `mason node status`.
+/// `coord` is the asking coordinator's directory name, for what the node keeps for it.
+pub fn status_value(d: &Daemon, s: &NodeSettings, coord: Option<&str>) -> Value {
+    let jobs_running = d.node.jobs.running();
+    let g = gather(d, s, jobs_running);
+    let why = why_not(&g.readings, s);
     let projects: serde_json::Map<String, Value> = d
         .projects()
         .values()
         .map(|p| (p.id.clone(), json!({"remote": p.remote})))
         .collect();
+    let mirrors: serde_json::Map<String, Value> = coord
+        .map(|c| d.node.jobs.warm(c).into_iter().collect())
+        .unwrap_or_default();
     json!({
         "node_proto": NODE_PROTO,
         "version": env!("CARGO_PKG_VERSION"),
@@ -549,20 +593,26 @@ pub fn status_value(d: &Daemon, s: &NodeSettings) -> Value {
         "cores": std::thread::available_parallelism().map_or(0, |n| n.get()),
         "accepting": why.is_none(),
         "why_not": why,
-        "switch": {"on": switch.on, "changed_by": switch.changed_by, "changed_at": switch.changed_at},
-        "cpu_pct": cpu_pct,
-        "other_cpu_pct": other,
+        "switch": {"on": g.switch.on, "changed_by": g.switch.changed_by, "changed_at": g.switch.changed_at},
+        "cpu_pct": g.cpu_pct,
+        "other_cpu_pct": g.readings.other_cpu_pct,
         "thermal": {
-            "limit_pct": speed, "die_c": die, "power_limited_ms": limited_ms,
-            "pressure": pressure, "hot": hot.is_some(),
+            "limit_pct": g.speed, "die_c": g.die, "power_limited_ms": g.limited_ms,
+            "pressure": g.pressure, "hot": g.readings.hot.is_some(),
         },
-        "slots": slots,
+        "slots": g.slots,
         "jobs": {"running": jobs_running, "max": s.max_jobs},
-        "disk_free_gb": disk_free_gb,
+        "disk_free_gb": g.disk_free_gb,
         "toolchains": toolchains(),
         "projects": projects,
+        "mirrors": mirrors,
         "settings": s.to_json(),
     })
+}
+
+/// Why a job cannot start now: the availability rules with the jobs that run, or `None`.
+pub fn no_room_for_job(d: &Daemon, s: &NodeSettings, running: u32) -> Option<String> {
+    why_not(&gather(d, s, running).readings, s)
 }
 
 // ---- the listener ---------------------------------------------------------------------------
@@ -730,6 +780,8 @@ pub async fn start(d: Arc<Daemon>) -> std::io::Result<u16> {
             Err(e) => tracing::warn!("mDNS is not advertising this node: {e}"),
         }
     }
+    d.node.jobs.resume(&d);
+    spawn_upkeep(&d);
     let app = router(d.clone());
     tracing::info!(port, bind = ?d.cfg.node.bind, "masond serving as a node (TLS, paired coordinators only)");
     for listener in listeners {
@@ -743,6 +795,13 @@ pub async fn start(d: Arc<Daemon>) -> std::io::Result<u16> {
 pub fn router(d: Arc<Daemon>) -> Router {
     let guarded = Router::new()
         .route("/node/status", post(remote_status))
+        .route("/node/mirror/{project}/has", get(mirror_has))
+        .route("/node/mirror/{project}", put(mirror_put))
+        .route("/node/jobs", post(job_start))
+        .route("/node/jobs/{id}", get(job_get).delete(job_cancel))
+        .route("/node/jobs/{id}/log", get(job_log))
+        .route("/node/jobs/{id}/artifact", get(job_artifact))
+        .route("/node/jobs/{id}/ack", post(job_ack))
         .layer(axum::middleware::from_fn_with_state(d.clone(), guard))
         .with_state(d.clone());
     Router::new()
@@ -831,10 +890,260 @@ async fn remote_status(
     let d2 = d.clone();
     let v = d
         .pool
-        .run(move || status_value(&d2, &d2.node.effective_settings()))
+        .run(move || {
+            status_value(
+                &d2,
+                &d2.node.effective_settings(),
+                Some(&crate::node_run::fp16(&fp)),
+            )
+        })
         .await
         .map_err(|_| fail(503, "the daemon is busy; try again"))?;
     Ok(Json(v))
+}
+
+// ---- jobs: mirrors and runs, for a paired coordinator ------------------------------------------
+
+fn coord_of(fp: &str) -> String {
+    crate::node_run::fp16(fp)
+}
+
+fn project_ok(p: &str) -> Result<(), (StatusCode, Json<Value>)> {
+    if crate::node_run::safe_name(p) {
+        Ok(())
+    } else {
+        Err(fail(
+            400,
+            "`project` must be letters, digits, `.`, `_` and `-`",
+        ))
+    }
+}
+
+/// `GET /node/mirror/{project}/has?c=<sha>&c=<sha>`: which of those commits the mirror has.
+async fn mirror_has(
+    State(d): State<Arc<Daemon>>,
+    Extension(PeerFp(fp)): Extension<PeerFp>,
+    UrlPath(project): UrlPath<String>,
+    RawQuery(q): RawQuery,
+) -> Res {
+    project_ok(&project)?;
+    let shas: Vec<String> = q
+        .unwrap_or_default()
+        .split('&')
+        .filter_map(|kv| kv.strip_prefix("c="))
+        .map(String::from)
+        .take(64)
+        .collect();
+    let d2 = d.clone();
+    let have = d
+        .pool
+        .run(move || d2.node.jobs.has(&coord_of(&fp), &project, &shas))
+        .await
+        .map_err(|_| fail(503, "the daemon is busy; try again"))?;
+    Ok(Json(json!({"has": have})))
+}
+
+/// `PUT /node/mirror/{project}`: a git bundle, added to the project's mirror. Refused, with what
+/// is missing, when the mirror lacks a commit the bundle builds on.
+async fn mirror_put(
+    State(d): State<Arc<Daemon>>,
+    Extension(PeerFp(fp)): Extension<PeerFp>,
+    UrlPath(project): UrlPath<String>,
+    body: axum::body::Body,
+) -> Res {
+    use http_body_util::BodyExt;
+    use std::io::Write;
+    project_ok(&project)?;
+    let dir = d.cfg.data_dir.join("node").join("incoming");
+    std::fs::create_dir_all(&dir).map_err(|e| fail(500, e.to_string()))?;
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let file = dir.join(format!(
+        "{}-{}-{}.bundle",
+        coord_of(&fp),
+        now_ms(),
+        N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    ));
+    let mut out = std::fs::File::create(&file).map_err(|e| fail(500, e.to_string()))?;
+    let mut body = body;
+    let mut size = 0u64;
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|e| {
+            let _ = std::fs::remove_file(&file);
+            fail(400, e.to_string())
+        })?;
+        if let Some(data) = frame.data_ref() {
+            size += data.len() as u64;
+            if size > 8 * 1024 * 1024 * 1024 {
+                let _ = std::fs::remove_file(&file);
+                return Err(fail(413, "the bundle is too large"));
+            }
+            out.write_all(data).map_err(|e| {
+                let _ = std::fs::remove_file(&file);
+                fail(500, e.to_string())
+            })?;
+        }
+    }
+    drop(out);
+    let (d2, f2) = (d.clone(), file.clone());
+    let r = d
+        .pool
+        .run(move || d2.node.jobs.add_bundle(&coord_of(&fp), &project, &f2))
+        .await
+        .map_err(|_| fail(503, "the daemon is busy; try again"))?;
+    let _ = std::fs::remove_file(&file);
+    match r {
+        Ok(()) => Ok(Json(json!({"added": size}))),
+        Err(e) => Err((
+            StatusCode::from_u16(412).unwrap_or(StatusCode::BAD_REQUEST),
+            Json(json!({"error": e, "missing": true})),
+        )),
+    }
+}
+
+/// `POST /node/jobs {id, project, sha, run, limit_s, lease_s}`: start a job, if there is room
+/// for it now. `409 {why}` if not; `412` if the commit is not in the mirror.
+async fn job_start(
+    State(d): State<Arc<Daemon>>,
+    Extension(PeerFp(fp)): Extension<PeerFp>,
+    Json(b): Json<Value>,
+) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
+    use crate::node_run::StartError;
+    let req = crate::node_run::StartReq::parse(&b).map_err(|e| fail(400, e))?;
+    let coord = coord_of(&fp);
+    let d2 = d.clone();
+    let r = d
+        .pool
+        .run(move || {
+            let s = d2.node.effective_settings();
+            let jobs = d2.node.jobs.clone();
+            let d3 = d2.clone();
+            jobs.start(&d2, &coord, req, &s, &|running| {
+                no_room_for_job(&d3, &s, running)
+            })
+            .map(|h| h.job.lock().map(|j| j.view()).unwrap_or(Value::Null))
+        })
+        .await
+        .map_err(|_| fail(503, "the daemon is busy; try again"))?;
+    match r {
+        Ok(v) => Ok((StatusCode::CREATED, Json(json!({"job": v})))),
+        Err(StartError::Busy(why)) => Err(fail(409, why)),
+        Err(StartError::Missing(sha)) => Err((
+            StatusCode::from_u16(412).unwrap_or(StatusCode::BAD_REQUEST),
+            Json(json!({"error": "the commit is not in the mirror", "missing": sha})),
+        )),
+        Err(StartError::Bad(e)) => Err(fail(400, e)),
+        Err(StartError::Io(e)) => Err(fail(500, e)),
+    }
+}
+
+/// `GET /node/jobs/{id}`: the job's state. Asking renews its lease.
+async fn job_get(
+    State(d): State<Arc<Daemon>>,
+    Extension(PeerFp(fp)): Extension<PeerFp>,
+    UrlPath(id): UrlPath<String>,
+) -> Res {
+    let h = d
+        .node
+        .jobs
+        .handle(&coord_of(&fp), &id)
+        .ok_or_else(|| fail(404, "no such job"))?;
+    d.node.jobs.renew(&h);
+    let v = h.job.lock().map(|j| j.view()).unwrap_or(Value::Null);
+    Ok(Json(json!({"job": v})))
+}
+
+/// `GET /node/jobs/{id}/log?from=N`: the output from byte `N`, raw.
+async fn job_log(
+    State(d): State<Arc<Daemon>>,
+    Extension(PeerFp(fp)): Extension<PeerFp>,
+    UrlPath(id): UrlPath<String>,
+    RawQuery(q): RawQuery,
+) -> Response {
+    let from = q
+        .unwrap_or_default()
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("from=").and_then(|v| v.parse::<u64>().ok()))
+        .unwrap_or(0);
+    let coord = coord_of(&fp);
+    if d.node.jobs.handle(&coord, &id).is_none() {
+        return fail(404, "no such job").into_response();
+    }
+    let d2 = d.clone();
+    let bytes = d
+        .pool
+        .run(move || d2.node.jobs.log(&coord, &id, from))
+        .await
+        .unwrap_or_default();
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+        bytes,
+    )
+        .into_response()
+}
+
+/// `GET /node/jobs/{id}/artifact`: the result and the results files of a job that has ended.
+async fn job_artifact(
+    State(d): State<Arc<Daemon>>,
+    Extension(PeerFp(fp)): Extension<PeerFp>,
+    UrlPath(id): UrlPath<String>,
+) -> Res {
+    let (d2, coord) = (d.clone(), coord_of(&fp));
+    let r = d
+        .pool
+        .run(move || d2.node.jobs.artifact(&coord, &id))
+        .await
+        .map_err(|_| fail(503, "the daemon is busy; try again"))?;
+    r.map(Json).map_err(|e| fail(409, e))
+}
+
+/// `DELETE /node/jobs/{id}`: cancel.
+async fn job_cancel(
+    State(d): State<Arc<Daemon>>,
+    Extension(PeerFp(fp)): Extension<PeerFp>,
+    UrlPath(id): UrlPath<String>,
+) -> Res {
+    if d.node
+        .jobs
+        .cancel(&coord_of(&fp), &id, "cancelled by its coordinator")
+    {
+        Ok(Json(json!({"cancelled": id})))
+    } else {
+        Err(fail(404, "no such job"))
+    }
+}
+
+/// `POST /node/jobs/{id}/ack`: the result was collected; the node may delete the job.
+async fn job_ack(
+    State(d): State<Arc<Daemon>>,
+    Extension(PeerFp(fp)): Extension<PeerFp>,
+    UrlPath(id): UrlPath<String>,
+) -> Res {
+    if d.node.jobs.ack(&coord_of(&fp), &id) {
+        Ok(Json(json!({"acked": id})))
+    } else {
+        Err(fail(404, "no such finished job"))
+    }
+}
+
+/// Keep the node's jobs in order: leases, old results, and the owner's switch when the
+/// coordinator chose `cancel`.
+fn spawn_upkeep(d: &Arc<Daemon>) {
+    let weak = Arc::downgrade(d);
+    let _ = std::thread::Builder::new()
+        .name("node-upkeep".into())
+        .spawn(move || loop {
+            std::thread::sleep(Duration::from_secs(2));
+            let Some(d) = weak.upgrade() else {
+                return;
+            };
+            d.node.jobs.tick(now_ms());
+            if !read_switch(&d).on
+                && d.node.effective_settings().on_switch_off == OnSwitchOff::Cancel
+            {
+                d.node.jobs.cancel_all("the owner turned remote work off");
+            }
+        });
 }
 
 // ---- the owner's side, on loopback ----------------------------------------------------------
@@ -845,7 +1154,7 @@ pub async fn local_status(State(d): State<Arc<Daemon>>) -> Res {
     let v = d
         .pool
         .run(move || {
-            let mut v = status_value(&d2, &d2.node.effective_settings());
+            let mut v = status_value(&d2, &d2.node.effective_settings(), None);
             v["serving"] = json!(d2.node.info().is_some());
             v["coordinators"] = json!(d2
                 .node
@@ -900,8 +1209,14 @@ pub async fn accept(
         .unwrap_or("owner")
         .to_string();
     let sw = set_switch(&d, on, &who).map_err(|(c, m)| fail(c, m))?;
+    // By default running jobs finish (`drain`); a coordinator that set `cancel` has them stopped.
+    let cancelled = if !on && d.node.effective_settings().on_switch_off == OnSwitchOff::Cancel {
+        d.node.jobs.cancel_all("the owner turned remote work off")
+    } else {
+        0
+    };
     Ok(Json(
-        json!({"accept": sw.on, "changed_by": sw.changed_by, "changed_at": sw.changed_at}),
+        json!({"accept": sw.on, "changed_by": sw.changed_by, "changed_at": sw.changed_at, "cancelled": cancelled}),
     ))
 }
 
@@ -924,14 +1239,18 @@ pub async fn coordinator_remove(State(d): State<Arc<Daemon>>, Json(b): Json<Valu
     }
 }
 
-/// `POST /node/stop-jobs`: cancel every running job now. Nothing runs here until phase 2.
-pub async fn stop_jobs(State(_d): State<Arc<Daemon>>) -> Res {
-    Ok(Json(json!({"cancelled": 0})))
+/// `POST /node/stop-jobs`: cancel every running job now.
+pub async fn stop_jobs(State(d): State<Arc<Daemon>>) -> Res {
+    let n = d
+        .node
+        .jobs
+        .cancel_all("the owner stopped the jobs on this machine");
+    Ok(Json(json!({"cancelled": n})))
 }
 
-/// `GET /node/jobs`: the jobs running here. None until phase 2.
-pub async fn jobs(State(_d): State<Arc<Daemon>>) -> Res {
-    Ok(Json(json!({"jobs": []})))
+/// `GET /node/jobs`: the jobs this node knows.
+pub async fn jobs(State(d): State<Arc<Daemon>>) -> Res {
+    Ok(Json(json!({"jobs": d.node.jobs.list()})))
 }
 
 #[cfg(test)]

@@ -662,31 +662,46 @@ pub fn where_ran(d: &Arc<Daemon>, spec: &CheckSpec) -> String {
     }
 }
 
+/// Where `spec` goes when it leaves this machine, decided before anything is queued (#759).
+fn executor_of(d: &Arc<Daemon>, spec: &CheckSpec) -> Option<crate::remote::Executor> {
+    use crate::remote as rm;
+    let project = rm::project_of(d, &spec.cwd)?;
+    let place = spec.place.as_ref().map(|(t, s)| (*t, &**s));
+    Some(match place {
+        Some((t, s)) => rm::executor_for(d, &project, rm::Kind::Check, Some((t, s))),
+        None if spec.global => rm::executor_global(d, &project),
+        None => rm::executor_for(d, &project, rm::Kind::Check, None),
+    })
+}
+
 /// The runner label when `spec` goes to GitHub, decided before anything is queued (#759).
 fn runs_on_github(d: &Arc<Daemon>, spec: &CheckSpec) -> Option<String> {
     use crate::remote as rm;
     if !rm::any_remote(d) {
         return None;
     }
-    let project = rm::project_of(d, &spec.cwd)?;
-    let place = spec.place.as_ref().map(|(t, s)| (*t, &**s));
-    let exec = match place {
-        Some((t, s)) => rm::executor_for(d, &project, rm::Kind::Check, Some((t, s))),
-        None if spec.global => rm::executor_global(d, &project),
-        None => rm::executor_for(d, &project, rm::Kind::Check, None),
-    };
-    match exec {
+    match executor_of(d, spec)? {
         rm::Executor::GitHub { runs_on } => Some(runs_on),
-        // A node run takes none of this Mac's slots either; `goes_remote` learns that in phase 2
-        // when placement can produce one.
-        rm::Executor::Node { .. } | rm::Executor::Local => None,
+        _ => None,
     }
 }
 
-/// Does `spec` go to GitHub? Then it needs no local `compile` or `test-suite` slot and no CPU
-/// or heat gate: it uses nothing on this Mac (#759).
+/// The node `spec` goes to, when `[nodes]` is on and placement says so.
+fn node_for(d: &Arc<Daemon>, spec: &CheckSpec) -> Option<(String, String)> {
+    use crate::remote as rm;
+    if !d.nodes.cfg(&d.cfg.config_dir).enabled {
+        return None;
+    }
+    match executor_of(d, spec)? {
+        rm::Executor::Node { nid, name } => Some((nid, name)),
+        _ => None,
+    }
+}
+
+/// Does `spec` leave this machine, for GitHub or a node? Then it needs no local `compile` or
+/// `test-suite` slot and no CPU or heat gate: it uses nothing on this Mac (#759).
 pub fn goes_remote(d: &Arc<Daemon>, spec: &CheckSpec) -> bool {
-    runs_on_github(d, spec).is_some()
+    runs_on_github(d, spec).is_some() || node_for(d, spec).is_some()
 }
 
 /// The check on GitHub Actions, when the one function that decides where runs go says so
@@ -856,6 +871,83 @@ fn remote_check(
     )
 }
 
+/// What takes a check's output as it arrives.
+type Feed = Box<dyn FnMut(&[u8])>;
+
+/// The check on a node, when placement says so (the multi-machine plan, §3.9). `None`: it does
+/// not go to a node, or no node had room, and the caller takes the next place: here, with the
+/// slots a local run holds.
+fn node_check(
+    d: &Arc<Daemon>,
+    spec: &CheckSpec,
+    id: &str,
+    progress: Option<&CheckProgress>,
+) -> Option<Shared> {
+    use crate::remote as rm;
+    let (nid, _) = node_for(d, spec)?;
+    let project = rm::project_of(d, &spec.cwd)?;
+    let base_ref = rm::base_ref_of(d, &project)?;
+    let place = spec.place.as_ref().map(|(t, s)| (*t, &**s));
+    // The suite's build is the first part of what runs there, as a separate process.
+    let build = build_choice(place.map(|(_, s)| s), &spec.cmd);
+    let build = spec.build.as_deref().or(build);
+    let rs = rm::with_build(check_run_spec(&project, id, spec, "node"), build);
+    let note: Mutex<Option<String>> = Mutex::new(None);
+    let stop = || {
+        let asked = cancel_requests()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(id)
+            .cloned();
+        let n = match asked {
+            Some(n) => n,
+            None => spec.stop.as_ref().and_then(|f| f())?,
+        };
+        *note.lock().unwrap_or_else(|e| e.into_inner()) = Some(n);
+        Some(rm::StopWhy::Skipped)
+    };
+    let mut feed: Feed = match progress {
+        Some(p) => Box::new(p.feeder(d)),
+        None => Box::new(|_| {}),
+    };
+    Some(
+        match crate::node_exec::execute(
+            d,
+            Some(&nid),
+            &rs,
+            &spec.cwd,
+            &base_ref,
+            &spec.log_dir,
+            &stop,
+            &mut |_, b| feed(b),
+        ) {
+            Err(rm::Fail::Environmental(why)) => {
+                tracing::warn!(check = %id, "{why}; running it here instead");
+                return None;
+            }
+            Err(rm::Fail::Error(e)) => Err(e),
+            Ok(rm::Outcome::Stopped(_)) => Ok(CheckOutcome {
+                passed: false,
+                timed_out: false,
+                output: String::new(),
+                full: String::new(),
+                id: id.to_string(),
+                stopped: note.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+                phase: None,
+            }),
+            Ok(rm::Outcome::Done(f)) => Ok(CheckOutcome {
+                passed: f.code == 0 && f.signal == 0 && !f.timed_out,
+                timed_out: f.timed_out,
+                output: format!("({})\n{}", f.ran_on, crate::jobs::tail(&f.output, 40)),
+                full: f.output.clone(),
+                id: id.to_string(),
+                stopped: None,
+                phase: f.phase.clone(),
+            }),
+        },
+    )
+}
+
 /// What an error from [`run`] starts with when GitHub, not the code, kept the check from running.
 pub const OUTAGE_PREFIX: &str = "no result (infrastructure): ";
 
@@ -870,7 +962,10 @@ fn collect(
     id: &str,
     progress: Option<&CheckProgress>,
 ) -> Shared {
-    let bound_remote = runs_on_github(d, spec).is_some();
+    let bound_remote = goes_remote(d, spec);
+    if let Some(r) = node_check(d, spec, id, progress) {
+        return r;
+    }
     if let Some(r) = remote_check(d, spec, id, progress) {
         return r;
     }

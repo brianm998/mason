@@ -378,3 +378,236 @@ fn use_on_and_off_edits_daemon_toml_live_and_keeps_the_rest() {
             .enabled
     );
 }
+
+// ---- phase 2: running a job on the node ------------------------------------------------------
+
+use mason_daemon::remote::{self, Fail, Outcome, StopWhy};
+
+/// A coordinator with a project (`scratch`, a clone with an origin) paired with a node that
+/// takes work, so that a run can be sent. The node says it has Rust; the machine need not.
+fn working_pair(max_jobs: u32) -> Pair {
+    std::env::set_var(
+        "MASON_NODE_TOOLCHAINS",
+        r#"{"rust":["1.96.0"],"xcode":[],"java":[]}"#,
+    );
+    std::env::set_var("MASON_NODE_POLL_MS", "50");
+    let p = pair();
+    std::fs::write(
+        p.sa.config_dir.join("daemon.toml"),
+        format!("[nodes]\nenabled = true\n[nodes.default]\nmax_jobs = {max_jobs}\n"),
+    )
+    .unwrap();
+    let (c, fp) = code(&p);
+    add(&p, &c, &fp, "b").unwrap();
+    set_switch(&p, true);
+    poll(&p);
+    assert_eq!(listed(&p, "b")["usable"], true, "{}", listed(&p, "b"));
+    p
+}
+
+fn spec(id: &str, build: Option<&str>, cmd: &str) -> remote::RunSpec {
+    let s = remote::spec_for(
+        "scratch",
+        id,
+        None,
+        cmd,
+        std::time::Duration::from_secs(120),
+        &[("MASON_X".to_string(), "from-the-coordinator".to_string())],
+        "node",
+        "",
+    );
+    remote::with_build(s, build)
+}
+
+fn run_on_b(
+    p: &Pair,
+    spec: &remote::RunSpec,
+    stop: &dyn Fn() -> Option<StopWhy>,
+) -> Result<Outcome, Fail> {
+    let base = remote::base_ref_of(&p.a, "scratch").expect("the project has a base");
+    let log = p.sa.root.path().join("logs");
+    mason_daemon::node_exec::execute(
+        &p.a,
+        None,
+        spec,
+        &p.sa.repo,
+        &base,
+        &log,
+        stop,
+        &mut |_, _| {},
+    )
+}
+
+fn done(r: Result<Outcome, Fail>) -> remote::Finished {
+    match r {
+        Ok(Outcome::Done(f)) => f,
+        Ok(Outcome::Stopped(w)) => panic!("stopped: {w:?}"),
+        Err(e) => panic!("failed: {e:?}"),
+    }
+}
+
+/// What a local run of the same command in the same tree gives.
+fn local(p: &Pair, build: Option<&str>, cmd: &str) -> (i32, String) {
+    let script = match build {
+        Some(b) => format!("({b}) && ({cmd})"),
+        None => cmd.to_string(),
+    };
+    let o = std::process::Command::new("sh")
+        .args(["-c", &script])
+        .current_dir(&p.sa.repo)
+        .env("MASON_X", "from-the-coordinator")
+        .output()
+        .unwrap();
+    (
+        o.status.code().unwrap_or(-1),
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&o.stdout),
+            String::from_utf8_lossy(&o.stderr)
+        ),
+    )
+}
+
+#[test]
+fn a_run_goes_to_the_node_and_comes_back_as_a_local_run_would() {
+    let p = working_pair(2);
+    // What a local run sees: tracked, modified and untracked files, as they are in the worktree.
+    std::fs::write(
+        p.sa.repo.join("t.sh"),
+        "echo \"tests start $MASON_X\"\nmkdir -p res\necho '<ok/>' > res/out.xml\necho \"worktree=$(basename $MASON_WORKTREE) node=$MASON_NODE\"\nexit 0\n",
+    )
+    .unwrap();
+    let mut s = spec("run-green", None, "sh t.sh");
+    s.results_file = Some("res/out.xml".into());
+    let f = done(run_on_b(&p, &s, &|| None));
+    assert_eq!((f.code, f.signal, f.timed_out), (0, 0, false));
+    assert!(
+        f.output.contains("tests start from-the-coordinator"),
+        "{}",
+        f.output
+    );
+    // The node's own facts, and not the coordinator's paths.
+    assert!(
+        f.output.contains("worktree=scratch-slot-1 node=1"),
+        "{}",
+        f.output
+    );
+    assert!(f.ran_on.starts_with("ran on node b"), "{}", f.ran_on);
+    // The results file is where a local run leaves it.
+    assert_eq!(
+        std::fs::read_to_string(p.sa.repo.join("res/out.xml")).unwrap(),
+        "<ok/>\n"
+    );
+    // The same command locally gives the same exit and, but for the node's own lines, the same output.
+    let (code, out) = local(&p, None, "sh t.sh");
+    assert_eq!(code, 0);
+    assert!(out.starts_with("tests start from-the-coordinator\n"));
+    // The coordinator keeps no record of a finished run, and the node deleted the job.
+    assert!(
+        !mason_daemon::node_exec::record_path(&p.sa.root.path().join("logs"), "run-green").exists()
+    );
+    let jobs = run(&p, node_serve::jobs(State(p.b.clone()))).unwrap().0;
+    assert!(jobs["jobs"].as_array().unwrap().is_empty(), "{jobs}");
+}
+
+#[test]
+fn a_red_run_and_a_failed_build_give_the_verdicts_a_local_run_gives() {
+    let p = working_pair(2);
+    std::fs::write(p.sa.repo.join("red.sh"), "echo 'not ok 1 - boom'\nexit 3\n").unwrap();
+    let f = done(run_on_b(&p, &spec("run-red", None, "sh red.sh"), &|| None));
+    let (code, out) = local(&p, None, "sh red.sh");
+    assert_eq!((f.code, f.signal), (code, 0));
+    assert_eq!(f.output, out);
+    assert_eq!(f.phase.as_deref(), Some("run"));
+
+    // A build that fails ends the run before the command, naming the phase.
+    let f = done(run_on_b(
+        &p,
+        &spec(
+            "run-build",
+            Some("echo building; exit 4"),
+            "echo SHOULD-NOT-RUN",
+        ),
+        &|| None,
+    ));
+    assert_eq!(f.code, 4);
+    assert_eq!(f.phase.as_deref(), Some("build"));
+    assert_eq!(f.output, "building\n");
+    assert!(!f.output.contains("SHOULD-NOT-RUN"));
+
+    // A build that passes runs the command, the build's output first.
+    let f = done(run_on_b(
+        &p,
+        &spec("run-both", Some("echo building"), "echo testing; exit 1"),
+        &|| None,
+    ));
+    assert_eq!((f.code, f.output.as_str()), (1, "building\ntesting\n"));
+    assert_eq!(f.phase.as_deref(), Some("run"));
+}
+
+#[test]
+fn a_stopped_run_is_cancelled_on_the_node_and_its_job_goes() {
+    let p = working_pair(2);
+    std::fs::write(p.sa.repo.join("slow.sh"), "echo started\nsleep 300\n").unwrap();
+    let asked = std::sync::atomic::AtomicBool::new(false);
+    // Stop it once the node has the job running.
+    let b = p.b.clone();
+    let stop = || {
+        let running = !b.node.jobs.list().is_empty();
+        if running {
+            asked.store(true, std::sync::atomic::Ordering::SeqCst);
+            Some(StopWhy::Skipped)
+        } else {
+            None
+        }
+    };
+    let r = run_on_b(&p, &spec("run-stop", None, "sh slow.sh"), &stop);
+    assert!(matches!(r, Ok(Outcome::Stopped(StopWhy::Skipped))), "{r:?}");
+    support::wait_for("the node to end the cancelled job", 60, || {
+        b.node.jobs.list().iter().all(|j| j["state"] != "running")
+    });
+    let jobs = run(&p, node_serve::jobs(State(p.b.clone()))).unwrap().0;
+    assert_eq!(jobs["jobs"][0]["state"], "cancelled", "{jobs}");
+}
+
+#[test]
+fn a_node_with_no_room_is_not_a_failure_of_the_code() {
+    let p = working_pair(1);
+    std::fs::write(p.sa.repo.join("slow.sh"), "sleep 300\n").unwrap();
+    // The first run holds the node's only job slot...
+    let b = p.b.clone();
+    let release = std::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|sc| {
+        let h = sc.spawn(|| {
+            run_on_b(&p, &spec("run-one", None, "sh slow.sh"), &|| {
+                release
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                    .then_some(StopWhy::Skipped)
+            })
+        });
+        support::wait_for("the first job to run on the node", 60, || {
+            b.node.jobs.running() == 1
+        });
+        // ...so a second finds the node full (the coordinator's last look says it had room):
+        // the run is environmental, which sends it to the next place.
+        let second = run_on_b(&p, &spec("run-two", None, "echo hi"), &|| None);
+        match second {
+            Err(Fail::Environmental(why)) => {
+                assert!(why.contains("no node had room"), "{why}");
+                assert!(why.contains("job slots"), "{why}");
+            }
+            other => panic!("expected an environmental failure, got {other:?}"),
+        }
+        release.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(matches!(h.join().unwrap(), Ok(Outcome::Stopped(_))));
+    });
+}
+
+#[test]
+fn a_node_that_is_off_takes_nothing() {
+    let p = working_pair(2);
+    set_switch(&p, false);
+    poll(&p);
+    let r = run_on_b(&p, &spec("run-off", None, "echo hi"), &|| None);
+    assert!(matches!(r, Err(Fail::Environmental(_))), "{r:?}");
+}

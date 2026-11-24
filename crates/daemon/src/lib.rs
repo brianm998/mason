@@ -59,6 +59,8 @@ pub mod markers;
 pub mod monitor_inplace;
 pub mod newtests;
 pub mod node_client;
+pub mod node_exec;
+pub mod node_run;
 pub mod node_serve;
 pub mod nodes;
 pub mod notify;

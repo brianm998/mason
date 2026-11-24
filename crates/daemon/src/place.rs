@@ -122,6 +122,41 @@ pub struct Facts {
     pub spill: Option<Spill>,
     /// What `favor-remote` weighs (#833); `None` reads as "GitHub had room".
     pub remote_spill: Option<RemoteSpill>,
+    /// The nodes that could take this run now, already filtered (accepting, the toolchains it
+    /// needs, a free unit). Empty: no node is in play, and the decision is exactly what it was
+    /// before nodes existed.
+    pub nodes: Vec<NodeRoom>,
+    /// `[nodes] prefer = "github"`: GitHub is tried before a node.
+    pub prefer_github: bool,
+}
+
+/// A node with room for a run (the multi-machine plan, §3.9).
+#[derive(Clone, Debug, PartialEq)]
+pub struct NodeRoom {
+    pub nid: String,
+    pub name: String,
+    /// Units free for this coordinator's runs.
+    pub free: u32,
+    /// The node holds a slot checkout of this project already, so its build is warm.
+    pub warm: bool,
+    pub die_c: Option<f32>,
+}
+
+/// The best of the nodes with room: a warm one first, then the most free units, then the cooler
+/// die, then the name, so the same facts always give the same node. Pure.
+pub fn best_node(rooms: &[NodeRoom]) -> Option<&NodeRoom> {
+    rooms.iter().min_by(|a, b| {
+        b.warm
+            .cmp(&a.warm)
+            .then(b.free.cmp(&a.free))
+            .then(
+                a.die_c
+                    .unwrap_or(f32::MAX)
+                    .partial_cmp(&b.die_c.unwrap_or(f32::MAX))
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
+            .then(a.name.cmp(&b.name))
+    })
 }
 
 /// A reading of this machine's load, built from the scheduler's state (#832). Only the slots a
@@ -366,6 +401,8 @@ impl Facts {
             setup_failed: None,
             spill: None,
             remote_spill: None,
+            nodes: vec![],
+            prefer_github: false,
         }
     }
 
@@ -562,12 +599,98 @@ pub fn decide(f: &Facts) -> Place {
             from,
         };
     }
+    if !f.nodes.is_empty() {
+        return decide_with_nodes(f, mode, from);
+    }
     match may_leave(f) {
         Err(why) => Place::Local {
             why,
             from: Source::Suite,
         },
         Ok(project_runs_on) => off_machine(f, project_runs_on, mode, from),
+    }
+}
+
+/// The rules a run answers to whatever off-machine target it would go to.
+fn shared_stay(f: &Facts) -> Option<String> {
+    if !f.suite_remote {
+        Some("the suite says remote = false".into())
+    } else if f.device {
+        Some("its environment leases a device, simulator or emulator".into())
+    } else if f.exclusive {
+        Some("it uses `exclusive`, which only this machine can give".into())
+    } else {
+        None
+    }
+}
+
+/// The decision when at least one node has room. A project need not have a `[remote_runs]`: a
+/// node is a target by itself. The modes keep their meaning, with "remote" read as "off this
+/// machine": `remote` is a node, else GitHub; `favor-local` stays here until this machine is
+/// overloaded and then goes to a node, else GitHub; `favor-remote` is a node, else what it was
+/// (GitHub, spilling over here when GitHub is full and this machine has room).
+fn decide_with_nodes(f: &Facts, mode: Mode, from: Source) -> Place {
+    if let Some(why) = shared_stay(f) {
+        return Place::Local {
+            why,
+            from: Source::Suite,
+        };
+    }
+    // GitHub, under exactly its own rules, when the project has the section and its setup works.
+    let github = |why: String| -> Option<Place> {
+        let runs_on = f.suite_runs_on.as_ref().or(f.project_runs_on.as_ref())?;
+        f.setup_failed.is_none().then(|| Place::GitHub {
+            runs_on: runs_on.clone(),
+            from,
+            why,
+        })
+    };
+    let node = |why: String| -> Place {
+        let n = best_node(&f.nodes).expect("nodes is not empty");
+        Place::Node {
+            nid: n.nid.clone(),
+            name: n.name.clone(),
+            from,
+            why,
+        }
+    };
+    match mode {
+        Mode::Remote => match (f.prefer_github, github(String::new())) {
+            (true, Some(g)) => g,
+            _ => node(String::new()),
+        },
+        Mode::FavorLocal => {
+            let local = |why: String| Place::Local {
+                why: format!("favor-local, {why}"),
+                from,
+            };
+            let Some(sp) = &f.spill else {
+                return local("this machine had room".into());
+            };
+            match sp.load.overloaded(sp.spill_after_ms) {
+                None => local(sp.load.room_text()),
+                Some(why) => match (f.prefer_github && sp.github_room, github(String::new())) {
+                    (true, Some(g)) => match g {
+                        Place::GitHub { runs_on, from, .. } => Place::GitHub {
+                            runs_on,
+                            from,
+                            why: format!("favor-local, {why}"),
+                        },
+                        other => other,
+                    },
+                    _ => node(format!("favor-local, {why}")),
+                },
+            }
+        }
+        _ => {
+            if f.prefer_github {
+                if let Some(Place::GitHub { runs_on, .. }) = github(String::new()) {
+                    return balance(mode, f, &runs_on, from);
+                }
+            }
+            let n = best_node(&f.nodes).expect("nodes is not empty");
+            node(format!("favor-remote, node {} had room", n.name))
+        }
     }
 }
 
@@ -848,6 +971,9 @@ pub fn plain_place(d: &Daemon, project: &str, task: Option<u64>) -> Place {
     f.project_runs_on = pid
         .and_then(|p| d.project(p))
         .and_then(|p| p.services.remote.as_ref().map(|r| r.runs_on.clone()));
+    let (nodes, prefer_github) = crate::nodes::rooms_for(d, project, None);
+    f.nodes = nodes;
+    f.prefer_github = prefer_github;
     decide(&f)
 }
 
@@ -943,9 +1069,14 @@ pub fn facts_for(
         setup_failed: None,
         spill: None,
         remote_spill: None,
+        nodes: vec![],
+        prefer_github: false,
     };
+    let (nodes, prefer_github) = crate::nodes::rooms_for(d, project, Some(suite));
+    f.nodes = nodes;
+    f.prefer_github = prefer_github;
     match f.effective().0 {
-        Mode::FavorLocal => f.spill = spill_for(d, project, suite),
+        Mode::FavorLocal => f.spill = spill_for(d, project, suite, !f.nodes.is_empty()),
         Mode::FavorRemote => f.remote_spill = remote_spill_for(d, project, suite),
         _ => {}
     }
@@ -953,19 +1084,37 @@ pub fn facts_for(
 }
 
 /// The load and GitHub's room for a suite of `project`, read from the scheduler (#832).
-fn spill_for(d: &Daemon, project: &str, suite: &mason_testing::Suite) -> Option<Spill> {
+fn spill_for(
+    d: &Daemon,
+    project: &str,
+    suite: &mason_testing::Suite,
+    nodes_in_play: bool,
+) -> Option<Spill> {
     let cfg = d
         .project_id_by_name(project)
         .and_then(|p| d.project(p))
-        .and_then(|p| p.services.remote.clone())?;
+        .and_then(|p| p.services.remote.clone());
+    // A project with no `[remote_runs]` has nothing to weigh unless a node can take the run.
+    if cfg.is_none() && !nodes_in_play {
+        return None;
+    }
     let needs = local_needs(&suite.uses);
-    let runs_on = suite.runs_on.clone().unwrap_or(cfg.runs_on);
     let room = |name: &str| d.broker.limit(name).is_none_or(|l| d.broker.used(name) < l);
+    let (github_room, spill_after_ms) = match cfg {
+        Some(cfg) => {
+            let runs_on = suite.runs_on.clone().unwrap_or(cfg.runs_on);
+            (
+                room(mason_scheduler::GHA)
+                    && (!runs_on.contains("macos") || room(mason_scheduler::GHA_MACOS)),
+                cfg.spill_after_s.saturating_mul(1000),
+            )
+        }
+        None => (false, 120_000),
+    };
     Some(Spill {
         load: LocalLoad::from_reading(&d.broker.load_reading(now_ms()), &needs),
-        github_room: room(mason_scheduler::GHA)
-            && (!runs_on.contains("macos") || room(mason_scheduler::GHA_MACOS)),
-        spill_after_ms: cfg.spill_after_s.saturating_mul(1000),
+        github_room,
+        spill_after_ms,
     })
 }
 

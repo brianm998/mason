@@ -171,6 +171,11 @@ struct Inner {
     discovered: BTreeMap<String, Discovered>,
     views: BTreeMap<String, View>,
     identity: Option<(Vec<u8>, Vec<u8>)>,
+    /// The paired nodes as of the last poll (or add or remove), so a placement decision reads no
+    /// store.
+    paired: Vec<mason_store::NodeRow>,
+    /// `[nodes]` as last read, by configuration directory, with the file's stamp.
+    cfg: BTreeMap<std::path::PathBuf, (Option<(std::time::SystemTime, u64)>, NodesCfg)>,
 }
 
 impl Default for Nodes {
@@ -202,6 +207,41 @@ impl Nodes {
         self.lock().discovered.values().cloned().collect()
     }
 
+    /// The paired nodes that are taking work and have what a run needs, as `(row, host, port,
+    /// status)` with the address to reach each at, the coolest die first.
+    pub fn usable(
+        &self,
+        cfg: &NodesCfg,
+        suite_name: &str,
+        command: &str,
+    ) -> Vec<(mason_store::NodeRow, String, u16, Value)> {
+        let g = self.lock();
+        let mut out: Vec<(mason_store::NodeRow, String, u16, Value)> = g
+            .paired
+            .iter()
+            .filter_map(|r| {
+                let v = g.views.get(&r.nid)?;
+                if !state_of(v, cfg.lost_after_polls).usable() {
+                    return None;
+                }
+                let s = v.status.clone()?;
+                if !covers_run(&s, suite_name, command) {
+                    return None;
+                }
+                let (host, port) = endpoint(r, g.discovered.get(&r.nid));
+                Some((r.clone(), host, port, s))
+            })
+            .collect();
+        out.sort_by(|a, b| {
+            let die = |s: &Value| s["thermal"]["die_c"].as_f64().unwrap_or(f64::MAX);
+            die(&a.3)
+                .partial_cmp(&die(&b.3))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.0.name.cmp(&b.0.name))
+        });
+        out
+    }
+
     pub fn view(&self, nid: &str) -> Option<View> {
         self.lock().views.get(nid).cloned()
     }
@@ -212,6 +252,28 @@ impl Nodes {
 
     fn forget_view(&self, nid: &str) {
         self.lock().views.remove(nid);
+    }
+
+    fn set_paired(&self, rows: Vec<mason_store::NodeRow>) {
+        self.lock().paired = rows;
+    }
+
+    /// `[nodes]` from `daemon.toml`, read again only when the file changed. A file that does not
+    /// parse reads as no nodes.
+    pub fn cfg(&self, config_dir: &std::path::Path) -> NodesCfg {
+        let path = config_dir.join("daemon.toml");
+        let stamp = std::fs::metadata(&path)
+            .ok()
+            .and_then(|m| Some((m.modified().ok()?, m.len())));
+        let mut g = self.lock();
+        if let Some((s, c)) = g.cfg.get(config_dir) {
+            if *s == stamp {
+                return c.clone();
+            }
+        }
+        let c = load_nodes(config_dir).unwrap_or_default();
+        g.cfg.insert(config_dir.to_path_buf(), (stamp, c.clone()));
+        c
     }
 
     fn identity(&self, d: &Daemon) -> std::io::Result<(Vec<u8>, Vec<u8>)> {
@@ -306,6 +368,7 @@ async fn poll_one(
 pub async fn poll_once(d: &Arc<Daemon>) {
     let cfg = load_nodes(&d.cfg.config_dir).unwrap_or_default();
     let rows = paired(d);
+    d.nodes.set_paired(rows.clone());
     let Ok(identity) = d.nodes.identity(d) else {
         return;
     };
@@ -318,8 +381,111 @@ pub async fn poll_once(d: &Arc<Daemon>) {
         });
     }
     while let Some(Ok((nid, v))) = set.join_next().await {
+        set_capacity(d, &nid, &v, cfg.lost_after_polls);
         d.nodes.set_view(&nid, v);
     }
+}
+
+/// The broker resource a node's units are leased from.
+pub fn resource(nid: &str) -> String {
+    format!("node:{nid}")
+}
+
+/// The units this coordinator may hold on a node: what the node has free plus what this
+/// coordinator holds there already, so the limit means the node's real capacity. A node that is
+/// not taking work keeps what is held and grants one more at most, so a step that queued for it
+/// is let through to find that out (and fall back) instead of waiting for a node that is gone.
+fn set_capacity(d: &Arc<Daemon>, nid: &str, v: &View, lost_after: u32) {
+    let name = resource(nid);
+    let held = d.broker.used(&name);
+    let free = v
+        .status
+        .as_ref()
+        .map(|s| {
+            let max = s["jobs"]["max"].as_u64().unwrap_or(0);
+            let running = s["jobs"]["running"].as_u64().unwrap_or(0);
+            max.saturating_sub(running) as u32
+        })
+        .unwrap_or(0);
+    let units = if state_of(v, lost_after).usable() {
+        free + held
+    } else {
+        held
+    };
+    d.broker.set_pool_units(&name, units.max(1));
+}
+
+/// Does a node with this status have what a run of `suite` needs? The toolchain names the suite
+/// is known by (`remote::toolchains`) must be installed, and so must the Xcode version its
+/// command names.
+pub fn covers(status: &Value, suite: Option<&mason_testing::Suite>) -> bool {
+    match suite {
+        Some(s) => covers_run(status, &s.name, &s.command),
+        None => true,
+    }
+}
+
+/// [`covers`] for a run known by its suite's name and its command.
+pub fn covers_run(status: &Value, suite_name: &str, command: &str) -> bool {
+    let tc = &status["toolchains"];
+    let has = |k: &str| tc[k].as_array().is_some_and(|a| !a.is_empty());
+    for t in crate::remote::toolchains(suite_name) {
+        let key = if t == "swift" { "xcode" } else { t };
+        if !has(key) {
+            return false;
+        }
+    }
+    match crate::remote::xcode_requested(command) {
+        Some(v) => tc["xcode"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|x| x.as_str() == Some(v.as_str()))),
+        None => true,
+    }
+}
+
+/// The nodes that could take a run of `project` (of `suite`, when it is known) now, and whether
+/// `[nodes] prefer = "github"`. Empty unless `[nodes] enabled` and the project may use nodes.
+pub fn rooms_for(
+    d: &Daemon,
+    project: &str,
+    suite: Option<&mason_testing::Suite>,
+) -> (Vec<crate::place::NodeRoom>, bool) {
+    let cfg = d.nodes.cfg(&d.cfg.config_dir);
+    let prefer_github = cfg.prefer == crate::config::Prefer::Github;
+    if !cfg.enabled || !cfg.allows(project) {
+        return (vec![], prefer_github);
+    }
+    let (rows, views) = {
+        let g = d.nodes.lock();
+        (g.paired.clone(), g.views.clone())
+    };
+    let rooms = rows
+        .iter()
+        .filter_map(|r| {
+            let v = views.get(&r.nid)?;
+            let state = state_of(v, cfg.lost_after_polls);
+            if !state.usable() {
+                return None;
+            }
+            let s = v.status.as_ref()?;
+            if !covers(s, suite) {
+                return None;
+            }
+            let name = resource(&r.nid);
+            let free = match d.broker.limit(&name) {
+                Some(l) => l.saturating_sub(d.broker.used(&name)),
+                None => 0,
+            };
+            (free > 0).then(|| crate::place::NodeRoom {
+                nid: r.nid.clone(),
+                name: r.name.clone(),
+                free,
+                warm: s["mirrors"][project].is_object(),
+                die_c: s["thermal"]["die_c"].as_f64().map(|c| c as f32),
+            })
+        })
+        .collect();
+    (rooms, prefer_github)
 }
 
 /// Start the browse thread and the poller. The poller wakes every `[nodes] status_every_s`
@@ -557,6 +723,7 @@ pub async fn add(
         .put_node(&row)
         .map_err(|e| fail(500, e.to_string()))?;
     d.nodes.forget_view(&nid);
+    d.nodes.set_paired(paired(&d));
     // Ask it at once, so `mason node list` right after has an answer.
     let d2 = d.clone();
     poll_once(&d2).await;
@@ -581,6 +748,7 @@ pub async fn remove(
             if let Some(n) = nid {
                 d.nodes.forget_view(&n);
             }
+            d.nodes.set_paired(paired(&d));
             Ok(axum::Json(json!({"removed": name})))
         }
         Ok(false) => Err(fail(404, format!("no paired node called {name:?}"))),

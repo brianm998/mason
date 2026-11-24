@@ -142,6 +142,13 @@ pub fn any_remote(d: &Daemon) -> bool {
     d.projects().values().any(|p| p.services.remote.is_some())
 }
 
+/// The base branch of `project` as a revision (`origin/main`): what a snapshot is measured from.
+pub fn base_ref_of(d: &Daemon, project: &str) -> Option<String> {
+    let p = project_cfg(d, project)?;
+    let remote = p.remote.clone().unwrap_or_else(|| "origin".into());
+    Some(remote_base_ref(&p.path, &remote, &p.base))
+}
+
 fn project_cfg(d: &Daemon, project: &str) -> Option<ProjectCfg> {
     d.project_id_by_name(project)
         .and_then(|i| d.project(i))
@@ -900,7 +907,7 @@ fn git_in(cwd: &Path, index: &Path, args: &[&str], stdin: Option<&[u8]>) -> Resu
 pub fn snapshot(
     wt: &Path,
     base_ref: &str,
-    workflow: &str,
+    workflow: Option<&str>,
     run_json: &str,
     message: &str,
 ) -> Result<String, String> {
@@ -919,80 +926,84 @@ pub fn snapshot(
         // Everything a local run would see: modified, deleted, new and untracked files (not the
         // ignored ones, which a local run's checkout does not carry either).
         g(&["add", "-A"], None)?;
-        // No workflow of the task's runs on these refs...
-        g(
-            &[
-                "rm",
-                "-r",
-                "--cached",
-                "-q",
-                "--ignore-unmatch",
-                "--",
-                ".github/workflows",
-            ],
-            None,
-        )?;
-        // ...except the base branch's own copy of ours.
-        let path = format!(".github/workflows/{workflow}");
-        let blob = g(&["rev-parse", &format!("{base_ref}:{path}")], None)
-            .map_err(|e| format!("the base branch ({base_ref}) has no {path}: {e}"))?;
-        // A run starts by dispatch; a workflow that also runs on the push would start it twice.
-        let own = g(&["cat-file", "blob", &blob], None)?;
-        if mason_adapters::runref::fires_on(
-            &mason_adapters::runref::push_trigger(&own),
-            "mason/run/x",
-        ) {
-            return Err(format!(
-                "the base branch ({base_ref}) has {path}, which runs on `mason/run/**`; a run is started by dispatch, so the push would start it twice (see `mason doctor`)"
-            ));
-        }
-        g(
-            &[
-                "update-index",
-                "--add",
-                "--cacheinfo",
-                &format!("100644,{blob},{path}"),
-            ],
-            None,
-        )?;
-        // And the base branch's copy of every other workflow (tests read `ci.yml`), never the
-        // task's. None of them may run on `mason/run/**`: it would run with our secrets.
-        let listing = g(
-            &["ls-tree", "-r", base_ref, "--", ".github/workflows"],
-            None,
-        )?;
-        for line in listing.lines() {
-            let Some((meta, name)) = line.split_once('\t') else {
-                continue;
-            };
-            let mut m = meta.split_whitespace();
-            let (mode, kind, sha) = (m.next(), m.next(), m.next());
-            if name == path || kind != Some("blob") {
-                continue;
-            }
-            let (Some(mode), Some(sha)) = (mode, sha) else {
-                continue;
-            };
-            if name.ends_with(".yml") || name.ends_with(".yaml") {
-                let text = g(&["cat-file", "blob", sha], None)?;
-                if mason_adapters::runref::fires_on(
-                    &mason_adapters::runref::push_trigger(&text),
-                    "mason/run/x",
-                ) {
-                    return Err(format!(
-                        "the base branch ({base_ref}) has {name}, which runs on `mason/run/**`; a remote run would start it with the repository's secrets (see `mason doctor`)"
-                    ));
-                }
+        // A run for a node has no workflow: the node runs the command itself and nothing of
+        // GitHub's is involved, so the tree is what a local run would see, as it is.
+        if let Some(workflow) = workflow {
+            // No workflow of the task's runs on these refs...
+            g(
+                &[
+                    "rm",
+                    "-r",
+                    "--cached",
+                    "-q",
+                    "--ignore-unmatch",
+                    "--",
+                    ".github/workflows",
+                ],
+                None,
+            )?;
+            // ...except the base branch's own copy of ours.
+            let path = format!(".github/workflows/{workflow}");
+            let blob = g(&["rev-parse", &format!("{base_ref}:{path}")], None)
+                .map_err(|e| format!("the base branch ({base_ref}) has no {path}: {e}"))?;
+            // A run starts by dispatch; a workflow that also runs on the push would start it twice.
+            let own = g(&["cat-file", "blob", &blob], None)?;
+            if mason_adapters::runref::fires_on(
+                &mason_adapters::runref::push_trigger(&own),
+                "mason/run/x",
+            ) {
+                return Err(format!(
+                    "the base branch ({base_ref}) has {path}, which runs on `mason/run/**`; a run is started by dispatch, so the push would start it twice (see `mason doctor`)"
+                ));
             }
             g(
                 &[
                     "update-index",
                     "--add",
                     "--cacheinfo",
-                    &format!("{mode},{sha},{name}"),
+                    &format!("100644,{blob},{path}"),
                 ],
                 None,
             )?;
+            // And the base branch's copy of every other workflow (tests read `ci.yml`), never the
+            // task's. None of them may run on `mason/run/**`: it would run with our secrets.
+            let listing = g(
+                &["ls-tree", "-r", base_ref, "--", ".github/workflows"],
+                None,
+            )?;
+            for line in listing.lines() {
+                let Some((meta, name)) = line.split_once('\t') else {
+                    continue;
+                };
+                let mut m = meta.split_whitespace();
+                let (mode, kind, sha) = (m.next(), m.next(), m.next());
+                if name == path || kind != Some("blob") {
+                    continue;
+                }
+                let (Some(mode), Some(sha)) = (mode, sha) else {
+                    continue;
+                };
+                if name.ends_with(".yml") || name.ends_with(".yaml") {
+                    let text = g(&["cat-file", "blob", sha], None)?;
+                    if mason_adapters::runref::fires_on(
+                        &mason_adapters::runref::push_trigger(&text),
+                        "mason/run/x",
+                    ) {
+                        return Err(format!(
+                            "the base branch ({base_ref}) has {name}, which runs on `mason/run/**`; a remote run would start it with the repository's secrets (see `mason doctor`)"
+                        ));
+                    }
+                }
+                g(
+                    &[
+                        "update-index",
+                        "--add",
+                        "--cacheinfo",
+                        &format!("{mode},{sha},{name}"),
+                    ],
+                    None,
+                )?;
+            }
         }
         let spec_blob = g(&["hash-object", "-w", "--stdin"], Some(run_json.as_bytes()))?;
         g(
@@ -1639,7 +1650,7 @@ pub fn execute(
             let sha = snapshot(
                 &site.cwd,
                 &site.base_ref,
-                &site.workflow,
+                Some(&site.workflow),
                 &run_json(spec),
                 &format!("mason run {} ({})", spec.id, spec.suite),
             )
@@ -2515,12 +2526,14 @@ pub fn pool_needs(
     // The effective mode of the task (task, then project, then global; #761, #831): never
     // `executor_for(.., None)`, which is always local. A step whose suites are split between
     // here and GitHub by their own rules is not looked into: it follows this mode.
-    let runs_on = match executor_task(d, project, task.map(|t| t.0)) {
-        Executor::GitHub { runs_on } => runs_on,
+    let units = match executor_task(d, project, task.map(|t| t.0)) {
+        Executor::GitHub { runs_on } => units_for(&runs_on, 1),
+        // A step bound for a node holds one unit of that node's resource and nothing of this
+        // machine, whichever node the run then finds room on.
+        Executor::Node { nid, .. } => {
+            std::collections::BTreeMap::from([(crate::nodes::resource(&nid), 1)])
+        }
         Executor::Local => return None,
-        // A node's resource (`node:<nid>`) is phase 2; until placement produces one, a step
-        // that would go to a node keeps what it asked for.
-        Executor::Node { .. } => return None,
     };
     let mut out = mason_scheduler::Needs {
         exclusive: false,
@@ -2531,7 +2544,7 @@ pub fn pool_needs(
             .map(|(k, v)| (k.clone(), *v))
             .collect(),
     };
-    for (k, v) in units_for(&runs_on, 1) {
+    for (k, v) in units {
         out.amounts.insert(k, v);
     }
     Some(out)

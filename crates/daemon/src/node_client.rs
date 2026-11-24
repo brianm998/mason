@@ -177,7 +177,31 @@ impl NodeClient {
         path: &str,
         body: Option<&serde_json::Value>,
     ) -> Result<Response, ClientError> {
-        match tokio::time::timeout(self.timeout, self.once(method, path, body)).await {
+        match body {
+            Some(b) => {
+                self.send(
+                    method,
+                    path,
+                    Some("application/json"),
+                    b.to_string().into_bytes(),
+                )
+                .await
+            }
+            None => self.send(method, path, None, Vec::new()).await,
+        }
+    }
+
+    /// One request with a body of bytes (a git bundle), of the given kind.
+    pub async fn send(
+        &self,
+        method: &str,
+        path: &str,
+        content_type: Option<&str>,
+        payload: Vec<u8>,
+    ) -> Result<Response, ClientError> {
+        match tokio::time::timeout(self.timeout, self.once(method, path, content_type, payload))
+            .await
+        {
             Ok(r) => r,
             Err(_) => Err(ClientError::Unreachable(format!(
                 "{}:{} did not answer",
@@ -190,7 +214,8 @@ impl NodeClient {
         &self,
         method: &str,
         path: &str,
-        body: Option<&serde_json::Value>,
+        content_type: Option<&str>,
+        payload: Vec<u8>,
     ) -> Result<Response, ClientError> {
         let addr = format!("{}:{}", self.host, self.port);
         let tcp = tokio::net::TcpStream::connect(&addr)
@@ -215,13 +240,12 @@ impl NodeClient {
                 .await
                 .map_err(|e| ClientError::Protocol(e.to_string()))?;
         tokio::spawn(conn);
-        let payload = body.map(|b| b.to_string().into_bytes()).unwrap_or_default();
         let mut req = hyper::Request::builder()
             .method(method)
             .uri(path)
             .header(hyper::header::HOST, addr.as_str());
-        if body.is_some() {
-            req = req.header(hyper::header::CONTENT_TYPE, "application/json");
+        if let Some(t) = content_type {
+            req = req.header(hyper::header::CONTENT_TYPE, t);
         }
         let req = req
             .body(Full::new(Bytes::from(payload)))
@@ -240,5 +264,33 @@ impl NodeClient {
             .to_bytes()
             .to_vec();
         Ok(Response { status, body })
+    }
+}
+
+/// Run `f` to its end from a thread that is not a tokio worker: the daemon's blocking code
+/// (a step's thread) talks to nodes through this. From inside a runtime it runs on a helper
+/// thread, since a runtime cannot be started inside another.
+pub fn block_on<F>(f: F) -> F::Output
+where
+    F: std::future::Future + Send,
+    F::Output: Send,
+{
+    static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    let rt = RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .thread_name("node-client")
+            .build()
+            .expect("a runtime for node requests")
+    });
+    if tokio::runtime::Handle::try_current().is_ok() {
+        std::thread::scope(|s| {
+            s.spawn(|| rt.block_on(f))
+                .join()
+                .unwrap_or_else(|e| std::panic::resume_unwind(e))
+        })
+    } else {
+        rt.block_on(f)
     }
 }

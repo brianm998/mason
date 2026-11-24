@@ -454,19 +454,24 @@ fn run_hosted_resuming(
     // as its own step here has none when it goes remote: the build comes first in the command.
     // Held until this function returns, so for the whole local run.
     let mut fallback: Option<crate::sched::Lease> = None;
-    // An `Executor::Node` is not produced yet: `run_on_node` joins `run_remote` here in phase 2
-    // of the multi-machine plan, returning the same `Ran`.
-    if let crate::remote::Executor::GitHub { runs_on } =
-        crate::remote::executor_for(d, project, crate::remote::Kind::Suite, place)
-    {
+    // A node returns the same `Ran` GitHub does (`run_on_node`, the multi-machine plan).
+    let exec = crate::remote::executor_for(d, project, crate::remote::Kind::Suite, place);
+    if exec.is_off_machine() {
         let build = place.and_then(|(_, s)| s.build.as_deref());
-        if let Some(ran) = run_remote(
-            d, project, id, build, cmd, cwd, limit, log_dir, &check, run, watch, &env, &runs_on,
-            covered,
-        )? {
+        let ran = match &exec {
+            crate::remote::Executor::GitHub { runs_on } => run_remote(
+                d, project, id, build, cmd, cwd, limit, log_dir, &check, run, watch, &env, runs_on,
+                covered,
+            )?,
+            crate::remote::Executor::Node { nid, .. } => run_on_node(
+                d, project, id, build, cmd, cwd, limit, log_dir, &check, run, watch, &env, nid,
+            )?,
+            crate::remote::Executor::Local => None,
+        };
+        if let Some(ran) = ran {
             return Ok(ran);
         }
-        // `fallback = "local"` sent it here. Its step holds runner pool units, not this
+        // `fallback = "local"` (or no node with room) sent it here. Its step holds runner pool units, not this
         // machine's slots (#761), so it takes what the definition's test step `uses` before it
         // starts, under the same limits and CPU and thermal holds as a local test step.
         if !d.cfg.hosts_dir().join(id).join("host.kv").exists() {
@@ -682,6 +687,82 @@ fn run_remote(
         }),
         Some(rm::Outcome::Done(f)) => Some(remote_ran(f, watch)),
     })
+}
+
+/// A suite command run on a node: the same `Ran` a step host or a GitHub run gives, so the code
+/// that judges a run never knows where it was. `Ok(None)`: no node had room (or the one chosen
+/// went away), and the caller runs it here with the slots a local run holds. The suite's build
+/// comes first in the job, as its own process.
+#[allow(clippy::too_many_arguments)]
+fn run_on_node(
+    d: &Arc<Daemon>,
+    project: &str,
+    id: &str,
+    build: Option<&str>,
+    cmd: &str,
+    cwd: &Path,
+    limit: Duration,
+    log_dir: &Path,
+    check: &Check,
+    run: Option<StepRunId>,
+    watch: Option<&Suite>,
+    env: &[(String, String)],
+    nid: &str,
+) -> Result<Option<Ran>, String> {
+    use crate::remote as rm;
+    let Some(base_ref) = rm::base_ref_of(d, project) else {
+        return Ok(None);
+    };
+    let spec = rm::with_build(
+        rm::spec_for(project, id, watch, cmd, limit, env, "node", ""),
+        build,
+    );
+    let stop = || match check() {
+        Stop::No => None,
+        Stop::Skipped => Some(rm::StopWhy::Skipped),
+        Stop::Gone => Some(rm::StopWhy::Gone),
+    };
+    // Live counts, for progress only: the verdict is the full parse at the end.
+    let name = watch.map(|w| w.name.clone()).unwrap_or_default();
+    let mut live = watch.and_then(|w| LiveCount::new(w.parser, w));
+    let mut on_output = |_: u64, b: &[u8]| {
+        if let (Some(run), Some(l)) = (run, live.as_mut()) {
+            l.feed(b);
+            suite_counts(d, run, &name, l);
+        }
+    };
+    match crate::node_exec::execute(
+        d,
+        Some(nid),
+        &spec,
+        cwd,
+        &base_ref,
+        log_dir,
+        &stop,
+        &mut on_output,
+    ) {
+        Ok(rm::Outcome::Done(f)) => Ok(Some(remote_ran(f, watch))),
+        Ok(rm::Outcome::Stopped(why)) => Ok(Some(Ran {
+            code: -1,
+            signal: 9,
+            output: String::new(),
+            stop: match why {
+                rm::StopWhy::Skipped => Stop::Skipped,
+                rm::StopWhy::Gone => Stop::Gone,
+            },
+            timed_out: false,
+            stalled: None,
+            ran_ms: None,
+            narrowed: false,
+            resumed: None,
+            ran_on: None,
+        })),
+        Err(rm::Fail::Environmental(why)) => {
+            tracing::warn!(run = %id, "{why}; running it here instead");
+            Ok(None)
+        }
+        Err(rm::Fail::Error(e)) => Err(e),
+    }
 }
 
 /// Do the shard lists name more than this run's own tests (#873)? A narrowed run takes its
