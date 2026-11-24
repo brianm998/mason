@@ -121,6 +121,16 @@ fn reached(screen_seq: u64, views: usize, target: u64) -> bool {
     screen_seq >= target && views >= 3
 }
 
+/// Whether to stop waiting: after the target is reached, 300 ms with no message (trailing views
+/// of the same step); otherwise 1.5 s with nothing new.
+fn done(reached: bool, quiet: Duration) -> bool {
+    if reached {
+        quiet >= Duration::from_millis(300)
+    } else {
+        quiet >= Duration::from_millis(1500)
+    }
+}
+
 /// Wait until the screen has reached the daemon's current seq and `after` (the seq a step
 /// reported), or 1.5 s pass with nothing new.
 fn settle(c: &mut Client, screen: &mut Screen, after: u64) {
@@ -133,19 +143,17 @@ fn settle(c: &mut Client, screen: &mut Screen, after: u64) {
         .unwrap_or(0)
         .max(after);
     let mut quiet = std::time::Instant::now();
-    let mut last = screen.seq;
-    while !reached(screen.seq, screen.views.len(), target) {
+    loop {
+        let got = reached(screen.seq, screen.views.len(), target);
+        if done(got, quiet.elapsed()) && screen.views.len() >= 3 {
+            break;
+        }
         if std::time::Instant::now() > hard {
             die("the screen did not reach the daemon's seq within 60 s");
         }
-        if screen.seq > last {
-            last = screen.seq;
-            quiet = std::time::Instant::now();
-        } else if quiet.elapsed() > Duration::from_millis(1500) && screen.views.len() >= 3 {
-            break;
-        }
         if let Ok(Some(m)) = c.recv(Duration::from_millis(50)) {
             screen.absorb(m);
+            quiet = std::time::Instant::now();
         }
     }
     if !reached(screen.seq, screen.views.len(), target) {
@@ -634,7 +642,8 @@ fn latency(args: &mut Vec<String>) {
 
 #[cfg(test)]
 mod tests {
-    use super::reached;
+    use super::{done, reached};
+    use std::time::Duration;
 
     #[test]
     fn settle_target_needs_the_steps_seq_and_three_views() {
@@ -642,5 +651,13 @@ mod tests {
         assert!(!reached(10, 2, 10));
         assert!(reached(10, 3, 10));
         assert!(reached(11, 3, 10));
+    }
+
+    #[test]
+    fn done_waits_for_trailing_views() {
+        assert!(!done(true, Duration::from_millis(299)));
+        assert!(done(true, Duration::from_millis(300)));
+        assert!(!done(false, Duration::from_millis(1499)));
+        assert!(done(false, Duration::from_millis(1500)));
     }
 }
