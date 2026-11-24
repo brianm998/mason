@@ -8,7 +8,7 @@ run10() {
     local crate=$1 file=$2 name=$3 i build bin
     build=$(cargo test -p "$crate" --test "$file" --no-run --message-format=json 2>&1) \
         || { echo "$build" >&2; echo "FAILED: build of $file" >&2; exit 1; }
-    bin=$(echo "$build" | grep -oE "\"executable\":\"[^\"]*/deps/${file}-[0-9a-f]+\"" | tail -1 | cut -d'"' -f4 || true)
+    bin=$(echo "$build" | sed -nE "s|.*\"executable\":\"([^\"]*/deps/${file}-[0-9a-f]+)\".*|\1|p" | tail -1)
     [ -n "$bin" ] && [ -x "$bin" ] || { echo "$build" >&2; echo "no test binary for $file" >&2; exit 1; }
     for i in 1 2 3 4 5 6 7 8 9 10; do
         echo "== $name ($i of 10)"
