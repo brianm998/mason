@@ -468,16 +468,7 @@ fn run_hosted_resuming(
         // machine's slots (#761), so it takes what the definition's test step `uses` before it
         // starts, under the same limits and CPU and thermal holds as a local test step.
         if !d.cfg.hosts_dir().join(id).join("host.kv").exists() {
-            let uses = d
-                .project_id_by_name(project)
-                .map(|p| d.current_def(p))
-                .and_then(|def| {
-                    def.steps
-                        .iter()
-                        .find(|s| s.kind == mason_definition::StepType::Test)
-                        .map(|s| s.uses.clone())
-                })
-                .unwrap_or_default();
+            let uses = test_step_uses(d, project);
             let task = place.and_then(|(t, _)| t);
             let label = format!(
                 "{} {id} (no GitHub runner, run here)",
@@ -577,6 +568,19 @@ fn run_hosted_resuming(
     }
 }
 
+/// What the definition's test step `uses`: the slots a run that falls back to this machine takes.
+fn test_step_uses(d: &Arc<Daemon>, project: &str) -> std::collections::BTreeMap<String, u32> {
+    d.project_id_by_name(project)
+        .map(|p| d.current_def(p))
+        .and_then(|def| {
+            def.steps
+                .iter()
+                .find(|s| s.kind == mason_definition::StepType::Test)
+                .map(|s| s.uses.clone())
+        })
+        .unwrap_or_default()
+}
+
 /// A suite command run on GitHub Actions. `covered`: the caller holds this machine's slots for
 /// the run, so a fallback's room check does not count them against it. `Ok(None)`: it could not
 /// go remote and the project's `fallback` is `local`, so the caller runs it here. An outage or a missing runner is an `Err`
@@ -600,7 +604,8 @@ fn run_remote(
 ) -> Result<Option<Ran>, String> {
     use crate::remote as rm;
     let task = run.and_then(|r| d.world().ok().and_then(|w| w.task_of_open_run(r)));
-    let uses = watch.map(|s| s.uses.clone()).unwrap_or_default();
+    // The slots a fallback takes when it is placed here: the same ones `run_one` asks for.
+    let uses = test_step_uses(d, project);
     let Some(site) = rm::site_for_run(d, project, cwd, task.map(|t| t.0), &uses, covered) else {
         return Err(rm::env_err("the project has no [remote_runs] section"));
     };
