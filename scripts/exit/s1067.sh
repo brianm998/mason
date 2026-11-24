@@ -5,6 +5,6 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 grep -q '^Summary: ' docs/stages/s1067.md
-cargo test -q -p mason-cli owner_identity_follows_the_daemon_default_order
+cargo test -q -p mason-pipeline owner_identity_follows_the_daemon_default_order
 bash scripts/exit/s965.sh
 echo "OK s1067"
