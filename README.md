@@ -733,6 +733,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s960**: The Swift monitor no longer publishes sidebar, header or progress to its observed model while the window is hidden or minimised, and subscribes to only header and sidebar until it is visible again.
 - **s961**: The step-host portable transport tests are Unix-only until the Windows IPC transport exists, which fixes the red Windows CI job.
 - **s963**: A skip debt whose task branch was deleted after landing is now proven landed from the merge on the base branch, so the idle pass and `settle_debts` can pay it instead of leaving it open for ever.
+- **s965**: `mason project rename OLD NEW [--yes]` moves the registration file, appends a new `ProjectRenamed` event, rewrites the store's text `project` columns and name-built keys in one transaction and re-keys the live registry, so the project keeps its id, tasks and history with no restart.
 - **s969**: see decision 0962. Task #841's red landing result came from a bad batch build; three
 - **s975**: an owner's retry note is also kept per task and shown to the reviewer and later develop rounds as "Owner decisions on this task"; see decision 0968.
 - **s978**: `lint_files` now reads the repository guards' `<path>: <message>` and `<path>:<line>: <message>` lines, for paths in the batch's union diff only, so the existing file blame parks the one task that added the file instead of bisecting.
@@ -740,6 +741,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s982**: the daemon serves `GET /onboarding/candidates`, `POST /onboarding/plan` and `POST /onboarding/apply` (owner only) over the `mason-onboard` crate, with `[onboarding] roots` (default `["~/git"]`), so a desktop monitor can add a local repository and answer the same questions as `mason init`; see decision 0975.
 - **s983**: The monitor draws a task's blockers as one wrapping text of whole links (a sidebar row names three and "and N more"; the task page drops its "waiting for" line when the blocker list is shown), so 29 blockers no longer crush into one-character columns.
 - **s984**: A double click on the Failed tile now opens the lone failed task, or a Failed page listing every failed task (with "N of M" when capped); the phone tile tap and `mason://section/failed` do the same.
+- **s996**: A run GitHub has not picked up comes back here only when this machine would grant its lease at once (queue counted, hold settled, lease taken before the GitHub run is cancelled).
 - **s998**: masons_own_impact_map_selects_suites_by_path now expects the eight unit-level suites bound to run_check and the test step, instead of six.
 - **s1000**: The diagnosis session runs on `diagnose_model`/`diagnose_effort` from the project registration, else the provider file's `[diagnose]` table, else Opus at medium (Codex: its CLI's model at medium), and each diagnosis and `mason task show` print what it ran on.
 - **s1012**: a replayed run_check carries its call id, takes the suites that finished before a masond takeover instead of running them again, and no longer folds the base on the replay.
