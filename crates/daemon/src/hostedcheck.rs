@@ -437,13 +437,18 @@ pub fn pending(d: &Daemon, spec: &CheckSpec) -> bool {
 
 /// Run `spec` (or attach to, or take the result of, the run that already is it).
 /// Blocks until there is a result.
-pub fn run(d: &Arc<Daemon>, spec: &CheckSpec) -> Shared {
-    run_with(d, spec, None)
+pub fn run(d: &Arc<Daemon>, spec: &CheckSpec, grant: &crate::remote::Grant) -> Shared {
+    run_with(d, spec, None, grant)
 }
 
 /// [`run`], feeding the develop step's progress with the run's live counts (for display only;
 /// the verdict is what the command's exit says, as ever).
-pub fn run_with(d: &Arc<Daemon>, spec: &CheckSpec, progress: Option<&CheckProgress>) -> Shared {
+pub fn run_with(
+    d: &Arc<Daemon>,
+    spec: &CheckSpec,
+    progress: Option<&CheckProgress>,
+    grant: &crate::remote::Grant,
+) -> Shared {
     let _ = std::fs::create_dir_all(&spec.log_dir);
     let key = run_key(spec);
     // Find or allocate, one caller at a time, so two calls never take one number.
@@ -540,7 +545,7 @@ pub fn run_with(d: &Arc<Daemon>, spec: &CheckSpec, progress: Option<&CheckProgre
         }
         return g.clone().unwrap_or_else(|| Err("no result".into()));
     }
-    let res = collect(d, spec, &id, progress);
+    let res = collect(d, spec, &id, progress, grant);
     // A `favor-local` placement stood for this run only (#832).
     if let (Some((t, s)), Some(project)) = (
         spec.place.as_ref(),
@@ -683,6 +688,20 @@ fn runs_on_github(d: &Arc<Daemon>, spec: &CheckSpec) -> Option<String> {
     }
 }
 
+/// What `spec` holds when it goes to GitHub: one `gha` unit per job it starts (its shards, else
+/// one), and as many `gha-macos` on a macOS runner (#818). `None`: it runs here.
+pub fn pool_units(
+    d: &Arc<Daemon>,
+    spec: &CheckSpec,
+) -> Option<std::collections::BTreeMap<String, u32>> {
+    let runs_on = runs_on_github(d, spec)?;
+    let suite = spec.place.as_ref().map(|(_, s)| &**s);
+    Some(crate::remote::units_for(
+        &runs_on,
+        crate::remote::jobs_of(suite, &spec.cmd),
+    ))
+}
+
 /// Does `spec` go to GitHub? Then it needs no local `compile` or `test-suite` slot and no CPU
 /// or heat gate: it uses nothing on this Mac (#759).
 pub fn goes_remote(d: &Arc<Daemon>, spec: &CheckSpec) -> bool {
@@ -739,6 +758,7 @@ fn remote_check(
     spec: &CheckSpec,
     id: &str,
     progress: Option<&CheckProgress>,
+    grant: &crate::remote::Grant,
 ) -> Option<Shared> {
     use crate::remote as rm;
     let runs_on = runs_on_github(d, spec)?;
@@ -819,7 +839,7 @@ fn remote_check(
         }
     };
     Some(
-        match rm::run_retrying(&site, &rs, &spec.log_dir, &stop, &said) {
+        match rm::run_retrying(&site, &rs, &spec.log_dir, &stop, &said, grant) {
             Ok((None, _)) => return None,
             Ok((Some(rm::Outcome::Stopped(_)), _)) => Ok(CheckOutcome {
                 passed: false,
@@ -869,9 +889,10 @@ fn collect(
     spec: &CheckSpec,
     id: &str,
     progress: Option<&CheckProgress>,
+    grant: &crate::remote::Grant,
 ) -> Shared {
     let bound_remote = runs_on_github(d, spec).is_some();
-    if let Some(r) = remote_check(d, spec, id, progress) {
+    if let Some(r) = remote_check(d, spec, id, progress, grant) {
         return r;
     }
     // Meant for GitHub but sent here (`fallback = "local"`): it skipped this machine's queue,
