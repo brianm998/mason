@@ -163,7 +163,6 @@ struct Candidate {
     nid: String,
     name: String,
     client: NodeClient,
-    arch: String,
     lease_s: u64,
 }
 
@@ -181,11 +180,10 @@ fn candidates(d: &Arc<Daemon>, want: Option<&str>, spec: &RunSpec) -> Vec<Candid
         }
     }
     rows.into_iter()
-        .filter_map(|(row, host, port, status)| {
+        .filter_map(|(row, host, port, _status)| {
             let client = NodeClient::new(identity.clone(), &host, port, &row.fingerprint).ok()?;
             Some(Candidate {
                 lease_s: cfg.settings_for(&row.name).lease_s,
-                arch: status["arch"].as_str().unwrap_or_default().to_string(),
                 nid: row.nid,
                 name: row.name,
                 client: client.with_timeout(Duration::from_secs(60)),
@@ -265,9 +263,86 @@ fn start_job(c: &Candidate, body: &Value) -> Result<Started, String> {
     }
 }
 
-/// Run `spec` on a node and give back its result. `want`: the node the placement chose (tried
-/// first). `cwd`: the worktree the command would run in, which a snapshot is taken of and where
-/// the results files go. `live` is told each piece of output as it arrives.
+/// Send `spec` to a node and have the job started there, leaving the record that a restart finds
+/// it by. `want`: the node the placement chose (tried first). `cwd`: the worktree the command
+/// would run in, which a snapshot is taken of. A node with no room is not a failure: the next is
+/// tried, and when none has room the run is [`Fail::Environmental`].
+pub fn start(
+    d: &Arc<Daemon>,
+    want: Option<&str>,
+    spec: &RunSpec,
+    cwd: &Path,
+    base_ref: &str,
+    dir: &Path,
+) -> Result<Record, Fail> {
+    let _ = std::fs::create_dir_all(dir);
+    let rec_path = record_path(dir, &spec.id);
+    let cands = candidates(d, want, spec);
+    if cands.is_empty() {
+        return Err(Fail::Environmental("no node is taking work".into()));
+    }
+    let sha = crate::remote::snapshot(
+        cwd,
+        base_ref,
+        None,
+        &crate::remote::run_json(spec),
+        &format!("mason run {} ({})", spec.id, spec.suite),
+    )
+    .map_err(|e| Fail::Error(format!("cannot snapshot the worktree: {e}")))?;
+    let run: Value = serde_json::from_str(&crate::remote::run_json(spec)).unwrap_or(Value::Null);
+    let mut why: Vec<String> = vec![];
+    'nodes: for c in &cands {
+        // The record first: a daemon that dies from here on finds the run.
+        let rec = Record {
+            nid: c.nid.clone(),
+            name: c.name.clone(),
+            job: spec.id.clone(),
+            sha: sha.clone(),
+            sent_ms: now_ms(),
+        };
+        save(&rec_path, &rec);
+        let body = json!({
+            "id": spec.id, "project": spec.project, "sha": sha, "run": run,
+            "limit_s": spec.limit.as_secs(), "lease_s": c.lease_s,
+        });
+        let mut full = false;
+        for attempt in 0..2 {
+            if let Err(e) = send_snapshot(c, cwd, &spec.project, &spec.id, &sha, base_ref, full) {
+                why.push(e);
+                continue 'nodes;
+            }
+            match start_job(c, &body) {
+                Ok(Started::Yes) => return Ok(rec),
+                Ok(Started::NoRoom(w)) => {
+                    why.push(format!("node {}: {w}", c.name));
+                    continue 'nodes;
+                }
+                // The mirror lacks the commit after all: once more with the whole history.
+                Ok(Started::Lacks) if attempt == 0 => full = true,
+                Ok(Started::Lacks) => {
+                    why.push(format!(
+                        "node {} still lacks the commit after a full bundle",
+                        c.name
+                    ));
+                    continue 'nodes;
+                }
+                Err(e) => {
+                    why.push(e);
+                    continue 'nodes;
+                }
+            }
+        }
+    }
+    let _ = std::fs::remove_file(&rec_path);
+    Err(Fail::Environmental(format!(
+        "no node had room: {}",
+        why.join("; ")
+    )))
+}
+
+/// Run `spec` on a node and give back its result: [`start`] it (or, after a restart, attach to
+/// the job its record names), then [`follow`] it. `live` is told each piece of output as it
+/// arrives.
 #[allow(clippy::too_many_arguments)]
 pub fn execute(
     d: &Arc<Daemon>,
@@ -279,7 +354,43 @@ pub fn execute(
     stop: &dyn Fn() -> Option<StopWhy>,
     live: &mut dyn FnMut(u64, &[u8]),
 ) -> Result<Outcome, Fail> {
-    let _ = std::fs::create_dir_all(dir);
+    let rec = match load(&record_path(dir, &spec.id)) {
+        // The node it names is paired still: ask it for the job it has, taking no new snapshot.
+        Some(r) if d.nodes.client_for(d, &r.nid).is_some() => r,
+        Some(_) => {
+            let _ = std::fs::remove_file(record_path(dir, &spec.id));
+            start(d, want, spec, cwd, base_ref, dir)?
+        }
+        None => start(d, want, spec, cwd, base_ref, dir)?,
+    };
+    follow(d, &rec, spec, cwd, dir, stop, live)
+}
+
+/// Tells the "Remote runs" list that a run ended, when it goes out of scope.
+struct Ended {
+    scope: PathBuf,
+    id: String,
+    outcome: std::cell::Cell<&'static str>,
+}
+
+impl Drop for Ended {
+    fn drop(&mut self) {
+        crate::remote_runs::finished(&self.scope, &self.id, Some(self.outcome.get()));
+    }
+}
+
+/// Follow a started job to its end: ask after it (which renews its lease), tail its output, and
+/// bring the result back. A node that stops answering for `lost_after_polls` polls in a row is
+/// given up on ([`Fail::Environmental`]), and so is one that cancelled the job or could not run it.
+pub fn follow(
+    d: &Arc<Daemon>,
+    rec: &Record,
+    spec: &RunSpec,
+    cwd: &Path,
+    dir: &Path,
+    stop: &dyn Fn() -> Option<StopWhy>,
+    live: &mut dyn FnMut(u64, &[u8]),
+) -> Result<Outcome, Fail> {
     let rec_path = record_path(dir, &spec.id);
     let log = dir.join(format!("{}.log", spec.id));
     let poll = Duration::from_millis(
@@ -289,116 +400,41 @@ pub fn execute(
             .unwrap_or(1000),
     );
     let cfg = d.nodes.cfg(&d.cfg.config_dir);
-    let cands = candidates(d, want, spec);
-
-    // A record from before a restart: ask the node it names for the job it has.
-    let mut chosen: Option<(usize, Record)> = None;
-    if let Some(r) = load(&rec_path) {
-        match cands.iter().position(|c| c.nid == r.nid) {
-            Some(i) => chosen = Some((i, r)),
-            None => {
-                // That node is not usable now; nothing to attach to.
-                let _ = std::fs::remove_file(&rec_path);
-            }
-        }
-    }
-    if chosen.is_none() {
-        if cands.is_empty() {
-            return Err(Fail::Environmental("no node is taking work".into()));
-        }
-        let sha = crate::remote::snapshot(
-            cwd,
-            base_ref,
-            None,
-            &crate::remote::run_json(spec),
-            &format!("mason run {} ({})", spec.id, spec.suite),
-        )
-        .map_err(|e| Fail::Error(format!("cannot snapshot the worktree: {e}")))?;
-        let run: Value =
-            serde_json::from_str(&crate::remote::run_json(spec)).unwrap_or(Value::Null);
-        let mut why: Vec<String> = vec![];
-        'nodes: for (i, c) in cands.iter().enumerate() {
-            // The record first: a daemon that dies from here on finds the run.
-            let rec = Record {
-                nid: c.nid.clone(),
-                name: c.name.clone(),
-                job: spec.id.clone(),
-                sha: sha.clone(),
-                sent_ms: now_ms(),
-            };
-            save(&rec_path, &rec);
-            let body = json!({
-                "id": spec.id, "project": spec.project, "sha": sha, "run": run,
-                "limit_s": spec.limit.as_secs(), "lease_s": c.lease_s,
-            });
-            let mut full = false;
-            for attempt in 0..2 {
-                if let Err(e) = send_snapshot(c, cwd, &spec.project, &spec.id, &sha, base_ref, full)
-                {
-                    why.push(e);
-                    continue 'nodes;
-                }
-                match start_job(c, &body) {
-                    Ok(Started::Yes) => {
-                        chosen = Some((i, rec));
-                        break 'nodes;
-                    }
-                    Ok(Started::NoRoom(w)) => {
-                        why.push(format!("node {}: {w}", c.name));
-                        continue 'nodes;
-                    }
-                    // The mirror lacks the commit after all: once more with the whole history.
-                    Ok(Started::Lacks) if attempt == 0 => full = true,
-                    Ok(Started::Lacks) => {
-                        why.push(format!(
-                            "node {} still lacks the commit after a full bundle",
-                            c.name
-                        ));
-                        continue 'nodes;
-                    }
-                    Err(e) => {
-                        why.push(e);
-                        continue 'nodes;
-                    }
-                }
-            }
-        }
-        if chosen.is_none() {
-            let _ = std::fs::remove_file(&rec_path);
-            return Err(Fail::Environmental(format!(
-                "no node had room: {}",
-                why.join("; ")
-            )));
-        }
-    }
-    let (i, rec) = chosen.expect("a node was chosen");
-    let c = &cands[i];
+    let Some((row, client, arch)) = d.nodes.client_for(d, &rec.nid) else {
+        let _ = std::fs::remove_file(&rec_path);
+        return Err(Fail::Environmental(format!(
+            "node {} is not paired any more",
+            rec.name
+        )));
+    };
+    let name = row.name.clone();
     let id = spec.id.clone();
-
-    // Follow the job: ask after it (which renews its lease), and tail its output.
+    // Shown in the monitor's "Remote runs" until it ends, however it ends.
+    let hosts = d.cfg.hosts_dir();
+    crate::remote_runs::node_started(&hosts, &id, &spec.suite, &name, &rec_path);
+    let _ended = Ended {
+        scope: hosts,
+        id: id.clone(),
+        outcome: std::cell::Cell::new("cancelled"),
+    };
     let mut off = std::fs::metadata(&log).map_or(0, |m| m.len());
     let mut misses = 0u32;
-    let started = rec.sent_ms;
-    let give_up = started + spec.limit.as_millis() as u64 + MARGIN_MS;
+    let give_up = rec.sent_ms + spec.limit.as_millis() as u64 + MARGIN_MS;
     let lost_after = cfg.lost_after_polls.max(1);
     let end = loop {
-        if stop().is_some() {
-            let why = stop();
-            let _ = block_on(
-                c.client
-                    .request("DELETE", &format!("/node/jobs/{id}"), None),
-            );
+        if let Some(why) = stop() {
+            let _ = block_on(client.request("DELETE", &format!("/node/jobs/{id}"), None));
             let _ = std::fs::remove_file(&rec_path);
-            return Ok(Outcome::Stopped(why.unwrap_or(StopWhy::Skipped)));
+            return Ok(Outcome::Stopped(why));
         }
-        let st = block_on(c.client.request("GET", &format!("/node/jobs/{id}"), None));
+        let st = block_on(client.request("GET", &format!("/node/jobs/{id}"), None));
         match st {
             Ok(r) if r.status == 200 => {
                 misses = 0;
                 let job = r.json()["job"].clone();
                 // Tail what arrived, until nothing more does.
                 loop {
-                    let l = block_on(c.client.request(
+                    let l = block_on(client.request(
                         "GET",
                         &format!("/node/jobs/{id}/log?from={off}"),
                         None,
@@ -427,66 +463,50 @@ pub fn execute(
             Ok(r) if r.status == 404 => {
                 let _ = std::fs::remove_file(&rec_path);
                 return Err(Fail::Environmental(format!(
-                    "node {} no longer has the job",
-                    c.name
+                    "node {name} no longer has the job"
                 )));
             }
             Ok(r) if r.status == 403 => {
+                let _ = std::fs::remove_file(&rec_path);
                 return Err(Fail::Environmental(format!(
-                    "node {} no longer trusts this coordinator",
-                    c.name
+                    "node {name} no longer trusts this coordinator"
                 )));
             }
             Ok(_) | Err(_) => {
                 misses += 1;
                 if misses >= lost_after {
-                    let _ = block_on(
-                        c.client
-                            .request("DELETE", &format!("/node/jobs/{id}"), None),
-                    );
+                    let _ = block_on(client.request("DELETE", &format!("/node/jobs/{id}"), None));
                     let _ = std::fs::remove_file(&rec_path);
                     return Err(Fail::Environmental(format!(
-                        "node {} went away ({misses} polls without an answer)",
-                        c.name
+                        "node {name} went away ({misses} polls without an answer)"
                     )));
                 }
             }
         }
         if now_ms() > give_up {
-            let _ = block_on(
-                c.client
-                    .request("DELETE", &format!("/node/jobs/{id}"), None),
-            );
+            let _ = block_on(client.request("DELETE", &format!("/node/jobs/{id}"), None));
             let _ = std::fs::remove_file(&rec_path);
             return Err(Fail::Environmental(format!(
-                "node {} did not finish within the limit of {} s",
-                c.name,
+                "node {name} did not finish within the limit of {} s",
                 spec.limit.as_secs()
             )));
         }
         std::thread::sleep(poll);
     };
     let (state, job) = end;
-    match state.as_str() {
-        "cancelled" | "failed" => {
-            let why = job["why"]
-                .as_str()
-                .unwrap_or("it did not say why")
-                .to_string();
-            let _ = block_on(
-                c.client
-                    .request("POST", &format!("/node/jobs/{id}/ack"), None),
-            );
-            let _ = std::fs::remove_file(&rec_path);
-            return Err(Fail::Environmental(format!(
-                "node {} {state} the job: {why}",
-                c.name
-            )));
-        }
-        _ => {}
+    if matches!(state.as_str(), "cancelled" | "failed") {
+        let why = job["why"]
+            .as_str()
+            .unwrap_or("it did not say why")
+            .to_string();
+        let _ = block_on(client.request("POST", &format!("/node/jobs/{id}/ack"), None));
+        let _ = std::fs::remove_file(&rec_path);
+        return Err(Fail::Environmental(format!(
+            "node {name} {state} the job: {why}"
+        )));
     }
     // The result, and the results files where a local run would have left them.
-    let art = answered(block_on(c.client.request(
+    let art = answered(block_on(client.request(
         "GET",
         &format!("/node/jobs/{id}/artifact"),
         None,
@@ -494,18 +514,14 @@ pub fn execute(
     .map_err(Fail::Environmental)?;
     if art.status != 200 {
         return Err(Fail::Environmental(format!(
-            "node {} gave no result: {}",
-            c.name,
+            "node {name} gave no result: {}",
             art.error_text()
         )));
     }
     let a = art.json();
     // Whatever of the output has not arrived yet.
     loop {
-        match block_on(
-            c.client
-                .request("GET", &format!("/node/jobs/{id}/log?from={off}"), None),
-        ) {
+        match block_on(client.request("GET", &format!("/node/jobs/{id}/log?from={off}"), None)) {
             Ok(l) if l.status == 200 && !l.body.is_empty() => {
                 use std::io::Write;
                 if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -541,6 +557,13 @@ pub fn execute(
         r["build_s"].as_u64().unwrap_or(0),
         r["run_s"].as_u64().unwrap_or(0),
     );
+    _ended.outcome.set(
+        if r["code"].as_i64() == Some(0) && r["signal"].as_i64().unwrap_or(0) == 0 {
+            "green"
+        } else {
+            "red"
+        },
+    );
     let finished = Finished {
         code: r["code"].as_i64().unwrap_or(-1) as i32,
         signal: r["signal"].as_i64().unwrap_or(0) as i32,
@@ -552,7 +575,7 @@ pub fn execute(
             .as_str()
             .filter(|p| matches!(*p, "build" | "run"))
             .map(str::to_string),
-        ran_on: ran_on(&c.name, &c.arch, build_s + run_s),
+        ran_on: ran_on(&name, &arch, build_s + run_s),
         parts: vec![],
         missing: vec![],
     };
@@ -560,10 +583,7 @@ pub fn execute(
         dir.join(format!("{}.where", spec.id)),
         format!("{}\n", finished.ran_on),
     );
-    let _ = block_on(
-        c.client
-            .request("POST", &format!("/node/jobs/{id}/ack"), None),
-    );
+    let _ = block_on(client.request("POST", &format!("/node/jobs/{id}/ack"), None));
     let _ = std::fs::remove_file(&rec_path);
     Ok(Outcome::Done(finished))
 }

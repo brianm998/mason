@@ -7,9 +7,9 @@ A `masond` can **serve as a node**: it takes compile and test runs from another 
 This is how a second Mac (the Mac Studio) takes load off the iMac Pro. The design is in
 `docs/multi-machine-nodes-plan.md`; this page is how to set it up and run it.
 
-**What exists today:** the node listener, pairing, discovery, and `mason node list` showing each
-node's switch, CPU, heat, slots and disk (phase 1). Jobs run on nodes from phase 2 on; this page
-says so where a step depends on that.
+**What exists today:** the node listener, pairing and discovery; runs of suites, `run_check` and a
+landing batch's tests on a node; draining, cancelling and giving up on a node; the monitor's switch
+and Nodes section.
 
 ## How it fits together
 
@@ -215,9 +215,27 @@ sudo -u masonnode -H /Users/masonnode/.local/bin/mason node accept on
 sudo -u masonnode -H /Users/masonnode/.local/bin/mason node accept off
 ```
 
-(The monitor gets a one-click toggle in a later phase.) `accept off` stops new jobs at once.
+`accept off` stops new jobs at once. The same switch is in the monitor (next section).
 Jobs already running finish by default. `mason node stop-jobs` cancels them immediately, for the
 moment you need the machine back; the coordinator then runs those jobs somewhere else.
+
+### The monitor
+
+- On a Mac that serves as a node, Home and Settings show **Accept work from other Macs**: one click
+  turns the switch on or off, and the line under it says what the node is doing ("Off. 2 jobs still
+  running here will finish.", "On: taking work from other Macs.", or why it is held: "too hot: die
+  96 °C").
+- On a coordinator, Home shows a **Nodes** section: a "Send runs to nodes" switch (the same as
+  `mason node use`), how many paired nodes take work, and a row per node with its state and its
+  CPU, die temperature and jobs. The old GitHub section is now **Remote runs**, and a run on a node
+  is a row in it ("on node studio").
+- **Reaching the node's daemon from your own login.** The node daemon belongs to `masonnode`, so
+  the monitor you run as yourself cannot read its `daemon.json`. Give the node daemon a fixed port in
+  its `daemon.toml` (`[daemon]` `port = 7433`) and start the monitor on the Studio with
+  `--port 7433`. That port is on loopback only. Loopback is trusted by design, so any process on the
+  Studio can reach it, including a job: a job can turn the switch off or on for the machine it runs on,
+  and nothing else of yours is reachable through it. The node's listener for coordinators is a
+  separate port that only paired coordinators can use.
 
 On the iMac, `mason node use on` lets runs go to nodes (`[nodes] enabled = true`, written to
 `daemon.toml` and read live) and `mason node use off` stops it. Nodes are tried before GitHub
@@ -254,6 +272,20 @@ strictest value of each setting applies.
 On the Studio: `mason node coordinators remove <name>` (as the node user). On the iMac:
 `mason node remove studio`. If the iMac's certificate is ever replaced (a new data directory),
 pair again.
+
+## When something goes wrong
+
+- **You turn the switch off.** No new job starts. Jobs already running finish and the iMac collects
+  them as usual (`on_switch_off = "drain"`). If you need the machine back at once: `mason node
+  stop-jobs` (or set `on_switch_off = "cancel"` for that node on the iMac, which does it whenever
+  the switch goes off). The iMac then runs those jobs somewhere else, and no task is charged.
+- **The Studio sleeps or leaves the network.** After `lost_after_polls` polls in a row with no
+  answer the iMac gives up on the job and runs it somewhere else. The Studio, when it is back, kills
+  the orphan once its lease (`lease_s`) has run out with nobody asking after it.
+- **The node is too hot or busy with your own work.** It takes no new job; a job already running
+  continues, since there is no pre-emption.
+- **The iMac restarts mid-run.** It finds the record of the run it sent and asks the Studio for that
+  job; nothing is sent again.
 
 ## Troubleshooting
 

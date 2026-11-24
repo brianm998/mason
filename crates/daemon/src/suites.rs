@@ -471,6 +471,19 @@ fn run_hosted_resuming(
         if let Some(ran) = ran {
             return Ok(ran);
         }
+        // GitHub gave a run back that waited too long for a runner (`favor-remote`): a node with
+        // room takes it before this machine does.
+        if matches!(exec, crate::remote::Executor::GitHub { .. }) {
+            if let Some(room) = crate::nodes::best_room(d, project, place.map(|(_, s)| s)) {
+                let build = place.and_then(|(_, s)| s.build.as_deref());
+                if let Some(ran) = run_on_node(
+                    d, project, id, build, cmd, cwd, limit, log_dir, &check, run, watch, &env,
+                    &room.nid,
+                )? {
+                    return Ok(ran);
+                }
+            }
+        }
         // `fallback = "local"` (or no node with room) sent it here. Its step holds runner pool units, not this
         // machine's slots (#761), so it takes what the definition's test step `uses` before it
         // starts, under the same limits and CPU and thermal holds as a local test step.

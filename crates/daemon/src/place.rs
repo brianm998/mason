@@ -1755,6 +1755,167 @@ mod tests {
         assert!(got.is_off_machine() && got.is_github(), "{got:?}");
     }
 
+    fn room(name: &str, free: u32, warm: bool, die: Option<f32>) -> NodeRoom {
+        NodeRoom {
+            nid: format!("id-{name}"),
+            name: name.into(),
+            free,
+            warm,
+            die_c: die,
+        }
+    }
+
+    fn node_name(p: &Place) -> Option<&str> {
+        match p {
+            Place::Node { name, .. } => Some(name),
+            _ => None,
+        }
+    }
+
+    /// The best of several nodes is the same whatever order they are listed in.
+    #[test]
+    fn the_best_node_is_warm_then_freer_then_cooler_then_by_name() {
+        let a = room("a", 2, false, Some(70.0));
+        let b = room("b", 2, true, Some(90.0));
+        let c = room("c", 3, false, Some(60.0));
+        let d = room("d", 2, false, Some(50.0));
+        assert_eq!(
+            best_node(&[a.clone(), b.clone(), c.clone()]).unwrap().name,
+            "b"
+        );
+        assert_eq!(best_node(&[a.clone(), c.clone()]).unwrap().name, "c");
+        assert_eq!(best_node(&[a.clone(), d.clone()]).unwrap().name, "d");
+        let x = room("x", 2, false, None);
+        let y = room("y", 2, false, None);
+        assert_eq!(best_node(&[y, x]).unwrap().name, "x");
+        assert!(best_node(&[]).is_none());
+    }
+
+    /// Nodes join the decision: with none, nothing changes (the tables above); with one, the
+    /// modes mean "off this machine".
+    #[test]
+    fn a_node_with_room_is_chosen_before_github_and_the_rules_that_keep_a_run_here_still_hold() {
+        let node = |f: Facts| decide(&f);
+        let with = |mode: Mode| Facts {
+            nodes: vec![room("studio", 2, false, None)],
+            ..Facts::plain(mode)
+        };
+        // `remote`: a node, with the project having a `[remote_runs]` or not.
+        assert_eq!(node_name(&node(with(Mode::Remote))), Some("studio"));
+        let no_github = Facts {
+            project_runs_on: None,
+            ..with(Mode::Remote)
+        };
+        let p = node(no_github);
+        assert_eq!(node_name(&p), Some("studio"), "{p:?}");
+        assert_eq!(p.text(), "on node studio, from the global switch");
+        // `prefer = "github"` puts GitHub first, when the project has it.
+        let pg = Facts {
+            prefer_github: true,
+            ..with(Mode::Remote)
+        };
+        assert!(node(pg).is_github());
+        let pg_none = Facts {
+            prefer_github: true,
+            project_runs_on: None,
+            ..with(Mode::Remote)
+        };
+        assert_eq!(node_name(&node(pg_none)), Some("studio"));
+        // A failed GitHub setup check does not stand in a node's way, and sends GitHub nowhere.
+        let setup = Facts {
+            setup_failed: Some("x".into()),
+            prefer_github: true,
+            ..with(Mode::Remote)
+        };
+        assert_eq!(node_name(&node(setup)), Some("studio"));
+        // What keeps a run here keeps it from a node too, with the same words.
+        for (name, f, want) in [
+            (
+                "remote = false",
+                Facts {
+                    suite_remote: false,
+                    ..with(Mode::Remote)
+                },
+                "the suite says remote = false",
+            ),
+            (
+                "device",
+                Facts {
+                    device: true,
+                    ..with(Mode::Remote)
+                },
+                "leases a device",
+            ),
+            (
+                "exclusive",
+                Facts {
+                    exclusive: true,
+                    ..with(Mode::Remote)
+                },
+                "`exclusive`",
+            ),
+        ] {
+            let p = node(f);
+            assert!(!p.is_off_machine(), "{name}: {p:?}");
+            assert!(p.text().contains(want), "{name}: {}", p.text());
+        }
+        // `local` is here, nodes or not.
+        let p = node(with(Mode::Local));
+        assert_eq!(p.text(), "on this Mac: the global switch is off");
+    }
+
+    #[test]
+    fn the_balancing_modes_send_to_a_node_before_github() {
+        let rooms = vec![room("studio", 1, false, None)];
+        // favor-local: here until overloaded, then a node.
+        let calm = Facts {
+            nodes: rooms.clone(),
+            ..favor_local(load(None, 2, 0, 0), true)
+        };
+        assert!(!decide(&calm).is_off_machine(), "{:?}", decide(&calm));
+        let busy = Facts {
+            nodes: rooms.clone(),
+            ..favor_local(load(Some("held for heat (die 99 °C)"), 2, 0, 0), true)
+        };
+        let p = decide(&busy);
+        assert_eq!(node_name(&p), Some("studio"), "{p:?}");
+        assert!(p.text().contains("favor-local") && p.text().contains("held for heat"));
+        // ... and GitHub first when the owner prefers it and it has room.
+        let busy_gh = Facts {
+            prefer_github: true,
+            ..busy.clone()
+        };
+        assert!(decide(&busy_gh).is_github());
+        let busy_no_gh = Facts {
+            prefer_github: true,
+            ..favor_local(load(Some("held for heat (die 99 °C)"), 2, 0, 0), false)
+        };
+        let busy_no_gh = Facts {
+            nodes: rooms.clone(),
+            ..busy_no_gh
+        };
+        assert_eq!(node_name(&decide(&busy_no_gh)), Some("studio"));
+        // favor-remote: a node, and the words say so.
+        let fr = Facts {
+            nodes: rooms.clone(),
+            ..favor_remote(load(None, 2, 0, 0), remote_load(4, 0, None, None))
+        };
+        let p = decide(&fr);
+        assert_eq!(node_name(&p), Some("studio"), "{p:?}");
+        assert!(
+            p.text().contains("favor-remote, node studio had room"),
+            "{}",
+            p.text()
+        );
+        // A node-only project (no `[remote_runs]`) weighs the load of this machine all the same.
+        let only = Facts {
+            project_runs_on: None,
+            nodes: rooms,
+            ..favor_local(load(Some("held for heat (die 99 °C)"), 2, 0, 0), false)
+        };
+        assert_eq!(node_name(&decide(&only)), Some("studio"));
+    }
+
     #[test]
     fn a_node_placement_is_off_machine_and_says_so() {
         let n = |why: &str| Place::Node {

@@ -584,7 +584,7 @@ pub fn status_value(d: &Daemon, s: &NodeSettings, coord: Option<&str>) -> Value 
         .map(|c| d.node.jobs.warm(c).into_iter().collect())
         .unwrap_or_default();
     json!({
-        "node_proto": NODE_PROTO,
+        "node_proto": d.cfg.node.proto,
         "version": env!("CARGO_PKG_VERSION"),
         "nid": node_id(&d.cfg.data_dir).unwrap_or_default(),
         "name": lan::hostname(),

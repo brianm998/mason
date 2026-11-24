@@ -457,15 +457,21 @@ pub fn site_for_run(
         // gives up GitHub only with a grant in hand, so two runs cannot both take the last unit.
         // A covered run (a batch holds its slots) takes nothing.
         site.local_room = Some(Arc::new(move || {
-            if let Some(why) =
-                crate::place::no_room_for(&d.broker.load_reading(now_ms()), &uses, covered)
-            {
-                return Some(why);
-            }
-            if covered {
+            let here =
+                match crate::place::no_room_for(&d.broker.load_reading(now_ms()), &uses, covered) {
+                    Some(why) => Some(why),
+                    None if covered => None,
+                    None => {
+                        try_take_fallback(&d, &project, task.map(mason_core::TaskId), &uses).err()
+                    }
+                };
+            // A run that has waited too long for GitHub may go to a node instead (the caller
+            // tries one before it takes this machine's slots): a node with room is room too,
+            // and nothing of this machine is taken for it.
+            if here.is_some() && crate::nodes::best_room(&d, &project, None).is_some() {
                 return None;
             }
-            try_take_fallback(&d, &project, task.map(mason_core::TaskId), &uses).err()
+            here
         }));
     }
     Some(site)
@@ -4156,7 +4162,7 @@ mod tests {
             git_ok(&r.wt, &["diff", "--cached"]),
         );
         let json = run_json(&spec("x1"));
-        let sha = snapshot(&r.wt, "origin/main", "mason-run.yml", &json, "m").unwrap();
+        let sha = snapshot(&r.wt, "origin/main", Some("mason-run.yml"), &json, "m").unwrap();
         let show = |p: &str| git_ok(&r.wt, &["show", &format!("{sha}:{p}")]);
         // What a local run would see...
         assert_eq!(show("a.txt"), "two");
@@ -4212,14 +4218,14 @@ mod tests {
         git_ok(&r.wt, &["commit", "-qam", "ci on every ref"]);
         git_ok(&r.wt, &["push", "-q", "origin", "main"]);
         git_ok(&r.wt, &["fetch", "-q", "origin"]);
-        let e = snapshot(&r.wt, "origin/main", "mason-run.yml", "{}", "m").unwrap_err();
+        let e = snapshot(&r.wt, "origin/main", Some("mason-run.yml"), "{}", "m").unwrap_err();
         assert!(e.contains("ci.yml") && e.contains("mason/run/**"), "{e}");
     }
 
     #[test]
     fn a_base_branch_without_the_workflow_is_environmental_not_the_tasks() {
         let r = repo();
-        let e = snapshot(&r.wt, "origin/main", "other.yml", "{}", "m").unwrap_err();
+        let e = snapshot(&r.wt, "origin/main", Some("other.yml"), "{}", "m").unwrap_err();
         assert!(e.contains("the base branch"), "{e}");
         token();
         let gh = FakeGh::new(&r, &r.wt.join("none.zip"), Mode::Normal);
@@ -5406,7 +5412,14 @@ mod tests {
         let sp = spec("d2");
         // A record written and a ref pushed by a daemon that died before it dispatched.
         let write = |logs: &Path| {
-            let sha = snapshot(&r.wt, "origin/main", "mason-run.yml", &run_json(&sp), "m").unwrap();
+            let sha = snapshot(
+                &r.wt,
+                "origin/main",
+                Some("mason-run.yml"),
+                &run_json(&sp),
+                "m",
+            )
+            .unwrap();
             let st = State {
                 ref_name: ref_name(&sp.project, &sp.id),
                 sha,
@@ -5438,7 +5451,14 @@ mod tests {
         let r2 = repo();
         let logs2 = tempfile::tempdir().unwrap();
         let rec = |l: &Path| record_path(l, &sp.id);
-        let sha = snapshot(&r2.wt, "origin/main", "mason-run.yml", &run_json(&sp), "m").unwrap();
+        let sha = snapshot(
+            &r2.wt,
+            "origin/main",
+            Some("mason-run.yml"),
+            &run_json(&sp),
+            "m",
+        )
+        .unwrap();
         State {
             ref_name: ref_name(&sp.project, &sp.id),
             sha,

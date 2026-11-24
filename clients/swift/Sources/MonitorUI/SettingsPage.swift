@@ -96,6 +96,8 @@ struct SettingsPage: View {
             } else {
                 Text("Loading where runs go.").font(theme.body()).foregroundStyle(theme.muted)
             }
+            NodeAcceptToggle(model: model)
+            NodesPoller(model: model)
         }
     }
 

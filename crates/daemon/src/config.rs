@@ -244,6 +244,9 @@ pub struct NodeCfg {
     pub port: u16,
     /// The addresses to listen on, one listener each.
     pub bind: Vec<std::net::IpAddr>,
+    /// The node protocol this node speaks. Not a setting: a test says another to see what a
+    /// coordinator does with a node it cannot work with.
+    pub proto: u32,
 }
 
 impl Default for NodeCfg {
@@ -252,6 +255,7 @@ impl Default for NodeCfg {
             serve: false,
             port: crate::node_serve::DEFAULT_NODE_PORT,
             bind: vec![std::net::IpAddr::from([0, 0, 0, 0])],
+            proto: crate::node_serve::NODE_PROTO,
         }
     }
 }

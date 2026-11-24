@@ -242,6 +242,32 @@ impl Nodes {
         out
     }
 
+    /// A client for the paired node `nid` whatever state it is in (a job it already has is
+    /// followed to its end even when the node has since stopped taking new ones), with the
+    /// node's architecture from its last status.
+    pub fn client_for(
+        &self,
+        d: &Daemon,
+        nid: &str,
+    ) -> Option<(mason_store::NodeRow, NodeClient, String)> {
+        let (row, host, port, arch) = {
+            let g = self.lock();
+            let row = g.paired.iter().find(|r| r.nid == nid)?.clone();
+            let (host, port) = endpoint(&row, g.discovered.get(nid));
+            let arch = g
+                .views
+                .get(nid)
+                .and_then(|v| v.status.as_ref())
+                .and_then(|s| s["arch"].as_str())
+                .unwrap_or_default()
+                .to_string();
+            (row, host, port, arch)
+        };
+        let identity = self.identity(d).ok()?;
+        let client = NodeClient::new(identity, &host, port, &row.fingerprint).ok()?;
+        Some((row, client.with_timeout(Duration::from_secs(60)), arch))
+    }
+
     pub fn view(&self, nid: &str) -> Option<View> {
         self.lock().views.get(nid).cloned()
     }
@@ -441,6 +467,61 @@ pub fn covers_run(status: &Value, suite_name: &str, command: &str) -> bool {
             .is_some_and(|a| a.iter().any(|x| x.as_str() == Some(v.as_str()))),
         None => true,
     }
+}
+
+/// The node with the most room for a run of `project`, if any: where a run that waited too long
+/// for GitHub goes instead.
+pub fn best_room(
+    d: &Daemon,
+    project: &str,
+    suite: Option<&mason_testing::Suite>,
+) -> Option<crate::place::NodeRoom> {
+    let (rooms, _) = rooms_for(d, project, suite);
+    crate::place::best_node(&rooms).cloned()
+}
+
+/// What needs saying about the nodes, as `(key, kind, text)` the way the alert table takes it
+/// (`attention::alerts_now`): a node that went away, one that cannot work with this coordinator.
+/// An alert is true exactly as long as its condition.
+pub fn alerts(d: &Daemon) -> Vec<(String, String, String)> {
+    let cfg = d.nodes.cfg(&d.cfg.config_dir);
+    if !cfg.enabled {
+        return vec![];
+    }
+    let g = d.nodes.lock();
+    alerts_for(&g.paired, &g.views, cfg.lost_after_polls)
+}
+
+/// [`alerts`] from what the poller knows. Pure.
+pub fn alerts_for(
+    rows: &[mason_store::NodeRow],
+    views: &BTreeMap<String, View>,
+    lost_after: u32,
+) -> Vec<(String, String, String)> {
+    rows.iter()
+        .filter_map(|r| {
+            let v = views.get(&r.nid)?;
+            let (what, text) = match state_of(v, lost_after) {
+                NodeState::Lost(_) => ("lost", format!("node {} went away", r.name)),
+                NodeState::Incompatible(why) => (
+                    "incompatible",
+                    format!(
+                        "node {} is incompatible with this coordinator ({why})",
+                        r.name
+                    ),
+                ),
+                NodeState::WrongCertificate => (
+                    "certificate",
+                    format!(
+                        "node {} presents another certificate than the one paired",
+                        r.name
+                    ),
+                ),
+                _ => return None,
+            };
+            Some((format!("node:{}:{what}", r.nid), "node".to_string(), text))
+        })
+        .collect()
 }
 
 /// The nodes that could take a run of `project` (of `suite`, when it is known) now, and whether
@@ -918,6 +999,50 @@ mod tests {
         ));
         assert!(NodeState::Accepting.usable() && !NodeState::Lost(7).usable());
         assert!(NodeState::NotPaired.text().contains("403"));
+    }
+
+    #[test]
+    fn a_node_that_went_away_or_cannot_be_worked_with_is_an_alert_only_while_it_is_so() {
+        let row = |nid: &str, name: &str| mason_store::NodeRow {
+            nid: nid.into(),
+            name: name.into(),
+            host: "h".into(),
+            port: 1,
+            fingerprint: "f".into(),
+            paired_at: 0,
+        };
+        let ok = View {
+            status: Some(json!({"accepting": true})),
+            ..View::default()
+        };
+        let lost = View {
+            failures: 6,
+            ..ok.clone()
+        };
+        let old = View {
+            fault: Some(Fault::Incompatible("protocol 1 vs 2".into())),
+            ..ok.clone()
+        };
+        let rows = [row("n1", "studio"), row("n2", "mini"), row("n3", "old")];
+        let views = BTreeMap::from([
+            ("n1".to_string(), lost),
+            ("n2".to_string(), ok),
+            ("n3".to_string(), old),
+        ]);
+        let a = alerts_for(&rows, &views, 6);
+        assert_eq!(a.len(), 2, "{a:?}");
+        assert_eq!(a[0].0, "node:n1:lost");
+        assert_eq!(a[0].2, "node studio went away");
+        assert!(a[1].2.contains("node old is incompatible") && a[1].2.contains("protocol 1 vs 2"));
+        // Fewer misses than the limit is not news; nothing known is not either.
+        let silent = View {
+            failures: 5,
+            ..View::default()
+        };
+        assert!(
+            alerts_for(&rows[..1], &BTreeMap::from([("n1".to_string(), silent)]), 6).is_empty()
+        );
+        assert!(alerts_for(&rows, &BTreeMap::new(), 6).is_empty());
     }
 
     #[test]

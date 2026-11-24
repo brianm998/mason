@@ -882,9 +882,13 @@ fn node_check(
     spec: &CheckSpec,
     id: &str,
     progress: Option<&CheckProgress>,
+    spill: Option<String>,
 ) -> Option<Shared> {
     use crate::remote as rm;
-    let (nid, _) = node_for(d, spec)?;
+    let nid = match spill {
+        Some(n) => n,
+        None => node_for(d, spec)?.0,
+    };
     let project = rm::project_of(d, &spec.cwd)?;
     let base_ref = rm::base_ref_of(d, &project)?;
     let place = spec.place.as_ref().map(|(t, s)| (*t, &**s));
@@ -963,11 +967,22 @@ fn collect(
     progress: Option<&CheckProgress>,
 ) -> Shared {
     let bound_remote = goes_remote(d, spec);
-    if let Some(r) = node_check(d, spec, id, progress) {
+    if let Some(r) = node_check(d, spec, id, progress, None) {
         return r;
     }
     if let Some(r) = remote_check(d, spec, id, progress) {
         return r;
+    }
+    // GitHub gave the check back (it waited too long for a runner): a node with room takes it
+    // before this machine does.
+    if runs_on_github(d, spec).is_some() {
+        let project = crate::remote::project_of(d, &spec.cwd);
+        let suite = spec.place.as_ref().map(|(_, s)| &**s);
+        if let Some(room) = project.and_then(|p| crate::nodes::best_room(d, &p, suite)) {
+            if let Some(r) = node_check(d, spec, id, progress, Some(room.nid)) {
+                return r;
+            }
+        }
     }
     // Meant for GitHub but sent here (`fallback = "local"`): it skipped this machine's queue,
     // so it takes the slots it holds when placed here before it starts, under the same limits

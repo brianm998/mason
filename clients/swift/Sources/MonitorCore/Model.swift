@@ -71,6 +71,9 @@ public final class MonitorModel {
     public var notifySettings: NotifySettings?
     public var settingsNotice: String?
     public var remoteSettings: RemoteSettings?
+    /// Running work on other Macs: this Mac's own switch (a node), and the nodes (a coordinator).
+    public var nodeSelf: NodeSelf?
+    public var nodes: NodesSnapshot?
     /// The Devices section (s433): LAN state, paired devices, the code on show, and what the last action said.
     public var lanStatus: LanStatus?
     public var devices: DeviceList?
@@ -1353,6 +1356,11 @@ public final class MonitorModel {
         }
         if r.id == "notify-settings", r.ok { notifySettings = NotifySettings(json: r.json) }
         if r.id == "remote", r.ok { remoteSettings = RemoteSettings(json: r.json) }
+        if r.id == "node-self", r.ok { nodeSelf = NodeSelf(json: r.json) }
+        if r.id == "nodes", r.ok { nodes = NodesSnapshot(json: r.json) }
+        if r.id == "node-accept" || r.id == "nodes-use" {
+            if r.ok { loadNodes() } else { settingsNotice = r.error }
+        }
         if r.id == "remote-save" {
             if r.ok { settingsNotice = Self.settingsDone(r.id); raw("GET", "/remote", id: "remote") } else { settingsNotice = r.error }
         }
