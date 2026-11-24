@@ -1,0 +1,5 @@
+.mason/run.json
+crates/daemon/src/remote.rs
+docs/decisions/1037-windows-test-hook-permissions.md
+docs/stages/s1044.md
+scripts/exit/s1044.sh
