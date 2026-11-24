@@ -458,6 +458,37 @@ fn waits_are_activity_not_state_and_clear_when_the_step_moves_on() {
 }
 
 #[test]
+fn a_rename_changes_the_name_and_refuses_a_taken_or_unknown_one() {
+    let mut sim = Sim::new();
+    sim.ok(E::ProjectRegistered {
+        project: ProjectId(2),
+        name: "q".into(),
+    });
+    let before = format!("{:?}", sim.w);
+    assert_eq!(
+        sim.try_ev(E::ProjectRenamed {
+            project: P,
+            name: "q".into()
+        }),
+        Err(ReduceError::NameTaken("q".into()))
+    );
+    assert_eq!(
+        sim.try_ev(E::ProjectRenamed {
+            project: ProjectId(9),
+            name: "z".into()
+        }),
+        Err(ReduceError::UnknownProject(ProjectId(9)))
+    );
+    assert_eq!(format!("{:?}", sim.w), before);
+    sim.ok(E::ProjectRenamed {
+        project: P,
+        name: "z".into(),
+    });
+    assert_eq!(sim.w.projects[&P].name, "z");
+    assert_eq!(sim.w.projects[&ProjectId(2)].name, "q");
+}
+
+#[test]
 fn unknown_project_and_duplicate_project_are_refused() {
     let mut sim = Sim::new();
     assert_eq!(
