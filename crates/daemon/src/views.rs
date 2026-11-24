@@ -105,6 +105,8 @@ pub struct Ctx<'a> {
     immune: std::collections::HashSet<u64>,
     /// Tasks with their own placement mode (`run_on`), read once per build (#834).
     run_on: std::collections::HashMap<u64, String>,
+    /// Developing tasks whose last check failed only tests that are red on develop (#1023).
+    red_held: std::collections::BTreeMap<u64, crate::redwatch::Held>,
 }
 
 type LogCache = std::collections::HashMap<u64, (Vec<crate::http::LogStamp>, String)>;
@@ -201,10 +203,12 @@ impl<'a> Ctx<'a> {
                 blocks.entry(*b).or_default().push(o.id.0);
             }
         }
+        let now = now_ms();
         Ctx {
             d,
             w,
-            now: now_ms(),
+            now,
+            red_held: crate::redwatch::held(d, w, now),
             issues,
             owner_sessions: d.store.open_owner_sessions().unwrap_or_default(),
             runs: RunIndex::build(w.step_runs.values()),
@@ -394,6 +398,18 @@ impl<'a> Ctx<'a> {
         None
     }
 
+    /// A developing task whose last check failed only tests that are red on develop waits in
+    /// the class `base-red`, as a task does at the test step: not "developing" (#1023).
+    fn red_wait(&self, t: &Task) -> Option<mason_protocol::WaitInfo> {
+        let h = self.red_held.get(&t.id.0)?;
+        Some(mason_protocol::WaitInfo {
+            cause: "base-red".into(),
+            resource: "base-red".into(),
+            sentence: crate::redwatch::held_sentence(h),
+            ..Default::default()
+        })
+    }
+
     fn why_waiting(&self, t: &Task) -> String {
         // The sentence comes with the structured wait, from the same plan.
         if let Some(i) = self.wait_view.tasks.get(&t.id.0) {
@@ -401,6 +417,9 @@ impl<'a> Ctx<'a> {
         }
         if let Some(w) = self.waits.get(&t.id) {
             return w.clone();
+        }
+        if let Some(i) = self.red_wait(t) {
+            return i.sentence;
         }
         if t.state == State::Proposed && !t.blockers.is_empty() {
             return format!(
@@ -518,7 +537,12 @@ impl<'a> Ctx<'a> {
             state: state_name(t.state).to_string(),
             activity: crate::http::activity_text(&t.activity),
             why_waiting: self.why_waiting(t),
-            wait: self.wait_view.tasks.get(&t.id.0).cloned(),
+            wait: self
+                .wait_view
+                .tasks
+                .get(&t.id.0)
+                .cloned()
+                .or_else(|| self.red_wait(t)),
             enqueued_ms: t.enqueued_at.0,
             // Whole minutes, so a sidebar that changed in nothing else hashes the same.
             in_state_ms: in_state / 60_000 * 60_000,
