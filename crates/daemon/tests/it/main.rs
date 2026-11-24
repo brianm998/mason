@@ -78,6 +78,7 @@ mod push_auth;
 mod red_base;
 mod registration;
 mod remote_runs;
+mod rename;
 mod repin;
 mod replay;
 mod report;

@@ -9,6 +9,8 @@ pub enum ReduceError {
     UnknownTask(TaskId),
     UnknownProject(ProjectId),
     DuplicateProject(ProjectId),
+    /// A rename to a name another project already uses.
+    NameTaken(String),
     /// The event is not allowed from the task's current state.
     Illegal {
         from: State,
@@ -30,6 +32,7 @@ fn name(k: &EventKind) -> &'static str {
     use EventKind::*;
     match k {
         ProjectRegistered { .. } => "ProjectRegistered",
+        ProjectRenamed { .. } => "ProjectRenamed",
         TaskFiled { .. } => "TaskFiled",
         Approved { .. } => "Approved",
         Rejected { .. } => "Rejected",
@@ -92,7 +95,8 @@ pub fn reduce_in_place(
         k => task_of(k),
     };
     match &event.kind {
-        EventKind::ProjectRegistered { project, .. } => touched.projects.push(*project),
+        EventKind::ProjectRegistered { project, .. }
+        | EventKind::ProjectRenamed { project, .. } => touched.projects.push(*project),
         EventKind::QuestionAsked { .. } => touched.decisions.push(DecisionId(w.next_decision)),
         EventKind::Answered { decision, .. } => touched.decisions.push(*decision),
         _ => {}
@@ -126,7 +130,7 @@ pub fn reduce_in_place(
 fn task_of(k: &EventKind) -> Option<TaskId> {
     use EventKind::*;
     match k {
-        ProjectRegistered { .. } | TaskFiled { .. } | Tick => None,
+        ProjectRegistered { .. } | ProjectRenamed { .. } | TaskFiled { .. } | Tick => None,
         Approved { task }
         | Rejected { task }
         | Deferred { task }
@@ -228,6 +232,20 @@ fn apply(w: &mut World, k: &EventKind, fx: &mut Vec<Effect>) -> Result<(), Reduc
                     name: name.clone(),
                 },
             );
+        }
+        E::ProjectRenamed { project, name } => {
+            if !w.projects.contains_key(project) {
+                return Err(ReduceError::UnknownProject(*project));
+            }
+            if w.projects
+                .values()
+                .any(|p| p.id != *project && p.name == *name)
+            {
+                return Err(ReduceError::NameTaken(name.clone()));
+            }
+            if let Some(p) = w.projects.get_mut(project) {
+                p.name = name.clone();
+            }
         }
         E::TaskFiled {
             project,
