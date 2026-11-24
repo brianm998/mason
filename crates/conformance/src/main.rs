@@ -116,17 +116,24 @@ fn run(c: &mut Client, screen: &mut Screen, method: &str, path: &str) -> Command
     r
 }
 
-/// Wait until the screen has reached the daemon's current seq. The demo daemon resends every
-/// view at each new seq, so there is no quiet-window fallback (decision 1025).
-fn settle(c: &mut Client, screen: &mut Screen) {
+/// Whether the screen has absorbed `target` (the seq the step reported) and holds enough views.
+fn reached(screen_seq: u64, views: usize, target: u64) -> bool {
+    screen_seq >= target && views >= 3
+}
+
+/// Wait until the screen has reached the daemon's current seq and `after` (the seq a step
+/// reported). The demo daemon resends every view at each new seq, so there is no quiet-window
+/// fallback (decision 1025).
+fn settle(c: &mut Client, screen: &mut Screen, after: u64) {
     let hard = std::time::Instant::now() + Duration::from_secs(60);
     let r = run(c, screen, "GET", "/status");
     let v: serde_json::Value = serde_json::from_str(&r.json).unwrap_or_default();
     let target = v["seq"]
         .as_u64()
         .or_else(|| v["seq"].as_str().and_then(|s| s.parse().ok()))
-        .unwrap_or(0);
-    while screen.seq < target || screen.views.len() < 3 {
+        .unwrap_or(0)
+        .max(after);
+    while !reached(screen.seq, screen.views.len(), target) {
         if std::time::Instant::now() > hard {
             die(&format!(
                 "the screen did not reach the daemon's seq {target} within 60 s (at {})",
@@ -258,6 +265,7 @@ fn main() {
             let owner = c.hello(0, false).unwrap_or_else(|e| die(&e)).owner;
             // Checkpoint 0 is the state before the script; then one per step.
             let mut k = 0;
+            let mut after = 0;
             let mut screen = Screen::default();
             c.subscribe(
                 &[ViewKind::Header, ViewKind::Sidebar, ViewKind::Home],
@@ -266,7 +274,7 @@ fn main() {
             )
             .unwrap_or_else(|e| die(&e));
             loop {
-                settle(&mut c, &mut screen);
+                settle(&mut c, &mut screen, after);
                 let items: Vec<serde_json::Value> = conformance::visible(&screen.views(), owner)
                     .iter()
                     .map(|i| i.to_json())
@@ -286,6 +294,7 @@ fn main() {
                 if v["advanced"] != serde_json::json!(true) {
                     break;
                 }
+                after = v["seq"].as_u64().unwrap_or(0);
                 k += 1;
             }
         }
@@ -610,5 +619,18 @@ fn latency(args: &mut Vec<String>) {
     if median.as_millis() >= limit {
         eprintln!("too slow");
         exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reached;
+
+    #[test]
+    fn settle_target_needs_the_steps_seq_and_three_views() {
+        assert!(!reached(9, 3, 10));
+        assert!(!reached(10, 2, 10));
+        assert!(reached(10, 3, 10));
+        assert!(reached(11, 3, 10));
     }
 }
