@@ -671,11 +671,21 @@ fn a_check_from_run_check_goes_to_the_node_when_placement_says_so() {
         &p.a,
         &spec("g", "true")
     ));
-    let green = run_check(&p.a, &spec("t0r1-green", "echo checked")).unwrap();
+    let green = run_check(
+        &p.a,
+        &spec("t0r1-green", "echo checked"),
+        &mason_daemon::remote::Grant::attached(),
+    )
+    .unwrap();
     assert!(green.passed, "{}", green.output);
     assert!(green.output.contains("ran on node b"), "{}", green.output);
     assert!(green.full.contains("built\nchecked"), "{}", green.full);
-    let red = run_check(&p.a, &spec("t0r1-red", "echo nope; exit 2")).unwrap();
+    let red = run_check(
+        &p.a,
+        &spec("t0r1-red", "echo nope; exit 2"),
+        &mason_daemon::remote::Grant::attached(),
+    )
+    .unwrap();
     assert!(!red.passed && red.full.contains("nope"), "{}", red.full);
     assert!(red.output.contains("ran on node b"));
     // A node that is switched off sends the check where a local run would be: here.
@@ -898,7 +908,7 @@ fn a_cancelled_job_is_run_again_here_and_the_node_cleans_up() {
         };
         let b = p.b.clone();
         std::thread::scope(|sc| {
-            let h = sc.spawn(|| run_check(&p.a, &spec));
+            let h = sc.spawn(|| run_check(&p.a, &spec, &mason_daemon::remote::Grant::attached()));
             support::wait_for("the job to run on the node", 60, || {
                 b.node.jobs.running() == 1
             });
