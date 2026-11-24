@@ -100,6 +100,10 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     var isOwner by mutableStateOf(false)
     val canAct: Boolean get() = isOwner && readOnlyReason == null
 
+    /** Add Project is offered by the desktop monitors only; the Android app has no such control. */
+    val addProjectAvailable: Boolean get() = !System.getProperty("java.vm.vendor").orEmpty().contains("Android") &&
+        !System.getProperty("java.runtime.name").orEmpty().contains("Android")
+
     // About versions (Part 15).
     /** This monitor's own build: a commit, or "dev" for a build nobody versioned. */
     var ownVersion: String = System.getenv("MASON_MONITOR_VERSION") ?: System.getProperty("mason.monitor.version") ?: "dev"
@@ -829,6 +833,67 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         sshKeyBusy = false
     }
 
+    // ---- Add Project (desktop monitors only) ----
+
+    /** The open Add Project wizard, if any. */
+    var addProject by mutableStateOf<AddProjectWizard?>(null)
+        private set
+
+    /** Shows a directory picker and returns the choice; set only where the daemon was found through this machine's daemon.json. */
+    var chooseDirectory by mutableStateOf<(() -> String?)?>(null)
+
+    fun openAddProject() {
+        if (!canAct || !addProjectAvailable) return
+        addProject = AddProjectWizard()
+        raw("GET", "/onboarding/candidates", id = "onboard-candidates")
+    }
+
+    fun closeAddProject() { addProject = null }
+
+    /** Ask the daemon for the plan for the wizard's path and answers. */
+    fun addProjectPlan() {
+        val w = addProject ?: return
+        if (w.path.isBlank()) { w.error = "Choose a repository first."; return }
+        w.busy = true
+        w.error = null
+        raw("POST", "/onboarding/plan", id = "onboard-plan", json = w.planBody())
+    }
+
+    fun addProjectUseRecommended() {
+        val w = addProject ?: return
+        w.useRecommended()
+        addProjectPlan()
+    }
+
+    fun addProjectAnswer(q: WizardQuestion, value: String) {
+        val w = addProject ?: return
+        w.answer(q, value)
+        addProjectPlan()
+    }
+
+    fun addProjectBack() {
+        val w = addProject ?: return
+        if (w.back()) addProjectPlan()
+    }
+
+    fun addProjectApply() {
+        val w = addProject ?: return
+        w.startApply()
+        raw("POST", "/onboarding/apply", id = "onboard-apply", json = w.planBody())
+    }
+
+    private fun onboardingResult(r: CommandResult) {
+        val w = addProject ?: return
+        when (r.id) {
+            "onboard-candidates" -> if (r.ok) w.candidatesArrived(r.json) else w.error = r.error
+            "onboard-plan" -> if (r.ok) { if (w.planArrived(r.json)) addProjectPlan() } else w.planFailed(r.error)
+            "onboard-apply" -> w.applyArrived(r.ok, r.json, r.error)?.let { id ->
+                project = id
+                subscribe?.invoke()
+            }
+        }
+    }
+
     fun raw(method: String, path: String, id: String = "", json: String = "") =
         send(Command(id = id, raw = Raw(method = method, path = path, json = json)))
 
@@ -1088,6 +1153,7 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
                 if (r.ok && r.id == "remote-save") raw("GET", "/remote", id = "remote")
             }
             if (r.id.startsWith("publish:") && r.ok) publishPreview = PublishPreview.parse(r.json)
+            if (r.id.startsWith("onboard-")) onboardingResult(r)
             onResult?.invoke(r)
         }
     }
