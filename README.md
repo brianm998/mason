@@ -737,18 +737,24 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s975**: an owner's retry note is also kept per task and shown to the reviewer and later develop rounds as "Owner decisions on this task"; see decision 0968.
 - **s978**: `lint_files` now reads the repository guards' `<path>: <message>` and `<path>:<line>: <message>` lines, for paths in the batch's union diff only, so the existing file blame parks the one task that added the file instead of bisecting.
 - **s979**: Every notification row in both monitors is one line, and a row with more to say has a "?" button that opens a dialog with the full reason, the choices and an "Open task #N" action for each task it names; `Banner` gained a `detail` field.
+- **s982**: the daemon serves `GET /onboarding/candidates`, `POST /onboarding/plan` and `POST /onboarding/apply` (owner only) over the `mason-onboard` crate, with `[onboarding] roots` (default `["~/git"]`), so a desktop monitor can add a local repository and answer the same questions as `mason init`; see decision 0975.
 - **s983**: The monitor draws a task's blockers as one wrapping text of whole links (a sidebar row names three and "and N more"; the task page drops its "waiting for" line when the blocker list is shown), so 29 blockers no longer crush into one-character columns.
 - **s984**: A double click on the Failed tile now opens the lone failed task, or a Failed page listing every failed task (with "N of M" when capped); the phone tile tap and `mason://section/failed` do the same.
 - **s998**: masons_own_impact_map_selects_suites_by_path now expects the eight unit-level suites bound to run_check and the test step, instead of six.
+- **s1000**: The diagnosis session runs on `diagnose_model`/`diagnose_effort` from the project registration, else the provider file's `[diagnose]` table, else Opus at medium (Codex: its CLI's model at medium), and each diagnosis and `mason task show` print what it ran on.
 - **s1012**: a replayed run_check carries its call id, takes the suites that finished before a masond takeover instead of running them again, and no longer folds the base on the replay.
 - **s1014**: RemotePlacementTest now composes RemotePlacementBody inside a Column, as the settings page does, so the project row no longer covers the global row's buttons.
 - **s1015**: Unit-test narrowing no longer pushes a line into `Group.notes`, which is per directory target, so `the_note_says_how_the_modules_were_picked` passes again.
 - **s1022**: s249 clears the shard variables for its temporary repository and s782 accepts both the busy and the quiet next-trigger text.
 - **s1026**: s13.sh now prints the per-checkpoint id diff when the Compose conformance check fails, and Compose's step() reports a quiet exit before the views reached the daemon's seq, so the next red of run 45005421555's kind can be diagnosed.
+- **s1027**: CpuDiskRow's layout arithmetic is a pure `placement` function and the DiskSectionTests layout tests assert its exact frames instead of sampling ImageRenderer pixels, so CI/monitor-swift stops failing on runner rendering differences.
+- **s1028**: The Compose and Swift conformance tools now read the daemon's seq from GET /status before each capture and wait for the model to reach it, as the Rust capturer does.
 - **s1030**: The Land now freeze test holds the fix at a gate so the freeze is certainly in force, then waits for the fix and `other` to land instead of asserting `other` never does.
 - **s1035**: s22, s244 and s728 are named in weights.txt and s1035 checks them, but their cause is not diagnosed because the failed-step log was not readable from the pipeline.
 - **s1036**: Recorded that the s77, s117 and s902 reds on ubuntu shard 2 could not be traced without the full CI log, and changed no code.
 - **s1037**: The `the_note_says_how_the_modules_were_picked` failure on a0f67a2 was fixed by 9c18e970f (stop unit narrowing from pushing a note into Group.notes); no source change is needed.
 - **s1038**: scripts/run-exit-scripts.sh now prints a failed script's last 40 lines and marks limit kills `(over N s)` in the `FAILED scripts:` list.
 - **s1039**: s782 now clears the inherited shard and plan variables, and the first failing assertion of s249 and s782 in run 45143216377 is still open.
+- **s1040**: check-exit-portability.sh no longer uses gawk-only `\x27` escapes, so its refusals also fire under mawk on ubuntu-latest (s669).
+- **s1045**: The exit-script runner repeats each failed script's first panic or failing line as a `cause` line before the closing `FAILED scripts:` line.
 <!-- status:end -->

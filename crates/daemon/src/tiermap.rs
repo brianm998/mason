@@ -8,7 +8,7 @@
 //! parts live in `mason_definition::tiers`; this module only reads the files.
 
 use crate::config::Provider;
-use mason_definition::tiers::{parse_table, MapSource, Mapping};
+use mason_definition::tiers::{parse_diagnose, parse_table, Entry, MapSource, Mapping};
 use std::path::Path;
 use toml_edit::DocumentMut;
 
@@ -35,6 +35,8 @@ pub fn effort_levels(p: Provider) -> Vec<String> {
 #[derive(Clone, Debug)]
 pub struct Effective {
     pub mapping: Mapping,
+    /// The provider file's `[diagnose]` pair, if it has a good one.
+    pub diagnose_file: Option<Entry>,
     pub problems: Vec<String>,
 }
 
@@ -46,15 +48,24 @@ pub fn effective(config_dir: &Path, provider: Provider, project_text: &str) -> E
     let efforts = effort_levels(provider);
     let mut mapping = Mapping::builtin(pname);
     let mut problems = vec![];
+    let mut diagnose_file = None;
 
     let path = config_dir.join("providers").join(format!("{pname}.toml"));
     match std::fs::read_to_string(&path) {
         Ok(text) => match text.parse::<DocumentMut>() {
             Ok(doc) => {
-                let (good, bad) = parse_table(doc.as_table(), &efforts);
+                let (good, mut bad) = parse_table(doc.as_table(), &efforts);
+                if let Some(t) = doc.get("diagnose") {
+                    match t.as_table_like().map(|t| parse_diagnose(t, &efforts)) {
+                        Some(Ok(e)) => diagnose_file = Some(e),
+                        Some(Err(b)) => bad.extend(b),
+                        None => bad.push("diagnose must be a table like { model = \"...\", effort = \"...\" }".into()),
+                    }
+                }
                 if bad.is_empty() {
                     mapping.overlay(good, MapSource::ProviderFile);
                 } else {
+                    diagnose_file = None;
                     problems.extend(bad.into_iter().map(|b| {
                         format!(
                             "{}: {b}; the built-in mapping is used for {pname} until it is fixed",
@@ -88,7 +99,28 @@ pub fn effective(config_dir: &Path, provider: Provider, project_text: &str) -> E
                 .map(|b| format!("project file [provider.{pname}]: {b}; that entry is ignored")),
         );
     }
-    Effective { mapping, problems }
+    Effective {
+        mapping,
+        diagnose_file,
+        problems,
+    }
+}
+
+/// The model and effort of the diagnosis session: the project's `diagnose_model` and
+/// `diagnose_effort`, then the provider file's `[diagnose]`, then the built-in pair.
+pub fn diagnose_entry(
+    eff: &Effective,
+    provider: Provider,
+    project: (Option<String>, Option<String>),
+) -> (Entry, MapSource) {
+    mason_definition::tiers::resolve_diagnose(
+        mason_definition::tiers::builtin_diagnose(name(provider), &eff.mapping),
+        eff.diagnose_file.clone(),
+        Entry {
+            model: project.0,
+            effort: project.1,
+        },
+    )
 }
 
 #[cfg(test)]
