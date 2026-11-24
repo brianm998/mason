@@ -473,6 +473,124 @@ The owner decided that landing is coordinated in one place, so that machines nev
   `mason project add` should warn if a paired node reports that it has a project with the same
   remote URL (`/node/status` lists the node's own project remotes).
 
+### 3.14 macOS privacy prompts and signing on a node with no user logged in
+
+The node daemon runs as `masonnode` from a LaunchDaemon, while the owner is logged in as their
+own work user. **Nobody can ever answer a privacy prompt for it.** When macOS wants a dialog for a
+background process with no GUI session, the request is denied. The process then gets `EPERM`, or
+in the worst case blocks. For a coordinator that looks like a stuck or red job for no visible
+reason. The rule: **the node never needs a prompt.** Every permission it uses is granted ahead of
+time by the owner, in the owner's own GUI session. Every grant is tied to a signature that does
+not change across updates. The daemon checks its permissions itself and reports in words what is
+missing. It never hangs.
+
+**What MASON does today on the iMac (reuse it).**
+
+- `update.rs` `sign_installed` / `codesign_args` (around :497–:530) signs every installed runtime
+  binary with `sign_identity`, a Developer ID. That gives a team-anchored designated requirement
+  and the identifier `com.brianm998.mason.<name>`, so privacy grants survive self-updates.
+- `scripts/make-daemon-app.sh` wraps the launcher in **"MASON Daemon.app"**, signed the same way,
+  so System Settings has an app to grant permissions to (Developer Tools, Full Disk Access).
+- masond is the *responsible process* for everything it starts. Its grants cover the cargo,
+  rustc and test processes under it. The update.rs comment about `/Volumes/sp` and tccd explains
+  why an unsigned or ad-hoc masond is dangerous.
+
+**Problem 1: the node can't sign its own updates.** The Developer ID private key is in the
+owner's login keychain on the iMac. `masonnode` has no access to it, and `codesign` would hang
+waiting for keychain approval until `SIGN_TIMEOUT`. An ad-hoc signed node changes its designated
+requirement on every build, which drops every grant, and nobody is there to approve them again.
+
+**Fix: the coordinator delivers the node's runtime, already signed.** This fits "everything comes
+from the coordinator".
+
+- When the coordinator's `mason update` builds a new runtime and there are paired nodes of
+  another architecture (the Studio is `arm64`, the iMac `x86_64`), it **also builds for that
+  target** (`rustup target add aarch64-apple-darwin`, then `cargo build --target …`). It signs
+  the result with the same `sign_identity` and packs it with MASON Daemon.app.
+- It sends the package with `PUT /node/runtime`. The node verifies it with
+  `codesign --verify --strict` and a requirement pinned at pairing:
+  `anchor apple generic and certificate leaf[subject.OU] = "<team id>"`. The team id is taken
+  from the coordinator's signed binary at pairing and stored next to the fingerprint in
+  `coordinators.json`. The node then installs it under `runtimes/` and takes over with the
+  existing exec takeover. **A node never builds or signs MASON itself.** This also keeps node and
+  coordinator versions in step, as §3.1 requires.
+- **First install:** `mason node export-runtime --arch arm64 --out <dir>` on the coordinator
+  writes the same signed package. The owner copies it to the Studio and installs it from
+  `docs/nodes.md`.
+- The cross build costs the iMac one extra build per update until January. The rejected option
+  is to put a copy of the Developer ID identity in a dedicated keychain for `masonnode`. That is
+  a signing secret on the work machine, so don't do it unless the owner asks.
+
+**Problem 2: volumes.** The owner noted that the node needs a volume other than its boot
+volume. macOS guards removable volumes (USB or Thunderbolt disks) and network volumes (SMB, NFS)
+separately, with per-user prompts. Those prompts can never be answered here.
+
+- **Preferred: keep everything the node writes on the Studio's internal disk.** That is
+  `--data-dir` under `/Users/masonnode`, with mirrors, slots, `~/.cache/mason-target`, cargo and
+  sccache caches. No volume permission is needed, there are no USB stalls (CLAUDE.md "USB disk
+  stall"), and it is fastest.
+- **If a volume really is needed,** grant **Full Disk Access to MASON Daemon.app** (System
+  Settings → Privacy & Security → Full Disk Access, added by the owner with admin
+  authentication). It is stored in the system-wide privacy database. It applies to that signed
+  app whichever user runs it, and it covers removable and network volumes for masond and every
+  process it starts.
+  - The node checks this at start (below). Check on the real Studio that a LaunchDaemon running
+    as `masonnode` really is covered. If it isn't, record what was needed.
+- **External disk:** macOS mounts external disks only after someone logs in, unless the owner
+  sets `AutomountDisksWithoutUserLogin`. The command goes in `docs/nodes.md`:
+  `sudo defaults write /Library/Preferences/SystemConfiguration/autodiskmount
+  AutomountDisksWithoutUserLogin -bool true`. Also, `masonnode` must be able to write to the
+  disk: either "Ignore ownership on this volume", or a directory owned by `masonnode`.
+- **Network share:** a share the owner mounts in their own session belongs to the owner and
+  vanishes when they log out, so the node can't rely on it. It would need a system-level mount
+  (autofs, `/etc/auto_master`) that holds the share's credentials on the Studio. Build
+  directories on SMB are also slow and unreliable for cargo's file locking. **Don't put slots or
+  target directories on a network volume.** If the owner really needs one for inputs, it goes
+  into `docs/nodes.md` as an autofs setup and gets its own decision record.
+- **Work-machine caveat:** if the Studio is managed by an employer's MDM, a profile may block or
+  pre-set Full Disk Access. `docs/nodes.md` tells the owner to check System Settings → Privacy &
+  Security → Profiles first.
+
+**Problem 3: other privacy grants.**
+
+- **Developer Tools** (it skips the malware scan on every launch of freshly built code; see
+  CLAUDE.md "syspolicyd down"): add MASON Daemon.app on the Studio as on the iMac. If this grant
+  turns out to be stored per user and not system-wide, the owner logs in as `masonnode` **once**
+  (fast user switching), adds it in System Settings there, and logs out. That is a one-time step
+  in `docs/nodes.md`.
+- **Local Network** (macOS 15+). On the node, the daemon listens on the LAN and advertises with
+  mDNS. Apple's documentation says launchd *daemons* are not subject to local network privacy.
+  Check that on the Studio with a LaunchDaemon running as `masonnode`. If a prompt would appear,
+  record the fix. On the **coordinator** (the iMac, a LaunchAgent in the owner's session), the
+  first connection to a node raises "Allow MASON to find devices on local networks?". The owner
+  can answer it there, and the Team ID signature keeps the answer across updates. **Check
+  first:** on 2026-11-22 a scratch exit-script daemon raised this dialog, charged to the same
+  bundle `com.brianm998.mason.masond`, and the advice was "Don't Allow". If the owner clicked it,
+  the production coordinator is denied too. Turn it on in System Settings → Privacy & Security →
+  Local Network before Phase 1's manual check. `mason node list` must say "local network access
+  denied by macOS" in that case, not just "unreachable".
+- **Nothing else.** No Accessibility, Screen Recording, Input Monitoring, Automation or camera.
+  The node runs no UI tests (§3.7), so it never needs them.
+
+**`mason node doctor`, and the start-up probe.** The node runs the same checks on start, every 10
+minutes, and on demand with `mason node doctor`. The results go into `/node/status` as
+`accepting=false` with a `why_not` the owner can act on:
+
+- **Signature:** its own executable and app have a team-anchored designated requirement
+  (`codesign -dr -`). If the signature is ad hoc: "masond is signed ad hoc; privacy grants will
+  not hold — install the runtime from the coordinator".
+- **Paths:** for every path it will use (data dir, mirrors, slots, cache and target dirs, any
+  volume the owner configured), create, write, read and delete a probe file. Do this on a thread
+  with a deadline, so a stalled disk or a privacy denial reports instead of hanging (CLAUDE.md
+  "USB disk stall"). `EPERM` on a volume reads: "macOS denied access to /Volumes/X: give MASON
+  Daemon.app Full Disk Access".
+- **Volume mounted:** a configured volume is mounted ("/Volumes/X is not mounted; see
+  AutomountDisksWithoutUserLogin in docs/nodes.md").
+- **Local network:** the listener is bound and the mDNS registration succeeded.
+- **Toolchains:** `cargo --version`, `xcode-select -p` and `java -version` run **as masonnode**
+  without prompting. A first `xcodebuild` as a new user may need `sudo xcodebuild -license
+  accept` and `sudo xcodebuild -runFirstLaunch`; put both in `docs/nodes.md`.
+
 ---
 
 ## 4. Configuration reference
@@ -574,11 +692,31 @@ and the exit script for the phase.
 - CLI:
   - on the node: `mason node pair-code | accept on|off | stop-jobs | status | coordinators [remove]`
   - on the coordinator: `mason node add | remove | list | use`
+- **Signed runtime for the node (§3.14):** `mason node export-runtime --arch <arch> --out <dir>`
+  (a cross build plus `sign_installed` with `sign_identity`, packaged with MASON Daemon.app).
+  On the node, a verified install (`codesign --verify --strict` against the team id pinned at
+  pairing). Tests:
+  - the requirement check refuses an ad-hoc package and a package from another team; use a fake
+    `codesign` runner, as `update.rs` tests do
+  - `codesign_args` output for the cross-built binaries
+- **`mason node doctor` and the start-up probe (§3.14):** signature, paths with a deadline,
+  volumes mounted, listener and mDNS, toolchains. Each failure becomes `accepting=false` with an
+  actionable `why_not`. Table tests run over injected probe results.
 - **`docs/nodes.md`, first version.** The owner sets up the Studio from this doc, so write it in
   this phase:
   - creating the `masonnode` standard user
-  - installing toolchains in that account (rustup with the pinned Rust, the Xcode selection, Java)
-  - installing `masond` and a LaunchDaemon plist with `UserName`
+  - installing toolchains in that account (rustup with the pinned Rust, the Xcode selection,
+    `sudo xcodebuild -license accept` and `-runFirstLaunch`, Java)
+  - installing the **coordinator-exported signed runtime** and "MASON Daemon.app", plus a
+    LaunchDaemon plist with `UserName=masonnode` whose program is inside the app
+  - privacy grants in the owner's session: **Full Disk Access** and **Developer Tools** for MASON
+    Daemon.app. If Developer Tools turns out to be per-user, include the one-time GUI login as
+    `masonnode`
+  - checking for an MDM profile
+  - keeping node data on the internal disk; if a volume is used, `AutomountDisksWithoutUserLogin`
+    and ownership
+  - on the **iMac**: Local Network enabled for MASON in System Settings (§3.14)
+  - running `mason node doctor` until it is clean
   - `[node] serve = true`
   - opening the firewall for the node port
   - pairing from the iMac
@@ -597,7 +735,10 @@ and the exit script for the phase.
   and no copy of A's settings on disk. No mDNS in the automated test, because
   multicast is unreliable in CI. mDNS gets a TXT-parsing unit test and a manual check.
 - **Manual:** on the real Studio, `mason node list` on the iMac shows it through mDNS with its
-  real CPU and temperature.
+  real CPU and temperature. `mason node doctor` on the Studio is clean while **nobody is logged
+  in as masonnode**, and with the owner logged in as their work user. Record which grants were
+  really needed (Full Disk Access, Developer Tools, Local Network) and fix `docs/nodes.md` to
+  match.
 
 ### Phase 2: run jobs on a node
 
@@ -629,6 +770,10 @@ and the exit script for the phase.
   adoption. Orphan lease on the node. A `412` resend. Incompatible versions. The spill from the
   GitHub queue to a node.
 - Live log tail and live counts from node runs.
+- **Runtime updates pushed to nodes (§3.14):** after the coordinator's `mason update` installs a
+  new runtime, it cross-builds and signs for each paired node's architecture and sends
+  `PUT /node/runtime`. The node verifies, installs and takes over after its running jobs drain.
+  A node on an older `node_proto` stays "incompatible" until it has been updated.
 - Alerts.
 - **Tests:** each row of §3.10 as an integration test on loopback, using counts and conditions,
   **never durations**. Use an injectable clock or poll counter where the code waits.
@@ -651,7 +796,7 @@ and the exit script for the phase.
 
 Idle detection, a working-hours schedule, simulators and devices on nodes (the Studio could run
 the Preffect and timelapse simulator suites), shards across nodes, agent sessions on nodes,
-`mason update` pushed to nodes, Linux nodes.
+Linux nodes. (Runtime updates pushed to nodes are now in Phase 3, §3.14.)
 
 ---
 
@@ -722,6 +867,7 @@ Changed files:
 | `crates/daemon/src/suites.rs` | Add the `Executor::Node` arm and `run_on_node`, returning the same `Ran` that `run_remote` returns. The verdict code is unchanged. | 0, 2 |
 | `crates/daemon/src/landing.rs` | The `Executor::Node` arm at :5230, and sending batch, rerun and bisect test runs through placement (§3.13). Merging and promotion are unchanged. | 0, 2 |
 | `scripts/exit/sNNN.sh` (new) | One exit script per phase. | 1-3 |
+| `crates/daemon/src/update.rs` | Reuse `sign_installed` and `codesign_args` for the cross-built node runtime, and hook "send runtime to nodes" after a takeover (§3.14). The rollback and no-downgrade rules stay as they are. **Added after the first approval; the owner approved it separately on 2026-11-23: approved (2026-11-23).** | 1, 3 |
 | `deny.toml` | Only if the hyper client features pull in a crate that isn't allowed yet. | 1 |
 | `clients/features.toml` | The parity entries for the accept toggle and the Nodes section. | 4 |
 | `crates/daemon/tests/fixtures/**` | Only if a golden event log changes because of new events (node lost, and so on). | 3 |
@@ -733,7 +879,7 @@ Changed files:
 Agent (LLM) sessions on nodes. They are API-bound, and their heavy part, `run_check`, already
 moves to a node through this plan. Also not included: simulators and devices on nodes, shards
 across nodes or across a node and GitHub, working-hours schedules, idle detection (phase 5),
-remote updates of nodes, Linux nodes, and NAT or internet nodes (Tailscale would work with
+Linux nodes, and NAT or internet nodes (Tailscale would work with
 `static`, but it isn't designed for here).
 
 ---
