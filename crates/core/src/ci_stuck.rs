@@ -45,7 +45,7 @@ pub fn span(secs: u64) -> String {
         90..=5399 => format!("{} min", (secs + 30) / 60),
         _ => {
             let m = (secs + 30) / 60;
-            if m % 60 == 0 {
+            if m.is_multiple_of(60) {
                 format!("{} h", m / 60)
             } else {
                 format!("{} h {} min", m / 60, m % 60)
