@@ -71,9 +71,10 @@ run_limited() {
   # No timeout(1) (macOS): a watcher kills the script and its children.
   local flag; flag=$(mktemp); rm -f "$flag"
   bash "$s" & local pid=$!
-  ( sleep "$limit"; if kill -0 "$pid" 2>/dev/null; then : > "$flag"; pkill -P "$pid" 2>/dev/null; kill "$pid" 2>/dev/null; fi ) &
+  ( sleep "$limit"; if kill -0 "$pid" 2>/dev/null; then : > "$flag"; pkill -P "$pid" 2>/dev/null; kill "$pid" 2>/dev/null; fi ) >/dev/null 2>&1 &
   local watcher=$!
   wait "$pid"; rc=$?
+  pkill -P "$watcher" sleep 2>/dev/null
   kill "$watcher" 2>/dev/null; wait "$watcher" 2>/dev/null
   if [ -e "$flag" ]; then rm -f "$flag"; return 2; fi
   [ $rc -eq 0 ] && return 0 || return 1
