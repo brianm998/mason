@@ -51,6 +51,8 @@ pub struct DaemonConfig {
     pub port: u16,
     /// LAN access (Part 16): off unless the owner turns it on.
     pub lan: LanCfg,
+    /// `[node]`: this daemon accepts work from other Macs. Read once at start.
+    pub node: NodeCfg,
     pub stall_threshold: Duration,
     /// How long a provider hold waits before the session is resumed.
     pub hold_retry: Duration,
@@ -227,6 +229,432 @@ pub fn load_lan(config_dir: &std::path::Path) -> Result<LanCfg, String> {
     match std::fs::read_to_string(config_dir.join("daemon.toml")) {
         Ok(t) => parse_lan(&t),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(LanCfg::default()),
+        Err(e) => Err(format!("daemon.toml: {e}")),
+    }
+}
+
+// ---- nodes: running work on other Macs (docs/multi-machine-nodes-plan.md) ---------------------
+
+/// `[node]` in `daemon.toml`: the whole local configuration of a node. Off unless `serve = true`.
+/// The owner's on/off switch is not here: it is `node.toml`, changed live.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NodeCfg {
+    pub serve: bool,
+    /// 0 asks the OS for a free port.
+    pub port: u16,
+    /// The addresses to listen on, one listener each.
+    pub bind: Vec<std::net::IpAddr>,
+}
+
+impl Default for NodeCfg {
+    fn default() -> Self {
+        NodeCfg {
+            serve: false,
+            port: crate::node_serve::DEFAULT_NODE_PORT,
+            bind: vec![std::net::IpAddr::from([0, 0, 0, 0])],
+        }
+    }
+}
+
+/// Read the `[node]` table. Any bad value is an error that names the file and the setting.
+pub fn parse_node(text: &str) -> Result<NodeCfg, String> {
+    let doc: toml_edit::DocumentMut = text.parse().map_err(|e| format!("daemon.toml: {e}"))?;
+    let mut node = NodeCfg::default();
+    let Some(item) = doc.get("node") else {
+        return Ok(node);
+    };
+    let table = item
+        .as_table_like()
+        .ok_or("daemon.toml: `node` must be a table: [node]")?;
+    for (name, v) in table.iter() {
+        match name {
+            "serve" => {
+                node.serve = v
+                    .as_bool()
+                    .ok_or("daemon.toml: node.serve must be true or false")?
+            }
+            "port" => {
+                node.port = v
+                    .as_integer()
+                    .and_then(|n| u16::try_from(n).ok())
+                    .ok_or("daemon.toml: node.port must be a whole number from 0 to 65535")?
+            }
+            "bind" => {
+                let bad = "daemon.toml: node.bind must be a non-empty list of IP addresses, e.g. [\"0.0.0.0\"]";
+                let arr = v.as_array().ok_or(bad)?;
+                let mut out: Vec<std::net::IpAddr> = Vec::new();
+                for e in arr.iter() {
+                    let a: std::net::IpAddr =
+                        e.as_str().and_then(|t| t.parse().ok()).ok_or_else(|| {
+                            format!("daemon.toml: node.bind entry {e} is not an IP address")
+                        })?;
+                    if !out.contains(&a) {
+                        out.push(a);
+                    }
+                }
+                if out.is_empty() {
+                    return Err(bad.into());
+                }
+                node.bind = out;
+            }
+            other => return Err(format!("daemon.toml: unknown setting node.{other}")),
+        }
+    }
+    Ok(node)
+}
+
+pub fn load_node(config_dir: &std::path::Path) -> Result<NodeCfg, String> {
+    match std::fs::read_to_string(config_dir.join("daemon.toml")) {
+        Ok(t) => parse_node(&t),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(NodeCfg::default()),
+        Err(e) => Err(format!("daemon.toml: {e}")),
+    }
+}
+
+/// What a node does with running jobs when the owner turns the switch off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OnSwitchOff {
+    /// Let them finish (the default); no new job starts.
+    Drain,
+    /// Kill them; the coordinator places them again.
+    Cancel,
+}
+
+impl OnSwitchOff {
+    pub fn name(self) -> &'static str {
+        match self {
+            OnSwitchOff::Drain => "drain",
+            OnSwitchOff::Cancel => "cancel",
+        }
+    }
+}
+
+/// The tunables of a node, set on the coordinator and sent to the node with every status poll.
+/// A node that has heard nothing uses [`NodeSettings::default`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NodeSettings {
+    pub max_jobs: u32,
+    /// The node takes no job while other work uses more of its CPU than this.
+    pub max_other_cpu_pct: u32,
+    pub min_disk_free_gb: u64,
+    pub on_switch_off: OnSwitchOff,
+    /// A job whose coordinator has not asked after it for this long is cancelled.
+    pub lease_s: u64,
+    /// 0: the node's own thermal defaults.
+    pub max_die_c: u32,
+}
+
+impl Default for NodeSettings {
+    fn default() -> Self {
+        NodeSettings {
+            max_jobs: 2,
+            max_other_cpu_pct: 50,
+            min_disk_free_gb: 50,
+            on_switch_off: OnSwitchOff::Drain,
+            lease_s: 300,
+            max_die_c: 0,
+        }
+    }
+}
+
+/// Some of a node's settings: `[nodes.default]` or `[nodes.<name>]`, laid over the built-ins.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SettingsPatch {
+    pub max_jobs: Option<u32>,
+    pub max_other_cpu_pct: Option<u32>,
+    pub min_disk_free_gb: Option<u64>,
+    pub on_switch_off: Option<OnSwitchOff>,
+    pub lease_s: Option<u64>,
+    pub max_die_c: Option<u32>,
+}
+
+impl SettingsPatch {
+    /// One setting, checked: `what` names it in the error ("nodes.default.max_jobs").
+    pub fn set(&mut self, key: &str, v: &toml_edit::Item, what: &str) -> Result<(), String> {
+        let int = |lo: i64, hi: i64| -> Result<i64, String> {
+            v.as_integer()
+                .filter(|n| (lo..=hi).contains(n))
+                .ok_or_else(|| {
+                    format!("daemon.toml: {what} must be a whole number from {lo} to {hi}")
+                })
+        };
+        match key {
+            "max_jobs" => self.max_jobs = Some(int(1, 64)? as u32),
+            "max_other_cpu_pct" => self.max_other_cpu_pct = Some(int(1, 100)? as u32),
+            "min_disk_free_gb" => self.min_disk_free_gb = Some(int(0, 100_000)? as u64),
+            "lease_s" => self.lease_s = Some(int(10, 3600)? as u64),
+            "max_die_c" => {
+                let n = int(0, 110)?;
+                if n != 0 && n < 50 {
+                    return Err(format!(
+                        "daemon.toml: {what} must be 0 (the node's own default) or from 50 to 110"
+                    ));
+                }
+                self.max_die_c = Some(n as u32)
+            }
+            "on_switch_off" => {
+                self.on_switch_off = Some(match v.as_str() {
+                    Some("drain") => OnSwitchOff::Drain,
+                    Some("cancel") => OnSwitchOff::Cancel,
+                    _ => {
+                        return Err(format!(
+                            "daemon.toml: {what} must be \"drain\" or \"cancel\""
+                        ))
+                    }
+                })
+            }
+            other => {
+                let (table, _) = what.rsplit_once('.').unwrap_or((what, ""));
+                return Err(format!("daemon.toml: unknown setting {table}.{other}"));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn apply(&self, s: &mut NodeSettings) {
+        if let Some(v) = self.max_jobs {
+            s.max_jobs = v;
+        }
+        if let Some(v) = self.max_other_cpu_pct {
+            s.max_other_cpu_pct = v;
+        }
+        if let Some(v) = self.min_disk_free_gb {
+            s.min_disk_free_gb = v;
+        }
+        if let Some(v) = self.on_switch_off {
+            s.on_switch_off = v;
+        }
+        if let Some(v) = self.lease_s {
+            s.lease_s = v;
+        }
+        if let Some(v) = self.max_die_c {
+            s.max_die_c = v;
+        }
+    }
+}
+
+impl NodeSettings {
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "max_jobs": self.max_jobs,
+            "max_other_cpu_pct": self.max_other_cpu_pct,
+            "min_disk_free_gb": self.min_disk_free_gb,
+            "on_switch_off": self.on_switch_off.name(),
+            "lease_s": self.lease_s,
+            "max_die_c": self.max_die_c,
+        })
+    }
+
+    /// Settings as a coordinator sent them. A missing key keeps the built-in value; a key of the
+    /// wrong kind or out of range is an error that names it.
+    pub fn from_json(v: &serde_json::Value) -> Result<NodeSettings, String> {
+        let mut patch = SettingsPatch::default();
+        let Some(o) = v.as_object() else {
+            return Err("the settings must be a JSON object".into());
+        };
+        for (k, x) in o {
+            let item = match x {
+                serde_json::Value::String(t) => toml_edit::value(t.as_str()),
+                serde_json::Value::Number(n) if n.is_i64() || n.is_u64() => {
+                    toml_edit::value(i64::try_from(n.as_u64().unwrap_or(0)).unwrap_or(i64::MAX))
+                }
+                _ => return Err(format!("setting {k} has the wrong kind of value")),
+            };
+            patch
+                .set(k, &item, &format!("settings.{k}"))
+                .map_err(|e| e.trim_start_matches("daemon.toml: ").to_string())?;
+        }
+        let mut s = NodeSettings::default();
+        patch.apply(&mut s);
+        Ok(s)
+    }
+
+    /// What applies when several coordinators have sent settings: the strictest of each. Fewer
+    /// jobs, less CPU the node's own work may leave to others, more disk kept free, the shorter
+    /// lease, the lower die limit (0 means "no opinion"), and `cancel` if any coordinator wants it.
+    pub fn strictest(all: &[NodeSettings]) -> NodeSettings {
+        let mut it = all.iter();
+        let Some(first) = it.next() else {
+            return NodeSettings::default();
+        };
+        it.fold(*first, |a, b| NodeSettings {
+            max_jobs: a.max_jobs.min(b.max_jobs),
+            max_other_cpu_pct: a.max_other_cpu_pct.min(b.max_other_cpu_pct),
+            min_disk_free_gb: a.min_disk_free_gb.max(b.min_disk_free_gb),
+            on_switch_off: if a.on_switch_off == OnSwitchOff::Cancel
+                || b.on_switch_off == OnSwitchOff::Cancel
+            {
+                OnSwitchOff::Cancel
+            } else {
+                OnSwitchOff::Drain
+            },
+            lease_s: a.lease_s.min(b.lease_s),
+            max_die_c: match (a.max_die_c, b.max_die_c) {
+                (0, x) | (x, 0) => x,
+                (x, y) => x.min(y),
+            },
+        })
+    }
+}
+
+/// Which off-machine target is tried first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Prefer {
+    Nodes,
+    Github,
+}
+
+/// `[nodes]` in `daemon.toml`: the coordinator's side. Read live (`load_nodes`), so a change
+/// needs no restart.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NodesCfg {
+    pub enabled: bool,
+    pub prefer: Prefer,
+    /// `host:port` of nodes mDNS cannot see.
+    pub static_hosts: Vec<String>,
+    pub status_every_s: u64,
+    /// Failed polls in a row after which a node counts as gone.
+    pub lost_after_polls: u32,
+    /// Only these projects may use nodes; `None`: every project.
+    pub projects: Option<Vec<String>>,
+    pub exclude: Vec<String>,
+    pub default: SettingsPatch,
+    pub per_node: std::collections::BTreeMap<String, SettingsPatch>,
+}
+
+impl Default for NodesCfg {
+    fn default() -> Self {
+        NodesCfg {
+            enabled: false,
+            prefer: Prefer::Nodes,
+            static_hosts: Vec::new(),
+            status_every_s: 5,
+            lost_after_polls: 6,
+            projects: None,
+            exclude: Vec::new(),
+            default: SettingsPatch::default(),
+            per_node: std::collections::BTreeMap::new(),
+        }
+    }
+}
+
+impl NodesCfg {
+    /// The settings sent to the node called `name`: the built-ins, then `[nodes.default]`, then
+    /// `[nodes.<name>]`.
+    pub fn settings_for(&self, name: &str) -> NodeSettings {
+        let mut s = NodeSettings::default();
+        self.default.apply(&mut s);
+        if let Some(p) = self.per_node.get(name) {
+            p.apply(&mut s);
+        }
+        s
+    }
+
+    /// May `project` use nodes?
+    pub fn allows(&self, project: &str) -> bool {
+        self.projects
+            .as_ref()
+            .is_none_or(|p| p.iter().any(|x| x == project))
+            && !self.exclude.iter().any(|x| x == project)
+    }
+}
+
+/// A `host:port` that is a host name or address and a port.
+pub fn valid_host_port(h: &str) -> bool {
+    let Some((host, port)) = h.rsplit_once(':') else {
+        return false;
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    !host.is_empty()
+        && host.len() <= 253
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':'))
+        && port.parse::<u16>().is_ok_and(|p| p > 0)
+}
+
+/// Read the `[nodes]` tables. Any bad value is an error that names the file and the setting.
+pub fn parse_nodes(text: &str) -> Result<NodesCfg, String> {
+    let doc: toml_edit::DocumentMut = text.parse().map_err(|e| format!("daemon.toml: {e}"))?;
+    let mut cfg = NodesCfg::default();
+    let Some(item) = doc.get("nodes") else {
+        return Ok(cfg);
+    };
+    let table = item
+        .as_table_like()
+        .ok_or("daemon.toml: `nodes` must be a table: [nodes]")?;
+    let names = |v: &toml_edit::Item, what: &str| -> Result<Vec<String>, String> {
+        let bad = format!("daemon.toml: {what} must be a list of project names");
+        let arr = v.as_array().ok_or(bad.clone())?;
+        arr.iter()
+            .map(|e| e.as_str().map(String::from).ok_or(bad.clone()))
+            .collect()
+    };
+    for (name, v) in table.iter() {
+        match name {
+            "enabled" => {
+                cfg.enabled = v
+                    .as_bool()
+                    .ok_or("daemon.toml: nodes.enabled must be true or false")?
+            }
+            "prefer" => {
+                cfg.prefer = match v.as_str() {
+                    Some("nodes") => Prefer::Nodes,
+                    Some("github") => Prefer::Github,
+                    _ => {
+                        return Err(
+                            "daemon.toml: nodes.prefer must be \"nodes\" or \"github\"".into()
+                        )
+                    }
+                }
+            }
+            "static" => {
+                let bad = "daemon.toml: nodes.static must be a list of host:port, e.g. [\"studio.local:7425\"]";
+                let arr = v.as_array().ok_or(bad)?;
+                for e in arr.iter() {
+                    let h = e.as_str().filter(|h| valid_host_port(h)).ok_or_else(|| {
+                        format!("daemon.toml: nodes.static entry {e} is not a host:port")
+                    })?;
+                    if !cfg.static_hosts.iter().any(|x| x == h) {
+                        cfg.static_hosts.push(h.to_string());
+                    }
+                }
+            }
+            "status_every_s" => {
+                cfg.status_every_s = v.as_integer().filter(|n| (1..=3600).contains(n)).ok_or(
+                    "daemon.toml: nodes.status_every_s must be a whole number from 1 to 3600",
+                )? as u64
+            }
+            "lost_after_polls" => {
+                cfg.lost_after_polls = v.as_integer().filter(|n| (1..=1000).contains(n)).ok_or(
+                    "daemon.toml: nodes.lost_after_polls must be a whole number from 1 to 1000",
+                )? as u32
+            }
+            "projects" => cfg.projects = Some(names(v, "nodes.projects")?),
+            "exclude" => cfg.exclude = names(v, "nodes.exclude")?,
+            sub => {
+                let t = v.as_table_like().ok_or_else(|| {
+                    format!("daemon.toml: unknown setting nodes.{sub}; a node's settings are a table: [nodes.{sub}]")
+                })?;
+                let mut patch = SettingsPatch::default();
+                for (k, x) in t.iter() {
+                    patch.set(k, x, &format!("nodes.{sub}.{k}"))?;
+                }
+                if sub == "default" {
+                    cfg.default = patch;
+                } else {
+                    cfg.per_node.insert(sub.to_string(), patch);
+                }
+            }
+        }
+    }
+    Ok(cfg)
+}
+
+pub fn load_nodes(config_dir: &std::path::Path) -> Result<NodesCfg, String> {
+    match std::fs::read_to_string(config_dir.join("daemon.toml")) {
+        Ok(t) => parse_nodes(&t),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(NodesCfg::default()),
         Err(e) => Err(format!("daemon.toml: {e}")),
     }
 }
@@ -539,8 +967,11 @@ pub fn parse_daemon_port(text: &str) -> Result<Option<u16>, String> {
     let doc: toml_edit::DocumentMut = text.parse().map_err(|e| format!("daemon.toml: {e}"))?;
     let mut port = None;
     for (key, item) in doc.iter() {
-        if key == "lan" || key == "targets" || key == "sessions" || key == "onboarding" {
-            continue; // read by `parse_lan` and `parse_targets`
+        if matches!(
+            key,
+            "lan" | "targets" | "sessions" | "onboarding" | "node" | "nodes"
+        ) {
+            continue; // read by `parse_lan`, `parse_targets`, `parse_node` and `parse_nodes`
         }
         let table = item
             .as_table_like()
@@ -609,6 +1040,7 @@ impl DaemonConfig {
             mcp_bin,
             port: 0,
             lan: LanCfg::default(),
+            node: NodeCfg::default(),
             stall_threshold: Duration::from_millis(500),
             hold_retry: Duration::from_secs(60),
             debug: false,
@@ -2131,6 +2563,129 @@ mod tests {
             "[provider.a]\nadapter=\"claude\"\nbilling=\"x\"\n",
         );
         assert!(load_projects(d.path()).is_err());
+    }
+
+    #[test]
+    fn a_node_is_off_by_default_and_bad_values_name_the_setting() {
+        use super::{parse_node, NodeCfg};
+        assert_eq!(parse_node("").unwrap(), NodeCfg::default());
+        assert!(!NodeCfg::default().serve);
+        let n = parse_node("[node]\nserve = true\nport = 9000\nbind = [\"10.0.0.2\"]\n").unwrap();
+        assert!(n.serve && n.port == 9000 && n.bind == [std::net::IpAddr::from([10, 0, 0, 2])]);
+        for (bad, names) in [
+            ("[node]\nserve = 1\n", "node.serve"),
+            ("[node]\nport = 70000\n", "node.port"),
+            ("[node]\nbind = []\n", "node.bind"),
+            ("[node]\nbind = [\"x\"]\n", "node.bind"),
+            ("[node]\ntoken = \"x\"\n", "node.token"),
+            ("node = 3\n", "`node`"),
+        ] {
+            let e = parse_node(bad).unwrap_err();
+            assert!(e.contains(names) && e.contains("daemon.toml"), "{bad}: {e}");
+        }
+        // The port reader leaves both tables alone.
+        assert_eq!(
+            super::parse_daemon_port("[node]\nserve = true\n[nodes]\nenabled = true\n").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn the_coordinators_nodes_tables_layer_default_then_the_node() {
+        use super::{parse_nodes, NodeSettings, OnSwitchOff, Prefer};
+        let c = parse_nodes("").unwrap();
+        assert!(!c.enabled && c.prefer == Prefer::Nodes && c.projects.is_none());
+        assert_eq!(c.settings_for("studio"), NodeSettings::default());
+        let c = parse_nodes(
+            "[nodes]\nenabled = true\nprefer = \"github\"\nstatic = [\"studio.local:7425\", \"127.0.0.1:1\"]\n\
+             status_every_s = 2\nlost_after_polls = 3\nprojects = [\"mason\"]\nexclude = [\"star\"]\n\
+             [nodes.default]\nmax_jobs = 4\non_switch_off = \"cancel\"\n[nodes.studio]\nmax_jobs = 6\nmax_die_c = 90\n",
+        )
+        .unwrap();
+        assert!(c.enabled && c.prefer == Prefer::Github);
+        assert_eq!(c.static_hosts, ["studio.local:7425", "127.0.0.1:1"]);
+        assert_eq!((c.status_every_s, c.lost_after_polls), (2, 3));
+        assert!(c.allows("mason") && !c.allows("star") && !c.allows("other"));
+        let s = c.settings_for("studio");
+        assert_eq!(
+            (s.max_jobs, s.max_die_c, s.on_switch_off),
+            (6, 90, OnSwitchOff::Cancel)
+        );
+        let other = c.settings_for("mini");
+        assert_eq!((other.max_jobs, other.max_die_c), (4, 0));
+        for (bad, names) in [
+            ("[nodes]\nenabled = \"yes\"\n", "nodes.enabled"),
+            ("[nodes]\nprefer = \"x\"\n", "nodes.prefer"),
+            ("[nodes]\nstatic = [\"nohost\"]\n", "nodes.static"),
+            ("[nodes]\nstatus_every_s = 0\n", "nodes.status_every_s"),
+            ("[nodes]\nbogus = 1\n", "nodes.bogus"),
+            ("[nodes.default]\nmax_jobs = 0\n", "nodes.default.max_jobs"),
+            (
+                "[nodes.default]\nmax_die_c = 20\n",
+                "nodes.default.max_die_c",
+            ),
+            (
+                "[nodes.studio]\non_switch_off = \"x\"\n",
+                "nodes.studio.on_switch_off",
+            ),
+            ("[nodes.studio]\nzzz = 1\n", "nodes.studio.zzz"),
+        ] {
+            let e = parse_nodes(bad).unwrap_err();
+            assert!(e.contains(names) && e.contains("daemon.toml"), "{bad}: {e}");
+        }
+    }
+
+    #[test]
+    fn settings_travel_as_json_and_the_strictest_wins() {
+        use super::{NodeSettings, OnSwitchOff};
+        let s = NodeSettings {
+            max_jobs: 3,
+            ..NodeSettings::default()
+        };
+        assert_eq!(NodeSettings::from_json(&s.to_json()).unwrap(), s);
+        assert_eq!(
+            NodeSettings::from_json(&serde_json::json!({})).unwrap(),
+            NodeSettings::default()
+        );
+        for bad in [
+            serde_json::json!({"max_jobs": 0}),
+            serde_json::json!({"max_jobs": "x"}),
+            serde_json::json!({"on_switch_off": "later"}),
+            serde_json::json!({"nope": 1}),
+            serde_json::json!([1]),
+        ] {
+            assert!(NodeSettings::from_json(&bad).is_err(), "{bad}");
+        }
+        let a = NodeSettings {
+            max_jobs: 4,
+            max_other_cpu_pct: 60,
+            min_disk_free_gb: 10,
+            lease_s: 300,
+            max_die_c: 0,
+            on_switch_off: OnSwitchOff::Drain,
+        };
+        let b = NodeSettings {
+            max_jobs: 2,
+            max_other_cpu_pct: 80,
+            min_disk_free_gb: 40,
+            lease_s: 120,
+            max_die_c: 85,
+            on_switch_off: OnSwitchOff::Cancel,
+        };
+        let m = NodeSettings::strictest(&[a, b]);
+        assert_eq!(
+            (
+                m.max_jobs,
+                m.max_other_cpu_pct,
+                m.min_disk_free_gb,
+                m.lease_s,
+                m.max_die_c,
+                m.on_switch_off
+            ),
+            (2, 60, 40, 120, 85, OnSwitchOff::Cancel)
+        );
+        assert_eq!(NodeSettings::strictest(&[]), NodeSettings::default());
+        assert_eq!(NodeSettings::strictest(&[a]), a);
     }
 
     #[test]

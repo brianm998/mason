@@ -130,8 +130,8 @@ they are.
 
 **Pairing (done once, by the owner, from `docs/nodes.md`):**
 
-1. On the Studio: run `mason node pair-code`. It prints an eight-digit code, valid for 10
-   minutes, and this node's fingerprint. Use the existing `mason_core::access::Pairing` for the
+1. On the Studio: run `mason node pair-code`. It prints an eight-digit code, valid for 2
+   minutes (the lifetime `Pairing` already has; the plan first said 10), and this node's fingerprint. Use the existing `mason_core::access::Pairing` for the
    code's lifetime, its attempt limit and its lockout.
 2. On the iMac: run `mason node add [<name>|--host H:P]`. It lists the discovered nodes and asks
    for the code. The coordinator connects with its client cert, **checks that the node's server
@@ -194,9 +194,9 @@ in plain words ("the owner turned remote work off", "die 96 °C", "CPU 85 % from
    the SMC keys and `pmset -g therm` in `thermal.rs` were written for the Intel iMac Pro. On the
    Studio, check what they return. If they return nothing, add the macOS thermal pressure level
    (`notify_get_state` on `com.apple.system.thermalpressurelevel`: 0 nominal … 4 sleeping) as a
-   source. Treat "heavy" or worse as hot. Do it the same way `thermal.rs` already reaches IOKit
-   without `unsafe` in the daemon crate, which means through `mason-platform` if that is where
-   it lives.
+   source. Treat "heavy" or worse as hot. Read it with `/usr/bin/notifyutil -g com.apple.system.thermalpressurelevel`
+   (present on macOS, no FFI and no `unsafe`; `thermal::pressure_level`). This Intel Mac returns
+   a level, so the call works; what the Studio reports is checked by hand (phase 1, manual).
 3. **The owner's own work leaves room.** `other_cpu_pct` is total CPU minus the CPU of the
    node's own job processes. Use the process-tree CPU accounting already in `cputasks.rs`. It
    must be under the coordinator-set `max_other_cpu_pct` (default 50). This is the "I'm working on it right
@@ -678,7 +678,9 @@ Changed files:
 - `covmap.rs`
 - `lan.rs`: `advertise`, made reusable by the node listener
 - `config.rs`
-- `sched.rs`: dynamic limits for `node:<nid>`
+- ~~`sched.rs`: dynamic limits for `node:<nid>`~~ — `sched.rs` is protected and §8 does not approve
+  it. The poller sets `node:<nid>`'s limit through the public `Broker::set_limit` instead, so
+  `sched.rs` is not edited.
 - `thermal.rs`
 - `remote_runs.rs`
 - `http.rs`

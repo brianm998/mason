@@ -41,6 +41,7 @@ mod client;
 mod definition;
 mod doctor;
 mod init;
+mod node;
 mod progress;
 mod remote;
 mod remove;
@@ -162,6 +163,10 @@ mason: command-line client for the MASON pipeline
   mason definition show [--project P] | reload [--project P]
   mason project reload [--project P]      re-read ~/.config/mason/projects/P.toml, no restart
   mason extension list|show|approve [NAME] [--project P]   project extensions; approving is the owner's
+  mason node pair-code | accept on|off | status | jobs | stop-jobs | coordinators [remove NAME]
+                                      this Mac as a node, taking compile and test runs from a coordinator
+  mason node list | add [NAME | --host H:PORT --fp F] [--code C] | remove NAME | use on|off
+                                      the coordinator's nodes: found, paired, whether each takes work
   mason lan status                    whether LAN access is on, its port and certificate fingerprint
   mason pair [--viewer]               a one-time code (and mason://pair URL) for a phone; 120 s
   mason devices list | revoke ID      paired devices; revoking cuts one off at once
@@ -653,6 +658,10 @@ fn main() {
             outside_args(&mut a).unwrap_or_else(|| die("name the pipeline: --pipeline starpipe"));
         finish(&a);
         resources::hold(&d, uses, &label, pid, &outside).unwrap_or_else(|e| die(&e));
+        return;
+    }
+    if cmd == "node" {
+        node::run(&mut a, &d, json_out);
         return;
     }
     if cmd == "targets" {
