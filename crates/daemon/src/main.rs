@@ -218,6 +218,18 @@ fn main() {
             std::process::exit(1);
         }
     };
+    cfg.node = match mason_daemon::config::load_node(&cfg.config_dir) {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("masond: {}: {e}", cfg.config_dir.display());
+            std::process::exit(1);
+        }
+    };
+    // `[nodes]` is read live afterwards; a bad table is refused here, as a bad `[lan]` is.
+    if let Err(e) = mason_daemon::config::load_nodes(&cfg.config_dir) {
+        eprintln!("masond: {}: {e}", cfg.config_dir.display());
+        std::process::exit(1);
+    }
     cfg.lan.enabled |= cli_lan;
     if let Some(p) = cli_lan_port {
         cfg.lan.port = p;

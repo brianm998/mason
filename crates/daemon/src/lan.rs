@@ -90,7 +90,7 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
-fn random_bytes(n: usize) -> std::io::Result<Vec<u8>> {
+pub(crate) fn random_bytes(n: usize) -> std::io::Result<Vec<u8>> {
     use std::io::Read;
     let mut buf = vec![0u8; n];
     std::fs::File::open("/dev/urandom")?.read_exact(&mut buf)?;
@@ -106,7 +106,7 @@ fn new_token() -> std::io::Result<String> {
 }
 
 /// A fresh eight-digit code, uniform (values above the largest multiple of 10^8 are redrawn).
-fn new_code() -> std::io::Result<String> {
+pub(crate) fn new_code() -> std::io::Result<String> {
     const LIMIT: u64 = u64::MAX - (u64::MAX % 100_000_000);
     loop {
         let b = random_bytes(8)?;
@@ -117,7 +117,7 @@ fn new_code() -> std::io::Result<String> {
     }
 }
 
-fn write_private(path: &FsPath, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_private(path: &FsPath, bytes: &[u8]) -> std::io::Result<()> {
     let mut f = std::fs::OpenOptions::new();
     f.write(true).create(true).truncate(true);
     let mut f = mason_platform::fs::owner_only(&mut f).open(path)?;
@@ -178,7 +178,7 @@ pub fn txt_record(fingerprint: &str) -> BTreeMap<String, String> {
     ])
 }
 
-fn advertise(info: &Info) -> Result<mdns_sd::ServiceDaemon, String> {
+pub(crate) fn advertise(info: &Info) -> Result<mdns_sd::ServiceDaemon, String> {
     let host = hostname();
     let mdns = mdns_sd::ServiceDaemon::new().map_err(|e| e.to_string())?;
     let props: std::collections::HashMap<String, String> = info.txt.clone().into_iter().collect();

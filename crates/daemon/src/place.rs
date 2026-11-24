@@ -122,6 +122,41 @@ pub struct Facts {
     pub spill: Option<Spill>,
     /// What `favor-remote` weighs (#833); `None` reads as "GitHub had room".
     pub remote_spill: Option<RemoteSpill>,
+    /// The nodes that could take this run now, already filtered (accepting, the toolchains it
+    /// needs, a free unit). Empty: no node is in play, and the decision is exactly what it was
+    /// before nodes existed.
+    pub nodes: Vec<NodeRoom>,
+    /// `[nodes] prefer = "github"`: GitHub is tried before a node.
+    pub prefer_github: bool,
+}
+
+/// A node with room for a run (the multi-machine plan, §3.9).
+#[derive(Clone, Debug, PartialEq)]
+pub struct NodeRoom {
+    pub nid: String,
+    pub name: String,
+    /// Units free for this coordinator's runs.
+    pub free: u32,
+    /// The node holds a slot checkout of this project already, so its build is warm.
+    pub warm: bool,
+    pub die_c: Option<f32>,
+}
+
+/// The best of the nodes with room: a warm one first, then the most free units, then the cooler
+/// die, then the name, so the same facts always give the same node. Pure.
+pub fn best_node(rooms: &[NodeRoom]) -> Option<&NodeRoom> {
+    rooms.iter().min_by(|a, b| {
+        b.warm
+            .cmp(&a.warm)
+            .then(b.free.cmp(&a.free))
+            .then(
+                a.die_c
+                    .unwrap_or(f32::MAX)
+                    .partial_cmp(&b.die_c.unwrap_or(f32::MAX))
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
+            .then(a.name.cmp(&b.name))
+    })
 }
 
 /// A reading of this machine's load, built from the scheduler's state (#832). Only the slots a
@@ -366,6 +401,8 @@ impl Facts {
             setup_failed: None,
             spill: None,
             remote_spill: None,
+            nodes: vec![],
+            prefer_github: false,
         }
     }
 
@@ -393,11 +430,25 @@ pub enum Place {
         /// For a balancing mode: why GitHub ("favor-remote, GitHub had room"). Empty otherwise.
         why: String,
     },
+    /// On another Mac running `masond` as a node (the multi-machine plan). Nothing produces it
+    /// yet: `decide` reaches GitHub or here only.
+    Node {
+        nid: String,
+        name: String,
+        from: Source,
+        why: String,
+    },
 }
 
 impl Place {
     pub fn is_github(&self) -> bool {
         matches!(self, Place::GitHub { .. })
+    }
+
+    /// Does the run leave this machine (GitHub or a node)? What decides that a run needs none
+    /// of this Mac's `compile` or `test-suite` slots and no CPU or heat gate.
+    pub fn is_off_machine(&self) -> bool {
+        !matches!(self, Place::Local { .. })
     }
 
     /// "this Mac, because ..." / "GitHub (macos-15), from the global switch".
@@ -410,12 +461,22 @@ impl Place {
             Place::GitHub { runs_on, from, why } => {
                 format!("on GitHub ({runs_on}), from the {}: {why}", from.label())
             }
+            Place::Node {
+                name, from, why, ..
+            } if why.is_empty() => {
+                format!("on node {name}, from the {}", from.label())
+            }
+            Place::Node {
+                name, from, why, ..
+            } => format!("on node {name}, from the {}: {why}", from.label()),
         }
     }
 
     pub fn from(&self) -> Source {
         match self {
-            Place::Local { from, .. } | Place::GitHub { from, .. } => *from,
+            Place::Local { from, .. } | Place::GitHub { from, .. } | Place::Node { from, .. } => {
+                *from
+            }
         }
     }
 }
@@ -486,10 +547,46 @@ pub fn balance(mode: Mode, f: &Facts, runs_on: &str, from: Source) -> Place {
     }
 }
 
-/// The one decision. The mode comes from the task, else the project, else the global switch. A
-/// run that would go to GitHub stays here when the project has no `[remote_runs]`, the suite says
-/// `remote = false`, its environment leases a device, it uses `exclusive`, or the remote setup
-/// check failed. The reason is always given.
+/// May this run leave this machine at all? `Err` names why it stays: the project has no
+/// `[remote_runs]` section, the suite says `remote = false`, its environment leases a device, it
+/// uses `exclusive`, or the remote setup check failed. These are the rules every off-machine
+/// target shares.
+fn may_leave(f: &Facts) -> Result<&String, String> {
+    let Some(project_runs_on) = &f.project_runs_on else {
+        return Err("the project has no [remote_runs] section".into());
+    };
+    if !f.suite_remote {
+        return Err("the suite says remote = false".into());
+    }
+    if f.device {
+        return Err("its environment leases a device, simulator or emulator".into());
+    }
+    if f.exclusive {
+        return Err("it uses `exclusive`, which only this machine can give".into());
+    }
+    if let Some(why) = &f.setup_failed {
+        return Err(format!("the project's remote setup check failed: {why}"));
+    }
+    Ok(project_runs_on)
+}
+
+/// Where a run that may leave this machine goes. GitHub is the only target so far; nodes join
+/// it here (the multi-machine plan, §3.9).
+fn off_machine(f: &Facts, project_runs_on: &String, mode: Mode, from: Source) -> Place {
+    let runs_on = f.suite_runs_on.as_ref().unwrap_or(project_runs_on);
+    match mode {
+        Mode::Remote => Place::GitHub {
+            runs_on: runs_on.clone(),
+            from,
+            why: String::new(),
+        },
+        _ => balance(mode, f, runs_on, from),
+    }
+}
+
+/// The one decision. The mode comes from the task, else the project, else the global switch.
+/// Two questions follow, in this order: may the run leave this machine (`may_leave`), and where
+/// off it (`off_machine`). The reason is always given.
 pub fn decide(f: &Facts) -> Place {
     let (mode, from) = f.effective();
     if mode == Mode::Local {
@@ -502,33 +599,98 @@ pub fn decide(f: &Facts) -> Place {
             from,
         };
     }
-    let stay = |why: String| Place::Local {
-        why,
-        from: Source::Suite,
-    };
-    let Some(project_runs_on) = &f.project_runs_on else {
-        return stay("the project has no [remote_runs] section".into());
-    };
+    if !f.nodes.is_empty() {
+        return decide_with_nodes(f, mode, from);
+    }
+    match may_leave(f) {
+        Err(why) => Place::Local {
+            why,
+            from: Source::Suite,
+        },
+        Ok(project_runs_on) => off_machine(f, project_runs_on, mode, from),
+    }
+}
+
+/// The rules a run answers to whatever off-machine target it would go to.
+fn shared_stay(f: &Facts) -> Option<String> {
     if !f.suite_remote {
-        return stay("the suite says remote = false".into());
+        Some("the suite says remote = false".into())
+    } else if f.device {
+        Some("its environment leases a device, simulator or emulator".into())
+    } else if f.exclusive {
+        Some("it uses `exclusive`, which only this machine can give".into())
+    } else {
+        None
     }
-    if f.device {
-        return stay("its environment leases a device, simulator or emulator".into());
+}
+
+/// The decision when at least one node has room. A project need not have a `[remote_runs]`: a
+/// node is a target by itself. The modes keep their meaning, with "remote" read as "off this
+/// machine": `remote` is a node, else GitHub; `favor-local` stays here until this machine is
+/// overloaded and then goes to a node, else GitHub; `favor-remote` is a node, else what it was
+/// (GitHub, spilling over here when GitHub is full and this machine has room).
+fn decide_with_nodes(f: &Facts, mode: Mode, from: Source) -> Place {
+    if let Some(why) = shared_stay(f) {
+        return Place::Local {
+            why,
+            from: Source::Suite,
+        };
     }
-    if f.exclusive {
-        return stay("it uses `exclusive`, which only this machine can give".into());
-    }
-    if let Some(why) = &f.setup_failed {
-        return stay(format!("the project's remote setup check failed: {why}"));
-    }
-    let runs_on = f.suite_runs_on.as_ref().unwrap_or(project_runs_on);
-    match mode {
-        Mode::Remote => Place::GitHub {
+    // GitHub, under exactly its own rules, when the project has the section and its setup works.
+    let github = |why: String| -> Option<Place> {
+        let runs_on = f.suite_runs_on.as_ref().or(f.project_runs_on.as_ref())?;
+        f.setup_failed.is_none().then(|| Place::GitHub {
             runs_on: runs_on.clone(),
             from,
-            why: String::new(),
+            why,
+        })
+    };
+    let node = |why: String| -> Place {
+        let n = best_node(&f.nodes).expect("nodes is not empty");
+        Place::Node {
+            nid: n.nid.clone(),
+            name: n.name.clone(),
+            from,
+            why,
+        }
+    };
+    match mode {
+        Mode::Remote => match (f.prefer_github, github(String::new())) {
+            (true, Some(g)) => g,
+            _ => node(String::new()),
         },
-        _ => balance(mode, f, runs_on, from),
+        Mode::FavorLocal => {
+            let local = |why: String| Place::Local {
+                why: format!("favor-local, {why}"),
+                from,
+            };
+            let Some(sp) = &f.spill else {
+                return local("this machine had room".into());
+            };
+            match sp.load.overloaded(sp.spill_after_ms) {
+                None => local(sp.load.room_text()),
+                Some(why) => match (f.prefer_github && sp.github_room, github(String::new())) {
+                    (true, Some(g)) => match g {
+                        Place::GitHub { runs_on, from, .. } => Place::GitHub {
+                            runs_on,
+                            from,
+                            why: format!("favor-local, {why}"),
+                        },
+                        other => other,
+                    },
+                    _ => node(format!("favor-local, {why}")),
+                },
+            }
+        }
+        _ => {
+            if f.prefer_github {
+                if let Some(Place::GitHub { runs_on, .. }) = github(String::new()) {
+                    return balance(mode, f, &runs_on, from);
+                }
+            }
+            let n = best_node(&f.nodes).expect("nodes is not empty");
+            node(format!("favor-remote, node {} had room", n.name))
+        }
     }
 }
 
@@ -809,13 +971,16 @@ pub fn plain_place(d: &Daemon, project: &str, task: Option<u64>) -> Place {
     f.project_runs_on = pid
         .and_then(|p| d.project(p))
         .and_then(|p| p.services.remote.as_ref().map(|r| r.runs_on.clone()));
+    let (nodes, prefer_github) = crate::nodes::rooms_for(d, project, None);
+    f.nodes = nodes;
+    f.prefer_github = prefer_github;
     decide(&f)
 }
 
 /// Do the checks of `task` in `project` go to GitHub (#704)? Whether a suite then stays here
 /// for its own reasons does not matter: the agent is told to use `run_check` either way.
 pub fn task_checks_on_github(d: &Daemon, project: &str, task: u64) -> bool {
-    plain_place(d, project, Some(task)).is_github()
+    plain_place(d, project, Some(task)).is_off_machine()
 }
 
 /// "runs on: GitHub (task choice)" / "runs on: this Mac (global switch)": the place a task's
@@ -904,9 +1069,14 @@ pub fn facts_for(
         setup_failed: None,
         spill: None,
         remote_spill: None,
+        nodes: vec![],
+        prefer_github: false,
     };
+    let (nodes, prefer_github) = crate::nodes::rooms_for(d, project, Some(suite));
+    f.nodes = nodes;
+    f.prefer_github = prefer_github;
     match f.effective().0 {
-        Mode::FavorLocal => f.spill = spill_for(d, project, suite),
+        Mode::FavorLocal => f.spill = spill_for(d, project, suite, !f.nodes.is_empty()),
         Mode::FavorRemote => f.remote_spill = remote_spill_for(d, project, suite),
         _ => {}
     }
@@ -914,19 +1084,37 @@ pub fn facts_for(
 }
 
 /// The load and GitHub's room for a suite of `project`, read from the scheduler (#832).
-fn spill_for(d: &Daemon, project: &str, suite: &mason_testing::Suite) -> Option<Spill> {
+fn spill_for(
+    d: &Daemon,
+    project: &str,
+    suite: &mason_testing::Suite,
+    nodes_in_play: bool,
+) -> Option<Spill> {
     let cfg = d
         .project_id_by_name(project)
         .and_then(|p| d.project(p))
-        .and_then(|p| p.services.remote.clone())?;
+        .and_then(|p| p.services.remote.clone());
+    // A project with no `[remote_runs]` has nothing to weigh unless a node can take the run.
+    if cfg.is_none() && !nodes_in_play {
+        return None;
+    }
     let needs = local_needs(&suite.uses);
-    let runs_on = suite.runs_on.clone().unwrap_or(cfg.runs_on);
     let room = |name: &str| d.broker.limit(name).is_none_or(|l| d.broker.used(name) < l);
+    let (github_room, spill_after_ms) = match cfg {
+        Some(cfg) => {
+            let runs_on = suite.runs_on.clone().unwrap_or(cfg.runs_on);
+            (
+                room(mason_scheduler::GHA)
+                    && (!runs_on.contains("macos") || room(mason_scheduler::GHA_MACOS)),
+                cfg.spill_after_s.saturating_mul(1000),
+            )
+        }
+        None => (false, 120_000),
+    };
     Some(Spill {
         load: LocalLoad::from_reading(&d.broker.load_reading(now_ms()), &needs),
-        github_room: room(mason_scheduler::GHA)
-            && (!runs_on.contains("macos") || room(mason_scheduler::GHA_MACOS)),
-        spill_after_ms: cfg.spill_after_s.saturating_mul(1000),
+        github_room,
+        spill_after_ms,
     })
 }
 
@@ -1019,7 +1207,7 @@ pub fn note(project: &str, task: Option<u64>, name: &str, kind: &'static str, pl
 fn seen_json(s: &Seen) -> Value {
     json!({
         "project": s.project, "task": s.task, "name": s.name, "kind": s.kind,
-        "where": if s.place.is_github() { "github" } else { "local" },
+        "where": match &s.place { Place::GitHub { .. } => "github", Place::Node { .. } => "node", Place::Local { .. } => "local" },
         "runs_on": match &s.place { Place::GitHub { runs_on, .. } => json!(runs_on), _ => Value::Null },
         "why": s.place.text(), "from": s.place.from().label(), "at": s.at,
     })
@@ -1179,7 +1367,7 @@ pub fn config_view(d: &Daemon, project: &str) -> Vec<Value> {
         .iter()
         .map(|s| {
             let p = decide(&facts_for(d, project, None, s));
-            json!({"suite": s.name, "where": if p.is_github() {"github"} else {"local"},
+            json!({"suite": s.name, "where": match &p { Place::GitHub { .. } => "github", Place::Node { .. } => "node", Place::Local { .. } => "local" },
                    "text": p.text(), "from": p.from().label()})
         })
         .collect()
@@ -1502,6 +1690,249 @@ mod tests {
             from,
             why: String::new(),
         }
+    }
+
+    /// The two questions `decide` asks: the rules that keep a run on this machine are the same
+    /// for every off-machine target, and what is left is where it goes.
+    #[test]
+    fn a_run_that_may_not_leave_stays_and_one_that_may_goes_off_machine() {
+        let ok = || Facts {
+            project_runs_on: Some("ubuntu-latest".into()),
+            ..Facts::plain(Mode::Remote)
+        };
+        assert_eq!(may_leave(&ok()).map(String::as_str), Ok("ubuntu-latest"));
+        let rows: Vec<(&str, Facts, &str)> = vec![
+            (
+                "no [remote_runs]",
+                Facts {
+                    project_runs_on: None,
+                    ..ok()
+                },
+                "no [remote_runs]",
+            ),
+            (
+                "remote = false",
+                Facts {
+                    suite_remote: false,
+                    ..ok()
+                },
+                "remote = false",
+            ),
+            (
+                "device",
+                Facts {
+                    device: true,
+                    ..ok()
+                },
+                "leases a device",
+            ),
+            (
+                "exclusive",
+                Facts {
+                    exclusive: true,
+                    ..ok()
+                },
+                "`exclusive`",
+            ),
+            (
+                "setup failed",
+                Facts {
+                    setup_failed: Some("no token".into()),
+                    ..ok()
+                },
+                "setup check failed: no token",
+            ),
+        ];
+        for (name, f, want) in rows {
+            let why = may_leave(&f).expect_err(name);
+            assert!(why.contains(want), "{name}: {why}");
+            let got = decide(&f);
+            assert!(!got.is_off_machine(), "{name}: {got:?}");
+            assert_eq!(got.text(), format!("on this Mac: {why}"), "{name}");
+            assert_eq!(got.from(), Source::Suite, "{name}");
+        }
+        let got = decide(&ok());
+        assert!(got.is_off_machine() && got.is_github(), "{got:?}");
+    }
+
+    fn room(name: &str, free: u32, warm: bool, die: Option<f32>) -> NodeRoom {
+        NodeRoom {
+            nid: format!("id-{name}"),
+            name: name.into(),
+            free,
+            warm,
+            die_c: die,
+        }
+    }
+
+    fn node_name(p: &Place) -> Option<&str> {
+        match p {
+            Place::Node { name, .. } => Some(name),
+            _ => None,
+        }
+    }
+
+    /// The best of several nodes is the same whatever order they are listed in.
+    #[test]
+    fn the_best_node_is_warm_then_freer_then_cooler_then_by_name() {
+        let a = room("a", 2, false, Some(70.0));
+        let b = room("b", 2, true, Some(90.0));
+        let c = room("c", 3, false, Some(60.0));
+        let d = room("d", 2, false, Some(50.0));
+        assert_eq!(
+            best_node(&[a.clone(), b.clone(), c.clone()]).unwrap().name,
+            "b"
+        );
+        assert_eq!(best_node(&[a.clone(), c.clone()]).unwrap().name, "c");
+        assert_eq!(best_node(&[a.clone(), d.clone()]).unwrap().name, "d");
+        let x = room("x", 2, false, None);
+        let y = room("y", 2, false, None);
+        assert_eq!(best_node(&[y, x]).unwrap().name, "x");
+        assert!(best_node(&[]).is_none());
+    }
+
+    /// Nodes join the decision: with none, nothing changes (the tables above); with one, the
+    /// modes mean "off this machine".
+    #[test]
+    fn a_node_with_room_is_chosen_before_github_and_the_rules_that_keep_a_run_here_still_hold() {
+        let node = |f: Facts| decide(&f);
+        let with = |mode: Mode| Facts {
+            nodes: vec![room("studio", 2, false, None)],
+            ..Facts::plain(mode)
+        };
+        // `remote`: a node, with the project having a `[remote_runs]` or not.
+        assert_eq!(node_name(&node(with(Mode::Remote))), Some("studio"));
+        let no_github = Facts {
+            project_runs_on: None,
+            ..with(Mode::Remote)
+        };
+        let p = node(no_github);
+        assert_eq!(node_name(&p), Some("studio"), "{p:?}");
+        assert_eq!(p.text(), "on node studio, from the global switch");
+        // `prefer = "github"` puts GitHub first, when the project has it.
+        let pg = Facts {
+            prefer_github: true,
+            ..with(Mode::Remote)
+        };
+        assert!(node(pg).is_github());
+        let pg_none = Facts {
+            prefer_github: true,
+            project_runs_on: None,
+            ..with(Mode::Remote)
+        };
+        assert_eq!(node_name(&node(pg_none)), Some("studio"));
+        // A failed GitHub setup check does not stand in a node's way, and sends GitHub nowhere.
+        let setup = Facts {
+            setup_failed: Some("x".into()),
+            prefer_github: true,
+            ..with(Mode::Remote)
+        };
+        assert_eq!(node_name(&node(setup)), Some("studio"));
+        // What keeps a run here keeps it from a node too, with the same words.
+        for (name, f, want) in [
+            (
+                "remote = false",
+                Facts {
+                    suite_remote: false,
+                    ..with(Mode::Remote)
+                },
+                "the suite says remote = false",
+            ),
+            (
+                "device",
+                Facts {
+                    device: true,
+                    ..with(Mode::Remote)
+                },
+                "leases a device",
+            ),
+            (
+                "exclusive",
+                Facts {
+                    exclusive: true,
+                    ..with(Mode::Remote)
+                },
+                "`exclusive`",
+            ),
+        ] {
+            let p = node(f);
+            assert!(!p.is_off_machine(), "{name}: {p:?}");
+            assert!(p.text().contains(want), "{name}: {}", p.text());
+        }
+        // `local` is here, nodes or not.
+        let p = node(with(Mode::Local));
+        assert_eq!(p.text(), "on this Mac: the global switch is off");
+    }
+
+    #[test]
+    fn the_balancing_modes_send_to_a_node_before_github() {
+        let rooms = vec![room("studio", 1, false, None)];
+        // favor-local: here until overloaded, then a node.
+        let calm = Facts {
+            nodes: rooms.clone(),
+            ..favor_local(load(None, 2, 0, 0), true)
+        };
+        assert!(!decide(&calm).is_off_machine(), "{:?}", decide(&calm));
+        let busy = Facts {
+            nodes: rooms.clone(),
+            ..favor_local(load(Some("held for heat (die 99 °C)"), 2, 0, 0), true)
+        };
+        let p = decide(&busy);
+        assert_eq!(node_name(&p), Some("studio"), "{p:?}");
+        assert!(p.text().contains("favor-local") && p.text().contains("held for heat"));
+        // ... and GitHub first when the owner prefers it and it has room.
+        let busy_gh = Facts {
+            prefer_github: true,
+            ..busy.clone()
+        };
+        assert!(decide(&busy_gh).is_github());
+        let busy_no_gh = Facts {
+            prefer_github: true,
+            ..favor_local(load(Some("held for heat (die 99 °C)"), 2, 0, 0), false)
+        };
+        let busy_no_gh = Facts {
+            nodes: rooms.clone(),
+            ..busy_no_gh
+        };
+        assert_eq!(node_name(&decide(&busy_no_gh)), Some("studio"));
+        // favor-remote: a node, and the words say so.
+        let fr = Facts {
+            nodes: rooms.clone(),
+            ..favor_remote(load(None, 2, 0, 0), remote_load(4, 0, None, None))
+        };
+        let p = decide(&fr);
+        assert_eq!(node_name(&p), Some("studio"), "{p:?}");
+        assert!(
+            p.text().contains("favor-remote, node studio had room"),
+            "{}",
+            p.text()
+        );
+        // A node-only project (no `[remote_runs]`) weighs the load of this machine all the same.
+        let only = Facts {
+            project_runs_on: None,
+            nodes: rooms,
+            ..favor_local(load(Some("held for heat (die 99 °C)"), 2, 0, 0), false)
+        };
+        assert_eq!(node_name(&decide(&only)), Some("studio"));
+    }
+
+    #[test]
+    fn a_node_placement_is_off_machine_and_says_so() {
+        let n = |why: &str| Place::Node {
+            nid: "n1".into(),
+            name: "studio".into(),
+            from: Source::Global,
+            why: why.into(),
+        };
+        assert!(n("").is_off_machine() && !n("").is_github());
+        assert_eq!(n("").text(), "on node studio, from the global switch");
+        assert_eq!(
+            n("room").text(),
+            "on node studio, from the global switch: room"
+        );
+        assert_eq!(n("").from(), Source::Global);
+        assert!(!local("x", Source::Global).is_off_machine());
+        assert!(gh("m", Source::Global).is_off_machine());
     }
 
     #[test]
