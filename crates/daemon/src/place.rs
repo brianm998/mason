@@ -134,6 +134,9 @@ pub struct LocalLoad {
     pub free: BTreeMap<String, u32>,
     /// Requests already waiting for any of those slots.
     pub waiting: u32,
+    /// A waiting exclusive request (label): everything behind it waits for the machine to
+    /// drain, so there is no room here whatever the free units say (2026-11-23).
+    pub exclusive_waiting: Option<String>,
     /// The longest any of them has waited, in ms.
     pub oldest_wait_ms: u64,
 }
@@ -143,6 +146,7 @@ impl LocalLoad {
     pub fn from_reading(r: &crate::sched::LoadReading, needs: &[String]) -> LocalLoad {
         let mut load = LocalLoad {
             held: r.held.clone(),
+            exclusive_waiting: r.exclusive_waiting.clone(),
             ..LocalLoad::default()
         };
         for n in needs {
@@ -169,6 +173,9 @@ impl LocalLoad {
         if let Some(h) = &self.held {
             return Some(format!("this machine {h}"));
         }
+        if let Some(x) = &self.exclusive_waiting {
+            return Some(format!("an exclusive request ({x}) is waiting here"));
+        }
         let full = !self.free.is_empty() && self.free.values().all(|n| *n == 0);
         if full && self.waiting > 0 {
             let names: Vec<&str> = self.free.keys().map(String::as_str).collect();
@@ -191,7 +198,9 @@ impl LocalLoad {
     /// Whether a run can start here now (#833): no hold is active and, when slots are named, one
     /// of them is free.
     pub fn has_room(&self) -> bool {
-        self.held.is_none() && (self.free.is_empty() || self.free.values().any(|n| *n > 0))
+        self.held.is_none()
+            && self.exclusive_waiting.is_none()
+            && (self.free.is_empty() || self.free.values().any(|n| *n > 0))
     }
 
     /// Why a run that would hold the slots in `free` cannot start here now, or `None` when it
@@ -205,13 +214,29 @@ impl LocalLoad {
         if covered {
             return None;
         }
-        let full: Vec<&str> = self
+        // An exclusive request at the head of the queue blocks every other request until the
+        // machine drains, so nothing placed here would start.
+        if let Some(x) = &self.exclusive_waiting {
+            return Some(format!(
+                "an exclusive request ({x}) is waiting here and blocks the queue"
+            ));
+        }
+        // Room means a grant now (#1025): a free unit for each slot beyond the requests already
+        // waiting for any of them, which the same gate holds back.
+        let waiting = self.waiting;
+        let blocked: Vec<String> = self
             .free
             .iter()
-            .filter(|(_, n)| **n == 0)
-            .map(|(k, _)| k.as_str())
+            .filter(|(_, n)| **n <= waiting)
+            .map(|(k, n)| {
+                if *n == 0 {
+                    format!("{k} slot free")
+                } else {
+                    format!("{k} unit beyond the {waiting} waiting ({n} free)")
+                }
+            })
             .collect();
-        (!full.is_empty()).then(|| format!("no {} slot free here", full.join("/")))
+        (!blocked.is_empty()).then(|| format!("no {} here", blocked.join(", no ")))
     }
 
     /// "2 compile slots free" for the local reason.
@@ -368,11 +393,25 @@ pub enum Place {
         /// For a balancing mode: why GitHub ("favor-remote, GitHub had room"). Empty otherwise.
         why: String,
     },
+    /// On another Mac running `masond` as a node (the multi-machine plan). Nothing produces it
+    /// yet: `decide` reaches GitHub or here only.
+    Node {
+        nid: String,
+        name: String,
+        from: Source,
+        why: String,
+    },
 }
 
 impl Place {
     pub fn is_github(&self) -> bool {
         matches!(self, Place::GitHub { .. })
+    }
+
+    /// Does the run leave this machine (GitHub or a node)? What decides that a run needs none
+    /// of this Mac's `compile` or `test-suite` slots and no CPU or heat gate.
+    pub fn is_off_machine(&self) -> bool {
+        !matches!(self, Place::Local { .. })
     }
 
     /// "this Mac, because ..." / "GitHub (macos-15), from the global switch".
@@ -385,12 +424,22 @@ impl Place {
             Place::GitHub { runs_on, from, why } => {
                 format!("on GitHub ({runs_on}), from the {}: {why}", from.label())
             }
+            Place::Node {
+                name, from, why, ..
+            } if why.is_empty() => {
+                format!("on node {name}, from the {}", from.label())
+            }
+            Place::Node {
+                name, from, why, ..
+            } => format!("on node {name}, from the {}: {why}", from.label()),
         }
     }
 
     pub fn from(&self) -> Source {
         match self {
-            Place::Local { from, .. } | Place::GitHub { from, .. } => *from,
+            Place::Local { from, .. } | Place::GitHub { from, .. } | Place::Node { from, .. } => {
+                *from
+            }
         }
     }
 }
@@ -445,6 +494,12 @@ pub fn balance(mode: Mode, f: &Facts, runs_on: &str, from: Source) -> Place {
                         .local
                         .held
                         .clone()
+                        .or_else(|| {
+                            sp.local
+                                .exclusive_waiting
+                                .as_ref()
+                                .map(|x| format!("has an exclusive request ({x}) waiting"))
+                        })
                         .unwrap_or_else(|| "has no slot free".into());
                     github(format!(
                         "favor-remote, {why}, but this machine {busy}, so it waits on GitHub{suffix}"
@@ -455,10 +510,46 @@ pub fn balance(mode: Mode, f: &Facts, runs_on: &str, from: Source) -> Place {
     }
 }
 
-/// The one decision. The mode comes from the task, else the project, else the global switch. A
-/// run that would go to GitHub stays here when the project has no `[remote_runs]`, the suite says
-/// `remote = false`, its environment leases a device, it uses `exclusive`, or the remote setup
-/// check failed. The reason is always given.
+/// May this run leave this machine at all? `Err` names why it stays: the project has no
+/// `[remote_runs]` section, the suite says `remote = false`, its environment leases a device, it
+/// uses `exclusive`, or the remote setup check failed. These are the rules every off-machine
+/// target shares.
+fn may_leave(f: &Facts) -> Result<&String, String> {
+    let Some(project_runs_on) = &f.project_runs_on else {
+        return Err("the project has no [remote_runs] section".into());
+    };
+    if !f.suite_remote {
+        return Err("the suite says remote = false".into());
+    }
+    if f.device {
+        return Err("its environment leases a device, simulator or emulator".into());
+    }
+    if f.exclusive {
+        return Err("it uses `exclusive`, which only this machine can give".into());
+    }
+    if let Some(why) = &f.setup_failed {
+        return Err(format!("the project's remote setup check failed: {why}"));
+    }
+    Ok(project_runs_on)
+}
+
+/// Where a run that may leave this machine goes. GitHub is the only target so far; nodes join
+/// it here (the multi-machine plan, §3.9).
+fn off_machine(f: &Facts, project_runs_on: &String, mode: Mode, from: Source) -> Place {
+    let runs_on = f.suite_runs_on.as_ref().unwrap_or(project_runs_on);
+    match mode {
+        Mode::Remote => Place::GitHub {
+            runs_on: runs_on.clone(),
+            from,
+            why: String::new(),
+        },
+        _ => balance(mode, f, runs_on, from),
+    }
+}
+
+/// The one decision. The mode comes from the task, else the project, else the global switch.
+/// Two questions follow, in this order: may the run leave this machine (`may_leave`), and where
+/// off it (`off_machine`). The reason is always given.
 pub fn decide(f: &Facts) -> Place {
     let (mode, from) = f.effective();
     if mode == Mode::Local {
@@ -471,33 +562,12 @@ pub fn decide(f: &Facts) -> Place {
             from,
         };
     }
-    let stay = |why: String| Place::Local {
-        why,
-        from: Source::Suite,
-    };
-    let Some(project_runs_on) = &f.project_runs_on else {
-        return stay("the project has no [remote_runs] section".into());
-    };
-    if !f.suite_remote {
-        return stay("the suite says remote = false".into());
-    }
-    if f.device {
-        return stay("its environment leases a device, simulator or emulator".into());
-    }
-    if f.exclusive {
-        return stay("it uses `exclusive`, which only this machine can give".into());
-    }
-    if let Some(why) = &f.setup_failed {
-        return stay(format!("the project's remote setup check failed: {why}"));
-    }
-    let runs_on = f.suite_runs_on.as_ref().unwrap_or(project_runs_on);
-    match mode {
-        Mode::Remote => Place::GitHub {
-            runs_on: runs_on.clone(),
-            from,
-            why: String::new(),
+    match may_leave(f) {
+        Err(why) => Place::Local {
+            why,
+            from: Source::Suite,
         },
-        _ => balance(mode, f, runs_on, from),
+        Ok(project_runs_on) => off_machine(f, project_runs_on, mode, from),
     }
 }
 
@@ -784,7 +854,7 @@ pub fn plain_place(d: &Daemon, project: &str, task: Option<u64>) -> Place {
 /// Do the checks of `task` in `project` go to GitHub (#704)? Whether a suite then stays here
 /// for its own reasons does not matter: the agent is told to use `run_check` either way.
 pub fn task_checks_on_github(d: &Daemon, project: &str, task: u64) -> bool {
-    plain_place(d, project, Some(task)).is_github()
+    plain_place(d, project, Some(task)).is_off_machine()
 }
 
 /// "runs on: GitHub (task choice)" / "runs on: this Mac (global switch)": the place a task's
@@ -988,7 +1058,7 @@ pub fn note(project: &str, task: Option<u64>, name: &str, kind: &'static str, pl
 fn seen_json(s: &Seen) -> Value {
     json!({
         "project": s.project, "task": s.task, "name": s.name, "kind": s.kind,
-        "where": if s.place.is_github() { "github" } else { "local" },
+        "where": match &s.place { Place::GitHub { .. } => "github", Place::Node { .. } => "node", Place::Local { .. } => "local" },
         "runs_on": match &s.place { Place::GitHub { runs_on, .. } => json!(runs_on), _ => Value::Null },
         "why": s.place.text(), "from": s.place.from().label(), "at": s.at,
     })
@@ -1148,7 +1218,7 @@ pub fn config_view(d: &Daemon, project: &str) -> Vec<Value> {
         .iter()
         .map(|s| {
             let p = decide(&facts_for(d, project, None, s));
-            json!({"suite": s.name, "where": if p.is_github() {"github"} else {"local"},
+            json!({"suite": s.name, "where": match &p { Place::GitHub { .. } => "github", Place::Node { .. } => "node", Place::Local { .. } => "local" },
                    "text": p.text(), "from": p.from().label()})
         })
         .collect()
@@ -1162,6 +1232,7 @@ mod tests {
             free: BTreeMap::from([("compile".to_string(), free)]),
             waiting,
             oldest_wait_ms: oldest_s * 1000,
+            exclusive_waiting: None,
         }
     }
 
@@ -1422,6 +1493,7 @@ mod tests {
                 (vec!["test-suite".to_string()], 99_000),
             ],
             held: None,
+            ..Default::default()
         };
         let l = LocalLoad::from_reading(&r, &["compile".to_string()]);
         assert_eq!(
@@ -1469,6 +1541,88 @@ mod tests {
             from,
             why: String::new(),
         }
+    }
+
+    /// The two questions `decide` asks: the rules that keep a run on this machine are the same
+    /// for every off-machine target, and what is left is where it goes.
+    #[test]
+    fn a_run_that_may_not_leave_stays_and_one_that_may_goes_off_machine() {
+        let ok = || Facts {
+            project_runs_on: Some("ubuntu-latest".into()),
+            ..Facts::plain(Mode::Remote)
+        };
+        assert_eq!(may_leave(&ok()).map(String::as_str), Ok("ubuntu-latest"));
+        let rows: Vec<(&str, Facts, &str)> = vec![
+            (
+                "no [remote_runs]",
+                Facts {
+                    project_runs_on: None,
+                    ..ok()
+                },
+                "no [remote_runs]",
+            ),
+            (
+                "remote = false",
+                Facts {
+                    suite_remote: false,
+                    ..ok()
+                },
+                "remote = false",
+            ),
+            (
+                "device",
+                Facts {
+                    device: true,
+                    ..ok()
+                },
+                "leases a device",
+            ),
+            (
+                "exclusive",
+                Facts {
+                    exclusive: true,
+                    ..ok()
+                },
+                "`exclusive`",
+            ),
+            (
+                "setup failed",
+                Facts {
+                    setup_failed: Some("no token".into()),
+                    ..ok()
+                },
+                "setup check failed: no token",
+            ),
+        ];
+        for (name, f, want) in rows {
+            let why = may_leave(&f).expect_err(name);
+            assert!(why.contains(want), "{name}: {why}");
+            let got = decide(&f);
+            assert!(!got.is_off_machine(), "{name}: {got:?}");
+            assert_eq!(got.text(), format!("on this Mac: {why}"), "{name}");
+            assert_eq!(got.from(), Source::Suite, "{name}");
+        }
+        let got = decide(&ok());
+        assert!(got.is_off_machine() && got.is_github(), "{got:?}");
+    }
+
+    #[test]
+    fn a_node_placement_is_off_machine_and_says_so() {
+        let n = |why: &str| Place::Node {
+            nid: "n1".into(),
+            name: "studio".into(),
+            from: Source::Global,
+            why: why.into(),
+        };
+        assert!(n("").is_off_machine() && !n("").is_github());
+        assert_eq!(n("").text(), "on node studio, from the global switch");
+        assert_eq!(
+            n("room").text(),
+            "on node studio, from the global switch: room"
+        );
+        assert_eq!(n("").from(), Source::Global);
+        assert!(!local("x", Source::Global).is_off_machine());
+        assert!(gh("m", Source::Global).is_off_machine());
     }
 
     #[test]
@@ -1699,6 +1853,7 @@ mod tests {
             limits: BTreeMap::from([("compile".to_string(), 2), ("test-suite".to_string(), 1)]),
             waiting: vec![],
             held: held.map(String::from),
+            ..Default::default()
         };
         // Free and no hold: room.
         assert_eq!(no_room_for(&reading(None, 1, 0), &uses, false), None);
@@ -1723,5 +1878,55 @@ mod tests {
         // Covered: the batch's own full slot is not counted, a hold still is.
         assert_eq!(no_room_for(&reading(None, 1, 1), &uses, true), None);
         assert!(no_room_for(&reading(Some("held for heat"), 1, 1), &uses, true).is_some());
+    }
+
+    /// #1025: room is a grant now, so requests already waiting for the slots count against the
+    /// free units: compile 1/6 used (5 free) with 5 waiting is no room; with 4 waiting it is.
+    #[test]
+    fn room_counts_the_queue_already_waiting() {
+        use crate::sched::LoadReading;
+        let uses = BTreeMap::from([("compile".to_string(), 1u32)]);
+        let reading = |waiting: usize| LoadReading {
+            used: BTreeMap::from([("compile".to_string(), 1)]),
+            limits: BTreeMap::from([("compile".to_string(), 6)]),
+            waiting: vec![(vec!["compile".to_string()], 1000); waiting],
+            held: None,
+            ..Default::default()
+        };
+        let why = no_room_for(&reading(5), &uses, false).expect("no room behind 5 waiting");
+        assert!(why.contains("compile"), "{why}");
+        assert_eq!(no_room_for(&reading(4), &uses, false), None);
+        // A batch's covered run is not counted against the queue.
+        assert_eq!(no_room_for(&reading(5), &uses, true), None);
+    }
+
+    /// 2026-11-23: an exclusive request waiting at the head of the queue blocks every other
+    /// local request until the machine drains, so there is no room here (and favor-local sees
+    /// the machine as overloaded) whatever the free units say; a covered run is not affected.
+    #[test]
+    fn a_waiting_exclusive_request_is_no_room() {
+        use crate::sched::LoadReading;
+        let uses = BTreeMap::from([("compile".to_string(), 1u32)]);
+        let reading = |x: Option<&str>| LoadReading {
+            used: BTreeMap::from([("compile".to_string(), 0)]),
+            limits: BTreeMap::from([("compile".to_string(), 6)]),
+            exclusive_waiting: x.map(String::from),
+            ..Default::default()
+        };
+        assert_eq!(no_room_for(&reading(None), &uses, false), None);
+        let why = no_room_for(&reading(Some("trd test")), &uses, false).expect("no room");
+        assert!(
+            why.contains("exclusive") && why.contains("trd test"),
+            "{why}"
+        );
+        assert_eq!(no_room_for(&reading(Some("trd test")), &uses, true), None);
+        let load = LocalLoad::from_reading(&reading(Some("trd test")), &["compile".to_string()]);
+        assert!(!load.has_room());
+        assert!(load.overloaded(1_000).is_some());
+        assert!(
+            LocalLoad::from_reading(&reading(None), &["compile".to_string()])
+                .overloaded(1_000)
+                .is_none()
+        );
     }
 }

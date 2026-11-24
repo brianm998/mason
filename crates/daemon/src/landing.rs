@@ -5310,7 +5310,8 @@ impl Runner {
             k.sort_unstable();
             runs.push((k, notes));
         };
-        // Both halves of a split at once, when every suite it can run goes to GitHub (#702).
+        // Both halves of a split at once, when every suite it can run goes off this machine, to
+        // GitHub or a node (#702).
         // The verdicts are the ones the one-at-a-time search gets; only the wall time differs.
         let side_by_side = {
             let mut names: std::collections::BTreeSet<&String> = failed.iter().collect();
@@ -5319,15 +5320,13 @@ impl Runner {
             !names.is_empty()
                 && names.into_iter().all(|n| {
                     def.testing.suite(n).is_some_and(|s| {
-                        matches!(
-                            crate::remote::executor_for(
-                                &self.d,
-                                &self.project().id,
-                                crate::remote::Kind::Suite,
-                                Some((None, s))
-                            ),
-                            crate::remote::Executor::GitHub { .. }
+                        crate::remote::executor_for(
+                            &self.d,
+                            &self.project().id,
+                            crate::remote::Kind::Suite,
+                            Some((None, s)),
                         )
+                        .is_off_machine()
                     })
                 })
         };
