@@ -760,5 +760,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s1040**: check-exit-portability.sh no longer uses gawk-only `\x27` escapes, so its refusals also fire under mawk on ubuntu-latest (s669).
 - **s1042**: A step run recovered after a masond restart no longer merges the base into its worktree; a recovered test step keeps its tree so finished suites are reused.
 - **s1045**: The exit-script runner repeats each failed script's first panic or failing line as a `cause` line before the closing `FAILED scripts:` line.
+- **s1052**: The macOS monitor has File > Add Project… (⇧⌘N) and a + under the project picker that open a five-step wizard (Repository, Detected, Questions, Review, Apply) over the daemon's `/onboarding` endpoints; iOS shows neither.
 - **s1053**: The Compose desktop monitor gains File > Add Project… (Cmd/Ctrl+Shift+N) and a + under the project filter, opening a five-step wizard (Repository, Detected, Questions, Review, Apply) over the daemon's /onboarding endpoints; the Android app has neither.
+- **s1054**: `Executor::Node` and `Place::Node` exist and every match site handles them, and `decide` asks "may this run leave this machine" and "where off it" as two questions; nothing produces a node placement yet, so no decision changes.
 <!-- status:end -->

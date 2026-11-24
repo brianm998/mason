@@ -454,6 +454,8 @@ fn run_hosted_resuming(
     // as its own step here has none when it goes remote: the build comes first in the command.
     // Held until this function returns, so for the whole local run.
     let mut fallback: Option<crate::sched::Lease> = None;
+    // An `Executor::Node` is not produced yet: `run_on_node` joins `run_remote` here in phase 2
+    // of the multi-machine plan, returning the same `Ran`.
     if let crate::remote::Executor::GitHub { runs_on } =
         crate::remote::executor_for(d, project, crate::remote::Kind::Suite, place)
     {
@@ -620,17 +622,7 @@ fn run_remote(
     );
     // The whole command of a suite that has shards is split across runners (#701); a narrowed
     // run, a run without the known-red tests and the like are not the whole suite and run on one.
-    let sharded = watch.and_then(|s| {
-        let sc = s.shard_command.as_deref()?;
-        (s.shards > 1 && !s.narrowed && cmd == s.command).then_some((s, sc))
-    });
-    // A narrowed run split the same way (#880): its `dev_shard_command` was filled in with the
-    // same pick as `command` (`dev_shard_for`); one still holding a `{...}` was not, and runs whole.
-    let sharded = sharded.or_else(|| {
-        let s = watch?;
-        let sc = s.dev_shard_command.as_deref()?;
-        (s.shards > 1 && s.narrowed && cmd == s.command && !sc.contains('{')).then_some((s, sc))
-    });
+    let sharded = watch.and_then(|s| Some((s, rm::shard_command(s, cmd)?)));
     if let Some((s, sc)) = sharded {
         spec.shards = s.shards;
         spec.shard_command = Some(sc.to_string());
@@ -661,25 +653,33 @@ fn run_remote(
         },
         task.map_or(0, |t| t.0),
     );
-    Ok(match rm::run_or_fallback(&site, &spec, log_dir, &stop)? {
-        None => None,
-        Some(rm::Outcome::Stopped(why)) => Some(Ran {
-            code: -1,
-            signal: 9,
-            output: String::new(),
-            stop: match why {
-                rm::StopWhy::Skipped => Stop::Skipped,
-                rm::StopWhy::Gone => Stop::Gone,
-            },
-            timed_out: false,
-            stalled: None,
-            ran_ms: None,
-            narrowed: false,
-            resumed: None,
-            ran_on: None,
-        }),
-        Some(rm::Outcome::Done(f)) => Some(remote_ran(f, watch)),
-    })
+    Ok(
+        match rm::run_or_fallback(
+            &site,
+            &spec,
+            log_dir,
+            &stop,
+            &rm::Grant::unplumbed("run_remote: the enclosing step, debt or batch hold"),
+        )? {
+            None => None,
+            Some(rm::Outcome::Stopped(why)) => Some(Ran {
+                code: -1,
+                signal: 9,
+                output: String::new(),
+                stop: match why {
+                    rm::StopWhy::Skipped => Stop::Skipped,
+                    rm::StopWhy::Gone => Stop::Gone,
+                },
+                timed_out: false,
+                stalled: None,
+                ran_ms: None,
+                narrowed: false,
+                resumed: None,
+                ran_on: None,
+            }),
+            Some(rm::Outcome::Done(f)) => Some(remote_ran(f, watch)),
+        },
+    )
 }
 
 /// Do the shard lists name more than this run's own tests (#873)? A narrowed run takes its
@@ -2826,6 +2826,7 @@ fn lease_suite(
     check: &Check,
     expected_ms: Option<u64>,
     label: Option<&str>,
+    suite: &Suite,
 ) -> Leased {
     match check() {
         Stop::Skipped => return Leased::Skipped,
@@ -2836,7 +2837,15 @@ fn lease_suite(
         return Leased::Got;
     }
     let wanted = || check() == Stop::No;
-    match crate::jobs::acquire_needs_labeled(c, needs, &wanted, false, expected_ms, label) {
+    match crate::jobs::acquire_needs_labeled(
+        c,
+        needs,
+        &wanted,
+        false,
+        expected_ms,
+        label,
+        Some(suite),
+    ) {
         Ok(l) => {
             *c.lease.lock().unwrap_or_else(|e| e.into_inner()) = Some(l);
             Leased::Got
@@ -3215,7 +3224,12 @@ fn run_side_by_side(
                             let wanted = || check() == Stop::No;
                             let expected = estimate(&who, &suite.name, "run");
                             match crate::jobs::acquire_needs_expecting(
-                                c, needs, &wanted, true, expected,
+                                c,
+                                needs,
+                                &wanted,
+                                true,
+                                expected,
+                                Some(suite),
                             ) {
                                 Ok(l) => Some(l),
                                 Err(_) if check() == Stop::Skipped => None,
@@ -3539,10 +3553,10 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
                 .build
                 .as_ref()
                 .filter(|b| !reused && !built.contains(b))
-                // On GitHub the build is the first part of the suite's own command.
+                // On GitHub or a node the build is the first part of the suite's own command.
                 .filter(|_| {
                     !crate::place::place_of(d, &c.project.id, Some(c.task.0), &suite, "suite")
-                        .is_github()
+                        .is_off_machine()
                 })
             {
                 let needs = needs_of(&crate::jobs::build_uses(), None);
@@ -3553,6 +3567,7 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
                     &who.check(&name),
                     estimate(&who, &name, "build"),
                     None,
+                    &suite,
                 ) {
                     Leased::Gone => return,
                     // Nothing is built; the suite's run below reports the skip.
@@ -3645,6 +3660,7 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
                     &who.check(&name),
                     estimate(&who, &name, "run"),
                     label.as_deref(),
+                    &suite,
                 ) {
                     return;
                 }
@@ -4444,6 +4460,7 @@ fn hold_for_debt(
     task: TaskId,
     debt: u64,
     at: u64,
+    suite: Option<&Suite>,
 ) -> Result<Option<crate::sched::Lease>, String> {
     let Some(step) = def
         .steps
@@ -4458,7 +4475,12 @@ fn hold_for_debt(
     }
     // A payment that runs on GitHub holds runner pool units, not this machine's slots (#761).
     let mut _waiting = None;
-    let needs = match crate::remote::pool_needs(d, project, &needs, Some(task)) {
+    // The units are those of the jobs the debt's suite starts (#818).
+    let pooled = match suite {
+        Some(s) => crate::remote::suite_pool_needs(d, project, Some(task), &needs, s),
+        None => crate::remote::pool_needs(d, project, &needs, Some(task)),
+    };
+    let needs = match pooled {
         Some(n) => {
             _waiting = Some(crate::remote_runs::waiting(
                 d,
@@ -4569,7 +4591,7 @@ fn mark_tried_covering(d: &Arc<Daemon>, project: &str, suite: &str) {
     }
 }
 
-/// Whether the project's runs go to GitHub and the `gha` pool has no idle unit: a debt run
+/// Whether the project's runs go to GitHub (a node uses no `gha` unit) and the `gha` pool has no idle unit: a debt run
 /// then waits for the next pass instead of queueing behind every task.
 fn gha_full(d: &Arc<Daemon>, project: &str) -> bool {
     matches!(
@@ -4890,7 +4912,15 @@ fn pay_with(d: &Arc<Daemon>, debt: u64, only: Option<&str>) -> Result<String, St
     {
         return Ok("already paid".into());
     }
-    let _lease = hold_for_debt(d, &def, &row.project, TaskId(row.task), debt, row.at)?;
+    let _lease = hold_for_debt(
+        d,
+        &def,
+        &row.project,
+        TaskId(row.task),
+        debt,
+        row.at,
+        suites.first(),
+    )?;
     if p.remote.is_some() {
         let _ = d.fetch_remote(pid);
     }

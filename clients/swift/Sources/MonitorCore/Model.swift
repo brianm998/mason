@@ -103,6 +103,8 @@ public final class MonitorModel {
         set { live.liveLog = newValue }
     }
     public var connected = false
+    /// The Add Project wizard while it is open (desktop only; see `canAddProject`).
+    public var addProject: AddProjectWizard?
     /// The connection is down and being retried: the daemon is restarting or has
     /// not answered. Shown as "reconnecting", never as a hard error.
     public var reconnecting = false
@@ -1022,6 +1024,74 @@ public final class MonitorModel {
         raw("POST", "/devices/\(id)/revoke", json: "{}", id: "device-revoke:\(id)")
     }
 
+    // MARK: Add Project (the daemon's /onboarding endpoints)
+
+    /// Add Project is offered on the desktop monitor only, to the owner, never read-only.
+    public var canAddProject: Bool { canAct }
+
+    /// Open the wizard and ask for the candidate repositories.
+    public func openAddProject() {
+        guard canAddProject else { return }
+        addProject = AddProjectWizard()
+        raw("GET", "/onboarding/candidates", id: "onb-candidates")
+    }
+
+    public func closeAddProject() { addProject = nil }
+
+    /// Ask what the daemon sees at the wizard's path, with the answers so far.
+    public func planAddProject() {
+        guard var w = addProject, w.canPlan || w.fillingRest else { return }
+        w.busy = true
+        addProject = w
+        raw("POST", "/onboarding/plan", json: w.body(forApply: false), id: "onb-plan")
+    }
+
+    /// Answer the current question and ask for the next.
+    public func answerAddProject(_ value: String) {
+        addProject?.answer(value)
+        planAddProject()
+    }
+
+    public func addProjectUseRecommendedForRest() {
+        addProject?.useRecommendedForRest()
+        planAddProject()
+    }
+
+    public func applyAddProject() {
+        guard var w = addProject, !w.busy else { return }
+        w.startApply()
+        addProject = w
+        raw("POST", "/onboarding/apply", json: w.body(forApply: true), id: "onb-apply")
+    }
+
+    /// Done: select the project that was added (the picker names it once the header lists it).
+    public func finishAddProject(openProofTask: Bool) {
+        guard let w = addProject else { return }
+        if let id = w.appliedId { project = id; subscribe?() }
+        if openProofTask, let t = w.proofTask { go(.task(t)) }
+        addProject = nil
+    }
+
+    func handleOnboarding(_ r: Mason_V1_CommandResult) {
+        guard addProject != nil else { return }
+        switch r.id {
+        case "onb-candidates":
+            if r.ok {
+                let l = OnboardingCandidate.list(json: r.json)
+                addProject?.candidates = l.candidates
+                addProject?.candidateErrors = l.errors
+            } else { addProject?.refusal = r.error }
+        case "onb-plan":
+            if r.ok, let p = OnboardingPlan(json: r.json) {
+                if addProject?.received(plan: p) == true { planAddProject() }
+            } else { addProject?.planRefused(r.ok ? "The daemon sent a plan this monitor could not read." : r.error) }
+        case "onb-apply":
+            addProject?.applied(ok: r.ok, json: r.json, error: r.error)
+            if r.ok, let id = addProject?.appliedId { project = id; subscribe?() }
+        default: break
+        }
+    }
+
     public func raw(_ method: String, _ path: String, json: String = "", id: String = "") {
         command {
             if !id.isEmpty { $0.id = id }
@@ -1313,6 +1383,7 @@ public final class MonitorModel {
     }
 
     func handle(result r: Mason_V1_CommandResult) {
+        if r.id.hasPrefix("onb-") { handleOnboarding(r) }
         if r.id.hasPrefix("publish:"), r.ok { publishPreview = PublishPreview(json: r.json) }
         if r.id.hasPrefix("session:"), let task = UInt64(r.id.dropFirst("session:".count)) {
             switch OpenSession.decide(ok: r.ok, json: r.json, error: r.error) {
