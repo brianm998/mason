@@ -110,6 +110,10 @@ pub struct Daemon {
     pub update_check: Mutex<crate::update::Check>,
     /// An automatic update held for the gap: `(waiting since, next window)`, both in ms.
     pub update_held: Mutex<Option<(u64, u64)>>,
+    /// What the automatic updater holds: the update that waits, and what it found (#1082).
+    pub update_plan: Mutex<crate::update_plan::PlanState>,
+    /// A newer build was found while a planned update waits for landing batches: let it go.
+    pub update_replace: AtomicBool,
     /// One debt payment at a time in this daemon (a full run of the skipped suites on the base
     /// tip; a burst of them at once hung the machine). Per daemon, so test worlds sharing a
     /// process do not wait on each other.
@@ -364,6 +368,8 @@ impl Daemon {
             shutdown: AtomicBool::new(false),
             update_check: Default::default(),
             update_held: Default::default(),
+            update_plan: Default::default(),
+            update_replace: AtomicBool::new(false),
             update_fetch: Mutex::new(()),
             owner_turns: Default::default(),
             monitor_builds: Default::default(),

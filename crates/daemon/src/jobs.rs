@@ -2586,6 +2586,7 @@ impl CheckHandler for TestChecks {
     fn run_scoped(&self, name: &str, scope: &CheckScope) -> CheckRun {
         // A call with an id holds its finished suites until the agent has the answer, so a
         // replay of it (after a takeover) takes them instead of running them again (#1051).
+        let _inflight = crate::update_plan::check_started(scope.call.is_some());
         let _hold = scope
             .call
             .as_ref()

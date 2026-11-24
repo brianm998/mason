@@ -3048,6 +3048,14 @@ impl Broker {
         (n, oldest)
     }
 
+    /// An exclusive request holds the machine now.
+    pub fn exclusive_running(&self) -> bool {
+        let st = lock(&self.st);
+        let snap = st.ledger.snapshot();
+        let r = snap.holders.iter().any(|h| h.needs.exclusive);
+        r
+    }
+
     /// The `compile` count in force now.
     pub fn compile_capacity(&self) -> Option<u64> {
         let st = lock(&self.st);
