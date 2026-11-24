@@ -4552,6 +4552,85 @@ impl Runner {
         }
     }
 
+    /// Record one look at a pending run and raise or clear the "CI has not changed" alert.
+    /// `at` is (CI branch, run id, run URL or empty).
+    fn watch_stuck(
+        &self,
+        looks: &mut Vec<mason_core::ci_stuck::Look>,
+        key: &str,
+        now_s: u64,
+        after_s: u64,
+        at: (&str, &str, &str),
+        detail: &[CiRunJobs],
+    ) {
+        use mason_core::ci_stuck::{span, stuck_for, Look};
+        let mut sum = CiJobCounts::default();
+        for w in detail {
+            sum.merge(&w.jobs);
+        }
+        let mut names = sum.running_names.clone();
+        names.sort();
+        let signature = format!(
+            "q{} r{} ok{} bad{} {}",
+            sum.queued,
+            sum.running,
+            sum.succeeded,
+            sum.failed,
+            names.join("|")
+        );
+        // No job detail at all: the run is pending, so something is unfinished.
+        let unfinished = sum.total == 0 || sum.queued + sum.running > 0;
+        // Only the stretch of the last signature matters: keep its first and latest look.
+        if looks.last().is_some_and(|l| l.signature != signature) {
+            looks.clear();
+        }
+        looks.push(Look {
+            at_s: now_s,
+            signature,
+            unfinished,
+        });
+        if looks.len() > 2 {
+            let (first, last) = (looks[0].clone(), looks[looks.len() - 1].clone());
+            *looks = vec![first, last];
+        }
+        let Some(quiet) = stuck_for(looks, after_s) else {
+            self.d.landing.clear(self.pid, key);
+            return;
+        };
+        let (branch, run, url) = at;
+        let jobs = if sum.total == 0 {
+            "the CI gave no job detail".to_string()
+        } else {
+            let mut parts = vec![];
+            if sum.running > 0 {
+                parts.push(format!(
+                    "{} running ({})",
+                    sum.running,
+                    sum.running_names.join(", ")
+                ));
+            }
+            if sum.queued > 0 {
+                parts.push(format!("{} queued, no runner yet", sum.queued));
+            }
+            parts.join("; ")
+        };
+        let batch = self.batch_id.load(std::sync::atomic::Ordering::SeqCst);
+        let page = if url.is_empty() { run } else { url };
+        let help = if url.is_empty() {
+            "see `mason landing`"
+        } else {
+            "`gh run cancel <id>` for the run, or `mason landing` for the batch"
+        };
+        let text = format!(
+            "{}: batch {batch}: CI on {branch} ({page}) has not changed for {}: {jobs}; {help}",
+            self.project().id,
+            // In steps of `stuck_after`, so the text (and any announcement of it) holds still.
+            span(quiet - quiet % after_s)
+        );
+        self.d.landing.raise(self.pid, key, "landing", &text);
+        self.d.poke();
+    }
+
     /// `direct-ci` and `local-only-ci`: push `mason/ci/<project>-b<batch>-<n>`, run CI
     /// on it, take the answer, delete the ref. `(green, notes, failed job names)`.
     fn ci_verify(&self, wt: &Path) -> Result<(bool, Vec<String>, Vec<String>), String> {
@@ -4565,6 +4644,8 @@ impl Runner {
         self.d.landing.ci.start(batch, &name, now_ms());
         self.say(&format!("waiting for CI on {name}"));
         let skipped = std::cell::Cell::new(false);
+        let looks = std::cell::RefCell::new(Vec::<mason_core::ci_stuck::Look>::new());
+        let stuck_key = self.alert_key("ci-stuck");
         let r = (|| {
             let run = self.ask("CI trigger", started, cfg.timeout_s, cfg.poll_s, || {
                 ci.trigger(&name, &sha).map(Some)
@@ -4580,15 +4661,33 @@ impl Runner {
                     CiState::Pending => {
                         self.ci_jobs(&name, &detail);
                         // For the landing view only; a failed read changes nothing.
+                        let mut url = String::new();
                         if let Ok(p) = ci.progress(&run) {
                             self.d.landing.ci.update(batch, &p);
+                            url = p
+                                .workflows
+                                .iter()
+                                .map(|w| w.url.clone())
+                                .find(|u| !u.is_empty())
+                                .unwrap_or_default();
                         }
+                        // Only looks: nothing is cancelled and no verdict changes.
+                        self.watch_stuck(
+                            &mut looks.borrow_mut(),
+                            &stuck_key,
+                            started.elapsed().as_secs(),
+                            cfg.stuck_after_s,
+                            (&name, &run, &url),
+                            &detail,
+                        );
                         None
                     }
                     done => Some(done),
                 })
             })
         })();
+        // The alert never outlives the run: finished, red, yielded, timed out or failed.
+        self.d.landing.clear(self.pid, &stuck_key);
         match &r {
             Ok(CiState::Green) => self.d.landing.ci.finish(batch, "green"),
             Ok(CiState::Red { .. }) => self.d.landing.ci.finish(batch, "red"),
