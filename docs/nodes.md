@@ -66,24 +66,53 @@ Install the Rust version each project pins in its `rust-toolchain.toml` (MASON's
 For Swift and iOS projects, Xcode is installed once for the whole Mac (from the App Store or as a
 versioned `/Applications/Xcode_16.4.app`); select it for the node user in
 `/Users/masonnode/.zprofile` with `export DEVELOPER_DIR=/Applications/Xcode_16.4.app/Contents/Developer`.
+A user who has never used Xcode needs its license accepted and its first-launch components
+installed, once, as an administrator (nobody can answer these later):
+
+```bash
+sudo xcodebuild -license accept
+sudo xcodebuild -runFirstLaunch
+```
+
 Java, if a project needs it: install a JDK for the Mac; `/usr/libexec/java_home -V` lists it.
 The coordinator only sends a job to a node whose toolchains cover what the job asks for.
 
-Start `masond` once by hand as that user and let macOS check the new binaries: the first launch
-of any binary it has not seen can take a minute or more (see "Troubleshooting").
+### 1.3 Install the signed runtime and "MASON Daemon.app"
 
-### 1.3 Install `masond` for that user
-
-The simplest route is the install script, run as the node user (see `docs/install.md`):
+**The node never builds or signs MASON itself.** The signing key is in your login keychain on the
+iMac, where `masonnode` cannot reach it, and an ad-hoc signature changes with every build, which
+makes macOS forget every privacy permission you give the node, with nobody there to give it again.
+So the iMac builds the runtime for the Studio's architecture, signs it with the `sign_identity` of
+`update.toml`, and you carry it over once:
 
 ```bash
-sudo -u masonnode -H bash -c 'bash install.sh'
+# On the iMac (a cross build: it needs `rustup target add aarch64-apple-darwin`, which it does):
+mason run --needs compile -- mason node export-runtime --arch arm64 --out ~/node-export
 ```
 
-or copy the four binaries (`mason`, `masond`, `step-host`, `mason-mcp`) built from the same
-MASON version as the coordinator's into `/Users/masonnode/.local/bin`. **Both Macs must run the
-same MASON version**: a node that speaks another node protocol is listed as incompatible and
-never used. Each Mac updates itself with `mason update`; there is no remote update of nodes.
+That writes `~/node-export/runtimes/<sha>/` (the signed binaries) and
+`~/node-export/MASON Daemon.app` (the app that macOS can give permissions to). Copy the folder to
+the Studio, then, as an administrator there:
+
+```bash
+sudo cp -R "node-export/MASON Daemon.app" /Applications/
+sudo -u masonnode -H mkdir -p "/Users/masonnode/Library/Application Support/mason/runtimes"
+sudo cp -R node-export/runtimes/* "/Users/masonnode/Library/Application Support/mason/runtimes/"
+sudo chown -R masonnode "/Users/masonnode/Library/Application Support/mason"
+# The runtime to start (the folder's name):
+echo -n <sha> | sudo -u masonnode tee "/Users/masonnode/Library/Application Support/mason/runtimes/current"
+```
+
+From then on **the iMac sends each new runtime itself** (`PUT /node/runtime`) after it has taken
+over one, cross-built and signed for the Studio. The Studio checks the package against the team it
+pinned when you paired (`codesign --verify --strict`, and the team id of the signature), installs
+it, and takes over once its running jobs have ended. A package that is ad hoc, unsigned, from
+another team or broken is refused and nothing of it is installed. This needs `sign_identity` in
+the iMac's `update.toml`, and the iMac itself running a signed `masond`; with neither the Studio is
+updated by hand, as above. `[nodes] push_runtime = false` turns the sending off.
+
+**Both Macs must run the same MASON version**: a node that speaks another node protocol is listed as
+incompatible and never used until it has been updated.
 
 ### 1.4 `daemon.toml`
 
@@ -101,11 +130,19 @@ own work it tolerates, how much disk to keep free, the lease) are set **on the c
 and sent to the node (see section 3). A node that has heard nothing uses safe defaults
 (2 jobs, other work at most 50 % of the CPU, 50 GB free).
 
+**Keep the node's data on the Studio's internal disk** (the default: everything is under
+`/Users/masonnode`: mirrors, slots, `~/.cache/mason-target`, cargo). Then no volume permission is
+needed, there are no external-disk stalls, and it is the fastest. Do not put slots or target
+directories on a network share: a share you mount in your own session is yours and vanishes when
+you log out, and cargo's file locking is slow and unreliable over SMB. If you really need another
+volume, see "Privacy grants".
+
 ### 1.5 Start it at boot, as that user
 
 A node must run without anyone logged in, so it is a **LaunchDaemon** with `UserName`, not a
-LaunchAgent. Save this as `/Library/LaunchDaemons/com.mason.node.plist` (owned by `root:wheel`,
-mode 644):
+LaunchAgent. The program is **inside MASON Daemon.app**, so that the permissions you give the app
+(next section) cover it. Save this as `/Library/LaunchDaemons/com.mason.node.plist` (owned by
+`root:wheel`, mode 644):
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -118,7 +155,7 @@ mode 644):
   <string>masonnode</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/masonnode/.local/bin/masond</string>
+    <string>/Applications/MASON Daemon.app/Contents/MacOS/masond</string>
     <string>--managed</string>
     <string>--data-dir</string>
     <string>/Users/masonnode/Library/Application Support/mason</string>
@@ -151,7 +188,70 @@ sudo launchctl bootstrap system /Library/LaunchDaemons/com.mason.node.plist
 Because it is a daemon there is no GUI session for that user: nothing a job does can appear on
 your screen, and jobs never run UI tests or wake the display.
 
-### 1.6 The firewall
+### 1.6 Privacy grants, given once, in your own session
+
+A node has nobody to answer a macOS privacy prompt: the request is denied, and the process gets
+"operation not permitted" or, at worst, hangs. So the node never *needs* a prompt: you grant
+everything ahead of time, to **MASON Daemon.app**, whose signature does not change across updates.
+In System Settings on the Studio, as an administrator:
+
+- **Privacy & Security → Developer Tools:** add MASON Daemon.app. It skips the malware scan that
+  macOS runs on every launch of freshly built code (a pipeline launches a great deal of it).
+  If this grant turns out to belong to one user and not to the whole Mac, log in as `masonnode`
+  **once** (fast user switching), add it there, and log out.
+- **Privacy & Security → Full Disk Access:** add MASON Daemon.app **only if** the node must use a
+  removable or network volume. It is stored for the whole Mac and covers `masond` and everything it
+  starts, whichever user runs it. (Check that it really covers a LaunchDaemon running as
+  `masonnode`: `mason node doctor` says so, below.)
+- **Nothing else.** No Accessibility, Screen Recording, Input Monitoring, Automation or camera: a
+  node runs no UI tests, so it never needs them.
+- **Local Network** (macOS 15 and later): launchd *daemons* are not subject to it, so the Studio
+  needs nothing. The **iMac** does: see below.
+
+**An external disk.** macOS mounts an external disk only after somebody logs in, unless you say
+otherwise; and `masonnode` must be able to write to it (give it "Ignore ownership on this volume",
+or a directory it owns):
+
+```bash
+sudo defaults write /Library/Preferences/SystemConfiguration/autodiskmount AutomountDisksWithoutUserLogin -bool true
+```
+
+**A managed Mac.** If the Studio is managed by an employer (MDM), a profile may block or pre-set
+these permissions. Check System Settings → Privacy & Security → Profiles first.
+
+**On the iMac (the coordinator): Local Network.** The first time MASON connects to a node, macOS
+asks "Allow MASON to find devices on local networks?". Allow it: the answer is kept across updates
+because MASON is signed by your team. If it was ever answered "Don't Allow" (a scratch test daemon
+raised the same question on 2026-11-22 for the same app), turn it back on in System Settings →
+Privacy & Security → Local Network. `mason node list` says "local network access denied by macOS"
+for a node it cannot reach while that is off. ("No route to host" is also what a node that is off
+the network gives, so check the node is up first.)
+
+### 1.7 `mason node doctor`
+
+Run it on the Studio, as `masonnode`, until it is clean:
+
+```bash
+sudo -u masonnode -H /Users/masonnode/.local/bin/mason node doctor
+```
+
+It checks, and the node repeats the checks when it starts and every ten minutes, so a grant that
+is lost shows up before a job meets it:
+
+- **signature:** masond is signed by a team (not ad hoc, not unsigned);
+- **paths:** it can create, write, read and delete a file in every directory it uses (data,
+  mirrors, slots, the build cache, cargo), within ten seconds each, so a stalled disk or a denial
+  is reported and never hangs it; a denied volume says "give MASON Daemon.app Full Disk Access";
+- **volumes:** a volume it uses is mounted;
+- **listener and mDNS:** the node listener is bound, and mDNS is advertising (a node that is not
+  advertised can still be added by address);
+- **toolchains:** `cargo`, `xcode-select` and `java` run as that user without a prompt.
+
+A failure that stops the node doing a job makes it `not accepting`, with the reason as `mason node
+list` shows it on the iMac. A new tool that does not run as `masonnode` is almost always a missing
+license or first-launch step (section 1.2).
+
+### 1.8 The firewall
 
 If the macOS application firewall is on, let the node daemon take incoming connections
 (otherwise the Mac shows a dialog the first time, which nobody answers):
@@ -196,7 +296,8 @@ Pairing is done once. The code lasts **2 minutes** and works once; five wrong gu
    `mason node list` shows it before it is paired.
 
    The iMac checks that the certificate the Studio shows is the one in its mDNS record (or the
-   fingerprint you typed) **before** it sends the code.
+   fingerprint you typed) **before** it sends the code. Pairing also tells the Studio the team the
+   iMac's MASON is signed by; that team is the only one whose runtime the Studio will install.
 
 3. Check:
 
@@ -288,6 +389,18 @@ pair again.
   job; nothing is sent again.
 
 ## Troubleshooting
+
+- **`not accepting (masond is signed ad hoc ...)`.** The Studio is running a binary nobody with the
+  team's key signed (a development build, or one built on the Studio). Install the runtime the iMac
+  exports (section 1.3). For a development node only, `MASON_NODE_ALLOW_UNSIGNED=1` in the daemon's
+  environment skips this check; its privacy grants will not survive an update.
+- **`macOS denied access to /Volumes/X: give MASON Daemon.app Full Disk Access`.** Add the app under
+  Privacy & Security → Full Disk Access (section 1.6), or move the node's data to the internal disk.
+- **`/Volumes/X is not mounted`.** The disk mounts only after a login unless
+  `AutomountDisksWithoutUserLogin` is set (section 1.6).
+- **`a runtime from this coordinator cannot be checked`.** The iMac's `masond` is not signed by a
+  team, so it cannot send a runtime; update the Studio by hand (section 1.3).
+- **`local network access denied by macOS` on the iMac.** Turn Local Network on for MASON (section 1.6).
 
 - **`mason node add` cannot find the Studio.** mDNS is blocked on some networks (a VPN, Wi-Fi
   isolation, a guest network). Use `--host ADDRESS:7425 --fp FINGERPRINT`, and consider

@@ -48,6 +48,10 @@ pub enum ClientError {
     Unreachable(String),
     /// The node presented a certificate other than the one pinned.
     WrongFingerprint { expected: String },
+    /// macOS answered "no route to host" for a machine on the local network: what a process
+    /// without Local Network permission gets (§3.14). A node that is simply off the network
+    /// answers the same, so the words say both.
+    LocalNetworkDenied(String),
     /// The connection broke or the node spoke something else than HTTP.
     Protocol(String),
 }
@@ -56,6 +60,10 @@ impl std::fmt::Display for ClientError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ClientError::Unreachable(m) | ClientError::Protocol(m) => write!(f, "{m}"),
+            ClientError::LocalNetworkDenied(addr) => write!(
+                f,
+                "local network access denied by macOS for MASON ({addr}: no route to host; if the node is up, turn Local Network on for MASON in System Settings → Privacy & Security → Local Network)"
+            ),
             ClientError::WrongFingerprint { expected } => write!(
                 f,
                 "that node's certificate is not the one paired (expected fingerprint {}…); pair it again if it was reinstalled",
@@ -218,9 +226,13 @@ impl NodeClient {
         payload: Vec<u8>,
     ) -> Result<Response, ClientError> {
         let addr = format!("{}:{}", self.host, self.port);
-        let tcp = tokio::net::TcpStream::connect(&addr)
-            .await
-            .map_err(|e| ClientError::Unreachable(format!("{addr}: {e}")))?;
+        let tcp = tokio::net::TcpStream::connect(&addr).await.map_err(|e| {
+            if denied_by_macos(&e, &self.host) {
+                ClientError::LocalNetworkDenied(addr.clone())
+            } else {
+                ClientError::Unreachable(format!("{addr}: {e}"))
+            }
+        })?;
         let name = ServerName::try_from(self.host.clone())
             .map_err(|_| ClientError::Unreachable(format!("{} is not a host name", self.host)))?;
         let tls = tokio_rustls::TlsConnector::from(self.cfg.clone())
@@ -267,6 +279,24 @@ impl NodeClient {
     }
 }
 
+/// Is `host` a machine on the local network (a private or link-local address, or a `.local` name)?
+pub fn is_lan_host(host: &str) -> bool {
+    match host.trim_matches(['[', ']']).parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(a)) => a.is_private() || a.is_link_local(),
+        Ok(std::net::IpAddr::V6(a)) => {
+            let s = a.segments()[0];
+            (s & 0xfe00) == 0xfc00 || (s & 0xffc0) == 0xfe80
+        }
+        Err(_) => host.ends_with(".local"),
+    }
+}
+
+/// Does this connect error look like macOS refusing Local Network access? A process without the
+/// permission gets `EHOSTUNREACH` (65, "No route to host") connecting to a machine on the LAN.
+pub fn denied_by_macos(e: &std::io::Error, host: &str) -> bool {
+    cfg!(target_os = "macos") && e.raw_os_error() == Some(65) && is_lan_host(host)
+}
+
 /// Run `f` to its end from a thread that is not a tokio worker: the daemon's blocking code
 /// (a step's thread) talks to nodes through this. From inside a runtime it runs on a helper
 /// thread, since a runtime cannot be started inside another.
@@ -292,5 +322,52 @@ where
         })
     } else {
         rt.block_on(f)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_lan_host_is_a_private_or_link_local_address_or_a_local_name() {
+        for h in [
+            "192.168.1.40",
+            "10.0.0.7",
+            "172.16.5.5",
+            "169.254.1.2",
+            "studio.local",
+            "fd00::1",
+            "fe80::1",
+            "[fe80::1]",
+        ] {
+            assert!(is_lan_host(h), "{h}");
+        }
+        for h in ["127.0.0.1", "8.8.8.8", "example.com", "::1"] {
+            assert!(!is_lan_host(h), "{h}");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn no_route_to_a_lan_host_is_what_a_macos_denial_looks_like_and_nothing_else_is() {
+        let no_route = std::io::Error::from_raw_os_error(65);
+        let refused = std::io::Error::from_raw_os_error(61);
+        assert!(denied_by_macos(&no_route, "192.168.1.40"));
+        assert!(denied_by_macos(&no_route, "studio.local"));
+        assert!(
+            !denied_by_macos(&no_route, "8.8.8.8"),
+            "the internet is not the local network"
+        );
+        assert!(
+            !denied_by_macos(&refused, "192.168.1.40"),
+            "a refused connection is a node that is not listening"
+        );
+        let m = ClientError::LocalNetworkDenied("192.168.1.40:7425".into()).to_string();
+        assert!(m.starts_with("local network access denied by macOS"), "{m}");
+        assert!(
+            m.contains("System Settings → Privacy & Security → Local Network"),
+            "{m}"
+        );
     }
 }

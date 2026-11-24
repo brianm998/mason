@@ -1140,3 +1140,173 @@ fn a_run_on_a_node_is_a_row_of_remote_runs() {
     assert_eq!(r.state, "green", "{r:?}");
     assert!(mason_daemon::remote_runs::view(&p.a, &|_| None, "").enabled);
 }
+
+// ---- §3.14: privacy prompts, signing and the doctor ---------------------------------------------
+
+/// The doctor checks the node and keeps what it found; a blocking problem is why the node takes
+/// no work, in words the owner can act on, and it is gone when the problem is.
+#[test]
+fn what_the_doctor_finds_stops_the_node_taking_work_until_it_is_fixed() {
+    use mason_daemon::node_doctor::{Check, Report};
+    let p = working_pair(2);
+    // The check itself, on this machine: the listener is up and the data directory writable.
+    let r = run(&p, node_serve::doctor(State(p.b.clone()))).unwrap().0;
+    let by = |name: &str| {
+        r["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == name)
+            .cloned()
+    };
+    assert_eq!(by("listener").unwrap()["ok"], true, "{r}");
+    assert!(
+        r["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["name"] == "path")
+            .all(|c| c["ok"] == true),
+        "{r}"
+    );
+    // A test's daemon does not keep a report of a machine it does not measure.
+    assert!(p.b.node.doctor.lock().unwrap().is_none());
+    // A problem found at start-up or by the periodic check:
+    *p.b.node.doctor.lock().unwrap() = Some(Report {
+        at_ms: 1,
+        checks: vec![Check {
+            name: "signature".into(),
+            ok: false,
+            detail: "masond is signed ad hoc; privacy grants will not hold: install the runtime from the coordinator (`mason node export-runtime`)".into(),
+            blocks: true,
+        }],
+    });
+    poll(&p);
+    let n = listed(&p, "b");
+    assert_eq!(n["accepting"], false, "{n}");
+    assert!(
+        n["state"]
+            .as_str()
+            .unwrap()
+            .contains("masond is signed ad hoc"),
+        "{n}"
+    );
+    assert_eq!(n["usable"], false);
+    let r = run_on_b(&p, &spec("run-doctor", None, "echo hi"), &|| None);
+    assert!(matches!(r, Err(Fail::Environmental(_))), "{r:?}");
+    // The node's own status carries the report.
+    let local = run(&p, node_serve::local_status(State(p.b.clone())))
+        .unwrap()
+        .0;
+    assert_eq!(local["doctor"]["ok"], false, "{local}");
+    // Fixed: the next check finds nothing, and the node takes work again.
+    *p.b.node.doctor.lock().unwrap() = None;
+    poll(&p);
+    assert_eq!(listed(&p, "b")["usable"], true);
+}
+
+/// A runtime waiting for the node's jobs to end holds the node, and says so.
+#[test]
+fn a_node_that_is_to_take_over_a_runtime_takes_no_new_job_and_says_why() {
+    let p = working_pair(2);
+    *p.b.node.pending_runtime.lock().unwrap() = Some("a".repeat(40));
+    poll(&p);
+    let n = listed(&p, "b");
+    assert_eq!(n["accepting"], false, "{n}");
+    assert!(
+        n["state"]
+            .as_str()
+            .unwrap()
+            .contains("updating to runtime aaaaaaaaaa"),
+        "{n}"
+    );
+    *p.b.node.pending_runtime.lock().unwrap() = None;
+    poll(&p);
+    assert_eq!(listed(&p, "b")["usable"], true);
+}
+
+fn put_runtime(p: &Pair, bytes: Vec<u8>) -> mason_daemon::node_client::Response {
+    let fp = lan::sha256_hex(&lan::load_or_create_identity(&p.sb.data_dir).unwrap().0);
+    let client = NodeClient::new(
+        lan::load_or_create_identity(&p.sa.data_dir).unwrap(),
+        "127.0.0.1",
+        p.port,
+        &fp,
+    )
+    .unwrap();
+    run(
+        p,
+        client.send(
+            "PUT",
+            "/node/runtime",
+            Some("application/octet-stream"),
+            bytes,
+        ),
+    )
+    .unwrap()
+}
+
+/// A node installs a runtime only from a coordinator that was signed by a team when it paired,
+/// and only if every executable of the package verifies and is that team's.
+#[test]
+fn a_node_refuses_a_runtime_it_cannot_check_and_installs_nothing_of_one_that_does_not_verify() {
+    use mason_daemon::node_runtime::{pack, File};
+    let p = working_pair(2);
+    let sha = "0123456789abcdef0123456789abcdef01234567";
+    let file = |name: &str| File {
+        path: name.into(),
+        mode: 0o755,
+        bytes: format!("not a Mach-O file: {name}").into_bytes(),
+    };
+    let package = pack(sha, &[file("masond"), file("step-host")]);
+    // This test's coordinator is not signed by a team, so none was pinned at pairing.
+    let r = put_runtime(&p, package.clone());
+    assert_eq!(r.status, 412, "{}", r.error_text());
+    assert!(
+        r.error_text()
+            .contains("not signed by a team when it paired"),
+        "{}",
+        r.error_text()
+    );
+    // A team pinned: the package is now looked at, and a file that is no signed program fails.
+    let (cert, _) = lan::load_or_create_identity(&p.sa.data_dir).unwrap();
+    p.b.node
+        .add_coordinator(
+            &lan::sha256_hex(&cert),
+            &lan::hostname(),
+            1,
+            Some("TEAM111111".into()),
+        )
+        .unwrap();
+    let r = put_runtime(&p, b"not a package at all".to_vec());
+    assert_eq!(r.status, 422, "{}", r.error_text());
+    assert!(
+        r.error_text().contains("not a MASON runtime package"),
+        "{}",
+        r.error_text()
+    );
+    #[cfg(target_os = "macos")]
+    {
+        let r = put_runtime(&p, package);
+        assert_eq!(r.status, 422, "{}", r.error_text());
+        assert!(
+            r.error_text().contains("does not verify"),
+            "{}",
+            r.error_text()
+        );
+    }
+    // Nothing was installed, whole or part, and no takeover is waiting.
+    let rt = p.sb.data_dir.join("runtimes");
+    let left: Vec<String> = std::fs::read_dir(&rt)
+        .map(|r| {
+            r.flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(left.iter().all(|n| !n.starts_with(sha)), "{left:?}");
+    assert!(p.b.node.pending_runtime.lock().unwrap().is_none());
+    // The pinned team is on disk beside the fingerprint, and only there.
+    let text = std::fs::read_to_string(p.sb.data_dir.join("node/coordinators.json")).unwrap();
+    assert!(text.contains("TEAM111111"), "{text}");
+}

@@ -88,6 +88,8 @@ pub enum NodeState {
     WrongCertificate,
     /// A different node protocol.
     Incompatible(String),
+    /// macOS will not let MASON on this Mac reach the local network (§3.14).
+    LocalNetworkDenied,
 }
 
 impl NodeState {
@@ -108,6 +110,7 @@ impl NodeState {
                 "its certificate is not the one paired; pair it again".into()
             }
             NodeState::Incompatible(m) => format!("incompatible ({m})"),
+            NodeState::LocalNetworkDenied => "local network access denied by macOS (or no route to it): turn on Local Network for MASON in System Settings → Privacy & Security → Local Network".into(),
         }
     }
 }
@@ -130,6 +133,7 @@ pub enum Fault {
     NotPaired,
     WrongCertificate,
     Incompatible(String),
+    LocalNetworkDenied,
 }
 
 /// The state a view amounts to. Pure.
@@ -138,6 +142,7 @@ pub fn state_of(v: &View, lost_after: u32) -> NodeState {
         Some(Fault::NotPaired) => return NodeState::NotPaired,
         Some(Fault::WrongCertificate) => return NodeState::WrongCertificate,
         Some(Fault::Incompatible(m)) => return NodeState::Incompatible(m.clone()),
+        Some(Fault::LocalNetworkDenied) => return NodeState::LocalNetworkDenied,
         None => {}
     }
     if v.failures >= lost_after.max(1) {
@@ -381,6 +386,11 @@ async fn poll_one(
             v.fault = Some(Fault::WrongCertificate);
             v.last_error = Some("the node presented another certificate".into());
         }
+        Err(ClientError::LocalNetworkDenied(a)) => {
+            v.failures += 1;
+            v.fault = Some(Fault::LocalNetworkDenied);
+            v.last_error = Some(ClientError::LocalNetworkDenied(a).to_string());
+        }
         Err(e) => {
             v.failures += 1;
             v.fault = None;
@@ -409,6 +419,140 @@ pub async fn poll_once(d: &Arc<Daemon>) {
     while let Some(Ok((nid, v))) = set.join_next().await {
         set_capacity(d, &nid, &v, cfg.lost_after_polls);
         d.nodes.set_view(&nid, v);
+    }
+    push_runtimes(d, &cfg);
+}
+
+/// What was last tried for a node: the commit, when, and whether it is still going.
+type Pushes = BTreeMap<String, (String, u64, bool)>;
+
+fn pushes() -> &'static Mutex<Pushes> {
+    static P: std::sync::OnceLock<Mutex<Pushes>> = std::sync::OnceLock::new();
+    P.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+/// How long after a failed push the next is tried.
+const PUSH_RETRY_MS: u64 = 10 * 60 * 1000;
+
+/// Does a node need the runtime this coordinator runs? It is on the same protocol, has not got
+/// that runtime installed and is not running it. Pure.
+pub fn needs_runtime(status: &Value, mine: &str) -> bool {
+    status["node_proto"].as_u64() == Some(u64::from(NODE_PROTO))
+        && status["runtime_sha"].as_str() != Some(mine)
+        && !status["runtimes"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|x| x.as_str() == Some(mine)))
+        && crate::node_runtime::triple_for(status["arch"].as_str().unwrap_or("")).is_some()
+}
+
+/// After this coordinator has taken over (and so on each poll after), send every paired node that
+/// lacks the runtime this daemon runs the runtime cross-built and signed for its architecture
+/// (`PUT /node/runtime`). The node verifies it against the team it pinned at pairing and takes
+/// over once its jobs have ended. One push at a time per node, and a failed one is tried again
+/// after ten minutes. Nothing happens without a `sign_identity` in `update.toml`.
+fn push_runtimes(d: &Arc<Daemon>, cfg: &NodesCfg) {
+    if !cfg.push_runtime {
+        return;
+    }
+    let Some(mine) = d.cfg.runtime_sha.clone() else {
+        return;
+    };
+    let Ok(ucfg) = crate::update::UpdateCfg::load(&d.cfg.config_dir) else {
+        return;
+    };
+    if ucfg.sign_identity.is_none() {
+        return;
+    }
+    let (rows, views) = {
+        let g = d.nodes.lock();
+        (g.paired.clone(), g.views.clone())
+    };
+    for r in rows {
+        let Some(status) = views.get(&r.nid).and_then(|v| v.status.clone()) else {
+            continue;
+        };
+        if !needs_runtime(&status, &mine) {
+            continue;
+        }
+        {
+            let mut p = pushes().lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((sha, at, inflight)) = p.get(&r.nid) {
+                if sha == &mine && (*inflight || now_ms().saturating_sub(*at) < PUSH_RETRY_MS) {
+                    continue;
+                }
+            }
+            p.insert(r.nid.clone(), (mine.clone(), now_ms(), true));
+        }
+        let (d, ucfg, mine, nid, name) = (
+            d.clone(),
+            ucfg.clone(),
+            mine.clone(),
+            r.nid.clone(),
+            r.name.clone(),
+        );
+        let arch = status["arch"].as_str().unwrap_or("").to_string();
+        let _ = std::thread::Builder::new()
+            .name("node-runtime-push".into())
+            .spawn(move || {
+                let r = push_one(&d, &ucfg, &nid, &arch);
+                match &r {
+                    Ok(()) => {
+                        tracing::info!(node = %name, runtime = %mine, "sent a runtime to a node")
+                    }
+                    Err(e) => {
+                        tracing::warn!(node = %name, "could not send a runtime to a node: {e}")
+                    }
+                }
+                let ok = r.is_ok();
+                if let Some(e) = pushes()
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get_mut(&nid)
+                {
+                    e.2 = false;
+                    if ok {
+                        e.1 = u64::MAX / 2; // done for this commit
+                    }
+                }
+            });
+    }
+}
+
+/// Build (cross-build, signed) and send the runtime to one node, holding a `compile` slot while
+/// it builds.
+fn push_one(
+    d: &Arc<Daemon>,
+    ucfg: &crate::update::UpdateCfg,
+    nid: &str,
+    arch: &str,
+) -> Result<(), String> {
+    let rt = crate::update::Runtimes::new(&d.cfg.data_dir);
+    let started = std::time::Instant::now();
+    let (_, bytes) = crate::update::with_compile_lease(
+        &d.broker,
+        "node runtime build",
+        false,
+        Duration::from_secs(ucfg.update_wait_max_s),
+        &|| started.elapsed(),
+        &|| {},
+        || crate::node_runtime::package_for(ucfg, &rt, arch),
+    )?;
+    let (_, client, _) = d
+        .nodes
+        .client_for(d, nid)
+        .ok_or("the node is not paired any more")?;
+    let client = client.with_timeout(Duration::from_secs(900));
+    let r = crate::node_client::block_on(client.send(
+        "PUT",
+        "/node/runtime",
+        Some("application/octet-stream"),
+        bytes,
+    ))
+    .map_err(|e| e.to_string())?;
+    if r.status == 200 {
+        Ok(())
+    } else {
+        Err(r.error_text())
     }
 }
 
@@ -509,6 +653,10 @@ pub fn alerts_for(
                         "node {} is incompatible with this coordinator ({why})",
                         r.name
                     ),
+                ),
+                NodeState::LocalNetworkDenied => (
+                    "local-network",
+                    "macOS denies MASON the local network, so node ".to_string() + &r.name + " cannot be reached (System Settings → Privacy & Security → Local Network)",
                 ),
                 NodeState::WrongCertificate => (
                     "certificate",
@@ -707,6 +855,19 @@ pub async fn list(axum::extract::State(d): axum::extract::State<Arc<Daemon>>) ->
     })))
 }
 
+/// The team this daemon's own executable is signed by, which a node pins at pairing: a runtime
+/// this coordinator sends it must be signed by the same team. `None` when it is not signed by one
+/// (a development build); such a coordinator can send no runtime.
+fn own_team() -> Option<String> {
+    static TEAM: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    TEAM.get_or_init(|| {
+        std::env::current_exe()
+            .ok()
+            .and_then(|e| crate::node_doctor::team_of(&e))
+    })
+    .clone()
+}
+
 /// `POST /nodes/add {target?, host?, port?, fp?, code, name?}`: pair with a node. `target` names
 /// a node mDNS has found (its host name or id); `host` and `fp` name one that is not found.
 pub async fn add(
@@ -767,7 +928,7 @@ pub async fn add(
         .request(
             "POST",
             "/node-pair",
-            Some(&json!({"code": code, "name": me})),
+            Some(&json!({"code": code, "name": me, "team_id": own_team()})),
         )
         .await
         .map_err(|e| fail(502, e.to_string()))?;
@@ -997,8 +1158,42 @@ mod tests {
             state_of(&fault(Fault::Incompatible("1 vs 2".into())), 6),
             NodeState::Incompatible(_)
         ));
+        assert_eq!(
+            state_of(&fault(Fault::LocalNetworkDenied), 6),
+            NodeState::LocalNetworkDenied
+        );
+        assert!(NodeState::LocalNetworkDenied
+            .text()
+            .starts_with("local network access denied by macOS"));
+        assert!(NodeState::LocalNetworkDenied
+            .text()
+            .contains("Local Network"));
         assert!(NodeState::Accepting.usable() && !NodeState::Lost(7).usable());
         assert!(NodeState::NotPaired.text().contains("403"));
+    }
+
+    #[test]
+    fn a_node_needs_the_runtime_this_coordinator_runs_when_it_has_neither_running_nor_installed() {
+        let sha = "a".repeat(40);
+        let st = |proto: u64, running: Option<&str>, installed: &[&str], arch: &str| json!({"node_proto": proto, "runtime_sha": running, "runtimes": installed, "arch": arch});
+        assert!(needs_runtime(&st(1, None, &[], "arm64"), &sha));
+        assert!(needs_runtime(&st(1, Some("b"), &["c"], "x86_64"), &sha));
+        assert!(
+            !needs_runtime(&st(1, Some(&sha), &[], "arm64"), &sha),
+            "running it"
+        );
+        assert!(
+            !needs_runtime(&st(1, None, &[&sha], "arm64"), &sha),
+            "installed, waiting to take over"
+        );
+        assert!(
+            !needs_runtime(&st(2, None, &[], "arm64"), &sha),
+            "another protocol is not updated blind"
+        );
+        assert!(
+            !needs_runtime(&st(1, None, &[], "riscv"), &sha),
+            "no build for that"
+        );
     }
 
     #[test]

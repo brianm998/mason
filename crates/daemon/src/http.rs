@@ -4168,6 +4168,7 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         )
         .route("/node/stop-jobs", post(crate::node_serve::stop_jobs))
         .route("/node/jobs", get(crate::node_serve::jobs))
+        .route("/node/doctor", post(crate::node_serve::doctor))
         .route("/nodes", get(crate::nodes::list))
         .route("/nodes/add", post(crate::nodes::add))
         .route("/nodes/remove", post(crate::nodes::remove))

@@ -60,6 +60,10 @@ pub struct Coordinator {
     pub fingerprint: String,
     pub name: String,
     pub paired_at: u64,
+    /// The team the coordinator's own binary is signed by, pinned at pairing: a runtime it sends
+    /// is installed only if it is signed by this team (§3.14). `None`: the coordinator is not
+    /// signed, so it can send none.
+    pub team_id: Option<String>,
 }
 
 /// What the running listener is.
@@ -82,6 +86,12 @@ pub struct NodeState {
     settings: Mutex<BTreeMap<String, NodeSettings>>,
     /// The jobs this node runs for its coordinators.
     pub jobs: Arc<crate::node_run::Jobs>,
+    /// What the last `mason node doctor` found (start-up, every ten minutes, on demand).
+    pub doctor: Mutex<Option<crate::node_doctor::Report>>,
+    /// What mDNS did when the listener started.
+    pub mdns: Mutex<crate::node_doctor::Mdns>,
+    /// A runtime installed and waiting for the running jobs to end before this daemon takes over.
+    pub pending_runtime: Mutex<Option<String>>,
 }
 
 impl NodeState {
@@ -93,6 +103,9 @@ impl NodeState {
             coordinators: Mutex::new(None),
             settings: Mutex::new(BTreeMap::new()),
             jobs: Arc::new(crate::node_run::Jobs::new(data_dir)),
+            doctor: Mutex::new(None),
+            mdns: Mutex::new(crate::node_doctor::Mdns::Off),
+            pending_runtime: Mutex::new(None),
         }
     }
 
@@ -111,6 +124,13 @@ impl NodeState {
             .clone()
     }
 
+    /// The coordinator with this certificate, if it is paired.
+    pub fn coordinator(&self, fingerprint: &str) -> Option<Coordinator> {
+        self.coordinators()
+            .into_iter()
+            .find(|c| !fingerprint.is_empty() && c.fingerprint == fingerprint)
+    }
+
     pub fn is_paired(&self, fingerprint: &str) -> bool {
         !fingerprint.is_empty()
             && self
@@ -124,7 +144,7 @@ impl NodeState {
         let v: Vec<Value> = list
             .iter()
             .map(
-                |c| json!({"fingerprint": c.fingerprint, "name": c.name, "paired_at": c.paired_at}),
+                |c| json!({"fingerprint": c.fingerprint, "name": c.name, "paired_at": c.paired_at, "team_id": c.team_id}),
             )
             .collect();
         let tmp = self.dir.join("coordinators.json.tmp");
@@ -134,7 +154,13 @@ impl NodeState {
 
     /// Trust `fingerprint`, called `name`. The same fingerprint again renames it. A name already
     /// used by another fingerprint is refused.
-    pub fn add_coordinator(&self, fingerprint: &str, name: &str, now: u64) -> Result<(), String> {
+    pub fn add_coordinator(
+        &self,
+        fingerprint: &str,
+        name: &str,
+        now: u64,
+        team_id: Option<String>,
+    ) -> Result<(), String> {
         let mut list = self.coordinators();
         if list
             .iter()
@@ -149,6 +175,7 @@ impl NodeState {
             fingerprint: fingerprint.to_string(),
             name: name.to_string(),
             paired_at: now,
+            team_id,
         });
         self.save(&list).map_err(|e| e.to_string())?;
         *self.coordinators.lock().unwrap_or_else(|e| e.into_inner()) = Some(list);
@@ -205,6 +232,7 @@ fn read_coordinators(path: &Path) -> Vec<Coordinator> {
                 fingerprint: c["fingerprint"].as_str()?.to_string(),
                 name: c["name"].as_str()?.to_string(),
                 paired_at: c["paired_at"].as_u64().unwrap_or(0),
+                team_id: c["team_id"].as_str().map(String::from),
             })
         })
         .collect()
@@ -326,6 +354,9 @@ pub struct Readings {
     /// Free units of the `compile` slot, from the node's own broker. `None`: not known.
     pub compile_free: Option<u32>,
     pub disk_free_gb: Option<u64>,
+    /// Why the node holds off, apart from its owner's wishes: `mason node doctor` found something
+    /// it cannot work with, or a runtime is installed and the node waits for its jobs to end.
+    pub held: Option<String>,
 }
 
 /// Why this node cannot take a job now, in plain words, or `None` when it can. The first rule
@@ -344,6 +375,9 @@ pub fn why_not(r: &Readings, s: &NodeSettings) -> Option<String> {
                 if n == 1 { "" } else { "s" }
             ),
         });
+    }
+    if let Some(h) = &r.held {
+        return Some(h.clone());
     }
     if let Some(h) = &r.hot {
         return Some(format!("too hot: {h}"));
@@ -518,6 +552,43 @@ struct Gathered {
     switch: Switch,
 }
 
+/// A daemon whose CPU is injected is a test's: it never reads the machine's real heat, disk or
+/// signature.
+pub fn measures_machine(d: &Daemon) -> bool {
+    d.cfg.cpu.is_none() && std::env::var_os("MASON_CPU_FILE").is_none()
+}
+
+/// Why the node holds off apart from its owner's wishes: what `mason node doctor` found, or a
+/// runtime waiting for the jobs to end so that the daemon can take over.
+fn held_now(d: &Daemon, jobs_running: u32) -> Option<String> {
+    if let Some(sha) = d
+        .node
+        .pending_runtime
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+    {
+        return Some(format!(
+            "updating to runtime {}: {}",
+            &sha[..sha.len().min(10)],
+            if jobs_running == 0 {
+                "taking over now".to_string()
+            } else {
+                format!(
+                    "waiting for {jobs_running} job{} to end",
+                    if jobs_running == 1 { "" } else { "s" }
+                )
+            }
+        ));
+    }
+    d.node
+        .doctor
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .and_then(|r| r.problem())
+}
+
 fn gather(d: &Daemon, s: &NodeSettings, jobs_running: u32) -> Gathered {
     let switch = read_switch(d);
     let cpu = d.cpu_reading().usage.busy_permille;
@@ -525,8 +596,11 @@ fn gather(d: &Daemon, s: &NodeSettings, jobs_running: u32) -> Gathered {
     let (die, limited_ms, _) = d.broker.thermal_smc();
     let speed = d.broker.thermal_read().map(|(p, _)| p);
     // A daemon whose CPU is injected is a test's: it never reads the machine's real heat.
-    let measures = d.cfg.cpu.is_none() && std::env::var_os("MASON_CPU_FILE").is_none();
-    let pressure = if measures { pressure_now() } else { None };
+    let pressure = if measures_machine(d) {
+        pressure_now()
+    } else {
+        None
+    };
     let hot = hot_now(d, s, die, pressure);
     let slot = |name: &str| {
         d.broker.limit(name).map(|limit| {
@@ -557,6 +631,7 @@ fn gather(d: &Daemon, s: &NodeSettings, jobs_running: u32) -> Gathered {
             other_cpu_pct: other,
             compile_free: slot("compile").map(|(f, _)| f),
             disk_free_gb,
+            held: held_now(d, jobs_running),
         },
         cpu_pct,
         die,
@@ -607,7 +682,22 @@ pub fn status_value(d: &Daemon, s: &NodeSettings, coord: Option<&str>) -> Value 
         "projects": projects,
         "mirrors": mirrors,
         "settings": s.to_json(),
+        "runtime_sha": d.cfg.runtime_sha,
+        "runtimes": installed_runtimes(&d.cfg.data_dir),
+        "doctor": d.node.doctor.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|r| r.to_json()),
     })
+}
+
+/// The runtimes installed here (complete ones), by commit.
+fn installed_runtimes(data_dir: &Path) -> Vec<String> {
+    let rt = crate::update::Runtimes::new(data_dir);
+    std::fs::read_dir(&rt.root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| crate::node_run::valid_sha(n) && rt.is_ready(n))
+        .collect()
 }
 
 /// Why a job cannot start now: the availability rules with the jobs that run, or `None`.
@@ -776,8 +866,16 @@ pub async fn start(d: Arc<Daemon>) -> std::io::Result<u16> {
         };
         match lan::advertise(&adv) {
             // Kept for the life of the process.
-            Ok(m) => std::mem::forget(m),
-            Err(e) => tracing::warn!("mDNS is not advertising this node: {e}"),
+            Ok(m) => {
+                std::mem::forget(m);
+                *d.node.mdns.lock().unwrap_or_else(|e| e.into_inner()) =
+                    crate::node_doctor::Mdns::Advertising;
+            }
+            Err(e) => {
+                tracing::warn!("mDNS is not advertising this node: {e}");
+                *d.node.mdns.lock().unwrap_or_else(|e| e.into_inner()) =
+                    crate::node_doctor::Mdns::Failed(e);
+            }
         }
     }
     d.node.jobs.resume(&d);
@@ -802,6 +900,7 @@ pub fn router(d: Arc<Daemon>) -> Router {
         .route("/node/jobs/{id}/log", get(job_log))
         .route("/node/jobs/{id}/artifact", get(job_artifact))
         .route("/node/jobs/{id}/ack", post(job_ack))
+        .route("/node/runtime", put(runtime_put))
         .layer(axum::middleware::from_fn_with_state(d.clone(), guard))
         .with_state(d.clone());
     Router::new()
@@ -861,8 +960,13 @@ async fn pair(
             };
             fail(status, e.message())
         })?;
+    // The team the coordinator is signed by, which a runtime it sends must be signed by too.
+    let team = b["team_id"]
+        .as_str()
+        .filter(|t| !t.is_empty() && t.len() <= 20 && t.bytes().all(|c| c.is_ascii_alphanumeric()))
+        .map(String::from);
     d.node
-        .add_coordinator(&fp, &name, now)
+        .add_coordinator(&fp, &name, now, team)
         .map_err(|e| fail(409, e))?;
     tracing::info!(coordinator = %name, "coordinator paired");
     let info = d.node.info();
@@ -1126,22 +1230,138 @@ async fn job_ack(
     }
 }
 
+/// Run the doctor now and keep what it found. A daemon that is a test's has no machine to judge
+/// and keeps nothing.
+pub fn run_doctor(d: &Arc<Daemon>) -> crate::node_doctor::Report {
+    let mdns = d
+        .node
+        .mdns
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let exe = std::env::current_exe().unwrap_or_default();
+    let allow = std::env::var_os("MASON_NODE_ALLOW_UNSIGNED").is_some();
+    let inputs =
+        crate::node_doctor::gather(&exe, &d.cfg.data_dir, d.node.info().is_some(), mdns, allow);
+    let r = crate::node_doctor::evaluate(&inputs, now_ms());
+    if measures_machine(d) {
+        *d.node.doctor.lock().unwrap_or_else(|e| e.into_inner()) = Some(r.clone());
+    }
+    r
+}
+
+/// `PUT /node/runtime`: a runtime the coordinator built and signed for this node. It is installed
+/// only if every executable of it verifies and is signed by the team the coordinator was signed
+/// by when it paired; this daemon then takes over once its running jobs have ended.
+async fn runtime_put(
+    State(d): State<Arc<Daemon>>,
+    Extension(PeerFp(fp)): Extension<PeerFp>,
+    body: axum::body::Body,
+) -> Res {
+    use http_body_util::BodyExt;
+    let Some(team) = d.node.coordinator(&fp).and_then(|c| c.team_id) else {
+        return Err(fail(
+            412,
+            "this coordinator was not signed by a team when it paired, so a runtime from it cannot be checked; install the runtime by hand (`mason node export-runtime`) or pair again with a signed coordinator",
+        ));
+    };
+    let mut bytes: Vec<u8> = Vec::new();
+    let mut body = body;
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|e| fail(400, e.to_string()))?;
+        if let Some(data) = frame.data_ref() {
+            if (bytes.len() + data.len()) as u64 > crate::node_runtime::MAX_BYTES {
+                return Err(fail(413, "the runtime is too large"));
+            }
+            bytes.extend_from_slice(data);
+        }
+    }
+    let d2 = d.clone();
+    let installed = d
+        .pool
+        .run(move || -> Result<String, String> {
+            let (sha, files) = crate::node_runtime::unpack(&bytes)?;
+            crate::node_runtime::install(
+                &d2.cfg.data_dir,
+                &sha,
+                &files,
+                &team,
+                &crate::node_runtime::real_codesign,
+            )?;
+            Ok(sha)
+        })
+        .await
+        .map_err(|_| fail(503, "the daemon is busy; try again"))?
+        .map_err(|e| fail(422, e))?;
+    // Takes over after its jobs, when this daemon runs from a runtime (a development build has
+    // none to replace).
+    let takes_over = d.cfg.runtime_sha.as_deref().is_some_and(|r| r != installed);
+    if takes_over {
+        *d.node
+            .pending_runtime
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(installed.clone());
+    }
+    tracing::info!(runtime = %installed, takes_over, "installed a runtime from its coordinator");
+    Ok(Json(
+        json!({"installed": installed, "takes_over": takes_over}),
+    ))
+}
+
+/// `POST /node/doctor`: check everything now (`mason node doctor`).
+pub async fn doctor(State(d): State<Arc<Daemon>>) -> Res {
+    let d2 = d.clone();
+    let r = d
+        .pool
+        .run(move || run_doctor(&d2))
+        .await
+        .map_err(|_| fail(503, "the daemon is busy; try again"))?;
+    Ok(Json(r.to_json()))
+}
+
 /// Keep the node's jobs in order: leases, old results, and the owner's switch when the
 /// coordinator chose `cancel`.
 fn spawn_upkeep(d: &Arc<Daemon>) {
     let weak = Arc::downgrade(d);
     let _ = std::thread::Builder::new()
         .name("node-upkeep".into())
-        .spawn(move || loop {
+        .spawn(move || {
+            let mut next_doctor = 0u64;
+            loop {
             std::thread::sleep(Duration::from_secs(2));
             let Some(d) = weak.upgrade() else {
                 return;
             };
+            // The start-up probe, then every ten minutes: a node that was healthy and loses a
+            // grant says so before a coordinator finds out with a job.
+            if measures_machine(&d) && now_ms() >= next_doctor {
+                next_doctor = now_ms() + 600_000;
+                run_doctor(&d);
+            }
+            // A runtime that arrived waits for the jobs to end, then this daemon becomes it.
+            let pending = d
+                .node
+                .pending_runtime
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            if let Some(sha) = pending {
+                if d.node.jobs.running() == 0 {
+                    *d.node
+                        .pending_runtime
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner()) = None;
+                    tracing::info!(runtime = %sha, "taking over the runtime a coordinator sent");
+                    // Returns only if it could not.
+                    let _ = crate::update::take_over(&d, &sha);
+                }
+            }
             d.node.jobs.tick(now_ms());
             if !read_switch(&d).on
                 && d.node.effective_settings().on_switch_off == OnSwitchOff::Cancel
             {
                 d.node.jobs.cancel_all("the owner turned remote work off");
+            }
             }
         });
 }
@@ -1265,6 +1485,7 @@ mod tests {
             other_cpu_pct: Some(10),
             compile_free: Some(3),
             disk_free_gb: Some(400),
+            held: None,
         }
     }
 
@@ -1298,6 +1519,32 @@ mod tests {
                     ..ok()
                 },
                 Some("draining: 2 jobs left"),
+            ),
+            (
+                "held by what the doctor found",
+                Readings {
+                    held: Some("masond is signed ad hoc; privacy grants will not hold".into()),
+                    ..ok()
+                },
+                Some("masond is signed ad hoc"),
+            ),
+            (
+                "the switch is named before what the doctor found",
+                Readings {
+                    switch_on: false,
+                    held: Some("x".into()),
+                    ..ok()
+                },
+                Some("turned remote work off"),
+            ),
+            (
+                "what the doctor found is named before heat",
+                Readings {
+                    held: Some("held first".into()),
+                    hot: Some("die 99 °C".into()),
+                    ..ok()
+                },
+                Some("held first"),
             ),
             (
                 "hot",
@@ -1471,11 +1718,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let n = NodeState::new(dir.path());
         assert!(n.coordinators().is_empty() && !n.is_paired("aa"));
-        n.add_coordinator("aa", "imac", 5).unwrap();
+        n.add_coordinator("aa", "imac", 5, None).unwrap();
         assert!(n.is_paired("aa") && !n.is_paired("bb") && !n.is_paired(""));
         // A name used by another fingerprint is refused; the same fingerprint may rename.
-        assert!(n.add_coordinator("bb", "imac", 6).is_err());
-        n.add_coordinator("aa", "desk", 7).unwrap();
+        assert!(n.add_coordinator("bb", "imac", 6, None).is_err());
+        n.add_coordinator("aa", "desk", 7, Some("TEAM111111".into()))
+            .unwrap();
         assert_eq!(n.coordinators().len(), 1);
         // A fresh state reads it back.
         let again = NodeState::new(dir.path());
@@ -1502,8 +1750,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let n = NodeState::new(dir.path());
         assert_eq!(n.effective_settings(), NodeSettings::default());
-        n.add_coordinator("aa", "one", 1).unwrap();
-        n.add_coordinator("bb", "two", 2).unwrap();
+        n.add_coordinator("aa", "one", 1, None).unwrap();
+        n.add_coordinator("bb", "two", 2, None).unwrap();
         n.remember(
             "aa",
             NodeSettings {

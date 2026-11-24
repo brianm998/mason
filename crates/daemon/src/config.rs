@@ -522,6 +522,10 @@ pub struct NodesCfg {
     /// Only these projects may use nodes; `None`: every project.
     pub projects: Option<Vec<String>>,
     pub exclude: Vec<String>,
+    /// Send each paired node the runtime this coordinator runs, cross-built and signed for the
+    /// node's architecture, when the node is on another (`push_runtime`, default true; §3.14).
+    /// It does nothing without a `sign_identity` in `update.toml`.
+    pub push_runtime: bool,
     pub default: SettingsPatch,
     pub per_node: std::collections::BTreeMap<String, SettingsPatch>,
 }
@@ -536,6 +540,7 @@ impl Default for NodesCfg {
             lost_after_polls: 6,
             projects: None,
             exclude: Vec::new(),
+            push_runtime: true,
             default: SettingsPatch::default(),
             per_node: std::collections::BTreeMap::new(),
         }
@@ -636,6 +641,11 @@ pub fn parse_nodes(text: &str) -> Result<NodesCfg, String> {
             }
             "projects" => cfg.projects = Some(names(v, "nodes.projects")?),
             "exclude" => cfg.exclude = names(v, "nodes.exclude")?,
+            "push_runtime" => {
+                cfg.push_runtime = v
+                    .as_bool()
+                    .ok_or("daemon.toml: nodes.push_runtime must be true or false")?
+            }
             sub => {
                 let t = v.as_table_like().ok_or_else(|| {
                     format!("daemon.toml: unknown setting nodes.{sub}; a node's settings are a table: [nodes.{sub}]")
@@ -2606,6 +2616,18 @@ mod tests {
              [nodes.default]\nmax_jobs = 4\non_switch_off = \"cancel\"\n[nodes.studio]\nmax_jobs = 6\nmax_die_c = 90\n",
         )
         .unwrap();
+        assert!(
+            c.push_runtime,
+            "a runtime is pushed unless the owner says not"
+        );
+        assert!(
+            !parse_nodes("[nodes]\npush_runtime = false\n")
+                .unwrap()
+                .push_runtime
+        );
+        assert!(parse_nodes("[nodes]\npush_runtime = 1\n")
+            .unwrap_err()
+            .contains("nodes.push_runtime"));
         assert!(c.enabled && c.prefer == Prefer::Github);
         assert_eq!(c.static_hosts, ["studio.local:7425", "127.0.0.1:1"]);
         assert_eq!((c.status_every_s, c.lost_after_polls), (2, 3));

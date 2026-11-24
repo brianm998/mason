@@ -60,3 +60,12 @@ A project has exactly one coordinator and so one landing queue; no landing lock 
   takes the local slots a run placed here takes (`fallback_lease`), as a GitHub run that found no
   runner does. It does not try GitHub next: placement already chose a node because it had room, and
   `prefer = "github"` puts GitHub first.
+
+## Privacy prompts and signing (§3.14)
+
+- **The package is one file of our own, not a tar.** `MNR1`, the commit, then each file's name, mode and bytes, names plain and sizes bounded. A node never extracts an archive a peer made.
+- **What is verified, and against what.** Each executable of the package must pass `codesign --verify --strict`, and its signature must carry the team id the coordinator's own `masond` was signed by when it paired (`TeamIdentifier`, read with `codesign -dvv`, sent in `/node-pair`, kept beside the fingerprint). An ad-hoc, unsigned or other-team package is refused and nothing is left on disk. A coordinator that is not signed by a team pins none, and so can send no runtime.
+- **The doctor blocks a node for what stops it doing the job** (signature, a path it writes, the listener, `cargo`), and only reports what matters to some projects (mDNS, since a node can be added by address; `xcode-select` and `java`, since the coordinator sends such work only to a node that has them). `MASON_NODE_ALLOW_UNSIGNED=1` skips the signature check on a development node.
+- **"Local network denied" is a guess.** macOS gives a process without the permission `EHOSTUNREACH` for a LAN address, which is also what a node that is off the network gives. The words say both, and name the setting.
+- **A node takes over with `update::take_over`**, once its running jobs have ended and only when it runs from a runtime (a development build has none to replace); until then it holds ("updating to runtime ..."), so no new job starts.
+- **The cross build is signed and wrapped by the code that signs the coordinator's own runtimes** (`update::sign_installed`, `scripts/make-daemon-app.sh`); only `update::shell` was made visible to the crate. The rollback and no-downgrade rules are untouched.

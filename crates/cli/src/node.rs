@@ -10,7 +10,7 @@ use crate::client::Daemon;
 use crate::{die, finish, or_die, Args};
 use serde_json::{json, Value};
 
-pub const COMMANDS: &str = "node pair-code | accept on|off | status | jobs | stop-jobs | coordinators [remove NAME]  (on a node)\n       node list | add [NAME | --host H:PORT --fp FINGERPRINT] [--code C] [--name N] | remove NAME | use on|off  (on the coordinator)";
+pub const COMMANDS: &str = "node pair-code | accept on|off | status | doctor | jobs | stop-jobs | coordinators [remove NAME]  (on a node)\n       node list | add [NAME | --host H:PORT --fp FINGERPRINT] [--code C] [--name N] | remove NAME | use on|off | export-runtime --arch ARCH --out DIR  (on the coordinator)";
 
 fn s(v: &Value) -> &str {
     v.as_str().unwrap_or("?")
@@ -119,6 +119,33 @@ pub fn run(a: &mut Args, d: &Daemon, json_out: bool) {
             }
             for c in cs {
                 println!("coordinator {}", s(&c["name"]));
+            }
+        }
+        "doctor" => {
+            finish(a);
+            let r = or_die(d.call("POST", "/node/doctor", Some(&json!({}))));
+            if json_out {
+                println!("{r:#}");
+            } else {
+                for c in r["checks"].as_array().cloned().unwrap_or_default() {
+                    let mark = match (c["ok"] == true, c["blocks"] == true) {
+                        (true, _) => "ok  ",
+                        (false, true) => "FAIL",
+                        (false, false) => "note",
+                    };
+                    println!("{mark} {:<13} {}", s(&c["name"]), s(&c["detail"]));
+                }
+                println!(
+                    "{}",
+                    if r["ok"] == true {
+                        "This node can take work."
+                    } else {
+                        "This node will not take work until the FAIL lines are fixed (docs/nodes.md)."
+                    }
+                );
+            }
+            if r["ok"] != true {
+                std::process::exit(1);
             }
         }
         "jobs" => {
@@ -278,5 +305,54 @@ pub fn run(a: &mut Args, d: &Daemon, json_out: bool) {
         other => die(&format!(
             "unknown node command {other:?}\n       {COMMANDS}"
         )),
+    }
+}
+
+/// `mason node export-runtime --arch ARCH --out DIR`: the signed runtime and "MASON Daemon.app" for
+/// a node of another architecture, written into `DIR` to copy to the node (docs/nodes.md). It
+/// needs no daemon: it reads `update.toml` and the runtimes directory. A cross build is a build:
+/// run it as `mason run --needs compile -- mason node export-runtime ...` to wait for a slot.
+pub fn export_runtime(
+    mut rest: Vec<String>,
+    data_dir: &std::path::Path,
+    config_dir: &std::path::Path,
+) -> i32 {
+    let mut opt = |name: &str| -> Option<String> {
+        let i = rest.iter().position(|a| a == name)?;
+        rest.remove(i);
+        (i < rest.len()).then(|| rest.remove(i))
+    };
+    let (Some(arch), Some(out)) = (opt("--arch"), opt("--out")) else {
+        eprintln!("error: mason node export-runtime --arch arm64|x86_64 --out DIR");
+        return 1;
+    };
+    let cfg = match mason_daemon::update::UpdateCfg::load(config_dir) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 1;
+        }
+    };
+    let rt = mason_daemon::update::Runtimes::new(data_dir);
+    let out = std::path::PathBuf::from(out);
+    if let Err(e) = std::fs::create_dir_all(&out) {
+        eprintln!("error: {}: {e}", out.display());
+        return 1;
+    }
+    match mason_daemon::node_runtime::export(&cfg, &rt, &arch, &out) {
+        Ok(sha) => {
+            println!(
+                "wrote the signed runtime {} for {arch} to {}/runtimes/{sha} and MASON Daemon.app to {}/",
+                &sha[..sha.len().min(10)],
+                out.display(),
+                out.display()
+            );
+            println!("Copy both to the node and install them as docs/nodes.md says.");
+            0
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            1
+        }
     }
 }
