@@ -416,10 +416,17 @@ fn host_key_file(dir: &Path) -> PathBuf {
     dir.join("run.key")
 }
 
+/// Is there a host in `dir` that was not started for `key`? One with no key file was started
+/// before the key was written, and counts as another.
+fn host_is_stale(dir: &Path, key: &str) -> bool {
+    !key.is_empty()
+        && dir.join("host.kv").exists()
+        && std::fs::read_to_string(host_key_file(dir)).ok().as_deref() != Some(key)
+}
+
 /// Stop the host `id` (and its second try) and take its directory away, with the log it wrote
 /// under `log_dir`: a run for another tree is not attached to.
-fn discard_host(d: &Arc<Daemon>, id: &str, log_dir: &Path) {
-    let hosts = d.cfg.hosts_dir();
+fn discard_host(hosts: &Path, id: &str, log_dir: &Path) {
     for on in [id.to_string(), mason_hostloss_id(id)] {
         let dir = hosts.join(&on);
         if !dir.exists() {
@@ -474,6 +481,33 @@ struct Recovered {
     had_any: bool,
 }
 
+/// What recovery decided about the attempts on record for `key`: the one to attach to (the
+/// latest for this key), the ones to cancel (another key, or replaced by a newer attempt),
+/// and whether any of those was for another key.
+#[derive(Debug, PartialEq, Eq)]
+struct Plan {
+    attach: Option<String>,
+    cancel: Vec<String>,
+    tree_changed: bool,
+}
+
+fn plan_recovery(all: &[(String, String)], key: &str) -> Plan {
+    let latest = all.iter().rposition(|(_, k)| k == key);
+    let mut plan = Plan {
+        attach: latest.map(|i| all[i].0.clone()),
+        cancel: vec![],
+        tree_changed: false,
+    };
+    for (i, (id, k)) in all.iter().enumerate() {
+        if Some(i) == latest {
+            continue;
+        }
+        plan.tree_changed |= k != key;
+        plan.cancel.push(id.clone());
+    }
+    plan
+}
+
 /// A step that starts its job again after a restart: read the attempts on record, cancel every
 /// run that is for another key or was replaced by a newer attempt (giving its runner unit
 /// back), and name the one to attach to. The record keeps only that one.
@@ -486,26 +520,22 @@ fn recover_attempts(who: &Who, tag: &str, suite: &str, key: &str) -> Recovered {
             had_any: false,
         };
     }
-    let latest = all.iter().rposition(|(_, k)| k == key);
-    let mut tree_changed = false;
-    for (i, (id, k)) in all.iter().enumerate() {
-        if Some(i) == latest {
-            continue;
-        }
-        if k != key {
-            tree_changed = true;
-            tracing::info!(%id, old = %k, new = %key, "not reusing an earlier run: another tree or command");
-        }
+    let plan = plan_recovery(&all, key);
+    for id in &plan.cancel {
+        tracing::info!(%id, new = %key, "not reusing an earlier run: another tree, command or a newer attempt");
         crate::remote::cancel_record(&who.d, &who.log_dir.join(format!("{id}.remote")));
-        discard_host(&who.d, id, &who.log_dir);
+        discard_host(&who.d.cfg.hosts_dir(), id, &who.log_dir);
     }
-    let keep: Vec<(String, String)> = latest.map(|i| all[i].clone()).into_iter().collect();
+    let keep: Vec<(String, String)> = all
+        .iter()
+        .filter(|(i, _)| plan.attach.as_ref() == Some(i))
+        .cloned()
+        .collect();
     write_attempts(&path, &keep);
-    let attach = keep.first().map(|(i, _)| i.clone());
     if let Some(run) = who.run() {
-        let text = if attach.is_some() {
+        let text = if plan.attach.is_some() {
             Some(format!("reattached to {suite} (same tree)"))
-        } else if tree_changed {
+        } else if plan.tree_changed {
             Some(format!("{suite} started again: the tree changed"))
         } else {
             None
@@ -515,7 +545,7 @@ fn recover_attempts(who: &Who, tag: &str, suite: &str, key: &str) -> Recovered {
         }
     }
     Recovered {
-        attach,
+        attach: plan.attach,
         had_any: true,
     }
 }
@@ -911,12 +941,9 @@ fn run_hosted_once(
     let dir = hosts.join(id);
     // A host started for another tree or command is stopped, not attached to (#1074). One with
     // no key file was started before the key was written: it counts as another.
-    if !key.is_empty()
-        && dir.join("host.kv").exists()
-        && std::fs::read_to_string(host_key_file(&dir)).ok().as_deref() != Some(key)
-    {
+    if host_is_stale(&dir, key) {
         tracing::info!(%id, "not attaching to the host: it was started for another tree or command");
-        discard_host(d, id, log_dir);
+        discard_host(&hosts, id, log_dir);
     }
     if !dir.join("host.kv").exists() {
         let o = SpawnOptions {
@@ -7041,7 +7068,90 @@ mod merged_branch_tests {
 
 #[cfg(test)]
 mod attempts_tests {
-    use super::{read_attempts, run_key_for, write_attempts};
+    use super::{
+        discard_host, host_is_stale, host_key_file, plan_recovery, read_attempts, run_key_for,
+        write_attempts, Plan,
+    };
+
+    fn at(list: &[(&str, &str)]) -> Vec<(String, String)> {
+        list.iter()
+            .map(|(i, k)| (i.to_string(), k.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn a_retry_in_flight_for_this_tree_is_attached_and_the_replaced_attempt_is_cancelled() {
+        // Attempt 1 (the plain id) was replaced by an environmental retry, which was out when
+        // the daemon went: the retry is the one to attach to, the first is cancelled.
+        let all = at(&[("t1r1-u-unit", "A"), ("t1r1-u99-unit", "A")]);
+        assert_eq!(
+            plan_recovery(&all, "A"),
+            Plan {
+                attach: Some("t1r1-u99-unit".into()),
+                cancel: vec!["t1r1-u-unit".into()],
+                tree_changed: false,
+            }
+        );
+    }
+
+    #[test]
+    fn a_local_host_for_another_tree_or_command_is_not_attached_to() {
+        let t = tempfile::tempdir().unwrap();
+        let (hosts, logs) = (t.path().join("hosts"), t.path().join("logs"));
+        std::fs::create_dir_all(&logs).unwrap();
+        let dir = hosts.join("t1r1-u-unit");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("host.kv"), "x=1\n").unwrap();
+        std::fs::write(logs.join("t1r1-u-unit.log"), "old").unwrap();
+        // No key file: started before keys were kept, so it counts as another tree.
+        assert!(host_is_stale(&dir, "A"));
+        std::fs::write(host_key_file(&dir), "A").unwrap();
+        assert!(
+            !host_is_stale(&dir, "A"),
+            "the same tree and command attach"
+        );
+        assert!(host_is_stale(&dir, "B"), "another tree does not");
+        // Where git cannot be asked at all the key is empty and nothing is compared.
+        assert!(!host_is_stale(&dir, ""));
+        discard_host(&hosts, "t1r1-u-unit", &logs);
+        assert!(
+            !dir.exists(),
+            "its directory is gone, so a fresh host starts"
+        );
+        assert!(!logs.join("t1r1-u-unit.log").exists());
+    }
+
+    #[test]
+    fn a_run_for_another_tree_is_cancelled_and_nothing_is_attached() {
+        let all = at(&[("t1r1-u-unit", "A")]);
+        assert_eq!(
+            plan_recovery(&all, "B"),
+            Plan {
+                attach: None,
+                cancel: vec!["t1r1-u-unit".into()],
+                tree_changed: true,
+            }
+        );
+        // Same tree, nothing replaced: attached, nothing cancelled.
+        assert_eq!(
+            plan_recovery(&all, "A"),
+            Plan {
+                attach: Some("t1r1-u-unit".into()),
+                cancel: vec![],
+                tree_changed: false,
+            }
+        );
+        // A run that has no key on record (an empty one) never matches a real key.
+        assert_eq!(plan_recovery(&at(&[("x", "")]), "A").attach, None);
+        // An older attempt for the tree and a later one for another: the older one is still
+        // the one for this tree, and the later is cancelled.
+        let mixed = at(&[("a1", "A"), ("b1", "B")]);
+        let p = plan_recovery(&mixed, "A");
+        assert_eq!(
+            (p.attach.as_deref(), p.cancel),
+            (Some("a1"), vec!["b1".to_string()])
+        );
+    }
 
     #[test]
     fn attempts_on_record_come_back_in_order_with_their_keys() {
