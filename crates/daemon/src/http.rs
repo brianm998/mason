@@ -4330,11 +4330,20 @@ async fn demo_next(Shared(d): Shared<Arc<Daemon>>) -> Res {
         return Err(fail(StatusCode::NOT_FOUND, "not a demo daemon"));
     }
     let d2 = d.clone();
-    let at = d.pool.run(move || d2.demo_next()).await.map_err(pool_err)?;
+    let (at, seq) = d
+        .pool
+        .run(move || {
+            let at = d2.demo_next();
+            (at, d2.store.last_seq().unwrap_or(0))
+        })
+        .await
+        .map_err(pool_err)?;
     Ok(Json(json!({
         "position": d.demo_position(),
         "total": crate::demo::checkpoints(),
         "advanced": at.is_some(),
+        // The store's seq after the step's events: what a client waits to have absorbed.
+        "seq": seq,
     })))
 }
 
