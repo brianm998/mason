@@ -744,7 +744,23 @@ pub struct Giver {
 impl Giver {
     /// Give back `give` units; the next in line is granted at once.
     pub fn shrink(&self, give: &BTreeMap<String, u32>) {
-        self.b.shrink(self.id, give);
+        self.b.shrink(self.id, &self.with_debt_cap(give));
+    }
+
+    /// A debt payment holds its `gha` units against the `gha-debt` cap too (#821): units given
+    /// back or asked for again move the cap's share with them, or the cap would leak, or the
+    /// lease would never read as given back.
+    fn with_debt_cap(&self, units: &BTreeMap<String, u32>) -> BTreeMap<String, u32> {
+        let mut u = units.clone();
+        if let (true, Some(n)) = (self.rank.is_debt(), units.get(GHA)) {
+            u.insert(mason_scheduler::GHA_DEBT.to_string(), *n);
+        }
+        u
+    }
+
+    /// Whether the lease still holds anything.
+    pub fn is_held(&self) -> bool {
+        self.b.lease_holds(self.id)
     }
 
     /// The runner units the lease holds now.
@@ -766,7 +782,7 @@ impl Giver {
             self.rank,
             Needs {
                 exclusive: false,
-                amounts: units,
+                amounts: self.with_debt_cap(&units),
                 flex: false,
             },
             alive,
@@ -5042,7 +5058,11 @@ pub(crate) mod tests {
     fn queue_ranked(b: &Broker, t: u64, landing: bool, uses: &BTreeMap<String, u32>) -> u64 {
         let mut st = lock(&b.st);
         st.rank_seq += 1;
-        let rank = order(&st, Rank::new(false, 3, 0, t, st.rank_seq, landing));
+        let mut rank = Rank::new(false, 3, 0, t, st.rank_seq, false);
+        if landing {
+            rank = rank.landing();
+        }
+        let rank = order(&st, rank);
         let id = st
             .ledger
             .submit(rank, needs_of(uses, None), &format!("#{t}"), t);
@@ -5050,6 +5070,149 @@ pub(crate) mod tests {
         st.by_task.insert(TaskId(t), id);
         drop(b.pass(st));
         id
+    }
+
+    /// Ask for runner units on a thread; the lease is sent back once granted.
+    fn ask_on_thread(
+        b: &Arc<Broker>,
+        name: &'static str,
+        task: u64,
+        rank: Rank,
+        tx: std::sync::mpsc::Sender<(&'static str, Lease)>,
+    ) {
+        let b = b.clone();
+        std::thread::spawn(move || {
+            let lease = b
+                .acquire(
+                    TaskId(task),
+                    name,
+                    rank,
+                    Needs::of(&[("gha", 1)]),
+                    &|| true,
+                    &mut |_| {},
+                )
+                .unwrap();
+            let _ = tx.send((name, lease));
+        });
+    }
+
+    fn wait_for_waiting(b: &Broker, n: usize) {
+        let began = Instant::now();
+        while b.gha_waiting() < n {
+            assert!(began.elapsed().as_secs() < 60, "{n} never queued");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// A check that gave its unit back and asks again keeps its kind (a check goes before a
+    /// test step even when the test step is more urgent and older) and the time it first began
+    /// to wait (it goes before a check that arrived after that but before it asked again).
+    #[test]
+    fn a_runner_request_made_again_keeps_its_kind_rank_and_its_wait_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = runner_broker(dir.path(), 1, 1, 0);
+        let check_rank = |id: u64| Rank::new(false, 3, 2, id, id, false).check();
+        let first = b
+            .acquire(
+                TaskId(1),
+                "#1 check",
+                check_rank(1),
+                Needs::of(&[("gha", 1)]),
+                &|| true,
+                &mut |_| {},
+            )
+            .unwrap();
+        let giver = first.giver();
+        giver.shrink(&gha(1));
+        assert!(!giver.is_held());
+        // The freed unit is taken, so everything after this queues.
+        let blocker = b
+            .acquire(
+                TaskId(9),
+                "#9 blocker",
+                Rank::new(false, 3, 2, 9, 9, false),
+                Needs::of(&[("gha", 1)]),
+                &|| true,
+                &mut |_| {},
+            )
+            .unwrap();
+        // Made later than the first check's request, so its wait start is later.
+        std::thread::sleep(Duration::from_millis(3));
+        let (tx, rx) = std::sync::mpsc::channel();
+        // An urgent test step that arrived before the first check began to wait.
+        ask_on_thread(
+            &b,
+            "test step",
+            2,
+            Rank::new(false, 1, 0, 0, 2, false),
+            tx.clone(),
+        );
+        wait_for_waiting(&b, 1);
+        ask_on_thread(&b, "later check", 3, check_rank(3), tx.clone());
+        wait_for_waiting(&b, 2);
+        let g = giver.clone();
+        let again_tx = tx.clone();
+        std::thread::spawn(move || {
+            let lease = g.ask_again(gha(1), &|| true, &mut |_| {}).unwrap();
+            let _ = again_tx.send(("again", lease));
+        });
+        wait_for_waiting(&b, 3);
+        let mut order = vec![];
+        drop(blocker);
+        for _ in 0..3 {
+            let (name, lease) = rx.recv_timeout(Duration::from_secs(60)).unwrap();
+            order.push(name);
+            // One unit: the next in line is granted when this one is dropped.
+            drop(lease);
+        }
+        assert_eq!(order, ["again", "later check", "test step"]);
+        drop(first);
+    }
+
+    /// A debt payment holds its `gha` units against the `gha-debt` cap: units it gives back
+    /// free the cap, and asking again takes the cap's share again, so a second debt that took
+    /// the freed share makes it wait.
+    #[test]
+    fn a_debt_asking_again_asks_the_debt_cap_again_and_gives_it_back_with_its_units() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = runner_broker(dir.path(), 8, 1, 0);
+        b.set_pool_units(mason_scheduler::GHA_DEBT, 4);
+        let debt_rank = |id: u64| Rank::new(false, 0, 0, id, id, false).debt();
+        let both = |n: u32| Needs::of(&[("gha", n), (mason_scheduler::GHA_DEBT, n)]);
+        let a = b
+            .acquire(
+                TaskId(1),
+                "debt a",
+                debt_rank(1),
+                both(4),
+                &|| true,
+                &mut |_| {},
+            )
+            .unwrap();
+        let giver = a.giver();
+        giver.shrink(&gha(4));
+        assert!(!giver.is_held(), "the cap's share goes back with the units");
+        let second = b
+            .acquire(
+                TaskId(2),
+                "debt b",
+                debt_rank(2),
+                both(4),
+                &|| true,
+                &mut |_| {},
+            )
+            .unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let g = giver.clone();
+        std::thread::spawn(move || {
+            let lease = g.ask_again(gha(1), &|| true, &mut |_| {}).unwrap();
+            let _ = tx.send(lease);
+        });
+        wait_for_waiting(&b, 1);
+        assert!(rx.try_recv().is_err(), "the cap is full: the rerun waits");
+        drop(second);
+        let again = rx.recv_timeout(Duration::from_secs(60)).unwrap();
+        assert_eq!(again.units(), gha(1));
     }
 
     #[test]
