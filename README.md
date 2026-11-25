@@ -747,6 +747,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s996**: A run GitHub has not picked up comes back here only when this machine would grant its lease at once (queue counted, hold settled, lease taken before the GitHub run is cancelled).
 - **s998**: masons_own_impact_map_selects_suites_by_path now expects the eight unit-level suites bound to run_check and the test step, instead of six.
 - **s1000**: The diagnosis session runs on `diagnose_model`/`diagnose_effort` from the project registration, else the provider file's `[diagnose]` table, else Opus at medium (Codex: its CLI's model at medium), and each diagnosis and `mason task show` print what it ran on.
+- **s1001**: The daemon folds three or more waiting speech announcements into one summary line ("25 mason issues have failed; come have a look."), for both monitors and daemon speech, controlled by `[speech] summarize_from`.
 - **s1012**: a replayed run_check carries its call id, takes the suites that finished before a masond takeover instead of running them again, and no longer folds the base on the replay.
 - **s1014**: RemotePlacementTest now composes RemotePlacementBody inside a Column, as the settings page does, so the project row no longer covers the global row's buttons.
 - **s1015**: Unit-test narrowing no longer pushes a line into `Group.notes`, which is per directory target, so `the_note_says_how_the_modules_were_picked` passes again.
