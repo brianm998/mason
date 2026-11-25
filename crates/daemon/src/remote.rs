@@ -1652,7 +1652,30 @@ pub fn execute(
     let _ = std::fs::create_dir_all(dir);
     let rec = record_path(dir, &spec.id);
     let log = dir.join(format!("{}.log", spec.id));
-    let (mut st, resumed) = match State::load(&rec) {
+    let mut loaded = State::load(&rec);
+    // A run is reused only for the tree and command it ran. A record for another key (or an old
+    // one with none) is superseded: its run is cancelled if live, its ref and record go, and the
+    // run starts again.
+    if let Some(old) = loaded.take() {
+        if old.tree_key != spec.tree_key {
+            tracing::info!(
+                id = %spec.id,
+                old_tree = %old.tree_key,
+                new_tree = %spec.tree_key,
+                "not reusing the earlier run: it was made on another tree"
+            );
+            let mut old = old;
+            if !old.collected {
+                cancel(site, &old);
+            }
+            delete_ref(site, &mut old, &rec);
+            let _ = std::fs::remove_file(&rec);
+            let _ = std::fs::remove_file(dir.join(format!("{}.log", spec.id)));
+        } else {
+            loaded = Some(old);
+        }
+    }
+    let (mut st, resumed) = match loaded {
         Some(s) => (s, true),
         None => {
             let name = ref_name(&spec.project, &spec.id);
@@ -2583,17 +2606,51 @@ pub fn run_place(
 /// `needs` of a run of `suite` placed by [`run_place`]: on GitHub the machine's `compile`,
 /// `test-suite` and `test-small` (and the whole machine) become the run's runner units; here
 /// nothing changes (`None`), whatever the global switch says (#766's lesson: decide per suite).
+///
+/// `flexible`: a sharded run asks for 1 to N runner units and is granted what is free (at least
+/// 1), then splits into that many shards ([`shards_granted`]) instead of waiting for all N.
 pub fn suite_pool_needs(
     d: &Daemon,
     project: &str,
     task: Option<mason_core::TaskId>,
     needs: &mason_scheduler::Needs,
     suite: &mason_testing::Suite,
+    flexible: bool,
 ) -> Option<mason_scheduler::Needs> {
     match run_place(d, project, task, Some(suite), &suite.command, Kind::Suite) {
-        RunPlace::GitHub { units, .. } => Some(with_units(needs, units)),
+        RunPlace::GitHub { units, .. } => {
+            let n = with_units(needs, units);
+            Some(if flexible { n.flexible() } else { n })
+        }
         RunPlace::Local => None,
     }
+}
+
+/// How many shards a run of `shards` makes when the broker granted it `granted` runner units
+/// (`None`: not a flexible grant, so all of them). Never more than asked, never fewer than one.
+pub fn shards_granted(shards: u32, granted: Option<u32>) -> u32 {
+    granted.map_or(shards, |g| g.clamp(1, shards.max(1)))
+}
+
+/// `rs` split for a run of `shards` shards that was granted `granted` runner units: that many
+/// ways (`lists` makes the tests of each), with `shard_command` on each runner; one unit runs
+/// `rs`'s own command whole on one runner. Suite runs and agents' checks both split by this.
+pub fn split_for_grant(
+    mut rs: RunSpec,
+    shards: u32,
+    shard_command: &str,
+    granted: Option<u32>,
+    partial_lists: bool,
+    lists: impl FnOnce(u32) -> Vec<Vec<String>>,
+) -> RunSpec {
+    let n = shards_granted(shards, granted);
+    if n > 1 {
+        rs.shards = n;
+        rs.shard_command = Some(shard_command.to_string());
+        rs.shard_lists = lists(n);
+        rs.partial_lists = partial_lists;
+    }
+    rs
 }
 
 /// `needs` without the machine's slots, plus `units`.
@@ -2610,6 +2667,7 @@ pub fn with_units(
             .filter(|(k, _)| !MACHINE.contains(&k.as_str()))
             .map(|(k, v)| (k.clone(), *v))
             .collect(),
+        flex: false,
     };
     for (k, v) in units {
         let have = out.amounts.entry(k).or_insert(0);
@@ -2660,6 +2718,14 @@ impl Grant {
             .as_ref()
             .map(|l| l.units())
             .unwrap_or_default()
+    }
+    /// How many runner units the lease was given when it asked for 1 to N, if it was flexible.
+    pub fn granted_runners(&self) -> Option<u32> {
+        self.lease
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .and_then(|l| l.granted_runners())
     }
     /// Give the units back: the run is not going to GitHub after all (`fallback = "local"`).
     /// Returns whether it held any.
@@ -3150,7 +3216,27 @@ pub fn reap_hold_etag(site: &Site, holds: &Path, record: &Path, etag: &mut Optio
             Err(_) => return false,
         },
     };
-    let Some(run) = run else { return false };
+    let Some(run) = run else {
+        // GitHub lists a run as soon as it exists, queued or not. A record that never learned
+        // its run's id and still has none on GitHub long after its push never had one (the
+        // dispatch was lost): nobody will collect it, and kept, it held a runner unit across
+        // every restart (debt602, 36 h on 2026-11-24). Give it up.
+        if st.run_id.is_none()
+            && site.clock.now_ms().saturating_sub(st.pushed_ms) >= orphan_after_ms(site)
+        {
+            tracing::info!(
+                run = %id,
+                "no GitHub run was ever made for {}; freeing its runner unit",
+                st.ref_name
+            );
+            st.released = true;
+            delete_ref(site, &mut st, record);
+            let _ = std::fs::remove_file(record);
+            remove_hold(holds, &id);
+            return true;
+        }
+        return false;
+    };
     if run.status != "completed" {
         return false;
     }
@@ -3166,6 +3252,12 @@ pub fn reap_hold_etag(site: &Site, holds: &Path, record: &Path, etag: &mut Optio
     }
     remove_hold(holds, &id);
     true
+}
+
+/// How long after its push a record with no run on GitHub is given up: the pickup timeout, and
+/// never under half an hour.
+fn orphan_after_ms(site: &Site) -> u64 {
+    (site.pickup_timeout.as_millis() as u64).max(30 * 60 * 1000)
 }
 
 /// Cancel an adopted run nobody will collect, delete its ref, end its record and remove its
@@ -4812,6 +4904,39 @@ mod tests {
     }
 
     #[test]
+    fn a_hold_with_no_run_on_github_is_kept_while_young_and_freed_once_old() {
+        token();
+        let r = repo();
+        let t = tempfile::tempdir().unwrap();
+        let zip = artifact(t.path(), GREEN, 0, None);
+        // Nothing was dispatched: GitHub lists no run for the commit.
+        let gh = FakeGh::new(&r, &zip, Mode::Normal);
+        let clk = clock();
+        let s = site(&r, gh, clk.clone(), false);
+        let logs = tempfile::tempdir().unwrap();
+        let (holds, rec) = adopted(&r, logs.path(), "d9");
+        let mut st = State::load(&rec).unwrap();
+        st.run_id = None;
+        st.pushed_ms = clk.now_ms();
+        st.save(&rec);
+        assert!(
+            !reap_hold(&s, &holds, &rec),
+            "a fresh push may still get its run"
+        );
+        assert_eq!(running_holds(&holds).len(), 1);
+        clk.sleep(orphan_after_ms(&s) - 1);
+        assert!(!reap_hold(&s, &holds, &rec), "not yet past the window");
+        clk.sleep(1);
+        assert!(
+            reap_hold(&s, &holds, &rec),
+            "no run was ever made: the unit is freed"
+        );
+        assert!(running_holds(&holds).is_empty());
+        assert!(record_ended(&rec), "the record no longer counts as out");
+        assert_eq!(refs(&r.bare), "", "the ref is deleted");
+    }
+
+    #[test]
     fn a_hold_whose_run_is_still_going_is_kept() {
         token();
         let r = repo();
@@ -4845,6 +4970,29 @@ mod tests {
         assert!(running_holds(&holds).is_empty());
         assert!(!rec.exists());
         assert_eq!(refs(&r.bare), "");
+    }
+
+    #[test]
+    fn a_replaced_step_attempt_is_cancelled_and_gives_its_unit_back_and_the_newer_one_stays() {
+        // #1074: after a restart the step cancels the attempt a retry replaced (the same call
+        // `suites::recover_attempts` makes); the retry it attaches to keeps its hold.
+        token();
+        let r = repo();
+        let t = tempfile::tempdir().unwrap();
+        let zip = artifact(t.path(), GREEN, 0, None);
+        let gh = FakeGh::new(&r, &zip, Mode::Normal);
+        let s = site(&r, gh.clone(), clock(), false);
+        let logs = tempfile::tempdir().unwrap();
+        let (holds, old) = adopted(&r, logs.path(), "t7r9-u-unit");
+        let (_, newer) = adopted(&r, logs.path(), "t7r9-u1700000000000-unit");
+        assert_eq!(running_holds(&holds).len(), 2);
+        cancel_hold(&s, &holds, &old);
+        assert_eq!(gh.cancels.lock().unwrap().len(), 1, "one run cancelled");
+        assert!(record_ended(&old) && !old.exists());
+        let left = running_holds(&holds);
+        assert_eq!(left.len(), 1, "only the older attempt's unit came back");
+        assert_eq!(left[0].record, newer);
+        assert!(!record_ended(&newer));
     }
 
     #[test]
@@ -5545,6 +5693,120 @@ mod tests {
         assert_eq!(gh.runs_seen.lock().unwrap().len(), 1);
     }
 
+    #[test]
+    fn an_environmental_retry_in_flight_at_a_restart_is_reattached_and_collected_once() {
+        // #1074: the retry (`-u<ms>-`) was out when the daemon died; the recovered step names
+        // it from its attempts record, and it is collected with no second push.
+        token();
+        let r = repo();
+        let t = tempfile::tempdir().unwrap();
+        let zip = artifact(t.path(), GREEN, 0, None);
+        let logs = tempfile::tempdir().unwrap();
+        let gh = FakeGh::new(&r, &zip, Mode::Normal);
+        *gh.die_at.lock().unwrap() = Some(2);
+        let id = "t7r9-u1700000000000-unit";
+        let s = site(&r, gh.clone(), clock(), false);
+        let died = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = execute(&s, &spec(id), logs.path(), &|| None, &Grant::test());
+        }));
+        assert!(died.is_err());
+        *gh.die_at.lock().unwrap() = None;
+        let s2 = site(&r, gh.clone(), clock(), false);
+        let Outcome::Done(f) =
+            execute(&s2, &spec(id), logs.path(), &|| None, &Grant::test()).unwrap()
+        else {
+            panic!("not done")
+        };
+        assert_eq!(f.output, GREEN);
+        assert_eq!(
+            gh.dispatches.lock().unwrap().len(),
+            1,
+            "no extra push or dispatch"
+        );
+        assert_eq!(gh.runs_seen.lock().unwrap().len(), 1);
+        assert_eq!(gh.cancels.lock().unwrap().len(), 0);
+        assert_eq!(refs(&r.bare), "");
+    }
+
+    #[test]
+    fn a_collected_run_is_reused_only_for_the_tree_it_ran_on() {
+        token();
+        let r = repo();
+        let t = tempfile::tempdir().unwrap();
+        let zip = artifact(t.path(), GREEN, 0, None);
+        let logs = tempfile::tempdir().unwrap();
+        let gh = FakeGh::new(&r, &zip, Mode::Normal);
+        let s = site(&r, gh.clone(), clock(), false);
+        let a = spec("tk1");
+        assert!(matches!(
+            execute(&s, &a, logs.path(), &|| None, &Grant::test()).unwrap(),
+            Outcome::Done(_)
+        ));
+        assert_eq!(gh.dispatches.lock().unwrap().len(), 1);
+        // The same tree: answered from the record, nothing pushed or dispatched.
+        assert!(matches!(
+            execute(&s, &a, logs.path(), &|| None, &Grant::test()).unwrap(),
+            Outcome::Done(_)
+        ));
+        assert_eq!(gh.dispatches.lock().unwrap().len(), 1);
+        // Another tree: A's result is not B's.
+        let mut b = spec("tk1");
+        b.tree_key = "treekey+other".into();
+        assert!(matches!(
+            execute(&s, &b, logs.path(), &|| None, &Grant::test()).unwrap(),
+            Outcome::Done(_)
+        ));
+        assert_eq!(gh.dispatches.lock().unwrap().len(), 2, "a new run was made");
+        assert_eq!(
+            State::load(&record_path(logs.path(), "tk1"))
+                .unwrap()
+                .tree_key,
+            "treekey+other"
+        );
+        // A record from before keys were kept counts as another tree.
+        let mut old = State::load(&record_path(logs.path(), "tk1")).unwrap();
+        old.tree_key = String::new();
+        old.save(&record_path(logs.path(), "tk1"));
+        assert!(matches!(
+            execute(&s, &b, logs.path(), &|| None, &Grant::test()).unwrap(),
+            Outcome::Done(_)
+        ));
+        assert_eq!(gh.dispatches.lock().unwrap().len(), 3);
+        assert_eq!(refs(&r.bare), "");
+    }
+
+    #[test]
+    fn a_run_in_flight_on_another_tree_is_cancelled_and_started_again() {
+        token();
+        let r = repo();
+        let t = tempfile::tempdir().unwrap();
+        let zip = artifact(t.path(), GREEN, 0, None);
+        let logs = tempfile::tempdir().unwrap();
+        let gh = FakeGh::new(&r, &zip, Mode::Normal);
+        *gh.die_at.lock().unwrap() = Some(2);
+        let s = site(&r, gh.clone(), clock(), false);
+        let died = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = execute(&s, &spec("tk2"), logs.path(), &|| None, &Grant::test());
+        }));
+        assert!(died.is_err());
+        *gh.die_at.lock().unwrap() = None;
+        let mut b = spec("tk2");
+        b.tree_key = "treekey+other".into();
+        let s2 = site(&r, gh.clone(), clock(), false);
+        let Outcome::Done(f) = execute(&s2, &b, logs.path(), &|| None, &Grant::test()).unwrap()
+        else {
+            panic!("not done")
+        };
+        assert_eq!(f.output, GREEN);
+        assert_eq!(
+            gh.cancels.lock().unwrap().len(),
+            1,
+            "the old run was cancelled"
+        );
+        assert_eq!(gh.dispatches.lock().unwrap().len(), 2, "and a new one made");
+        assert_eq!(refs(&r.bare), "");
+    }
+
     /// The inputs of the one dispatch the fake saw, as JSON.
     fn dispatched_inputs(gh: &FakeGh) -> serde_json::Value {
         let d = gh.dispatches.lock().unwrap();
@@ -5629,6 +5891,7 @@ mod tests {
             let st = State {
                 ref_name: ref_name(&sp.project, &sp.id),
                 sha,
+                tree_key: sp.tree_key.clone(),
                 pushed_ms: 1_000_000_000,
                 runs_on: sp.runs_on.clone(),
                 ..Default::default()
@@ -5668,6 +5931,7 @@ mod tests {
         State {
             ref_name: ref_name(&sp.project, &sp.id),
             sha,
+            tree_key: sp.tree_key.clone(),
             pushed_ms: 1_000_000_000,
             runs_on: sp.runs_on.clone(),
             ..Default::default()
@@ -5827,6 +6091,46 @@ mod tests {
             phase_text(&queued, 0, now, t0),
             "on GitHub: waiting for a runner, 4 min"
         );
+    }
+
+    #[test]
+    fn a_check_granted_fewer_units_than_its_shards_splits_that_many_ways_and_holds_them() {
+        let spec = |id: &str| {
+            spec_for(
+                "p",
+                id,
+                None,
+                "cargo test",
+                Duration::from_secs(60),
+                &[],
+                "ubuntu-latest",
+                "",
+            )
+        };
+        let lists = |n: u32| vec![vec![]; n as usize];
+        let dir = tempfile::tempdir().unwrap();
+        let hosts = dir.path().join("hosts");
+        let logs = dir.path().join("logs");
+        let hold_units = |id: &str| {
+            let kv = read_kv(&hold_file(&holds_dir(&hosts), id)).unwrap();
+            kv.get("units").cloned().unwrap_or_default()
+        };
+        // Granted 3 of 8: three shards, three lists, and the hold records 3 units.
+        let rs = split_for_grant(spec("c1"), 8, "shard-cmd", Some(3), false, lists);
+        assert_eq!((rs.shards, rs.shard_lists.len()), (3, 3));
+        assert_eq!(rs.shard_command.as_deref(), Some("shard-cmd"));
+        let guard = HoldGuard::new(&hosts, &rs, "c1", "c1", rs.shards.max(1), &logs, "check", 1);
+        assert_eq!(hold_units("c1"), "gha=3");
+        drop(guard);
+        // Granted 1: the whole command on one runner, one unit.
+        let rs = split_for_grant(spec("c2"), 8, "shard-cmd", Some(1), false, lists);
+        assert_eq!(rs.shards, 0);
+        assert!(rs.shard_command.is_none() && rs.shard_lists.is_empty());
+        let _guard = HoldGuard::new(&hosts, &rs, "c2", "c2", rs.shards.max(1), &logs, "check", 1);
+        assert_eq!(hold_units("c2"), "gha=1");
+        // Not a flexible lease: all eight.
+        let rs = split_for_grant(spec("c3"), 8, "shard-cmd", None, false, lists);
+        assert_eq!(rs.shards, 8);
     }
 
     #[test]
