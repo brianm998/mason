@@ -1067,7 +1067,9 @@ fn run_hosted_once(
             id: id.to_string(),
             cmd: vec!["sh".into(), "-c".into(), cmd.to_string()],
             cwd: Some(cwd.to_path_buf()),
-            env,
+            // The run budget is this suite's own limit, the one the watcher below kills at, not
+            // the step's shortest (`step_env_pairs`): it replaces any value already in `env`.
+            env: crate::jobs::with_run_budget(env, limit),
             clear_env: false,
             stdin: None,
             linger: Duration::from_secs(600),
