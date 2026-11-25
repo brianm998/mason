@@ -1,0 +1,14 @@
+.mason/run.json
+Cargo.lock
+crates/daemon/Cargo.toml
+crates/daemon/src/contentscan.rs
+crates/daemon/src/jobs.rs
+crates/daemon/src/landing.rs
+crates/daemon/src/lib.rs
+crates/daemon/src/main.rs
+crates/daemon/src/markers.rs
+crates/daemon/tests/it/landing_floor.rs
+docs/decisions/1095-content-scan-at-submit-check-and-landing.md
+docs/self-hosting.md
+docs/stages/s1106.md
+scripts/exit/s1106.sh
