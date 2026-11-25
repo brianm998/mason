@@ -57,10 +57,23 @@ pub struct Rank {
     landing: bool,
     debt: bool,
     holding: bool,
+    check: bool,
+    /// Set by [`Rank::for_runners`]: the order of requests that hold only runner units.
+    runners: bool,
     by_priority: bool,
     aged: bool,
     waiting_since: u64,
     arrived: u64,
+}
+
+/// What a request for GitHub runner units is, in the owner's order (2026-11-21): a landing's run
+/// first, then an agent's check, then a test step, then a debt payment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RunnerKind {
+    Landing,
+    Check,
+    TestStep,
+    Debt,
 }
 
 impl Rank {
@@ -89,6 +102,8 @@ impl Rank {
             landing: false,
             debt: false,
             holding: false,
+            check: false,
+            runners: false,
             by_priority: false,
             aged: false,
             waiting_since: 0,
@@ -110,6 +125,16 @@ impl Rank {
         self.not_aged = true;
         self.band = if interactive {
             2
+        } else if self.runners {
+            // Runner units (2026-11-21): kind first, then urgency, then the longest wait.
+            // Progress does not count; aging lifts a request only among its own kind.
+            self.remaining = 0;
+            if self.aged {
+                self.not_aged = false;
+                self.priority_key = 0;
+            }
+            self.enqueued = self.waiting_since;
+            self.runner_kind() as u8
         } else if self.landing {
             0
         } else if self.holding {
@@ -165,6 +190,40 @@ impl Rank {
         if !self.interactive() {
             self.debt = true;
         }
+        self.recompute()
+    }
+
+    /// The same rank for an agent's `run_check`: with local slots it ranks as the agent's step
+    /// (s262), with runner units it goes after a landing and before a test step.
+    pub fn check(mut self) -> Rank {
+        if !self.interactive() {
+            self.check = true;
+        }
+        self.recompute()
+    }
+
+    /// The kind of work this is, for the order of runner units.
+    pub fn runner_kind(&self) -> RunnerKind {
+        if self.is_landing() {
+            RunnerKind::Landing
+        } else if self.is_debt() {
+            RunnerKind::Debt
+        } else if !self.interactive() && self.check {
+            RunnerKind::Check
+        } else {
+            RunnerKind::TestStep
+        }
+    }
+
+    /// The rank for a request that holds only runner units (`gha`, `gha-macos`), waiting since
+    /// `since`: landing, check, test step, debt; then urgent first; then the longest wait. A
+    /// person's request still goes first. Local slots keep [`Rank`]'s own rule, where a test
+    /// step goes before a check (s262); the two differ on purpose, by the owner's choice.
+    /// `aged`: the request has waited past `order.max_wait_s`.
+    pub fn for_runners(mut self, since: u64, aged: bool) -> Rank {
+        self.runners = true;
+        self.aged = aged;
+        self.waiting_since = since;
         self.recompute()
     }
 
@@ -384,5 +443,36 @@ mod tests {
                 .priority_first()
         );
         assert_eq!(u.priority(), 0);
+    }
+
+    #[test]
+    fn runner_units_go_landing_check_test_step_debt_then_urgent_then_longest_wait() {
+        let step = Rank::new(false, 1, 2, 1, 1, false);
+        let order = |k: Rank, since| k.for_runners(since, false);
+        let land = order(step.landing(), 50);
+        let check = order(step.check(), 40);
+        let test = order(step, 30);
+        let debt = order(step.debt(), 1);
+        assert!(land < check && check < test && test < debt);
+        assert_eq!(debt.runner_kind(), RunnerKind::Debt);
+        // Within a kind: urgent first, then the one that has waited longer.
+        let urgent = order(Rank::new(false, 9, 0, 9, 2, false).check(), 90);
+        let low = order(Rank::new(false, 1, 3, 1, 3, false).check(), 10);
+        assert!(urgent < low);
+        let older = order(Rank::new(false, 1, 2, 5, 4, false).check(), 10);
+        let newer = order(Rank::new(false, 1, 2, 5, 5, false).check(), 20);
+        assert!(older < newer);
+        // Aging lifts only among its own kind.
+        let aged_test = Rank::new(false, 1, 3, 1, 6, false).for_runners(1, true);
+        assert!(check < aged_test && aged_test < order(step, 30).with_priority(0));
+        // A person goes first.
+        assert!(Rank::new(true, 9, 9, 9, 9, false).for_runners(99, false) < land);
+    }
+
+    #[test]
+    fn local_slots_keep_a_test_step_before_a_check() {
+        let check = Rank::new(false, 3, 2, 1, 1, false).check();
+        let test = Rank::new(false, 2, 2, 2, 2, false);
+        assert!(test < check);
     }
 }

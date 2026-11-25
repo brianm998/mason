@@ -155,7 +155,7 @@ fn project_cfg(d: &Daemon, project: &str) -> Option<ProjectCfg> {
         .cloned()
 }
 
-fn remote_cfg(d: &Daemon, project: &str) -> Option<RemoteCfg> {
+pub fn remote_cfg(d: &Daemon, project: &str) -> Option<RemoteCfg> {
     project_cfg(d, project).and_then(|p| p.services.remote)
 }
 
@@ -359,6 +359,13 @@ pub struct Site {
     /// `pickup_timeout` has passed) does so only when this says there is room. Without one the
     /// run comes back at the timeout whatever this machine is doing.
     pub local_room: Option<RoomFn>,
+    /// With `fallback_local`: why this machine cannot run the run at all now, whatever else it
+    /// is doing (a hold is active, or a slot it needs has limit 0), or `None` when it can. A run
+    /// is never sent here when this says why not: it waits on GitHub instead ([`wait_for_grant`]).
+    pub local_barred: Option<RoomFn>,
+    /// Splits a run again for a grant of the given number of runner units, as its caller split
+    /// it the first time ([`split_for_grant`]). Without one a run cannot wait for a bigger grant.
+    pub resplit: Option<ResplitFn>,
     /// `[remote_runs] test_env`, added to every run's environment.
     pub test_env: Vec<(String, String)>,
     pub gh: GitHub,
@@ -373,6 +380,9 @@ pub struct Site {
 /// Why this machine has no room for the run now (a hold is active, a slot it needs has no free
 /// unit), or `None` when it has room. Polled by the wait loop: it must be cheap.
 pub type RoomFn = Arc<dyn Fn() -> Option<String> + Send + Sync>;
+
+/// The run made again for a grant of this many runner units.
+pub type ResplitFn = Arc<dyn Fn(RunSpec, u32) -> RunSpec + Send + Sync>;
 
 /// A run waiting for pickup for `waited_ms` comes back here (#833): the spill time is set, it
 /// has passed, and `room` says this machine has room. Pure.
@@ -445,6 +455,8 @@ pub fn site_for_task(d: &Daemon, project: &str, cwd: &Path, task: Option<u64>) -
             == crate::place::Mode::FavorRemote,
         spill_after: None,
         local_room: None,
+        local_barred: None,
+        resplit: None,
         test_env: r.test_env,
         gh: GitHub::new(http, &r.api, &r.repo, token),
         clock: Arc::new(SystemClock),
@@ -479,6 +491,12 @@ pub fn site_for_run(
         let d = d.clone();
         let project = project.to_string();
         site.spill_after = Some(Duration::from_secs(after));
+        {
+            let (d, uses) = (d.clone(), uses.clone());
+            site.local_barred = Some(Arc::new(move || {
+                crate::place::cannot_run_here(&d.broker.load_reading(now_ms()), &uses)
+            }));
+        }
         // `None` means room, and then this machine's lease is already taken (#1025): the run
         // gives up GitHub only with a grant in hand, so two runs cannot both take the last unit.
         // A covered run (a batch holds its slots) takes nothing.
@@ -1743,7 +1761,7 @@ pub fn execute(
     spec: &RunSpec,
     dir: &Path,
     stop: &dyn Fn() -> Option<StopWhy>,
-    _grant: &Grant,
+    grant: &Grant,
 ) -> Result<Outcome, Fail> {
     let _caller = github_budget::as_caller("remote-run");
     let _ = std::fs::create_dir_all(dir);
@@ -1866,6 +1884,9 @@ pub fn execute(
     let mut outage_since: Option<u64> = None;
     let mut artifact_misses = 0u32;
     let mut live = Live::default();
+    // The jobs whose runner unit has been given back (#820).
+    let mut gave: std::collections::HashSet<String> = Default::default();
+    let per_job = units_for(&spec.runs_on, 1);
     let mut room = RoomCache::default();
     let mut held_back = false;
     let scratch = dir.join(format!("{}.remote-artifact", spec.id));
@@ -1980,6 +2001,14 @@ pub fn execute(
             now,
             spec.limit,
         );
+        // Each `run` job that has finished gives its runner unit back at once, so the next in
+        // line need not wait for the slowest shard (#820). Until the run's jobs exist (the
+        // `plan` job still runs) nothing is given.
+        for j in &live.jobs {
+            if is_run_job(&j.name) && j.status == "completed" && gave.insert(j.name.clone()) {
+                grant.give(&per_job);
+            }
+        }
         match step {
             Ok(Step::Wait) => outage_since = None,
             Ok(Step::Fail(why)) => {
@@ -2321,7 +2350,7 @@ fn poll(
     // the last reading is old: a minute for a run not yet picked up (its pickup is timed), two
     // minutes for the step shown of one running.
     if run.status != "completed" {
-        let stale_ms = if st.picked_ms.is_none() {
+        let stale_ms = if st.picked_ms.is_none() || !st.shards.is_empty() {
             60_000
         } else {
             120_000
@@ -2604,9 +2633,15 @@ pub fn execute_sharded(
     stop: &dyn Fn() -> Option<StopWhy>,
     grant: &Grant,
 ) -> Result<Outcome, Fail> {
-    // Granted too few runners to finish the suite inside its limit: nothing is pushed.
+    // Granted too few runners to finish the suite inside its limit: nothing is pushed, and the
+    // lease is not asked for again (the caller drops it whole).
     if let Some(why) = spec.too_few_runners() {
         return Err(Fail::Environmental(why));
+    }
+    // A lease emptied by an earlier run of the same suite or check asks again before this one
+    // is pushed (#820).
+    if !grant.regain(units_for(&spec.runs_on, spec.shards.max(1)), stop) {
+        return Ok(Outcome::Stopped(stop().unwrap_or(StopWhy::Gone)));
     }
     if !spec.sharded() {
         return execute(site, spec, dir, stop, grant);
@@ -2616,6 +2651,14 @@ pub fn execute_sharded(
     for attempt in 0..=SHARD_RERUNS {
         if attempt > 0 {
             attempt_spec.id = format!("{}-s{attempt}", spec.id);
+            // The shards run again ask for their units again, at the run's own rank and from
+            // when it began to wait, before anything is pushed (#820).
+            if !grant.ask_again(
+                units_for(&spec.runs_on, attempt_spec.only.len() as u32),
+                stop,
+            ) {
+                return Ok(Outcome::Stopped(stop().unwrap_or(StopWhy::Gone)));
+            }
         }
         let f = match execute(site, &attempt_spec, dir, stop, grant)? {
             Outcome::Done(f) => f,
@@ -2828,7 +2871,19 @@ pub fn with_units(
 /// Clones share one hold, which is released when the last is dropped or by [`Grant::give_back`].
 #[derive(Clone, Default)]
 pub struct Grant {
-    lease: Arc<std::sync::Mutex<Option<crate::sched::Lease>>>,
+    inner: Arc<std::sync::Mutex<GrantInner>>,
+}
+
+#[derive(Default)]
+struct GrantInner {
+    /// The lease this grant keeps, if it owns one.
+    owned: Option<crate::sched::Lease>,
+    /// Who can give units back and ask again: the owned lease, or the enclosing step's.
+    giver: Option<crate::sched::Giver>,
+    /// The runner units still held.
+    held: std::collections::BTreeMap<String, u32>,
+    /// Where the run's hold is recorded, rewritten as units go back.
+    hold: Option<(PathBuf, String)>,
 }
 
 impl std::fmt::Debug for Grant {
@@ -2838,10 +2893,18 @@ impl std::fmt::Debug for Grant {
 }
 
 impl Grant {
+    fn lock(&self) -> std::sync::MutexGuard<'_, GrantInner> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
     /// The grant of a lease the broker made; it keeps the lease until it is dropped.
     pub fn of(lease: crate::sched::Lease) -> Self {
         Grant {
-            lease: Arc::new(std::sync::Mutex::new(Some(lease))),
+            inner: Arc::new(std::sync::Mutex::new(GrantInner {
+                held: lease.units(),
+                giver: Some(lease.giver()),
+                owned: Some(lease),
+                hold: None,
+            })),
         }
     }
     /// A run that is already out (its record exists) or is collected, or one that takes local
@@ -2854,49 +2917,125 @@ impl Grant {
     pub fn unplumbed(_why: &'static str) -> Self {
         Grant::default()
     }
+    /// The units of a lease someone else keeps (the test step's): this grant can give them
+    /// back and ask for them again, but does not own the lease (#820).
+    pub fn borrowed(
+        giver: Option<crate::sched::Giver>,
+        units: std::collections::BTreeMap<String, u32>,
+    ) -> Self {
+        Grant {
+            inner: Arc::new(std::sync::Mutex::new(GrantInner {
+                giver,
+                held: units,
+                ..Default::default()
+            })),
+        }
+    }
+    /// Say where the run's hold is recorded, so units given back are written there.
+    pub fn note_hold(&self, dir: &Path, id: &str) {
+        self.lock().hold = Some((dir.to_path_buf(), id.to_string()));
+    }
     /// The runner units this grant holds.
     pub fn units(&self) -> std::collections::BTreeMap<String, u32> {
-        self.lease
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .map(|l| l.units())
-            .unwrap_or_default()
+        self.lock().held.clone()
+    }
+    /// A job of the run has finished: give back its units and grant the next in line at once.
+    /// What is held is written to the run's hold, so a restart counts only jobs still out.
+    pub fn give(&self, give: &std::collections::BTreeMap<String, u32>) {
+        let mut g = self.lock();
+        let Some(giver) = g.giver.clone() else {
+            return;
+        };
+        let give: std::collections::BTreeMap<String, u32> = give
+            .iter()
+            .filter_map(|(k, n)| Some((k.clone(), (*n).min(*g.held.get(k)?))))
+            .filter(|(_, n)| *n > 0)
+            .collect();
+        if give.is_empty() {
+            return;
+        }
+        giver.shrink(&give);
+        for (k, n) in &give {
+            if let Some(h) = g.held.get_mut(k) {
+                *h -= n;
+            }
+        }
+        g.held.retain(|_, n| *n > 0);
+        if let Some((dir, id)) = &g.hold {
+            set_hold_units(dir, id, &g.held);
+        }
+    }
+    /// Shards of the run are made again: ask for `units`, at the rank and from the wait start
+    /// the run had (#820), and wait. What is still held is given back first. `false`: the
+    /// caller was told to stop while it waited. A grant that holds nothing asks for nothing.
+    pub fn ask_again(
+        &self,
+        units: std::collections::BTreeMap<String, u32>,
+        stop: &dyn Fn() -> Option<StopWhy>,
+    ) -> bool {
+        let rest = self.units();
+        self.give(&rest);
+        let Some(giver) = self.lock().giver.clone() else {
+            return true;
+        };
+        match giver.ask_again(units.clone(), &|| stop().is_none(), &mut |_| {}) {
+            Ok(lease) => {
+                let mut g = self.lock();
+                g.giver = Some(lease.giver());
+                g.held = lease.units();
+                g.owned = Some(lease);
+                if let Some((dir, id)) = &g.hold {
+                    set_hold_units(dir, id, &g.held);
+                }
+                true
+            }
+            Err(_) => false,
+        }
+    }
+    /// Ask for `units` again if every unit of the lease has already been given back (its jobs
+    /// finished and the run is made again). `false`: told to stop while it waited.
+    pub fn regain(
+        &self,
+        units: std::collections::BTreeMap<String, u32>,
+        stop: &dyn Fn() -> Option<StopWhy>,
+    ) -> bool {
+        let released = self.lock().giver.as_ref().is_some_and(|g| !g.is_held());
+        !released || self.ask_again(units, stop)
     }
     /// How many runner units the lease was given when it asked for 1 to N, if it was flexible.
     pub fn granted_runners(&self) -> Option<u32> {
-        self.lease
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .and_then(|l| l.granted_runners())
+        self.lock().owned.as_ref().and_then(|l| l.granted_runners())
     }
     /// Give the units back: the run is not going to GitHub after all (`fallback = "local"`).
     /// Returns whether it held any. A lease with no runner units, this machine's own slots, is
     /// kept: the run goes on under it (#1149).
     pub fn give_back(&self) -> bool {
-        let mut lease = self.lease.lock().unwrap_or_else(|e| e.into_inner());
-        if lease.as_ref().is_none_or(|l| l.units().is_empty()) {
+        let mut g = self.lock();
+        if g.owned
+            .as_ref()
+            .is_some_and(|l| l.units().is_empty() && l.holds_local_slot())
+        {
             return false;
         }
-        lease.take().is_some()
+        let held = g.owned.take();
+        g.giver = None;
+        g.held.clear();
+        held.is_some()
     }
-    /// What of `uses` the grant's lease does not hold: all of it when there is no lease.
+    /// What of `uses` the grant's own lease does not hold: all of it when it owns none.
     pub fn shortfall(
         &self,
         uses: &std::collections::BTreeMap<String, u32>,
     ) -> std::collections::BTreeMap<String, u32> {
-        self.lease
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        self.lock()
+            .owned
             .as_ref()
             .map_or_else(|| uses.clone(), |l| l.shortfall(uses))
     }
-    /// The lease's id, when it holds a slot of this machine.
+    /// The id of the grant's own lease, when it holds a slot of this machine.
     pub fn local_slot_lease(&self) -> Option<u64> {
-        self.lease
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        self.lock()
+            .owned
             .as_ref()
             .filter(|l| l.holds_local_slot())
             .map(|l| l.id())
@@ -2906,6 +3045,25 @@ impl Grant {
     pub fn test() -> Self {
         Grant::attached()
     }
+}
+
+/// Rewrite the units of the hold of run `id` to `units`, keeping the rest of it.
+fn set_hold_units(dir: &Path, id: &str, units: &std::collections::BTreeMap<String, u32>) {
+    let Ok(kv) = read_kv(&hold_file(dir, id)) else {
+        return;
+    };
+    let text: Vec<String> = units.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    let _ = write_kv(
+        &hold_file(dir, id),
+        &[
+            ("key", kv.get("key").cloned().unwrap_or_default()),
+            ("label", kv.get("label").cloned().unwrap_or_default()),
+            ("units", text.join(",")),
+            ("record", kv.get("record").cloned().unwrap_or_default()),
+            ("kind", kv.get("kind").cloned().unwrap_or_default()),
+            ("task", kv.get("task").cloned().unwrap_or_default()),
+        ],
+    );
 }
 
 /// A lease request for `needs` of a project whose suites run on GitHub: the machine's
@@ -3908,9 +4066,39 @@ pub fn run_or_fallback(
     stop: &dyn Fn() -> Option<StopWhy>,
     grant: &Grant,
 ) -> Result<Option<Outcome>, String> {
-    match execute_sharded(site, spec, dir, stop, grant) {
+    let said = |t: &str| {
+        if let Some(f) = &site.on_phase {
+            f(t);
+        }
+    };
+    let mut spec = spec.clone();
+    // Granted too few runners: wait on GitHub for enough when this machine cannot run it.
+    if let Some(why) = spec.too_few_runners() {
+        match wait_for_grant(
+            site,
+            &spec,
+            min_shards(spec.shards_wanted),
+            &why,
+            stop,
+            grant,
+        ) {
+            Waited::Ready(s, note) => {
+                said(&note);
+                spec = *s;
+            }
+            Waited::Stopped(why) => return Ok(Some(Outcome::Stopped(why))),
+            Waited::NotNeeded => {}
+        }
+    }
+    match execute_sharded(site, &spec, dir, stop, grant) {
         Ok(o) => Ok(Some(o)),
         Err(Fail::Environmental(why)) if site.fallback_local => {
+            if let Some(b) = barred_here(site) {
+                let why = format!("{why}; not running it here: this Mac can't run it ({b})");
+                tracing::warn!(run = %spec.id, "{why}");
+                said(&why);
+                return Err(env_err(&why));
+            }
             tracing::warn!(run = %spec.id, "{why}; running it here instead (fallback = local)");
             // The run is not going to GitHub: its runner units go back before it takes local
             // slots (#818).
@@ -3920,6 +4108,58 @@ pub fn run_or_fallback(
         Err(Fail::Environmental(why)) => Err(env_err(&why)),
         Err(Fail::Error(e)) => Err(e),
     }
+}
+
+/// Why this machine cannot run a run at all now (a hold, or a slot of limit 0), when the site
+/// can fall back to it and says so. `None`: it can, or the site never falls back here.
+fn barred_here(site: &Site) -> Option<String> {
+    if !site.fallback_local {
+        return None;
+    }
+    site.local_barred.as_ref().and_then(|f| f())
+}
+
+/// What waiting for a bigger grant came to.
+enum Waited {
+    /// Granted `want` runner units: the run split for them, and what to tell about it.
+    Ready(Box<RunSpec>, String),
+    /// Told to stop while it waited.
+    Stopped(StopWhy),
+    /// Nothing to wait for: the run may fall back to this machine (it can run it there), or the
+    /// site has no way to split it again.
+    NotNeeded,
+}
+
+/// A run GitHub cannot take at the grant it has, and this machine cannot run either (limit 0,
+/// or held), waits on GitHub for a grant of at least `want` runner units instead of falling back
+/// into a queue that never starts it. The units it holds go back first and nothing is held while
+/// it waits: the broker's queue grants `want` when they are free, at the lease's own rank and
+/// from when it first waited (#820). Then the run is split again for what it was given.
+fn wait_for_grant(
+    site: &Site,
+    spec: &RunSpec,
+    want: u32,
+    why: &str,
+    stop: &dyn Fn() -> Option<StopWhy>,
+    grant: &Grant,
+) -> Waited {
+    let Some(resplit) = site.resplit.as_ref() else {
+        return Waited::NotNeeded;
+    };
+    let Some(barred) = barred_here(site) else {
+        return Waited::NotNeeded;
+    };
+    let note = format!(
+        "{why}; this Mac can't run it ({barred}), so it waits on GitHub for at least {want}"
+    );
+    tracing::warn!(run = %spec.id, "{note}");
+    if let Some(f) = &site.on_phase {
+        f(&note);
+    }
+    if !grant.ask_again(units_for(&spec.runs_on, want), stop) {
+        return Waited::Stopped(stop().unwrap_or(StopWhy::Gone));
+    }
+    Waited::Ready(Box::new(resplit(spec.clone(), want)), note)
 }
 
 /// Why a run ended without a result about the code (#873), or `None` when it gave one (green,
@@ -3956,6 +4196,13 @@ fn no_github_run(
     mut notes: Vec<String>,
 ) -> Result<(Option<Outcome>, Vec<String>), String> {
     tracing::warn!(run = %spec.id, "{why}");
+    // A machine that cannot run it is no place to send it (limit 0, or held for heat): the run
+    // is refused as it is when there is no fallback, and tried again later.
+    if let Some(b) = barred_here(site) {
+        let why = format!("{why}; not running it here: this Mac can't run it ({b})");
+        said(&why);
+        return Err(env_err(&why));
+    }
     if site.fallback_local {
         let note = format!("{why}; running it on this Mac");
         said(&note);
@@ -3982,17 +4229,37 @@ pub fn run_retrying(
 ) -> Result<(Option<Outcome>, Vec<String>), String> {
     let mut notes: Vec<String> = vec![];
     let mut whys: Vec<String> = vec![];
-    let mut attempt = spec.clone();
-    // Too few runners for the suite to finish inside its limit: not pushed at all, and not tried
-    // again either (the same shape would be refused again).
+    let mut spec = spec.clone();
+    let spec = &mut spec;
+    // Too few runners for the suite to finish inside its limit: not pushed at that size, and not
+    // tried again either (the same shape would be refused again). When this machine cannot run
+    // it, it waits on GitHub for enough runners instead of going here.
     if let Some(why) = spec.too_few_runners() {
-        return no_github_run(site, spec, why, said, grant, notes);
+        match wait_for_grant(
+            site,
+            spec,
+            min_shards(spec.shards_wanted),
+            &why,
+            stop,
+            grant,
+        ) {
+            Waited::Ready(s, note) => {
+                *spec = *s;
+                said(&note);
+                notes.push(note);
+            }
+            Waited::Stopped(w) => return Ok((Some(Outcome::Stopped(w)), notes)),
+            Waited::NotNeeded => return no_github_run(site, spec, why, said, grant, notes),
+        }
     }
+    let mut attempt = spec.clone();
+    let mut waited_for_more = false;
     for n in 0..2u32 {
         if n > 0 {
             if let Some(why) = stop() {
                 return Ok((Some(Outcome::Stopped(why)), notes));
             }
+            attempt = spec.clone();
             attempt.id = format!("{}-r{n}", spec.id);
             let note = format!(
                 "no result from the first run ({}); running it again on GitHub",
@@ -4030,12 +4297,33 @@ pub fn run_retrying(
                     spec.runners(),
                     spec.shards_wanted
                 );
+                // A machine that cannot run it waits for every runner the suite asked for, and
+                // the run goes out again at that size, once.
+                if !waited_for_more {
+                    waited_for_more = true;
+                    match wait_for_grant(site, spec, spec.shards_wanted, &why, stop, grant) {
+                        Waited::Ready(s, note) => {
+                            *spec = *s;
+                            said(&note);
+                            notes.push(note);
+                            whys.push(why);
+                            continue;
+                        }
+                        Waited::Stopped(w) => return Ok((Some(Outcome::Stopped(w)), notes)),
+                        Waited::NotNeeded => {}
+                    }
+                }
                 return no_github_run(site, spec, why, said, grant, notes);
             }
             Some(why) => whys.push(why),
         }
     }
     let both = format!("{}; then {}", whys[0], whys[1]);
+    if let Some(b) = barred_here(site) {
+        let why = format!("{both}; not running it here: this Mac can't run it ({b})");
+        said(&why);
+        return Err(env_err(&why));
+    }
     if site.fallback_local {
         let note = format!("no result from two runs on GitHub ({both}); running it on this Mac");
         tracing::warn!(run = %spec.id, "{note}");
@@ -4251,6 +4539,8 @@ mod tests {
         die_at: Mutex<Option<u32>>,
         /// The bodies of the dispatches: a run exists only once one was made.
         dispatches: Mutex<Vec<String>>,
+        /// The status of each job of the run, in order, when a test sets them one by one.
+        job_status: Mutex<Option<Vec<&'static str>>>,
     }
 
     impl FakeGh {
@@ -4271,6 +4561,7 @@ mod tests {
                 runs_seen: Mutex::new(Default::default()),
                 die_at: Mutex::new(None),
                 dispatches: Mutex::new(vec![]),
+                job_status: Mutex::new(None),
             })
         }
         fn requests(&self) -> Vec<String> {
@@ -4437,7 +4728,6 @@ mod tests {
             }
             if u.contains("/actions/runs/4242/jobs") {
                 let (_, job) = self.phase();
-                let started = (job != "queued").then_some("2026-11-20T10:00:06Z");
                 let ended = (job == "completed").then_some(if self.mode == Mode::StepTimeout {
                     "2026-11-20T10:08:06Z"
                 } else {
@@ -4461,8 +4751,18 @@ mod tests {
                     .iter()
                     .enumerate()
                     .map(|(i, n)| {
-                        serde_json::json!({"id": 9000 + i, "name": n, "status": job,
-                            "started_at": started, "completed_at": ended})
+                        let own = self
+                            .job_status
+                            .lock()
+                            .unwrap()
+                            .as_ref()
+                            .and_then(|v| v.get(i).copied());
+                        let status = own.unwrap_or(job);
+                        let started = (status != "queued").then_some("2026-11-20T10:00:06Z");
+                        // A job that completed has an end time, as GitHub gives it.
+                        let completed = (status == "completed").then_some(ended).flatten();
+                        serde_json::json!({"id": 9000 + i, "name": n, "status": status,
+                            "started_at": started, "completed_at": completed})
                     })
                     .collect();
                 return ok(serde_json::json!({ "jobs": jobs }));
@@ -4558,6 +4858,8 @@ mod tests {
             fallback_local: fallback,
             spill_after: None,
             local_room: None,
+            local_barred: None,
+            resplit: None,
             test_env: vec![],
             gh: GitHub::new(
                 gh,
@@ -5621,6 +5923,52 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_or_fallen_back_run_with_an_emptied_lease_asks_for_no_units_and_holds_none() {
+        use crate::sched::tests::{is_held, queue_gha, runner_broker};
+        token();
+        for fallback in [false, true] {
+            let r = repo();
+            let zip = artifact(r._t.path(), GREEN, 0, None);
+            let gh = FakeGh::new(&r, &zip, Mode::Normal);
+            let s = site(&r, gh.clone(), clock(), fallback);
+            let dir = r._t.path().join("runs");
+            let bdir = tempfile::tempdir().unwrap();
+            let b = runner_broker(bdir.path(), 2, 1, 0);
+            let lease = b
+                .acquire(
+                    mason_core::TaskId(1),
+                    "#1 test step",
+                    mason_scheduler::Rank::new(false, 3, 0, 1, 1, false),
+                    mason_scheduler::Needs::of(&[("gha", 2)]),
+                    &|| true,
+                    &mut |_| {},
+                )
+                .unwrap();
+            let grant = Grant::of(lease);
+            // An earlier run of the same lease finished all its jobs: nothing is held.
+            grant.give(&units_of(2));
+            assert!(grant.units().is_empty());
+            let mut sp = spec("rf");
+            sp.shards_wanted = 8;
+            let refused = execute_sharded(&s, &sp, &dir, &|| None, &grant);
+            assert!(matches!(refused, Err(Fail::Environmental(_))));
+            let r = run_retrying(&s, &sp, &dir, &|| None, &|_| {}, &grant);
+            if fallback {
+                assert!(r.unwrap().0.is_none(), "it runs on this Mac");
+            } else {
+                assert!(r.is_err());
+            }
+            // Nothing was pushed, nothing waits for units, and the grant holds none.
+            assert!(gh.dispatches.lock().unwrap().is_empty());
+            assert_eq!(b.gha_waiting(), 0);
+            assert!(grant.units().is_empty());
+            // So the whole pool is free for the next in line.
+            let next = queue_gha(&b, 5);
+            assert!(is_held(&b, next));
+        }
+    }
+
+    #[test]
     fn the_fewest_runners_is_half_the_shards_and_a_grant_below_it_is_refused() {
         let lists = |n: u32| vec![vec![]; n as usize];
         let mk = |granted| split_for_grant(spec("m"), 8, "c", granted, false, lists);
@@ -6390,6 +6738,154 @@ mod tests {
         }
     }
 
+    fn units_of(n: u32) -> std::collections::BTreeMap<String, u32> {
+        std::collections::BTreeMap::from([("gha".to_string(), n)])
+    }
+
+    #[test]
+    fn a_finished_shard_gives_its_unit_back_at_once_and_a_restart_counts_only_those_still_out() {
+        use crate::sched::tests::{is_held, queue_gha, runner_broker};
+        token();
+        let r = repo();
+        let t = tempfile::tempdir().unwrap();
+        let zip = artifact(t.path(), GREEN, 0, None);
+        let gh = FakeGh::new(&r, &zip, Mode::Hung);
+        // Shard 2 of three has finished; 1 and 3 are still running.
+        *gh.job_status.lock().unwrap() = Some(vec!["in_progress", "completed", "in_progress"]);
+        let s = site(&r, gh.clone(), clock(), false);
+        let logs = tempfile::tempdir().unwrap();
+        let mut sp = spec("g1");
+        sp.shards = 3;
+        sp.shard_lists = vec![vec![], vec![], vec![]];
+        let bdir = tempfile::tempdir().unwrap();
+        let b = runner_broker(bdir.path(), 3, 1, 0);
+        let lease = b
+            .acquire(
+                mason_core::TaskId(1),
+                "#1 test step",
+                mason_scheduler::Rank::new(false, 3, 0, 1, 1, false),
+                mason_scheduler::Needs::of(&[("gha", 3)]),
+                &|| true,
+                &mut |_| {},
+            )
+            .unwrap();
+        let grant = Grant::of(lease);
+        let holds = logs.path().join("remote-holds");
+        write_hold(
+            &holds,
+            "g1",
+            &RemoteHold {
+                key: "task 1".into(),
+                label: "#1".into(),
+                units: units_of(3),
+                record: record_path(logs.path(), "g1"),
+                kind: "test_step".into(),
+                task: 1,
+            },
+        );
+        grant.note_hold(&holds, "g1");
+        // The next in line needs one unit and waits: all three are held.
+        let waiter = queue_gha(&b, 9);
+        assert!(!is_held(&b, waiter));
+        // The run is left as soon as the waiter is granted, with two shards still running.
+        // The hold file is read then, while the run (and its record) is still out.
+        let b2 = b.clone();
+        let seen: Mutex<Vec<RemoteHold>> = Mutex::new(vec![]);
+        let stop = || {
+            is_held(&b2, waiter).then(|| {
+                *seen.lock().unwrap() = running_holds(&holds);
+                StopWhy::Skipped
+            })
+        };
+        let out = execute(&s, &sp, logs.path(), &stop, &grant).unwrap();
+        assert!(matches!(out, Outcome::Stopped(StopWhy::Skipped)));
+        assert!(
+            is_held(&b, waiter),
+            "granted while shards 1 and 3 still ran"
+        );
+        assert_eq!(grant.units(), units_of(2));
+        let kept = seen.lock().unwrap().clone();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].units, units_of(2));
+        // A daemon started with that hold file counts two units: of three, one more is free.
+        let again = tempfile::tempdir().unwrap();
+        let b3 = runner_broker(again.path(), 3, 1, 0);
+        // The daemon died with the run still out: its record is there.
+        State {
+            sha: "abc".into(),
+            ..Default::default()
+        }
+        .save(&kept[0].record);
+        b3.adopt_remote(&kept);
+        let first = queue_gha(&b3, 1);
+        let second = queue_gha(&b3, 2);
+        assert!(is_held(&b3, first));
+        assert!(
+            !is_held(&b3, second),
+            "two of the three units are the run's"
+        );
+    }
+
+    #[test]
+    fn shards_run_again_ask_for_their_units_again_at_the_runs_own_rank() {
+        use crate::sched::tests::{is_held, queue_gha, runner_broker};
+        let bdir = tempfile::tempdir().unwrap();
+        let b = runner_broker(bdir.path(), 1, 1, 0);
+        let lease = b
+            .acquire(
+                mason_core::TaskId(1),
+                "#1 test step",
+                mason_scheduler::Rank::new(false, 3, 0, 1, 1, false),
+                mason_scheduler::Needs::of(&[("gha", 1)]),
+                &|| true,
+                &mut |_| {},
+            )
+            .unwrap();
+        let grant = Grant::of(lease);
+        let first = queue_gha(&b, 8);
+        // The shard finished: its unit goes to the one waiting.
+        grant.give(&units_of(1));
+        assert!(grant.units().is_empty());
+        assert!(is_held(&b, first));
+        // A younger request of the same kind queues; then the missing shard asks again.
+        // (Through `acquire`, so it has waited as long as it says: `queue_gha` would age it.)
+        let (tx, younger) = std::sync::mpsc::channel();
+        let b9 = b.clone();
+        std::thread::spawn(move || {
+            let lease = b9.acquire(
+                mason_core::TaskId(9),
+                "#9 test step",
+                mason_scheduler::Rank::new(false, 3, 0, 9, 9, false),
+                mason_scheduler::Needs::of(&[("gha", 1)]),
+                &|| true,
+                &mut |_| {},
+            );
+            let _ = tx.send(lease);
+        });
+        let began = std::time::Instant::now();
+        let queued = |n: usize| {
+            while b.gha_waiting() < n {
+                assert!(began.elapsed().as_secs() < 60, "{n} never queued");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        queued(1);
+        let g2 = grant.clone();
+        let again = std::thread::spawn(move || g2.ask_again(units_of(1), &|| None));
+        queued(2);
+        b.release_for_test(first, mason_core::TaskId(8));
+        while !again.is_finished() {
+            assert!(began.elapsed().as_secs() < 60, "the rerun was not granted");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(again.join().unwrap());
+        assert_eq!(grant.units(), units_of(1));
+        assert!(
+            younger.try_recv().is_err(),
+            "the rerun went before the younger request"
+        );
+    }
+
     #[test]
     fn a_macos_run_holds_a_unit_of_each_pool_and_a_sharded_one_holds_one_per_job() {
         let u = units_for("macos-14", 1);
@@ -6709,6 +7205,8 @@ mod tests {
             fallback_local: false,
             spill_after: None,
             local_room: None,
+            local_barred: None,
+            resplit: None,
             test_env: vec![],
             gh: GitHub::new(
                 gh.clone(),
@@ -7374,5 +7872,247 @@ mod tests {
         for g in ["-p a --lib", "-p b --test it", "-p c --lib"] {
             assert!(cmd.contains(g), "{cmd}");
         }
+    }
+
+    // ---- a run this machine cannot take back waits on GitHub (the fallback dead end) ----
+
+    use crate::sched::LoadReading;
+
+    /// A machine reading: `held` is the hold in force, `limit` the `test-suite` limit.
+    fn reading(held: Option<&str>, limit: u32) -> LoadReading {
+        LoadReading {
+            limits: [
+                ("compile".to_string(), 3),
+                ("test-suite".to_string(), limit),
+            ]
+            .into(),
+            held: held.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    /// A site that falls back to a machine in this state, with the way to split a run again.
+    fn site_for_machine(r: &Repo, gh: Arc<FakeGh>, machine: LoadReading) -> Site {
+        let mut s = site(r, gh, clock(), true);
+        let uses = std::collections::BTreeMap::from([("test-suite".to_string(), 1)]);
+        s.local_barred = Some(Arc::new(move || {
+            crate::place::cannot_run_here(&machine, &uses)
+        }));
+        s.resplit = Some(Arc::new(|mut rs: RunSpec, n| {
+            rs.shards = n;
+            rs.shard_command = Some("shard-cmd".into());
+            rs.shard_lists = vec![vec![]; n as usize];
+            rs
+        }));
+        s
+    }
+
+    /// A broker whose 8 runner units are 7 held by another task, and a flexible lease of the
+    /// run's that was given the one left: a run split for 1 of the 8 it wanted.
+    struct ShortGrant {
+        _dir: tempfile::TempDir,
+        b: Arc<crate::sched::Broker>,
+        other: Option<crate::sched::Lease>,
+        grant: Grant,
+        spec: RunSpec,
+    }
+
+    fn short_grant() -> ShortGrant {
+        let dir = tempfile::tempdir().unwrap();
+        let b = crate::sched::tests::runner_broker(dir.path(), 8, 1, 0);
+        let rank = mason_scheduler::Rank::new(false, 3, 0, 1, 1, false);
+        let other = b
+            .acquire(
+                mason_core::TaskId(9),
+                "#9 other",
+                rank,
+                mason_scheduler::Needs::of(&[("gha", 7)]),
+                &|| true,
+                &mut |_| {},
+            )
+            .unwrap();
+        let lease = b
+            .acquire(
+                mason_core::TaskId(1),
+                "#1 test step",
+                rank,
+                mason_scheduler::Needs::of(&[("gha", 8)]).flexible(),
+                &|| true,
+                &mut |_| {},
+            )
+            .unwrap();
+        assert_eq!(lease.granted_runners(), Some(1));
+        let mut sp = spec("w1");
+        sp.shards_wanted = 8;
+        ShortGrant {
+            _dir: dir,
+            b,
+            other: Some(other),
+            grant: Grant::of(lease),
+            spec: sp,
+        }
+    }
+
+    /// Runs `run` on a thread while the units it needs are not free; once it has queued for
+    /// them, checks it holds nothing, then frees them and returns what `run` made.
+    fn run_while_short<T: Send>(sg: &mut ShortGrant, run: impl FnOnce(&Grant) -> T + Send) -> T {
+        let grant = sg.grant.clone();
+        let b = sg.b.clone();
+        let other = sg.other.take();
+        std::thread::scope(|sc| {
+            let h = sc.spawn(|| run(&grant));
+            // It queues for the units the other task holds (a wait for a condition, not time).
+            let mut looks = 0u64;
+            while b.gha_waiting() == 0 {
+                looks += 1;
+                assert!(looks < 50_000_000, "it never asked again");
+                std::thread::yield_now();
+            }
+            assert!(grant.units().is_empty(), "it holds nothing while it waits");
+            assert_eq!(b.used("gha"), 7, "only the other task's units are held");
+            drop(other);
+            h.join().unwrap()
+        })
+    }
+
+    /// Stops a run once it has looked at its jobs, so it ends after it was pushed.
+    fn stop_once_pushed(gh: &Arc<FakeGh>) -> impl Fn() -> Option<StopWhy> + Send + Sync {
+        let g = gh.clone();
+        move || {
+            g.requests()
+                .iter()
+                .any(|q| q.contains("/jobs"))
+                .then_some(StopWhy::Skipped)
+        }
+    }
+
+    #[test]
+    fn a_refused_short_grant_waits_on_github_when_this_machine_cannot_run_it() {
+        token();
+        // A limit of 0 and a hold each mean it cannot.
+        for (machine, why) in [
+            (reading(None, 0), "test-suite limit 0"),
+            (
+                reading(Some("held for heat (die 94 C)"), 2),
+                "held for heat",
+            ),
+        ] {
+            let r = repo();
+            let zip = artifact(r._t.path(), GREEN, 0, None);
+            let gh = FakeGh::new(&r, &zip, Mode::NeverPicked);
+            let s = site_for_machine(&r, gh.clone(), machine);
+            let said: Mutex<Vec<String>> = Mutex::new(vec![]);
+            let mut sg = short_grant();
+            let (sp, dir) = (sg.spec.clone(), r._t.path().join("runs"));
+            let stop = stop_once_pushed(&gh);
+            let out = run_while_short(&mut sg, |grant| {
+                run_retrying(
+                    &s,
+                    &sp,
+                    &dir,
+                    &stop,
+                    &|t| said.lock().unwrap().push(t.into()),
+                    grant,
+                )
+            });
+            let (o, notes) = out.unwrap();
+            assert!(
+                matches!(o, Some(Outcome::Stopped(StopWhy::Skipped))),
+                "it ran on GitHub, not here: {o:?}"
+            );
+            let said = said.into_inner().unwrap();
+            assert!(
+                said[0].contains("granted 1 of 8 runner units")
+                    && said[0].contains("this Mac can't run it (")
+                    && said[0].contains(why)
+                    && said[0].contains("so it waits on GitHub for at least 4"),
+                "{said:?}"
+            );
+            assert_eq!(notes[0], said[0]);
+            // Pushed once, split the fewest ways that can finish: half of 8.
+            assert_eq!(dispatched_inputs(&gh)["inputs"]["matrix"], "[1,2,3,4]");
+            assert_eq!(sg.grant.units(), units_of(4));
+        }
+    }
+
+    #[test]
+    fn a_suite_run_refused_for_a_short_grant_also_waits_when_this_machine_cannot_run_it() {
+        token();
+        let r = repo();
+        let zip = artifact(r._t.path(), GREEN, 0, None);
+        let gh = FakeGh::new(&r, &zip, Mode::NeverPicked);
+        let s = site_for_machine(&r, gh.clone(), reading(None, 0));
+        let mut sg = short_grant();
+        let (sp, dir) = (sg.spec.clone(), r._t.path().join("runs"));
+        let stop = stop_once_pushed(&gh);
+        let out = run_while_short(&mut sg, |grant| {
+            run_or_fallback(&s, &sp, &dir, &stop, grant)
+        });
+        assert!(matches!(out, Ok(Some(Outcome::Stopped(StopWhy::Skipped)))));
+        assert_eq!(dispatched_inputs(&gh)["inputs"]["matrix"], "[1,2,3,4]");
+    }
+
+    #[test]
+    fn a_refused_short_grant_still_falls_back_when_this_machine_can_run_it() {
+        token();
+        let r = repo();
+        let zip = artifact(r._t.path(), GREEN, 0, None);
+        let gh = FakeGh::new(&r, &zip, Mode::Normal);
+        // A limit above 0 and nothing held: it can, so it goes there as before, at once.
+        let s = site_for_machine(&r, gh.clone(), reading(None, 2));
+        let dir = r._t.path().join("runs");
+        let mut sg = short_grant();
+        let (o, notes) = run_retrying(&s, &sg.spec, &dir, &|| None, &|_| {}, &sg.grant).unwrap();
+        assert!(o.is_none(), "the caller runs it here");
+        assert!(notes[0].contains("running it on this Mac"), "{notes:?}");
+        assert!(!notes[0].contains("waits on GitHub"));
+        assert!(gh.dispatches.lock().unwrap().is_empty());
+        assert!(sg.grant.units().is_empty(), "its unit went back");
+        let mut sg2 = short_grant();
+        let out = run_or_fallback(&s, &sg2.spec, &dir, &|| None, &sg2.grant);
+        assert!(matches!(out, Ok(None)));
+        assert!(gh.dispatches.lock().unwrap().is_empty());
+        sg.other.take();
+        sg2.other.take();
+    }
+
+    #[test]
+    fn a_run_that_hit_the_limit_on_a_short_grant_waits_for_all_its_runners_when_this_machine_cannot_run_it(
+    ) {
+        token();
+        let r = repo();
+        let zip = cut_artifact(r._t.path(), "test a ... ok\n");
+        let gh = FakeGh::new(&r, &zip, Mode::StepTimeout);
+        let s = site_for_machine(&r, gh.clone(), reading(None, 0));
+        // 1 runner of 2 wanted (the fewest is 1): the run ends at the step limit.
+        let dir = r._t.path().join("runs");
+        let mut sp = spec("w2");
+        sp.shards_wanted = 2;
+        let said: Mutex<Vec<String>> = Mutex::new(vec![]);
+        let out = run_retrying(
+            &s,
+            &sp,
+            &dir,
+            &|| None,
+            &|t| said.lock().unwrap().push(t.to_string()),
+            &Grant::test(),
+        );
+        // It is not sent here: it waits for the 2 runners the suite asked for and goes out
+        // again at that size (the fake artifact has no shard results, so that run misses too,
+        // and the miss is not sent here either).
+        let e = out.unwrap_err();
+        assert!(
+            environmental(&e).unwrap().contains("this Mac can't run it"),
+            "{e}"
+        );
+        let said = said.into_inner().unwrap();
+        assert!(
+            said.iter()
+                .any(|t| t.contains("waits on GitHub for at least 2")),
+            "{said:?}"
+        );
+        let d = gh.dispatches.lock().unwrap();
+        assert!(d[1].contains("[1,2]"), "{d:?}");
+        assert_eq!(d.len(), 2);
     }
 }

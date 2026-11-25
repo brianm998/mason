@@ -25,7 +25,8 @@ pub use explain::{
 };
 pub use ledger::{Ledger, Snapshot, Stall};
 pub use plan::{
-    is_gha_pool, plan, Capacity, CompilePace, CpuGate, DiskGate, Holder, Kind, Needs, Plan,
-    PolicyGate, Request, StallGate, ThermalGate, World, COMPILE, GHA, GHA_MACOS,
+    is_gha_pool, is_runner_request, plan, Capacity, CompilePace, CpuGate, DiskGate, Holder, Kind,
+    Needs, Plan, PolicyGate, Request, StallGate, ThermalGate, World, COMPILE, GHA, GHA_DEBT,
+    GHA_MACOS,
 };
-pub use rank::Rank;
+pub use rank::{Rank, RunnerKind};

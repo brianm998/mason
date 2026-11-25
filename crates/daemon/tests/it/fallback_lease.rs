@@ -399,6 +399,7 @@ fn a_request_made_while_holding_a_slot_goes_before_an_earlier_step_start() {
     let w = world("window = \"20m\"\n", &[]);
     let d = w.d.clone();
     d.broker.declare("test-suite", 1);
+    d.broker.set_limit("compile", 2).unwrap();
     d.broker.set_limit("test-suite", 1).unwrap();
     let busy = step_lease(&d, 5, &[("test-suite", 1)]);
     let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
