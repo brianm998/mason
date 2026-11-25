@@ -70,8 +70,7 @@ pub fn location_with(path: &Path, run: &dyn Fn(&str, &[&str]) -> Option<String>)
 }
 
 fn tool(program: &str, args: &[&str]) -> Option<String> {
-    let out =
-        mason_landing::proc::output(Command::new(program).args(args), TOOL_TIMEOUT).ok()?;
+    let out = mason_landing::proc::output(Command::new(program).args(args), TOOL_TIMEOUT).ok()?;
     out.status
         .success()
         .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
@@ -90,9 +89,7 @@ pub fn location_of(path: &Path) -> Location {
 /// [`location_of`] this process's executable, asked once.
 pub fn own_location() -> Location {
     static OWN: std::sync::OnceLock<Location> = std::sync::OnceLock::new();
-    *OWN.get_or_init(|| {
-        std::env::current_exe().map_or(Location::Unknown, |e| location_of(&e))
-    })
+    *OWN.get_or_init(|| std::env::current_exe().map_or(Location::Unknown, |e| location_of(&e)))
 }
 
 // ---- where the bundle goes -----------------------------------------------------------------
@@ -601,7 +598,10 @@ mod tests {
             "only code goes in"
         );
         // Installed already: nothing to do.
-        assert!(prepare(&target, &rt, "one", None).unwrap().partial.is_none());
+        assert!(prepare(&target, &rt, "one", None)
+            .unwrap()
+            .partial
+            .is_none());
         let two = prepare(&target, &rt, "two", None).unwrap();
         let second = two.commit().unwrap();
         assert_eq!(first, second);
