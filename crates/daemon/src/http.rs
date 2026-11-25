@@ -113,6 +113,11 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
             v["auto_retries"] = json!(done);
             v["next_auto_retry_ms"] = json!(next);
         }
+        // A diagnosis session is running: when it started and on what model and effort.
+        v["diagnosis_running"] = crate::diagnose::running(t.id.0).map_or(
+            Value::Null,
+            |(at, on)| json!({"started_ms": at, "ran_on": on}),
+        );
     }
     if detail {
         v["body"] = json!(t.body);
@@ -993,9 +998,38 @@ async fn diagnoses(Shared(d): Shared<Arc<Daemon>>, Path(id): Path<u64>) -> Res {
             let a: Value = serde_json::from_str(&r.args).unwrap_or(json!({}));
             json!({"id": r.id, "task": r.task, "at": r.at_ms, "verdict": r.verdict,
                    "status": r.status, "args": a, "ran_on": a["ran_on"],
-                   "text": crate::diagnose::card_text(r.task, r.id, &r.verdict, &a)})
+                   "card": serde_json::from_str::<Value>(&r.card).unwrap_or(Value::Null),
+                   "failed_at": r.failed_at,
+                   "text": crate::diagnose::row_text(r)})
         })
         .collect::<Vec<_>>())))
+}
+
+/// Ask for a diagnosis of a failed task (s1048). Owner only; the task must be Failed, within the
+/// diagnosis budget, and have none running.
+async fn diagnose_now(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<u64>,
+) -> Res {
+    let who = who_of(&headers);
+    owner_only(&d, &who, "ask for a diagnosis")?;
+    let d2 = d.clone();
+    d.pool
+        .run(move || {
+            let latest = {
+                let w = d2.world().map_err(store_err)?;
+                if !w.tasks.contains_key(&TaskId(id)) {
+                    return Err(fail(StatusCode::NOT_FOUND, format!("no task #{id}")));
+                }
+                latest_run(&w, TaskId(id))
+            };
+            crate::diagnose::start(&d2, TaskId(id), StepRunId(latest), true)
+                .map_err(|e| fail(StatusCode::CONFLICT, e))
+        })
+        .await
+        .map_err(pool_err)??;
+    Ok(Json(json!({"ok": true})))
 }
 
 /// Apply or dismiss a pending diagnosis the owner chose (s250).
@@ -2584,13 +2618,22 @@ async fn debts_list(
     let d2 = d.clone();
     let rows = d
         .pool
-        .run(move || d2.store.debts(None, open))
+        .run(move || {
+            let rows = d2.store.debts(None, open)?;
+            Ok::<_, mason_store::StoreError>(
+                rows.iter()
+                    .map(|x| {
+                        let mut v = debt_json(x);
+                        v["no_effect"] = json!(crate::suites::skip_has_no_effect(&d2, x));
+                        v
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        })
         .await
         .map_err(pool_err)?
         .map_err(store_err)?;
-    Ok(Json(
-        json!({"debts": rows.iter().map(debt_json).collect::<Vec<_>>()}),
-    ))
+    Ok(Json(json!({"debts": rows})))
 }
 
 /// Pay a debt by running the skipped suite on the base branch now.
@@ -4267,6 +4310,7 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/tasks/{id}/owner-notes", get(owner_notes))
         .route("/tasks/{id}/owner-notes/clear", post(owner_notes_clear))
         .route("/tasks/{id}/retry", post(retry))
+        .route("/tasks/{id}/diagnose", post(diagnose_now))
         .route("/tasks/{id}/diagnoses", get(diagnoses))
         .route("/tasks/{id}/diagnoses/{did}/{what}", post(decide_diagnosis))
         .route("/tasks/{id}/approve", post(approve))
