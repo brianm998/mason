@@ -235,7 +235,12 @@ impl Ledger {
         );
         for id in &p.grants {
             if let Some(i) = self.waiting.iter().position(|r| r.id == *id) {
-                let r = self.waiting.remove(i);
+                let mut r = self.waiting.remove(i);
+                // A flexible request holds what it was given, not what it asked for.
+                if let Some(given) = p.flexed.get(id) {
+                    r.needs.amounts = given.clone();
+                    r.needs.flex = false;
+                }
                 if r.needs.amounts.contains_key(COMPILE) {
                     self.last_compile_start = Some(now);
                 }
@@ -734,5 +739,91 @@ mod tests {
         let ok_ids = ids(&mut ok);
         let q = ok.schedule(10, None, None);
         assert_eq!(q.grants, vec![ok_ids[0], ok_ids[1]]);
+    }
+
+    /// 20 `gha` units with `used` of them held, one by one (other workflows' jobs).
+    fn gha_ledger(used: u32) -> (Ledger, Vec<u64>) {
+        let mut l = Ledger::new();
+        l.set_capacity("gha", 20, Kind::Pool);
+        let held = (0..used)
+            .map(|_| l.adopt(Needs::of(&[("gha", 1)]), "other workflows", 0))
+            .collect();
+        (l, held)
+    }
+
+    fn gha(n: u32) -> Needs {
+        Needs::of(&[("gha", n)])
+    }
+
+    #[test]
+    fn flexible_waiters_take_what_is_free_and_do_not_starve_one_unit_requests() {
+        // The live case (2026-11-24): 20 units, 14 used, two sharded runs of 8 first in line.
+        let (mut l, mut held) = gha_ledger(14);
+        let a = l.submit(rank(1, 1, 1), gha(8).flexible(), "#a", 0);
+        let b = l.submit(rank(1, 2, 2), gha(8).flexible(), "#b", 0);
+        let c = l.submit(rank(1, 3, 3), gha(1), "#c", 0);
+        let d = l.submit(rank(1, 4, 4), gha(1), "#d", 0);
+        let p = l.schedule(1, None, None);
+        assert_eq!(p.grants, vec![a], "the first is given the 6 that are free");
+        assert_eq!(l.holder(a).unwrap().needs.amounts["gha"], 6);
+        assert!(!l.holder(a).unwrap().needs.flex);
+        assert_eq!(p.flexed[&a]["gha"], 6);
+        assert_eq!(l.snapshot().used["gha"], 20);
+        assert!(l.is_waiting(b) && l.is_waiting(c) && l.is_waiting(d));
+        // One unit frees: the second flexible run, first in line, takes it and runs as one job.
+        l.release(held.pop().unwrap());
+        let p = l.schedule(2, None, None);
+        assert_eq!(p.grants, vec![b]);
+        assert_eq!(l.holder(b).unwrap().needs.amounts["gha"], 1);
+        // Two more free: the one-unit requests are not held back by anything reserved.
+        l.release(held.pop().unwrap());
+        l.release(held.pop().unwrap());
+        let p = l.schedule(3, None, None);
+        assert_eq!(p.grants, vec![c, d]);
+    }
+
+    #[test]
+    fn a_flexible_waiter_with_none_free_holds_the_line_only_for_its_one_unit() {
+        let (mut l, mut held) = gha_ledger(20);
+        let a = l.submit(rank(1, 1, 1), gha(8).flexible(), "#a", 0);
+        let b = l.submit(rank(1, 2, 2), gha(1), "#b", 0);
+        assert!(l.schedule(1, None, None).grants.is_empty());
+        // The first unit that frees is the flexible one's, not 8 units' worth of waiting.
+        l.release(held.pop().unwrap());
+        assert_eq!(l.schedule(2, None, None).grants, vec![a]);
+        assert_eq!(l.holder(a).unwrap().needs.amounts["gha"], 1);
+        assert!(l.is_waiting(b));
+        l.release(held.pop().unwrap());
+        assert_eq!(l.schedule(3, None, None).grants, vec![b]);
+    }
+
+    #[test]
+    fn a_flexible_waiter_held_by_another_resource_reserves_one_unit_not_its_most() {
+        let mut l = Ledger::new();
+        l.set_capacity("gha", 20, Kind::Pool);
+        l.set_capacity("dev", 1, Kind::Pool);
+        l.adopt(Needs::of(&[("gha", 14), ("dev", 1)]), "held", 0);
+        let a = l.submit(
+            rank(1, 1, 1),
+            Needs::of(&[("gha", 8), ("dev", 1)]).flexible(),
+            "#a",
+            0,
+        );
+        let b = l.submit(rank(1, 2, 2), gha(1), "#b", 0);
+        let c = l.submit(rank(1, 3, 3), gha(4), "#c", 0);
+        let p = l.schedule(1, None, None);
+        // 14 used + 1 reserved leaves 5 (1 + 4): both later requests pass (8 reserved would block them).
+        assert_eq!(p.grants, vec![b, c]);
+        assert!(l.is_waiting(a));
+    }
+
+    #[test]
+    fn fixed_requests_still_reserve_everything_they_need() {
+        let (mut l, _) = gha_ledger(14);
+        let a = l.submit(rank(1, 1, 1), gha(8), "#a", 0);
+        let b = l.submit(rank(1, 2, 2), gha(1), "#b", 0);
+        let p = l.schedule(1, None, None);
+        assert!(p.grants.is_empty());
+        assert!(l.is_waiting(a) && l.is_waiting(b));
     }
 }

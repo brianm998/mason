@@ -2622,17 +2622,51 @@ pub fn run_place(
 /// `needs` of a run of `suite` placed by [`run_place`]: on GitHub the machine's `compile`,
 /// `test-suite` and `test-small` (and the whole machine) become the run's runner units; here
 /// nothing changes (`None`), whatever the global switch says (#766's lesson: decide per suite).
+///
+/// `flexible`: a sharded run asks for 1 to N runner units and is granted what is free (at least
+/// 1), then splits into that many shards ([`shards_granted`]) instead of waiting for all N.
 pub fn suite_pool_needs(
     d: &Daemon,
     project: &str,
     task: Option<mason_core::TaskId>,
     needs: &mason_scheduler::Needs,
     suite: &mason_testing::Suite,
+    flexible: bool,
 ) -> Option<mason_scheduler::Needs> {
     match run_place(d, project, task, Some(suite), &suite.command, Kind::Suite) {
-        RunPlace::GitHub { units, .. } => Some(with_units(needs, units)),
+        RunPlace::GitHub { units, .. } => {
+            let n = with_units(needs, units);
+            Some(if flexible { n.flexible() } else { n })
+        }
         RunPlace::Local => None,
     }
+}
+
+/// How many shards a run of `shards` makes when the broker granted it `granted` runner units
+/// (`None`: not a flexible grant, so all of them). Never more than asked, never fewer than one.
+pub fn shards_granted(shards: u32, granted: Option<u32>) -> u32 {
+    granted.map_or(shards, |g| g.clamp(1, shards.max(1)))
+}
+
+/// `rs` split for a run of `shards` shards that was granted `granted` runner units: that many
+/// ways (`lists` makes the tests of each), with `shard_command` on each runner; one unit runs
+/// `rs`'s own command whole on one runner. Suite runs and agents' checks both split by this.
+pub fn split_for_grant(
+    mut rs: RunSpec,
+    shards: u32,
+    shard_command: &str,
+    granted: Option<u32>,
+    partial_lists: bool,
+    lists: impl FnOnce(u32) -> Vec<Vec<String>>,
+) -> RunSpec {
+    let n = shards_granted(shards, granted);
+    if n > 1 {
+        rs.shards = n;
+        rs.shard_command = Some(shard_command.to_string());
+        rs.shard_lists = lists(n);
+        rs.partial_lists = partial_lists;
+    }
+    rs
 }
 
 /// `needs` without the machine's slots, plus `units`.
@@ -2649,6 +2683,7 @@ pub fn with_units(
             .filter(|(k, _)| !MACHINE.contains(&k.as_str()))
             .map(|(k, v)| (k.clone(), *v))
             .collect(),
+        flex: false,
     };
     for (k, v) in units {
         let have = out.amounts.entry(k).or_insert(0);
@@ -2785,6 +2820,14 @@ impl Grant {
             }
             Err(_) => false,
         }
+    }
+    /// How many runner units the lease was given when it asked for 1 to N, if it was flexible.
+    pub fn granted_runners(&self) -> Option<u32> {
+        self.lease
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .and_then(|l| l.granted_runners())
     }
     /// Give the units back: the run is not going to GitHub after all (`fallback = "local"`).
     /// Returns whether it held any.
@@ -3297,7 +3340,27 @@ pub fn reap_hold_etag(site: &Site, holds: &Path, record: &Path, etag: &mut Optio
             Err(_) => return false,
         },
     };
-    let Some(run) = run else { return false };
+    let Some(run) = run else {
+        // GitHub lists a run as soon as it exists, queued or not. A record that never learned
+        // its run's id and still has none on GitHub long after its push never had one (the
+        // dispatch was lost): nobody will collect it, and kept, it held a runner unit across
+        // every restart (debt602, 36 h on 2026-11-24). Give it up.
+        if st.run_id.is_none()
+            && site.clock.now_ms().saturating_sub(st.pushed_ms) >= orphan_after_ms(site)
+        {
+            tracing::info!(
+                run = %id,
+                "no GitHub run was ever made for {}; freeing its runner unit",
+                st.ref_name
+            );
+            st.released = true;
+            delete_ref(site, &mut st, record);
+            let _ = std::fs::remove_file(record);
+            remove_hold(holds, &id);
+            return true;
+        }
+        return false;
+    };
     if run.status != "completed" {
         return false;
     }
@@ -3313,6 +3376,12 @@ pub fn reap_hold_etag(site: &Site, holds: &Path, record: &Path, etag: &mut Optio
     }
     remove_hold(holds, &id);
     true
+}
+
+/// How long after its push a record with no run on GitHub is given up: the pickup timeout, and
+/// never under half an hour.
+fn orphan_after_ms(site: &Site) -> u64 {
+    (site.pickup_timeout.as_millis() as u64).max(30 * 60 * 1000)
 }
 
 /// Cancel an adopted run nobody will collect, delete its ref, end its record and remove its
@@ -4969,6 +5038,39 @@ mod tests {
     }
 
     #[test]
+    fn a_hold_with_no_run_on_github_is_kept_while_young_and_freed_once_old() {
+        token();
+        let r = repo();
+        let t = tempfile::tempdir().unwrap();
+        let zip = artifact(t.path(), GREEN, 0, None);
+        // Nothing was dispatched: GitHub lists no run for the commit.
+        let gh = FakeGh::new(&r, &zip, Mode::Normal);
+        let clk = clock();
+        let s = site(&r, gh, clk.clone(), false);
+        let logs = tempfile::tempdir().unwrap();
+        let (holds, rec) = adopted(&r, logs.path(), "d9");
+        let mut st = State::load(&rec).unwrap();
+        st.run_id = None;
+        st.pushed_ms = clk.now_ms();
+        st.save(&rec);
+        assert!(
+            !reap_hold(&s, &holds, &rec),
+            "a fresh push may still get its run"
+        );
+        assert_eq!(running_holds(&holds).len(), 1);
+        clk.sleep(orphan_after_ms(&s) - 1);
+        assert!(!reap_hold(&s, &holds, &rec), "not yet past the window");
+        clk.sleep(1);
+        assert!(
+            reap_hold(&s, &holds, &rec),
+            "no run was ever made: the unit is freed"
+        );
+        assert!(running_holds(&holds).is_empty());
+        assert!(record_ended(&rec), "the record no longer counts as out");
+        assert_eq!(refs(&r.bare), "", "the ref is deleted");
+    }
+
+    #[test]
     fn a_hold_whose_run_is_still_going_is_kept() {
         token();
         let r = repo();
@@ -6143,20 +6245,40 @@ mod tests {
         assert!(grant.units().is_empty());
         assert!(is_held(&b, first));
         // A younger request of the same kind queues; then the missing shard asks again.
-        let younger = queue_gha(&b, 9);
+        // (Through `acquire`, so it has waited as long as it says: `queue_gha` would age it.)
+        let (tx, younger) = std::sync::mpsc::channel();
+        let b9 = b.clone();
+        std::thread::spawn(move || {
+            let lease = b9.acquire(
+                mason_core::TaskId(9),
+                "#9 test step",
+                mason_scheduler::Rank::new(false, 3, 0, 9, 9, false),
+                mason_scheduler::Needs::of(&[("gha", 1)]),
+                &|| true,
+                &mut |_| {},
+            );
+            let _ = tx.send(lease);
+        });
+        let began = std::time::Instant::now();
+        let queued = |n: usize| {
+            while b.gha_waiting() < n {
+                assert!(began.elapsed().as_secs() < 60, "{n} never queued");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        queued(1);
         let g2 = grant.clone();
         let again = std::thread::spawn(move || g2.ask_again(units_of(1), &|| None));
-        let began = std::time::Instant::now();
-        while b.gha_waiting() < 2 {
-            assert!(began.elapsed().as_secs() < 60, "the rerun never queued");
+        queued(2);
+        b.release_for_test(first, mason_core::TaskId(8));
+        while !again.is_finished() {
+            assert!(began.elapsed().as_secs() < 60, "the rerun was not granted");
             std::thread::sleep(Duration::from_millis(5));
         }
-        assert!(!is_held(&b, younger));
-        b.release_for_test(first, mason_core::TaskId(8));
         assert!(again.join().unwrap());
         assert_eq!(grant.units(), units_of(1));
         assert!(
-            !is_held(&b, younger),
+            younger.try_recv().is_err(),
             "the rerun went before the younger request"
         );
     }
@@ -6245,6 +6367,46 @@ mod tests {
             phase_text(&queued, 0, now, t0),
             "on GitHub: waiting for a runner, 4 min"
         );
+    }
+
+    #[test]
+    fn a_check_granted_fewer_units_than_its_shards_splits_that_many_ways_and_holds_them() {
+        let spec = |id: &str| {
+            spec_for(
+                "p",
+                id,
+                None,
+                "cargo test",
+                Duration::from_secs(60),
+                &[],
+                "ubuntu-latest",
+                "",
+            )
+        };
+        let lists = |n: u32| vec![vec![]; n as usize];
+        let dir = tempfile::tempdir().unwrap();
+        let hosts = dir.path().join("hosts");
+        let logs = dir.path().join("logs");
+        let hold_units = |id: &str| {
+            let kv = read_kv(&hold_file(&holds_dir(&hosts), id)).unwrap();
+            kv.get("units").cloned().unwrap_or_default()
+        };
+        // Granted 3 of 8: three shards, three lists, and the hold records 3 units.
+        let rs = split_for_grant(spec("c1"), 8, "shard-cmd", Some(3), false, lists);
+        assert_eq!((rs.shards, rs.shard_lists.len()), (3, 3));
+        assert_eq!(rs.shard_command.as_deref(), Some("shard-cmd"));
+        let guard = HoldGuard::new(&hosts, &rs, "c1", "c1", rs.shards.max(1), &logs, "check", 1);
+        assert_eq!(hold_units("c1"), "gha=3");
+        drop(guard);
+        // Granted 1: the whole command on one runner, one unit.
+        let rs = split_for_grant(spec("c2"), 8, "shard-cmd", Some(1), false, lists);
+        assert_eq!(rs.shards, 0);
+        assert!(rs.shard_command.is_none() && rs.shard_lists.is_empty());
+        let _guard = HoldGuard::new(&hosts, &rs, "c2", "c2", rs.shards.max(1), &logs, "check", 1);
+        assert_eq!(hold_units("c2"), "gha=1");
+        // Not a flexible lease: all eight.
+        let rs = split_for_grant(spec("c3"), 8, "shard-cmd", None, false, lists);
+        assert_eq!(rs.shards, 8);
     }
 
     #[test]
