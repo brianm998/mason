@@ -98,7 +98,7 @@ run_limited() {
   local watcher=$!
   wait "$pid"; rc=$?
   # Kill the watcher's sleep first: killing only the subshell orphans `sleep $limit`, which keeps
-  # running (and, without the redirect above, holds the pipe into `tee`) until the limit passes.
+  # the stdout pipe into `tee` open until the limit passes (a 60-minute hang on macOS CI).
   pkill -P "$watcher" 2>/dev/null
   kill "$watcher" 2>/dev/null; wait "$watcher" 2>/dev/null
   reap_group "$pid"
