@@ -1457,7 +1457,7 @@ public final class MonitorModel {
         }
         if r.id == "node-self", r.ok { nodeSelf = NodeSelf(json: r.json) }
         if r.id == "nodes", r.ok { nodes = NodesSnapshot(json: r.json) }
-        if r.id == "node-accept" || r.id == "nodes-use" {
+        if r.id == "node-accept" || r.id == "nodes-use" || r.id == "node-update" {
             if r.ok { loadNodes() } else { settingsNotice = r.error }
         }
         if r.id == "remote-save" {

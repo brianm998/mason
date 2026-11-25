@@ -1431,6 +1431,9 @@ pub struct RemoteCfg {
     /// `favor-local` (#832): a run whose wait for this machine's slots passes this many seconds
     /// may start on GitHub instead.
     pub spill_after_s: u64,
+    /// Debt payments hold at most this many `gha` units in all at once, and a debt of a sharded
+    /// suite runs as at most this many shards (`[remote_runs] debt_units`, default 4).
+    pub debt_units: u32,
     /// `favor-remote` (#833): GitHub is overloaded when the account has more than this many
     /// jobs queued.
     pub remote_queue_max: u32,
@@ -1787,6 +1790,7 @@ fn parse_services(id: &str, doc: &DocumentMut) -> Result<ServicesCfg, String> {
             runs_on: get(t, "runs_on").unwrap_or_else(|| "ubuntu-latest".into()),
             pickup_timeout_s: int(t, "pickup_timeout", 1200),
             spill_after_s: int(t, "spill_after", 120),
+            debt_units: int(t, "debt_units", 4).max(1) as u32,
             remote_queue_max: int(t, "remote_queue_max", 4) as u32,
             fallback_local,
             mode,
