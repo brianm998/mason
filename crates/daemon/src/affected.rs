@@ -1605,17 +1605,11 @@ mod tests {
         };
         assert_eq!(
             notes(Some(&m)),
-            vec![
-                "leaf lib: 1 of 2 modules, by name scan",
-                "it: 1 of 3 modules, by the coverage map of 1234567"
-            ]
+            vec!["it: 1 of 3 modules, by the coverage map of 1234567"]
         );
         assert_eq!(
             notes(None),
-            vec![
-                "leaf lib: 1 of 2 modules, by name scan",
-                "it: 1 of 3 modules, by name scan (no coverage map)"
-            ]
+            vec!["it: 1 of 3 modules, by name scan (no coverage map)"]
         );
     }
 
