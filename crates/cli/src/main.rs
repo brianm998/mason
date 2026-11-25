@@ -1205,6 +1205,9 @@ fn main() {
                     .pos()
                     .unwrap_or_else(|| die("rename it to what? mason project rename OLD NEW"));
                 finish(&a);
+                if std::env::var("MASON_AS").is_err() {
+                    std::env::set_var("MASON_AS", owner_identity());
+                }
                 let r = or_die(d.call(
                     "POST",
                     &format!("/projects/{old}/rename"),
@@ -4691,6 +4694,15 @@ fn github_line(r: &Value) -> Option<String> {
     Some(format!("{head}: {}{mac}", parts.join(", ")))
 }
 
+/// The owner's identity as the daemon's default owner list takes it: MASON_AS, else USER,
+/// else LOGNAME, else "owner".
+fn owner_identity() -> String {
+    ["MASON_AS", "USER", "LOGNAME"]
+        .iter()
+        .find_map(|k| std::env::var(k).ok())
+        .unwrap_or_else(|| "owner".into())
+}
+
 #[cfg(test)]
 mod answer_tests {
     use super::answer_text;
@@ -4727,5 +4739,18 @@ mod answer_tests {
             Some("13 of 16 runners: 7 checks, 4 test steps, 2 debts; macOS 2 of 4")
         );
         assert_eq!(super::github_line(&serde_json::Value::Null), None);
+    }
+}
+
+#[cfg(test)]
+mod owner_identity_tests {
+    #[test]
+    fn owner_identity_follows_the_daemon_default_order() {
+        for k in ["MASON_AS", "USER", "LOGNAME"] {
+            std::env::remove_var(k);
+        }
+        assert_eq!(super::owner_identity(), "owner");
+        std::env::set_var("USER", "u");
+        assert_eq!(super::owner_identity(), "u");
     }
 }
