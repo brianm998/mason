@@ -326,6 +326,28 @@ fn list(ids: &[u64]) -> String {
 }
 
 /// Facts to findings, sorted by key. Healthy facts give none.
+/// Starts that were not a planned takeover. `events` are the `start`, `planned` and `cancelled`
+/// health rows in order; a `start` right after `planned` is the successor of a takeover.
+pub fn unplanned_starts(events: &[&str]) -> u32 {
+    let mut planned = false;
+    let mut n = 0;
+    for e in events {
+        match *e {
+            "planned" => planned = true,
+            "cancelled" => planned = false,
+            "start" => {
+                if planned {
+                    planned = false;
+                } else {
+                    n += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    n
+}
+
 pub fn judge(x: &Facts, l: &Limits) -> Vec<Finding> {
     let mut out = vec![];
     // stuck
@@ -433,7 +455,9 @@ pub fn judge(x: &Facts, l: &Limits) -> Vec<Finding> {
         ));
     }
     for (t, ms) in &x.silent_hosts {
-        if *ms > l.host_silent_ms {
+        // A host waiting on a resource is reported by stuck:wait, not as silent.
+        let waiting = x.tasks.iter().any(|k| k.id == *t && k.waiting.is_some());
+        if *ms > l.host_silent_ms && !waiting {
             out.push(f(
                 format!("stuck:host:{t}"),
                 "stuck",
@@ -787,6 +811,33 @@ mod tests {
     }
 
     #[test]
+    fn a_silent_host_waiting_on_a_resource_is_not_stuck() {
+        let mut t = TaskFact {
+            id: 9,
+            state: "developing".into(),
+            is_step: true,
+            in_state_ms: 2 * H,
+            typical_hi_ms: None,
+            silent_ms: 2 * H,
+            waiting: Some(("exclusive".into(), 52 * MIN)),
+            holders: None,
+        };
+        let x = Facts {
+            tasks: vec![t.clone()],
+            silent_hosts: vec![(9, 2 * H)],
+            ..Default::default()
+        };
+        assert!(!keys(&judge(&x, &l())).contains(&"stuck:host:9".to_string()));
+        t.waiting = None;
+        let x = Facts {
+            tasks: vec![t],
+            silent_hosts: vec![(9, 2 * H)],
+            ..Default::default()
+        };
+        assert!(keys(&judge(&x, &l())).contains(&"stuck:host:9".to_string()));
+    }
+
+    #[test]
     fn a_task_far_past_its_usual_time_without_progress_is_stuck() {
         let mut t = TaskFact {
             id: 7,
@@ -1016,6 +1067,19 @@ mod tests {
             keys(&judge(&x, &l())),
             ["daemon:late-loop", "daemon:restarts"]
         );
+    }
+
+    #[test]
+    fn a_planned_start_is_not_a_restart() {
+        assert_eq!(unplanned_starts(&["planned", "start"]), 0);
+        assert_eq!(unplanned_starts(&["start", "start", "start"]), 3);
+        assert_eq!(unplanned_starts(&["planned", "cancelled", "start"]), 1);
+        assert_eq!(unplanned_starts(&["planned", "start", "start", "start"]), 2);
+        let x = Facts {
+            restarts: unplanned_starts(&["planned", "start", "start", "start", "start"]),
+            ..Default::default()
+        };
+        assert_eq!(keys(&judge(&x, &l())), ["daemon:restarts"]);
     }
 
     #[test]
