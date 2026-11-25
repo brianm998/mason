@@ -747,6 +747,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s996**: A run GitHub has not picked up comes back here only when this machine would grant its lease at once (queue counted, hold settled, lease taken before the GitHub run is cancelled).
 - **s998**: masons_own_impact_map_selects_suites_by_path now expects the eight unit-level suites bound to run_check and the test step, instead of six.
 - **s1000**: The diagnosis session runs on `diagnose_model`/`diagnose_effort` from the project registration, else the provider file's `[diagnose]` table, else Opus at medium (Codex: its CLI's model at medium), and each diagnosis and `mason task show` print what it ran on.
+- **s1001**: The daemon folds three or more waiting speech announcements into one summary line ("25 mason issues have failed; come have a look."), for both monitors and daemon speech, controlled by `[speech] summarize_from`.
 - **s1012**: a replayed run_check carries its call id, takes the suites that finished before a masond takeover instead of running them again, and no longer folds the base on the replay.
 - **s1014**: RemotePlacementTest now composes RemotePlacementBody inside a Column, as the settings page does, so the project row no longer covers the global row's buttons.
 - **s1015**: Unit-test narrowing no longer pushes a line into `Group.notes`, which is per directory target, so `the_note_says_how_the_modules_were_picked` passes again.
@@ -786,6 +787,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s1072**: Windows clippy red on develop is fixed by compiling the unix-only CAFFEINATE and XCODEBUILD shim constants only under cfg(unix).
 - **s1073**: The Swift monitor-tool's settle now waits on `lastViewSeq` (moved only by views and snapshots) instead of `lastSeq`, which events also move, as Compose already does.
 - **s1074**: run-exit-scripts.sh runs each exit script in its own process group and ends the group when the script ends, so a leftover child or watcher `sleep` can no longer hold the output pipe and stall a shard.
+- **s1075**: The exit-script runner's no-timeout(1) fallback can now be forced and tested with MASON_EXIT_FALLBACK=1, and a narrowed test shard no longer passes `--doc` beside a target selector.
 - **s1076**: the macOS exit-script watcher's `sleep` is now detached from the runner's output pipe as well as killed, so a leftover one cannot stall a shard.
 - **s1077**: The macOS exit-scripts job gets 90 minutes, and an exit test proves that a finished script no longer waits for the no-timeout watcher's sleep.
 - **s1078**: A new exit test checks that the macOS fallback in run-exit-scripts.sh runs one exit script after another, reports failures, and leaves no watcher `sleep` behind.
