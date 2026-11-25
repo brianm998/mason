@@ -107,9 +107,34 @@ pub(crate) fn first_step_in(d: &Arc<Daemon>, t: &Task, state: State) -> Option<S
     def.first_in(state).map(|s| s.name.clone())
 }
 
-/// Every send-back's feedback, in order, for the escalated last round.
+/// Why the next develop round happens: it picks the `fix` or `conflict` prompt pack.
 const ROUND_REASON: &str = "round-reason.txt";
+/// Every red round's feedback, in order: for the escalated last round, the diagnosis and the
+/// owner's session.
 const FEEDBACK_HISTORY: &str = "feedback-history.txt";
+
+/// Keep a red round's feedback in the task folder `dir`: as `feedback.txt` for the next develop
+/// round, with why that round happens (written together so the two cannot get out of step), and
+/// as one more entry of the history. Done whether the task goes back or fails, so a retry and the
+/// diagnosis see the round that used up the last chance.
+fn save_feedback(
+    dir: &Path,
+    run: StepRunId,
+    step: &str,
+    reason: &str,
+    feedback: &str,
+    round_reason: &str,
+) {
+    let _ = std::fs::create_dir_all(dir);
+    let _ = std::fs::write(dir.join("feedback.txt"), feedback);
+    let _ = std::fs::write(dir.join(ROUND_REASON), round_reason);
+    let entry = format!("## After run {} ({step}): {reason}\n{feedback}\n\n", run.0);
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join(FEEDBACK_HISTORY))
+        .and_then(|mut h| std::io::Write::write_all(&mut h, entry.as_bytes()));
+}
 
 /// Is the next test round the last one the test step will give (another red would fail the
 /// task), after at least one red round? `done`: test rounds that went red so far.
@@ -373,6 +398,19 @@ impl Ctx {
                 retry_n: self.attempt,
                 at: now_ms(),
             });
+        // Saved only for a red round: a failure with no feedback leaves the earlier files alone.
+        let keep = || {
+            if let Some(f) = feedback.as_deref().filter(|_| outcome == Outcome::Red) {
+                save_feedback(
+                    &self.task_dir(),
+                    self.run,
+                    &self.step.name,
+                    &reason,
+                    f,
+                    round_reason,
+                );
+            }
+        };
         match after(&self.def, &self.step, outcome, round, rounds) {
             Transition::Next { step, state } => {
                 self.emit(EventKind::StepSucceeded {
@@ -392,22 +430,7 @@ impl Ctx {
                 crate::suites::after_landing(&self.d, self.task);
             }
             Transition::SendBack { step } => {
-                if let Some(f) = feedback {
-                    let _ = std::fs::write(self.task_dir().join("feedback.txt"), &f);
-                    // Why the next develop round happens, written with its feedback so the
-                    // two cannot get out of step: it picks the `fix` or `conflict` pack.
-                    let _ = std::fs::write(self.task_dir().join(ROUND_REASON), round_reason);
-                    // Every round's feedback is kept for the last round's fresh session (s251).
-                    let entry = format!(
-                        "## After run {} ({}): {}\n{}\n\n",
-                        self.run.0, self.step.name, reason, f
-                    );
-                    let _ = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(self.task_dir().join(FEEDBACK_HISTORY))
-                        .and_then(|mut h| std::io::Write::write_all(&mut h, entry.as_bytes()));
-                }
+                keep();
                 let step = repin_for_send_back(
                     &self.d,
                     self.task,
@@ -425,6 +448,8 @@ impl Ctx {
                 });
             }
             Transition::Fail(why) => {
+                // Before the failure shows, so a retry and the diagnosis read this round.
+                keep();
                 let reason = match (outcome, reason.is_empty()) {
                     (Outcome::Fail, false) => reason,
                     (_, true) => why,
@@ -4784,6 +4809,8 @@ fn finish_agent_inner(c: &Ctx, report: StepReport, dir: &Path) {
             // An approval that settles replaced base lines declares them as the task's removals.
             if c.state == State::Review && submission["verdict"] == "approve" {
                 add_removals(dir, &submission["removes"]);
+                // An earlier round's findings are answered: no later develop round gets them.
+                let _ = std::fs::remove_file(dir.join("feedback.txt"));
             }
             // A reviewer who asks for changes is red, not an error.
             if c.state == State::Review && submission["verdict"] == "changes" {
@@ -5736,6 +5763,18 @@ pub fn conclude_approval(
             step.kind.name()
         ));
     }
+    let keep = || {
+        if outcome == Outcome::Red {
+            save_feedback(
+                &d.task_dir(task),
+                run,
+                &step.name,
+                &format!("rejected by the owner: {reason}"),
+                &format!("The owner rejected the work at `{}`: {reason}", step.name),
+                "fix",
+            );
+        }
+    };
     let kind = match after(&def, step, outcome, r.attempt, step.max_rounds) {
         Transition::Next { step, state } => EventKind::StepSucceeded {
             task,
@@ -5749,10 +5788,7 @@ pub fn conclude_approval(
             }),
         },
         Transition::SendBack { step: back } => {
-            let _ = std::fs::write(
-                d.task_dir(task).join("feedback.txt"),
-                format!("The owner rejected the work at `{}`: {reason}", step.name),
-            );
+            keep();
             let back = repin_for_send_back(
                 d,
                 task,
@@ -5769,11 +5805,14 @@ pub fn conclude_approval(
                 to_step: back,
             }
         }
-        Transition::Fail(why) => EventKind::StepFailed {
-            task,
-            reason: format!("rejected by the owner: {reason} ({why})"),
-            class: Some(FailClass::Code),
-        },
+        Transition::Fail(why) => {
+            keep();
+            EventKind::StepFailed {
+                task,
+                reason: format!("rejected by the owner: {reason} ({why})"),
+                class: Some(FailClass::Code),
+            }
+        }
     };
     if d.emit_for_run(task, run, kind) {
         Ok(())
