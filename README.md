@@ -797,4 +797,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s1082**: daemon:restarts counts only unplanned starts, so a takeover from `mason update` no longer counts as a restart.
 - **s1083**: A step host queued for a lease is no longer reported as silent (stuck:host); the wait is left to overloaded:slots and stuck:wait.
 - **s1086**: s101 now starts its ad-hoc range at 9960 and expects the daemon's real ceiling (9999), so it raises the `numbers` alert again.
+- **s1098**: The red CI/monitor-compose run 45581279465 names no failing step in the supplied log tail, so no code changed and decision 1087 records how to classify it from the full log.
+- **s1099**: `s798` passes its scripted agent a `src` directory to write into, fixing its red on CI, and a red `s798` now puts the task state and the last log line on its first failure line.
+- **s1100**: The s1026 and s1068 exit scripts now check the signal-based Compose settle instead of the removed quiet-window text, so exit-scripts shard 6 no longer fails on it.
 <!-- status:end -->
