@@ -102,7 +102,11 @@ fn diagnosis(rec: &Path) -> Value {
     json!([
         record(rec, "diagnosis"),
         {"call": {"tool": "submit_diagnosis", "args": {
-            "verdict": "ask", "summary": "s", "question": "q?", "recommendation": "r"}}}
+            "summary": "the last round was red",
+            "options": [
+                {"label": "Cancel the task", "recommended": true, "action": "cancel"},
+                {"label": "Develop again", "recommended": false, "action": "retry",
+                 "step": "develop", "note": "fix it"}]}}}
     ])
 }
 
@@ -135,6 +139,12 @@ fn diagnosis_prompt(d: &Arc<mason_daemon::Daemon>, t: TaskId, rec: &Path) -> Str
     wait_for("the diagnosis", 180, || {
         !d.store.diagnoses(Some(t.0)).unwrap().is_empty()
     });
+    let row = &d.store.diagnoses(Some(t.0)).unwrap()[0];
+    assert_eq!(
+        row.status, "pending",
+        "a card was submitted: {}",
+        row.verdict
+    );
     recorded(rec, "diagnosis")
 }
 
