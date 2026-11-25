@@ -129,6 +129,16 @@ fn trailing_done(quiet: Duration) -> bool {
     quiet >= TRAILING_QUIET
 }
 
+/// Whether settle may stop waiting. Once the target is reached, only the trailing views are
+/// awaited. Short of it, a demo never leaves; a live daemon may after three agreeing round trips.
+fn may_leave(reached: bool, heard: Duration, demo: bool, views: usize, agreed: u32) -> bool {
+    if reached {
+        trailing_done(heard)
+    } else {
+        !demo && views >= 3 && agreed >= 3
+    }
+}
+
 /// Wait until the screen has reached the daemon's current seq and `after` (the seq a step
 /// reported), then until 300 ms pass with no message (trailing views of the same step). The demo
 /// daemon resends every view at each new seq, so there it waits for the seq and nothing else
@@ -163,12 +173,8 @@ fn settle(c: &mut Client, screen: &mut Screen, after: u64, demo: bool) {
             heard = std::time::Instant::now();
         }
         prev = (target, screen.seq);
-        let settled = if reached(screen.seq, screen.views.len(), target) {
-            trailing_done(heard.elapsed())
-        } else {
-            !demo && screen.views.len() >= 3 && agreed >= 3
-        };
-        if settled {
+        let got = reached(screen.seq, screen.views.len(), target);
+        if may_leave(got, heard.elapsed(), demo, screen.views.len(), agreed) {
             return;
         }
         if std::time::Instant::now() > hard {
@@ -660,7 +666,7 @@ fn latency(args: &mut Vec<String>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{reached, trailing_done};
+    use super::{may_leave, reached, trailing_done};
     use std::time::Duration;
 
     #[test]
@@ -669,6 +675,19 @@ mod tests {
         assert!(!reached(10, 2, 10));
         assert!(reached(10, 3, 10));
         assert!(reached(11, 3, 10));
+    }
+
+    #[test]
+    fn a_demo_wait_leaves_only_once_the_target_is_reached() {
+        let long = Duration::from_secs(59);
+        assert!(!may_leave(false, long, true, 3, 3));
+        assert!(!may_leave(false, long, true, 3, u32::MAX));
+        assert!(!may_leave(true, Duration::ZERO, true, 3, 3));
+        assert!(may_leave(true, long, true, 3, 0));
+        // A live daemon never resends an unchanged view.
+        assert!(!may_leave(false, long, false, 3, 2));
+        assert!(!may_leave(false, long, false, 2, 3));
+        assert!(may_leave(false, long, false, 3, 3));
     }
 
     #[test]
