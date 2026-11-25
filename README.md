@@ -757,6 +757,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s1027**: CpuDiskRow's layout arithmetic is a pure `placement` function and the DiskSectionTests layout tests assert its exact frames instead of sampling ImageRenderer pixels, so CI/monitor-swift stops failing on runner rendering differences.
 - **s1028**: The Compose and Swift conformance tools now read the daemon's seq from GET /status before each capture and wait for the model to reach it, as the Rust capturer does.
 - **s1030**: The Land now freeze test holds the fix at a gate so the freeze is certainly in force, then waits for the fix and `other` to land instead of asserting `other` never does.
+- **s1033**: The Compose conformance tool and the Rust dump wait for the daemon's seq to be covered by applied views (or agree across round trips) instead of a wall-clock quiet window, fixing the red full/monitor-compose CI.
 - **s1035**: s22, s244 and s728 are named in weights.txt and s1035 checks them, but their cause is not diagnosed because the failed-step log was not readable from the pipeline.
 - **s1036**: Recorded that the s77, s117 and s902 reds on ubuntu shard 2 could not be traced without the full CI log, and changed no code.
 - **s1037**: The `the_note_says_how_the_modules_were_picked` failure on a0f67a2 was fixed by 9c18e970f (stop unit narrowing from pushing a note into Group.notes); no source change is needed.
