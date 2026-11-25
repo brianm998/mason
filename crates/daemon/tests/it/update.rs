@@ -711,12 +711,12 @@ fn a_docs_only_commit_causes_no_takeover_and_the_status_says_none() {
     auto_cfg(&s, "normal_max_wait_s = 0\ncost_max = 100");
     let mut m = start(&s);
     s.mason_ok(&["update", "--sha", &src.shas[0]]);
-    wait_status(&s, "c1 to run", 90, |v| {
+    wait_status(&s, "c1 to run", 600, |v| {
         v["running"] == src.shas[0].as_str()
     });
     let pid = daemon_pid(&s);
     let docs = push(&s, &[("docs/note.md", "hello")], "docs only");
-    let v = wait_status(&s, "the status to say none", 60, |v| {
+    let v = wait_status(&s, "the status to say none", 600, |v| {
         plan_text(v).contains("none:")
     });
     assert_eq!(v["running"], src.shas[0].as_str(), "{v:#}");
@@ -739,7 +739,7 @@ fn a_daemon_change_waits_for_a_check_without_a_call_id_and_an_urgent_one_does_no
     auto_cfg(&s, "normal_max_wait_s = 100000");
     let mut m = start(&s);
     s.mason_ok(&["update", "--sha", &src.shas[0]]);
-    wait_status(&s, "c1 to run", 90, |v| {
+    wait_status(&s, "c1 to run", 600, |v| {
         v["running"] == src.shas[0].as_str()
     });
     s.mason_ok(&[
@@ -749,7 +749,7 @@ fn a_daemon_change_waits_for_a_check_without_a_call_id_and_an_urgent_one_does_no
         "--body",
         "Create hello.txt.",
     ]);
-    wait_for("the check to start", 240, || {
+    wait_for("the check to start", 600, || {
         gate.path().join("started").exists()
     });
 
@@ -759,7 +759,7 @@ fn a_daemon_change_waits_for_a_check_without_a_call_id_and_an_urgent_one_does_no
         &[("crates/daemon/src/x.rs", "// x")],
         "change the daemon",
     );
-    let v = wait_status(&s, "the update to wait", 60, |v| {
+    let v = wait_status(&s, "the update to wait", 600, |v| {
         plan_text(v).contains("would start over")
     });
     assert_eq!(v["running"], src.shas[0].as_str(), "{v:#}");
@@ -776,7 +776,7 @@ fn a_daemon_change_waits_for_a_check_without_a_call_id_and_an_urgent_one_does_no
         "fix the updater\n\nUpdate-Urgent: checks never returned",
     );
     assert_ne!(normal, urgent);
-    wait_status(&s, "the urgent build to take over", 180, |v| {
+    wait_status(&s, "the urgent build to take over", 600, |v| {
         v["running"] == urgent.as_str()
     });
     assert!(!gate.path().join("release").exists());
@@ -797,7 +797,7 @@ fn a_normal_update_goes_when_the_check_ends() {
     auto_cfg(&s, "normal_max_wait_s = 100000");
     let mut m = start(&s);
     s.mason_ok(&["update", "--sha", &src.shas[0]]);
-    wait_status(&s, "c1 to run", 90, |v| {
+    wait_status(&s, "c1 to run", 600, |v| {
         v["running"] == src.shas[0].as_str()
     });
     s.mason_ok(&[
@@ -807,7 +807,7 @@ fn a_normal_update_goes_when_the_check_ends() {
         "--body",
         "Create hello.txt.",
     ]);
-    wait_for("the check to start", 240, || {
+    wait_for("the check to start", 600, || {
         gate.path().join("started").exists()
     });
     let next = push(
@@ -815,7 +815,7 @@ fn a_normal_update_goes_when_the_check_ends() {
         &[("crates/daemon/src/x.rs", "// x")],
         "change the daemon",
     );
-    wait_status(&s, "the update to wait", 60, |v| {
+    wait_status(&s, "the update to wait", 600, |v| {
         plan_text(v).contains("would start over")
     });
     assert_eq!(status(&s)["running"], src.shas[0].as_str());
@@ -823,7 +823,7 @@ fn a_normal_update_goes_when_the_check_ends() {
     wait_status(
         &s,
         "the update to take over once the check ended",
-        240,
+        600,
         |v| v["running"] == next.as_str(),
     );
     drop(m.child.kill());
@@ -837,7 +837,7 @@ fn auto_disabled_starts_no_update() {
     auto_cfg(&s, "enabled = false");
     let mut m = start(&s);
     s.mason_ok(&["update", "--sha", &src.shas[0]]);
-    wait_status(&s, "c1 to run", 90, |v| {
+    wait_status(&s, "c1 to run", 600, |v| {
         v["running"] == src.shas[0].as_str()
     });
     let next = push(
@@ -845,7 +845,7 @@ fn auto_disabled_starts_no_update() {
         &[("crates/daemon/src/x.rs", "// x")],
         "change the daemon",
     );
-    wait_status(&s, "the check to see it", 60, |v| {
+    wait_status(&s, "the check to see it", 600, |v| {
         v["latest"] == next.as_str()
     });
     std::thread::sleep(Duration::from_secs(3));

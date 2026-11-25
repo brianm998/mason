@@ -496,8 +496,9 @@ pub fn mark_task(data_dir: &Path, task: u64, urgent: bool) -> std::io::Result<()
 #[derive(Debug, Default)]
 pub struct PlanState {
     pub pending: Option<Pending>,
-    /// A planned update is building or taking over; nothing else is scheduled meanwhile.
-    pub running: bool,
+    /// The target a planned update is building or taking over to; nothing else is scheduled
+    /// meanwhile.
+    pub running: Option<String>,
     /// The newest target found with priority none, and why.
     pub none_target: Option<(String, String)>,
     /// A target whose build failed, and when: not tried again for an hour.
@@ -601,6 +602,10 @@ pub fn found_newer(d: &Arc<Daemon>, cfg: &UpdateCfg, target: &str) {
         }
     };
     let mut p = lock(&d.update_plan);
+    // The build under way is not a newer one: filing it again would replace it with itself.
+    if p.running.as_deref() == Some(target) {
+        return;
+    }
     if p.failed
         .as_ref()
         .is_some_and(|(t, at)| t == target && now_ms().saturating_sub(*at) < RETRY_AFTER_FAILURE_MS)
@@ -636,7 +641,7 @@ pub fn found_newer(d: &Arc<Daemon>, cfg: &UpdateCfg, target: &str) {
     if !same {
         let merged = merge(p.pending.as_ref(), new);
         p.pending = Some(merged);
-        if p.running {
+        if p.running.is_some() {
             // A planned update waits for landing batches: let it go and build the newer one.
             d.update_replace.store(true, Ordering::SeqCst);
         }
@@ -658,7 +663,7 @@ pub fn tick(d: &Arc<Daemon>) {
         "fetching" | "building" | "testing" | "waiting for landing" | "taking over"
     );
     let mut p = lock(&d.update_plan);
-    if p.running || busy {
+    if p.running.is_some() || busy {
         return;
     }
     let Some(mut pending) = p.pending.clone() else {
@@ -696,7 +701,7 @@ pub fn tick(d: &Arc<Daemon>) {
             }
         }
         Verdict::Go(why) => {
-            p.running = true;
+            p.running = Some(pending.target.clone());
             p.pending = None;
             drop(p);
             tracing::info!(
@@ -709,7 +714,7 @@ pub fn tick(d: &Arc<Daemon>) {
                 .name("update-auto".into())
                 .spawn(move || run_planned(&d2, pending));
             if spawned.is_err() {
-                lock(&d.update_plan).running = false;
+                lock(&d.update_plan).running = None;
             }
         }
     }
@@ -743,7 +748,7 @@ fn run_planned(d: &Arc<Daemon>, first: Pending) {
                 tracing::warn!("auto-update to {} did not go: {e}", cur.target);
                 let mut p = lock(&d.update_plan);
                 p.failed = Some((cur.target.clone(), now_ms()));
-                p.running = false;
+                p.running = None;
                 return;
             }
         };
@@ -755,13 +760,14 @@ fn run_planned(d: &Arc<Daemon>, first: Pending) {
                 d.landing.set_draining(false);
                 lock(&d.update_status).phase = "idle".into();
                 tracing::info!("auto-update: {} replaces {target}", next.target);
+                lock(&d.update_plan).running = Some(next.target.clone());
                 cur = next;
                 continue;
             }
         }
         update::take_over(d, &target);
         d.landing.set_draining(false);
-        lock(&d.update_plan).running = false;
+        lock(&d.update_plan).running = None;
         return;
     }
 }
