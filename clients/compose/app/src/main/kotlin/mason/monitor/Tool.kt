@@ -41,8 +41,8 @@ private fun until(what: String, seconds: Int = 15, cond: () -> Boolean) {
 
 /**
  * Let the views settle: read the daemon's seq from GET /status, wait until the model has reached
- * it. The demo daemon resends every view at each new seq, so it always is. A hard limit of 60 s
- * fails.
+ * it. The demo daemon resends every view at each new seq, so it always is. A live daemon never
+ * resends an unchanged view, so there only a short quiet is waited for. A hard limit of 60 s fails.
  */
 private fun settle(model: MonitorModel) {
     val status = call(model, Command(raw = mason.v1.Raw(method = "GET", path = "/status")), "settle-status")
@@ -53,8 +53,8 @@ private fun settle(model: MonitorModel) {
     var quiet = 0
     while (true) {
         val reached = model.lastViewSeq >= target
-        // Reached: a short quiet for trailing views. Not reached: keep waiting (decision 1025).
-        if (reached && quiet >= 6) break
+        // Reached: a short quiet for trailing views. A demo not there yet: keep waiting (decision 1025).
+        if ((reached || !model.demo) && quiet >= 6) break
         if (System.currentTimeMillis() > end) fail("the screen did not reach the daemon's seq $target within 60 s")
         Thread.sleep(50)
         if (model.lastSeq == last) quiet++ else { quiet = 0; last = model.lastSeq }

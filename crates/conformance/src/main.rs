@@ -123,8 +123,9 @@ fn reached(screen_seq: u64, views: usize, target: u64) -> bool {
 
 /// Wait until the screen has reached the daemon's current seq and `after` (the seq a step
 /// reported). The demo daemon resends every view at each new seq, so there is no quiet-window
-/// fallback (decision 1025).
-fn settle(c: &mut Client, screen: &mut Screen, after: u64) {
+/// fallback (decision 1025). A live daemon (`demo` false) never resends an unchanged view, so
+/// there the wait is only for the views of the subscription.
+fn settle(c: &mut Client, screen: &mut Screen, after: u64, demo: bool) {
     let hard = std::time::Instant::now() + Duration::from_secs(60);
     let r = run(c, screen, "GET", "/status");
     let v: serde_json::Value = serde_json::from_str(&r.json).unwrap_or_default();
@@ -133,6 +134,7 @@ fn settle(c: &mut Client, screen: &mut Screen, after: u64) {
         .or_else(|| v["seq"].as_str().and_then(|s| s.parse().ok()))
         .unwrap_or(0)
         .max(after);
+    let target = if demo { target } else { 0 };
     while !reached(screen.seq, screen.views.len(), target) {
         if std::time::Instant::now() > hard {
             die(&format!(
@@ -262,7 +264,8 @@ fn main() {
             let now_only = flag(&mut args, "--now");
             let mut c = Client::connect(port, Encoding::Json).unwrap_or_else(|e| die(&e));
             c.acting_as(&actor);
-            let owner = c.hello(0, false).unwrap_or_else(|e| die(&e)).owner;
+            let welcome = c.hello(0, false).unwrap_or_else(|e| die(&e));
+            let owner = welcome.owner;
             // Checkpoint 0 is the state before the script; then one per step.
             let mut k = 0;
             let mut after = 0;
@@ -274,7 +277,7 @@ fn main() {
             )
             .unwrap_or_else(|e| die(&e));
             loop {
-                settle(&mut c, &mut screen, after);
+                settle(&mut c, &mut screen, after, welcome.demo);
                 let items: Vec<serde_json::Value> = conformance::visible(&screen.views(), owner)
                     .iter()
                     .map(|i| i.to_json())
