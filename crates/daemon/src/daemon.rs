@@ -392,6 +392,7 @@ impl Daemon {
             d.spawn_progress_ticker();
             d.spawn_sweeper();
             d.spawn_compile_watch();
+            d.spawn_red_watch();
             crate::usersession::on_start(&d);
             crate::health::on_start(&d);
             // A daemon whose CPU reading is injected is a test's: it would add a
@@ -1443,6 +1444,22 @@ impl Daemon {
                 last = now;
                 d.poke();
             }
+            true
+        });
+    }
+
+    /// Notice a red develop that was fixed, or that the checks of several tasks show (#1023).
+    fn spawn_red_watch(self: &Arc<Self>) {
+        let every = self
+            .cfg
+            .sweep_interval
+            .max(std::time::Duration::from_secs(60));
+        crate::bg::spawn_loop(self, "red-watch", move |weak| {
+            std::thread::sleep(every);
+            let Some(d) = weak.upgrade() else {
+                return false;
+            };
+            crate::redwatch::pass(&d);
             true
         });
     }

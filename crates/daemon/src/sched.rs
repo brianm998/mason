@@ -695,11 +695,22 @@ pub struct Lease {
     held: Option<Held>,
     /// What the lease was asked for, so a remote run can name the units it holds (#818).
     amounts: BTreeMap<String, u32>,
+    /// The request was flexible: `amounts` is what it was given, not what it asked for.
+    flex: bool,
 }
 
 impl Lease {
     pub fn id(&self) -> u64 {
         self.id
+    }
+
+    /// How many runner units this lease was given when it asked for 1 to N (a flexible
+    /// request), for the run it holds them for to split that many ways. `None`: not a flexible
+    /// lease, so the run keeps its own shard count. Each lease says its own: nothing is shared
+    /// between the leases of one task.
+    pub fn granted_runners(&self) -> Option<u32> {
+        self.flex
+            .then(|| self.amounts.get(GHA).copied().unwrap_or(1).max(1))
     }
 
     /// The runner units (`gha`, `gha-macos`) this lease holds.
@@ -1937,6 +1948,7 @@ impl Broker {
                 let needs = Needs {
                     exclusive: false,
                     amounts: BTreeMap::from([(class.clone(), 1)]),
+                    flex: false,
                 };
                 let id = st
                     .ledger
@@ -1975,6 +1987,7 @@ impl Broker {
             let needs = Needs {
                 exclusive: false,
                 amounts,
+                flex: false,
             };
             let id = st.ledger.adopt(
                 needs,
@@ -2004,6 +2017,7 @@ impl Broker {
                 Needs {
                     exclusive: false,
                     amounts,
+                    flex: false,
                 },
                 &format!("{} (from before the restart)", h.label),
                 now,
@@ -2221,7 +2235,6 @@ impl Broker {
         expected_ms: Option<u64>,
         nowait: bool,
     ) -> Result<Lease, Cancelled> {
-        let granted = needs.amounts.clone();
         let id = {
             let mut st = lock(&self.st);
             let rank = order(&st, rank);
@@ -2300,6 +2313,15 @@ impl Broker {
             }
             let _ = self.cv.wait_timeout(st, Duration::from_millis(100));
         }
+        // What was granted: a flexible request holds what it was given, not what it asked for.
+        let granted = {
+            let st = lock(&self.st);
+            let granted = st
+                .ledger
+                .holder(id)
+                .map_or_else(|| needs.amounts.clone(), |h| h.needs.amounts.clone());
+            granted
+        };
         // The grant is accounting; the kernel locks make it real.
         let (take, caps) = {
             let st = lock(&self.st);
@@ -2379,6 +2401,7 @@ impl Broker {
             task: Some(task),
             held: Some(held),
             amounts: granted,
+            flex: needs.flex,
         })
     }
 
@@ -5052,6 +5075,7 @@ pub(crate) mod tests {
                 Needs {
                     exclusive: true,
                     amounts: BTreeMap::new(),
+                    flex: false,
                 },
                 &|| true,
                 &mut |_| {
@@ -5112,6 +5136,69 @@ pub(crate) mod tests {
             assert!(pushed.load(Ordering::SeqCst));
             assert_eq!(units, gha(1));
         });
+    }
+
+    #[test]
+    fn a_sharded_run_is_granted_the_runner_units_that_are_free_and_splits_that_many_ways() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = runner_broker(dir.path(), 8, 1, 0);
+        // Five of the eight units are in use: a run sharded eight ways gets the other three.
+        let other = queue_task(&b, 1, &gha(5));
+        assert!(held(&b, other));
+        let lease = b
+            .acquire(
+                TaskId(2),
+                "#2 test",
+                Rank::new(false, 3, 0, 2, 2, false),
+                needs_of(&gha(8), None).flexible(),
+                &|| true,
+                &mut |_| {},
+            )
+            .unwrap();
+        assert_eq!(lease.units(), gha(3), "the lease reports what it was given");
+        let granted = lease.granted_runners();
+        assert_eq!(granted, Some(3));
+        assert_eq!(crate::remote::shards_granted(8, granted), 3);
+        // A run that holds no flexible lease keeps all its shards; one unit is a whole run.
+        assert_eq!(crate::remote::shards_granted(8, None), 8);
+        assert_eq!(crate::remote::shards_granted(8, Some(1)), 1);
+        assert_eq!(crate::remote::shards_granted(2, Some(5)), 2);
+        drop(lease);
+    }
+
+    #[test]
+    fn two_flexible_leases_of_one_task_are_granted_and_released_on_their_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = runner_broker(dir.path(), 8, 1, 0);
+        let ask = |n: u32| {
+            b.acquire_beside(
+                TaskId(1),
+                "#1 suite",
+                Rank::new(false, 3, 0, 1, 1, false),
+                needs_of(&gha(n), None).flexible(),
+                &|| true,
+                &mut |_| {},
+            )
+            .unwrap()
+        };
+        let first = ask(5);
+        let second = ask(5);
+        assert_eq!(first.granted_runners(), Some(5));
+        assert_eq!(second.granted_runners(), Some(3), "what was left");
+        let used = |b: &Broker| lock(&b.st).ledger.snapshot().used.get("gha").copied();
+        assert_eq!(used(&b), Some(8));
+        drop(first);
+        assert_eq!(
+            second.granted_runners(),
+            Some(3),
+            "unchanged by the other's end"
+        );
+        assert_eq!(used(&b), Some(3));
+        let third = ask(5);
+        assert_eq!(third.granted_runners(), Some(5));
+        drop(second);
+        assert_eq!(third.granted_runners(), Some(5));
+        assert_eq!(used(&b), Some(5));
     }
 
     #[test]
