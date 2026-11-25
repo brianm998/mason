@@ -721,3 +721,172 @@ fn a_never_heard_alert_plays_at_most_once_after_unmute_however_many_rounds_passe
     let got = notify::claim_at(&d, "mon", false, t);
     assert!(count(&got) <= 1, "{got}");
 }
+
+// ---- folding three or more announcements into one summary --------------------------------
+
+/// Queue one announcement about failed task `id`, as `tick_at` would.
+fn queue_failed(d: &Daemon, id: u64, label: &str, now: u64) {
+    let key = format!("alert:failed:{id}:{now}:{label}:11");
+    d.store
+        .enqueue_announcement(
+            &key,
+            "failed",
+            &format!("Task {id}, failed; open it to retry or cancel."),
+            true,
+            true,
+            now,
+        )
+        .unwrap();
+}
+
+fn sentences(v: &Value) -> Vec<String> {
+    v["announcements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["sentence"].as_str().unwrap().to_string())
+        .collect()
+}
+
+fn delivered_speech(d: &Daemon, id: u64, since: u64) -> bool {
+    d.store
+        .deliveries_for(&format!("failed:{id}"), since)
+        .unwrap()
+        .iter()
+        .any(|r| r.channel == "speech" && r.ok)
+}
+
+#[test]
+fn two_alerts_keep_their_own_sentences() {
+    let s = world();
+    let d = start(&s);
+    let now = mason_daemon::daemon::now_ms();
+    queue_failed(&d, 1, "initial", now);
+    queue_failed(&d, 2, "initial", now + 1);
+    let got = notify::claim_at(&d, "mon", false, now + 10);
+    assert_eq!(sentences(&got).len(), 2, "{got}");
+    assert!(sentences(&got)[0].starts_with("Task 1"));
+}
+
+#[test]
+fn three_alerts_become_one_summary_and_each_is_recorded() {
+    let s = world();
+    let d = start(&s);
+    let now = mason_daemon::daemon::now_ms();
+    for id in 1..=3 {
+        queue_failed(&d, id, "initial", now + id);
+    }
+    let got = notify::claim_at(&d, "mon", false, now + 10);
+    let said = sentences(&got);
+    assert_eq!(said.len(), 1, "{got}");
+    assert!(
+        said[0].starts_with("3 ") && said[0].contains("failed"),
+        "{said:?}"
+    );
+    assert_eq!(got["announcements"][0]["kind"], "failed");
+    for id in 1..=3 {
+        assert!(delivered_speech(&d, id, now + id), "alert {id}");
+    }
+}
+
+#[test]
+fn thirty_alerts_are_counted_in_full_and_none_are_left_waiting() {
+    let s = world();
+    let d = start(&s);
+    let now = mason_daemon::daemon::now_ms();
+    for id in 1..=30 {
+        queue_failed(&d, id, "initial", now + id);
+    }
+    let got = notify::claim_at(&d, "mon", false, now + 100);
+    let said = sentences(&got);
+    assert_eq!(said.len(), 1, "{got}");
+    assert!(said[0].starts_with("30 "), "{said:?}");
+    assert!(d
+        .store
+        .pending_announcements(200)
+        .unwrap()
+        .iter()
+        .all(|r| !r.key.starts_with("alert:")));
+}
+
+#[test]
+fn summarize_from_zero_keeps_every_sentence() {
+    let s = world();
+    let d = start(&s);
+    notify_toml(&s, "[speech]\nsummarize_from = 0\n");
+    let now = mason_daemon::daemon::now_ms();
+    for id in 1..=30 {
+        queue_failed(&d, id, "initial", now + id);
+    }
+    let got = notify::claim_at(&d, "mon", false, now + 100);
+    assert_eq!(sentences(&got).len(), 20, "{got}");
+    let got = notify::claim_at(&d, "mon", false, now + 200);
+    assert_eq!(sentences(&got).len(), 10, "{got}");
+}
+
+#[test]
+fn the_daemon_says_one_summary_for_five_alerts() {
+    let s = world();
+    let d = start(&s);
+    let script = s.root.path().join("say.sh");
+    let out = s.root.path().join("spoken.txt");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\n# SPDX-License-Identifier: GPL-3.0-or-later\necho \"$1\" >> {}\n",
+            out.display()
+        ),
+    )
+    .unwrap();
+    notify_toml(
+        &s,
+        &format!(
+            "[speech]\ndaemon = true\ncommand = [\"sh\", \"{}\"]\n",
+            script.display()
+        ),
+    );
+    let now = mason_daemon::daemon::now_ms();
+    // Plain keys: `tick` prunes announcements whose alert is not live.
+    for id in 1..=5 {
+        d.store
+            .enqueue_announcement(
+                &format!("plain{id}"),
+                "failed",
+                "Task failed.",
+                true,
+                true,
+                now,
+            )
+            .unwrap();
+    }
+    notify::tick(&d);
+    wait_for("the summary", 10, || out.exists());
+    std::thread::sleep(Duration::from_millis(300));
+    let said = std::fs::read_to_string(&out).unwrap();
+    assert_eq!(said.lines().count(), 1, "{said}");
+    assert!(said.starts_with("5 "), "{said}");
+}
+
+#[test]
+fn a_backlog_and_a_fold_are_one_summary_not_two() {
+    let s = world();
+    let d = start(&s);
+    let t0 = mason_daemon::daemon::now_ms();
+    queue_failed(&d, 1, "initial", t0);
+    queue_failed(&d, 2, "initial", t0 + 1);
+    assert_eq!(
+        sentences(&notify::claim_at(&d, "mon", false, t0 + 10)).len(),
+        2
+    );
+    // Long afterwards: two reminders for alerts already heard, and three new alerts.
+    let late = t0 + 3 * HOUR;
+    queue_failed(&d, 1, "reminder1", late - 5);
+    queue_failed(&d, 2, "reminder1", late - 4);
+    for id in 3..=5 {
+        queue_failed(&d, id, "initial", late - 3 + id);
+    }
+    let got = notify::claim_at(&d, "mon", false, late);
+    let said = sentences(&got);
+    assert_eq!(said.len(), 1, "{said:?}");
+    assert!(!said[0].contains("still waiting"), "{said:?}");
+}
