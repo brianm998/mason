@@ -6227,6 +6227,12 @@ mod tests {
         // A daemon started with that hold file counts two units: of three, one more is free.
         let again = tempfile::tempdir().unwrap();
         let b3 = runner_broker(again.path(), 3, 1, 0);
+        // The daemon died with the run still out: its record is there.
+        State {
+            sha: "abc".into(),
+            ..Default::default()
+        }
+        .save(&kept[0].record);
         b3.adopt_remote(&kept);
         let first = queue_gha(&b3, 1);
         let second = queue_gha(&b3, 2);
