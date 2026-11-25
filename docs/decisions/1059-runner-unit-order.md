@@ -7,3 +7,5 @@ This is for requests that hold only runner units (`gha`, `gha-macos`, and the `g
 `[remote_runs] debt_units` (default 4) caps what debt payments hold in all, through a `gha-debt` pool of that size that each debt asks for beside its `gha` units, and a debt of a sharded suite runs as at most that many shards. The cap is kept by the first project's setting seen by the broker (the pool is account-wide).
 
 Trust: `crates/scheduler/**`, `suites.rs` are in PROTECTED; this changes the order work gets runners, not any verdict.
+
+A run that gives its units back job by job and asks again (#820) keeps its kind rank and its first wait start, and a debt's `gha-debt` share moves with its `gha` units. `sched.rs` is in PROTECTED too; it changes only who gets runner units first, not any verdict.
