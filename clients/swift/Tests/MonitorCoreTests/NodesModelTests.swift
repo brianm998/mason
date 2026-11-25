@@ -65,4 +65,40 @@ final class NodesModelTests: XCTestCase {
         XCTAssertEqual(NodesSnapshot(json: #"{"enabled": false, "nodes": [{"name": "x", "paired": true}]}"#).header,
                        "0 of 1 node taking work (nodes are off)")
     }
+
+    func testEachNodesUpdateIsShownAndOnlyAStuckOneOffersUpdateNow() throws {
+        let s = NodesSnapshot(json: #"""
+        {"enabled": true, "prefer": "nodes", "nodes": [
+          {"name": "marmot", "nid": "n1", "paired": true, "usable": true, "state": "accepting",
+           "update": "building for arm64", "update_state": "building"},
+          {"name": "mini", "nid": "n2", "paired": true, "usable": false, "state": "lost (6 polls without an answer)",
+           "update": "will update when it returns", "update_state": "pending"},
+          {"name": "studio", "nid": "n3", "paired": true, "usable": true, "state": "accepting",
+           "update": "up to date", "update_state": "up-to-date"},
+          {"name": "air", "nid": "n4", "paired": true, "usable": true, "state": "accepting",
+           "update": "failed (the node said no)", "update_state": "failed"}
+        ]}
+        """#)
+        XCTAssertEqual(s.nodes.map(\.canUpdateNow), [false, true, false, true])
+        XCTAssertEqual(s.nodes[0].update, "building for arm64")
+        XCTAssertEqual(
+            s.updateSummary,
+            "marmot: building for arm64; mini: will update when it returns; air: failed (the node said no)"
+        )
+    }
+
+    func testTheUpdateSummaryIsQuietWhenEveryNodeIsUpToDateOrTheDaemonSaysNothing() {
+        let done = NodesSnapshot(json: #"""
+        {"enabled": true, "nodes": [
+          {"name": "a", "paired": true, "update": "up to date", "update_state": "up-to-date"},
+          {"name": "b", "paired": true, "update": "up to date", "update_state": "up-to-date"}]}
+        """#)
+        XCTAssertEqual(done.updateSummary, "2 nodes up to date")
+        let one = NodesSnapshot(json: #"{"nodes": [{"name": "a", "paired": true, "update": "up to date", "update_state": "up-to-date"}]}"#)
+        XCTAssertEqual(one.updateSummary, "1 node up to date")
+        // An older daemon sends no update, an unpaired node has none.
+        let old = NodesSnapshot(json: #"{"nodes": [{"name": "a", "paired": true}, {"name": "b", "paired": false}]}"#)
+        XCTAssertNil(old.updateSummary)
+        XCTAssertFalse(old.nodes[0].canUpdateNow)
+    }
 }
