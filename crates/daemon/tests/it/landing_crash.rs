@@ -217,8 +217,10 @@ fn run(point: &str, mode: &str) -> Result<(), String> {
         return Err("the culprit was not sent back".into());
     }
     // No integration branch is left behind once a batch is over.
-    let left = sh(&s.repo, &["branch", "--list", "mason/int/*"]);
+    // Rows first: a batch may finish between the two reads, and its branch goes before its row
+    // is final.
     let batches = store.batches(None, 50).map_err(|e| e.to_string())?;
+    let left = sh(&s.repo, &["branch", "--list", "mason/int/*"]);
     if batches.iter().all(|b| b.finished_at.is_some()) && !left.trim().is_empty() {
         return Err(format!("integration branches left behind: {left}"));
     }

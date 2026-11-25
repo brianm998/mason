@@ -792,6 +792,8 @@ fn coordinate(weak: &Weak<Daemon>, pid: ProjectId, first: &mut bool, last: &mut 
                     );
                 }
             }
+            // Before the dead batches are marked finished, as for a batch that ends itself.
+            sweep_integration(&d, pid);
             // The abandoned batches' results are thrown away: stop their step hosts, which
             // would otherwise run on for ever holding test worlds.
             for id in d.store.abandon_batches(&p.id, now_ms()).unwrap_or_default() {
@@ -800,7 +802,6 @@ fn coordinate(weak: &Weak<Daemon>, pid: ProjectId, first: &mut bool, last: &mut 
             let _ = d
                 .store
                 .prune_batch_runs(now_ms().saturating_sub(2 * 24 * 3600 * 1000));
-            sweep_integration(&d, pid);
             remove_refs(&d, pid, None);
         }
     }
@@ -822,6 +823,14 @@ fn coordinate(weak: &Weak<Daemon>, pid: ProjectId, first: &mut bool, last: &mut 
             .unwrap_or_else(|e| e.into_inner());
     }
     true
+}
+
+/// The second integration worktree and branch, of a split that runs both halves at once
+/// (#702).
+fn half(int_wt: &Path, int_branch: &str) -> (PathBuf, String) {
+    let mut wt = int_wt.as_os_str().to_owned();
+    wt.push("-half");
+    (PathBuf::from(wt), format!("{int_branch}-half"))
 }
 
 /// A dead daemon's batches left integration branches behind (and a worktree
@@ -2668,6 +2677,18 @@ impl Runner {
         } else {
             final_note
         };
+        // The integration branches were disposable. They go before the row is final: a
+        // batch that reads as finished has left none behind.
+        {
+            let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+            let (half_wt, half_branch) = half(&int_wt, &int_branch);
+            for (wt, branch) in [(&int_wt, &int_branch), (&half_wt, &half_branch)] {
+                if wt.join(".git").exists() {
+                    let _ = git::run(wt, &["checkout", "--detach", "--quiet"]);
+                }
+                let _ = git::run(&p.path, &["branch", "-D", branch]);
+            }
+        }
         self.record(
             batch_id,
             phase,
@@ -2678,14 +2699,6 @@ impl Runner {
             true,
         );
         self.clean_outside();
-        // The integration branch was disposable.
-        {
-            let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
-            if int_wt.join(".git").exists() {
-                let _ = git::run(&int_wt, &["checkout", "--detach", "--quiet"]);
-            }
-            let _ = git::run(&p.path, &["branch", "-D", &int_branch]);
-        }
         // -- the verdicts
         let was_ok = outcome.is_ok();
         let all_ids: Vec<u64> = ids.clone();
@@ -5208,13 +5221,7 @@ impl Runner {
     ) -> (plan::Pin, Vec<SplitRun>) {
         let ids: Vec<u64> = active.iter().map(|t| t.id).collect();
         let runs: Vec<SplitRun> = vec![];
-        // The second integration worktree of a split that runs both halves at once (#702).
-        let int_wt_b = {
-            let mut n = int_wt.as_os_str().to_owned();
-            n.push("-half");
-            PathBuf::from(n)
-        };
-        let int_branch_b = format!("{}-half", batch.int_branch);
+        let (int_wt_b, int_branch_b) = half(int_wt, batch.int_branch);
         let batch_b = Batch {
             int_wt: &int_wt_b,
             int_branch: &int_branch_b,
