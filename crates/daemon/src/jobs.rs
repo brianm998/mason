@@ -464,10 +464,9 @@ impl Ctx {
                     reason,
                     class,
                 });
-                // A failure about the code gets one look from a diagnosis session (s250).
-                if class == Some(FailClass::Code) {
-                    crate::diagnose::on_failed(&self.d, self.task, self.run);
-                }
+                // Every failure gets one look from a diagnosis session (s250, s1048), unless a
+                // retry is already coming.
+                crate::diagnose::on_failed(&self.d, self.task, self.run);
             }
         }
         self.release_lease();
