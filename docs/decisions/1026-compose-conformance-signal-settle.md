@@ -10,7 +10,7 @@
 
 Rejected: a longer quiet window (decision 0763 rejected it: it only moves the failure to a slower runner) and a looser `compare()` (it would hide real differences).
 
-Decision 1070 gave the Rust `settle()` a 5 s quiet fallback. It is kept (`should_leave`, `QUIET_WINDOW_MS`), but in the Rust capturer the fallback now needs both: the 5 s window has passed and the three round trips agree. The window alone no longer ends the wait.
+Decision 1070 gave the Rust `settle()` a 5 s quiet fallback. It is kept (`should_leave`, `QUIET_WINDOW_MS`), but in the Rust capturer the fallback now needs both: the 5 s window has passed and the three round trips agree. The window alone no longer ends the wait. Once the target is reached, the Rust side also keeps the base's 300 ms trailing quiet (`trailing_done`), so later views of the same step are taken in.
 
 ## Banners
 
