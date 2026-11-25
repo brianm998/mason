@@ -1,0 +1,8 @@
+.mason/run.json
+crates/adapters/src/claude.rs
+crates/cli/src/guard.rs
+crates/cli/src/main.rs
+crates/cli/src/resources.rs
+docs/decisions/1096-agent-command-guard.md
+docs/stages/s1107.md
+scripts/exit/s1107.sh
