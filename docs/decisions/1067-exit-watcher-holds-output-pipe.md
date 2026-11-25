@@ -6,6 +6,7 @@ Without timeout(1) (macOS runners), `run-exit-scripts.sh` starts a watcher subsh
 limit. It inherited the stdout piped into `tee`, and killing the subshell left its `sleep` alive, so `tee`
 saw no EOF until the limit (3600 s in CI) passed. The job then ran out its 60 minutes after one script.
 
-Decision: the watcher's output goes to /dev/null. Killing its sleep when the script ends is decision 1068,
-which landed first; the redirect also covers a sleep forked after that kill. Limits and job timeouts are
-unchanged.
+Decision: the watcher's stdio goes to /dev/null and its `sleep` is killed when the script ends. Both landed
+first, as decisions 1068 (the kill) and 1065 (the redirect). This task adds only its exit test, which also
+checks that a failing script is still reported on the fallback path and that no `sleep` is left behind.
+Limits and job timeouts are unchanged.
