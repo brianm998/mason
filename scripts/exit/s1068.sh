@@ -6,9 +6,9 @@ cd "$(dirname "$0")/../.."
 t=clients/compose/app/src/main/kotlin/mason/monitor/Tool.kt
 grep -q 'val reached = model.lastViewSeq >= target' "$t"
 ! grep -q 'val reached = model.lastSeq' "$t"
-grep -q 'while (model.lastViewSeq < seq)' "$t"
-grep -q 'while !reached(screen.seq, screen.views.len(), target)' crates/conformance/src/main.rs
-grep -q 'did not reach the daemon.s seq' "$t"
+grep -q 'val unmoved = !model.demo &&' "$t"
+grep -q '!demo && screen.views.len() >= 3' crates/conformance/src/main.rs
+grep -q 'timed out waiting for' "$t"
 grep -q '60_000' "$t"
 grep -q '^Summary: ' docs/stages/s1068.md
 grep -q '1019' docs/decisions/1057-monitor-compose-settle-counts-events.md

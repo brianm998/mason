@@ -39,25 +39,45 @@ private fun until(what: String, seconds: Int = 15, cond: () -> Boolean) {
     }
 }
 
+/** The view kinds the monitor subscribes to; a dump is not taken before each has been applied. */
+private val SUBSCRIBED = setOf("sidebar", "home", "header")
+
+/** Consecutive round trips that must agree before a live daemon's screen counts as settled. */
+private const val AGREEING_ROUND_TRIPS = 3
+
+private fun daemonSeq(model: MonitorModel, id: String): Long? {
+    val status = call(model, Command(raw = mason.v1.Raw(method = "GET", path = "/status")), id)
+    return (Codec.json(status.json)?.get("seq") as? Number)?.toLong()
+}
+
 /**
- * Let the views settle: read the daemon's seq from GET /status, wait until the model has reached
- * it. The demo daemon resends every view at each new seq, so it always is. A live daemon never
- * resends an unchanged view, so there only a short quiet is waited for. A hard limit of 60 s fails.
+ * Settled is a signal, not a quiet window: every subscribed kind has been applied, and an applied
+ * view covers the daemon's seq. The demo daemon resends every view at each new seq, so there
+ * nothing else settles (decision 1025). A live daemon sends no view whose content did not change,
+ * so there the seq may instead stay unmoved across several round trips (asked over the same
+ * ordered connection, so views sent before each answer have arrived) with nothing new arriving.
+ * A timeout fails, naming what was awaited; it never decides.
  */
 private fun settle(model: MonitorModel) {
-    val status = call(model, Command(raw = mason.v1.Raw(method = "GET", path = "/status")), "settle-status")
-    val raw = Codec.json(status.json)?.get("seq")
-    val target = (raw as? Number)?.toLong() ?: (raw as? String)?.toLongOrNull() ?: 0L
     val end = System.currentTimeMillis() + 60_000
-    var last = model.lastSeq
-    var quiet = 0
+    var agreed = 0
+    var prev = -1L
+    var prevLast = -1L
     while (true) {
+        val target = daemonSeq(model, "settle") ?: fail("the daemon's /status gave no seq")
+        val missing = SUBSCRIBED - model.appliedKinds()
         val reached = model.lastViewSeq >= target
-        // Reached: a short quiet for trailing views. A demo not there yet: keep waiting (decision 1025).
-        if ((reached || !model.demo) && quiet >= 6) break
-        if (System.currentTimeMillis() > end) fail("the screen did not reach the daemon's seq $target within 60 s")
-        Thread.sleep(50)
-        if (model.lastSeq == last) quiet++ else { quiet = 0; last = model.lastSeq }
+        val unmoved = !model.demo && target == prev && model.lastSeq == prevLast
+        if (missing.isEmpty() && (reached || unmoved)) agreed++ else agreed = 0
+        // Reached: one more round trip, so the rest of that batch of views has arrived.
+        if (reached && agreed >= 2) return
+        if (agreed >= AGREEING_ROUND_TRIPS) return
+        prev = target
+        prevLast = model.lastSeq
+        if (System.currentTimeMillis() > end) {
+            fail("timed out waiting for " + if (missing.isNotEmpty()) "a view of kind ${missing.first()}" else "the views of seq $target (applied up to ${model.lastViewSeq})")
+        }
+        Thread.sleep(100)
     }
 }
 
@@ -74,18 +94,6 @@ private fun step(model: MonitorModel): Boolean {
     val r = call(model, Command(raw = mason.v1.Raw(method = "POST", path = "/demo/next")), "step")
     val reply = Codec.json(r.json)
     val advanced = reply?.get("advanced") == true
-    // The views for this step carry a sequence number at least the daemon's (from /status,
-    // read after the step): wait for them, then let any trailing view land.
-    val status = call(model, Command(raw = mason.v1.Raw(method = "GET", path = "/status")), "status")
-    val seq = (Codec.json(status.json)?.get("seq") as? Number)?.toLong()
-    // The demo daemon resends every view at each new seq, so lastViewSeq reaches seq.
-    if (seq != null) {
-        val end = System.currentTimeMillis() + 60_000
-        while (model.lastViewSeq < seq) {
-            if (System.currentTimeMillis() > end) fail("timed out waiting for the views of seq $seq")
-            Thread.sleep(50)
-        }
-    }
     settle(model)
     return advanced
 }

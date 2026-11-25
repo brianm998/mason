@@ -121,29 +121,62 @@ fn reached(screen_seq: u64, views: usize, target: u64) -> bool {
     screen_seq >= target && views >= 3
 }
 
+/// How long with no message, after the target is reached, before the step's views are all in.
+const TRAILING_QUIET: Duration = Duration::from_millis(300);
+
+/// Whether the views that follow the first one of a step have stopped arriving.
+fn trailing_done(quiet: Duration) -> bool {
+    quiet >= TRAILING_QUIET
+}
+
 /// Wait until the screen has reached the daemon's current seq and `after` (the seq a step
-/// reported). The demo daemon resends every view at each new seq, so there is no quiet-window
-/// fallback (decision 1025). A live daemon (`demo` false) never resends an unchanged view, so
-/// there the wait is only for the views of the subscription.
+/// reported), then until 300 ms pass with no message (trailing views of the same step). The demo
+/// daemon resends every view at each new seq, so there it waits for the seq and nothing else
+/// (decision 1025). A live daemon (`demo` false) never resends an unchanged view, so there three
+/// `/status` round trips in a row (the same ordered connection, so views sent before each answer
+/// have arrived) may instead agree on the seq with nothing new shown. The 60 s limit only fails,
+/// naming what was awaited.
 fn settle(c: &mut Client, screen: &mut Screen, after: u64, demo: bool) {
     let hard = std::time::Instant::now() + Duration::from_secs(60);
-    let r = run(c, screen, "GET", "/status");
-    let v: serde_json::Value = serde_json::from_str(&r.json).unwrap_or_default();
-    let target = v["seq"]
-        .as_u64()
-        .or_else(|| v["seq"].as_str().and_then(|s| s.parse().ok()))
-        .unwrap_or(0)
-        .max(after);
-    let target = if demo { target } else { 0 };
-    while !reached(screen.seq, screen.views.len(), target) {
+    let mut heard = std::time::Instant::now();
+    let mut agreed = 0;
+    let mut prev = (u64::MAX, u64::MAX);
+    loop {
+        let r = run(c, screen, "GET", "/status");
+        let v: serde_json::Value = serde_json::from_str(&r.json).unwrap_or_default();
+        let target = v["seq"]
+            .as_u64()
+            .or_else(|| v["seq"].as_str().and_then(|s| s.parse().ok()))
+            .unwrap_or(0)
+            .max(after);
+        // Take in what is already on the wire.
+        while let Ok(Some(m)) = c.recv(Duration::from_millis(50)) {
+            screen.absorb(m);
+            heard = std::time::Instant::now();
+        }
+        if prev == (target, screen.seq) {
+            agreed += 1;
+        } else {
+            agreed = 0;
+        }
+        if screen.seq != prev.1 {
+            heard = std::time::Instant::now();
+        }
+        prev = (target, screen.seq);
+        let settled = if reached(screen.seq, screen.views.len(), target) {
+            trailing_done(heard.elapsed())
+        } else {
+            !demo && screen.views.len() >= 3 && agreed >= 3
+        };
+        if settled {
+            return;
+        }
         if std::time::Instant::now() > hard {
             die(&format!(
-                "the screen did not reach the daemon's seq {target} within 60 s (at {})",
-                screen.seq
+                "the screen did not reach the daemon's seq {target} within 60 s (at {}, {} views)",
+                screen.seq,
+                screen.views.len()
             ));
-        }
-        if let Ok(Some(m)) = c.recv(Duration::from_millis(50)) {
-            screen.absorb(m);
         }
     }
 }
@@ -627,7 +660,8 @@ fn latency(args: &mut Vec<String>) {
 
 #[cfg(test)]
 mod tests {
-    use super::reached;
+    use super::{reached, trailing_done};
+    use std::time::Duration;
 
     #[test]
     fn settle_target_needs_the_steps_seq_and_three_views() {
@@ -635,5 +669,12 @@ mod tests {
         assert!(!reached(10, 2, 10));
         assert!(reached(10, 3, 10));
         assert!(reached(11, 3, 10));
+    }
+
+    #[test]
+    fn trailing_done_waits_for_trailing_views() {
+        assert!(!trailing_done(Duration::ZERO));
+        assert!(!trailing_done(Duration::from_millis(299)));
+        assert!(trailing_done(Duration::from_millis(300)));
     }
 }

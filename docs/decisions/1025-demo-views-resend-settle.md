@@ -14,9 +14,10 @@ This supersedes the quiet-window fallback of decision 1070 (`should_leave`) and 
 `QUIET_TICKS`. The owner approved replacing the checks in s1026, s1068 and s1081 that required
 them with checks for the exact wait.
 
-Live daemons (Welcome `demo` false: `expected --now`, the Compose `dump` and `editor`) never
-resend an unchanged view, so an exact wait there could only time out. The expected capturer waits
-for the subscription's views, and Compose for a short quiet, as no step is involved.
+It also supersedes, for demo daemons, the agreeing-round-trips exit of decision 1026. Live
+daemons (Welcome `demo` false: `expected --now`, the Compose `dump` and `editor`) never resend
+an unchanged view, so an exact wait there could only time out; they keep 1026's signal. The
+trailing wait after the seq is reached stays (1069; Compose takes one more round trip).
 
 The Swift tool's settle is unchanged (outside this task).
 

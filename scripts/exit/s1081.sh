@@ -5,7 +5,7 @@ cd "$(dirname "$0")/../.."
 f=crates/conformance/src/main.rs
 # The expected capturer waits for the step's seq exactly, and fails loudly (decision 1025).
 grep -q 'fn reached' $f
-grep -q 'while !reached(screen.seq, screen.views.len(), target)' $f
+grep -q '!demo && screen.views.len() >= 3' $f
 grep -q 'did not reach the daemon.s seq {target} within 60 s' $f
 grep -q 'fn settle_target_needs_the_steps_seq_and_three_views' $f
 grep -q '^Summary: ' docs/stages/s1081.md

@@ -9,7 +9,7 @@ for n in 0905 0707 0690; do grep -q "$n" "$d"; done
 grep -q 'only in compose' scripts/exit/s13.sh
 grep -q 'conformance" check --expected "$root/expected" --actual "$root/compose"' scripts/exit/s13.sh
 # The Compose capture waits for the step's seq exactly, with no quiet-window fallback (1025).
-grep -q 'while (model.lastViewSeq < seq)' clients/compose/app/src/main/kotlin/mason/monitor/Tool.kt
-grep -q 'timed out waiting for the views of seq' clients/compose/app/src/main/kotlin/mason/monitor/Tool.kt
+grep -q 'val unmoved = !model.demo &&' clients/compose/app/src/main/kotlin/mason/monitor/Tool.kt
+grep -q 'the views of seq $target (applied up to' clients/compose/app/src/main/kotlin/mason/monitor/Tool.kt
 bash -n scripts/exit/s13.sh
 echo "s1026 passed"
