@@ -778,6 +778,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s1061**: s759 clears the CI shard env and s664 finds its test binary from cargo's JSON output, fixing two of the five red shard-3 exit scripts.
 - **s1063**: scripts/exit/s899.sh now checks the current 304 test and its source() helper, so CI/exit-scripts stops failing on a stale test name.
 - **s1064**: The causes of the red `exit-scripts (ubuntu-latest, 1)` job on 0de921ceb are already fixed on develop, and s1064 now checks them together.
+- **s1065**: The s77 exit script starts its two hand runs with `--origin person` and waits to see the first one holding `compile` before starting the second, in place of a one-second sleep.
 - **s1066**: s43 now expects the daemon's real ceiling (9999) and s49 picks the highest-numbered checkpoint, fixing two of the exit scripts red on shard 6.
 - **s1067**: `mason project rename` now sets MASON_AS from USER, LOGNAME or "owner" like the daemon's default owner, so s965 passes where USER is unset or differs.
 - **s1068**: The Compose conformance settle now waits until the model's last applied view reaches the daemon's seq (as step() and the Rust capturer do), and both capturers print a stderr line when they leave on the quiet fallback.
@@ -789,5 +790,6 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s1079**: The exit-script runner kills the limit watcher's sleep when a script ends, so the macOS legs no longer wait out the whole job limit.
 - **s1080**: `conformance expected` now waits 300 ms of quiet after reaching the daemon's seq, so its checkpoint dumps include the step's trailing views.
 - **s1081**: The Rust conformance capturer no longer leaves its settle after 1.5 s of quiet; it waits for the step's view, with a 5 s quiet fallback that is logged.
+- **s1082**: daemon:restarts counts only unplanned starts, so a takeover from `mason update` no longer counts as a restart.
 - **s1086**: s101 now starts its ad-hoc range at 9960 and expects the daemon's real ceiling (9999), so it raises the `numbers` alert again.
 <!-- status:end -->
