@@ -923,7 +923,8 @@ fn act(d: &Arc<Daemon>, action: &str, task: u64) -> Result<String, String> {
                 return Err(format!("#{task} is not failed"));
             }
             drop(w);
-            crate::diagnose::on_failed(d, TaskId(task), StepRunId(latest));
+            crate::diagnose::start(d, TaskId(task), StepRunId(latest), true)
+                .map_err(|e| format!("no diagnosis of #{task}: {e}"))?;
             Ok(format!(
                 "diagnosis of #{task} started (at most {} per task)",
                 crate::diagnose::MAX_PER_TASK
