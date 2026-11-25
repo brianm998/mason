@@ -13,7 +13,8 @@ them with `--exact`. libtest's lines are printed unchanged, under cargo's own
 A test belongs to the shard whose list names it. A test in no list (new since the times were
 recorded) belongs to shard `fnv1a64(name) % shards + 1`, so every test runs on exactly one shard.
 An executable that cannot list its tests (`harness = false`) runs whole, on the shard its target
-name hashes to. Doc tests are listed and split the same way, with `cargo test --doc`.
+name hashes to. Doc tests are listed and split the same way, with `cargo test --doc`; a command
+that selects targets (`--test x`, `--lib`) runs none, and `--doc` runs only them.
 
 The exit status is 0 only when every executable run passed. Leading NAME=value words of the cargo
 command are set in the environment of everything this runs. Each executable runs in its package's
@@ -34,6 +35,12 @@ VALUE_FLAGS = {
     "-p", "--package", "--exclude", "--target-dir", "--manifest-path", "--features", "-F",
     "--test", "--bin", "--example", "--bench", "-j", "--jobs", "--target", "--profile",
     "--message-format", "--color", "--config", "-Z", "--lockfile-path", "--timings",
+}
+
+# `cargo test` flags that pick targets. Cargo refuses `--doc` beside any of them.
+TARGET_FLAGS = {
+    "--lib", "--bins", "--bin", "--tests", "--test", "--benches", "--bench", "--examples",
+    "--example", "--all-targets",
 }
 
 LISTED = re.compile(r"^(.*): (test|benchmark)$")
@@ -207,8 +214,12 @@ def main():
     env = dict(os.environ)
     env.update(penv)
     root = os.getcwd()
-    items = list_executables(flags, root, env)
-    if not items:
+    # Cargo refuses `--doc` with --no-run and with a target selector.
+    doc_only = "--doc" in flags
+    flags = [f for f in flags if f != "--doc"]
+    selected = any(f.split("=", 1)[0] in TARGET_FLAGS for f in flags)
+    items = [] if doc_only else list_executables(flags, root, env)
+    if not items and not doc_only:
         print("test-shard: no test executable found", file=sys.stderr)
         return 1
     failed, ran_exes, kept_total = [], 0, 0
@@ -239,9 +250,13 @@ def main():
                  + (f" (timed out after {exe_limit():g} s)" if rc == 124 and exe_limit() else ""))
             failed.append(item["name"])
     # Doc tests, with cargo's own run so the lines are cargo's.
-    rc, out = run(flags + ["--doc"] + filters + ["--", "--list"], root, env)
-    docs = listing(out) if rc == 0 else None
-    if docs is None:
+    docs = None
+    if not selected:
+        rc, out = run(flags + ["--doc"] + filters + ["--", "--list"], root, env)
+        docs = listing(out) if rc == 0 else None
+    if selected:
+        doc_cmd = []
+    elif docs is None:
         doc_cmd = [] if shard_of([], "doc-tests", shards) != shard else \
             flags + ["--doc"] + filters + (["--"] + libtest if libtest else [])
     else:
