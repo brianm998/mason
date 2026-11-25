@@ -805,7 +805,8 @@ fn run_remote(
     let task = run.and_then(|r| d.world().ok().and_then(|w| w.task_of_open_run(r)));
     // The slots a fallback takes when it is placed here: the same ones `run_one` asks for.
     let uses = test_step_uses(d, project);
-    let Some(site) = rm::site_for_run(d, project, cwd, task.map(|t| t.0), &uses, covered) else {
+    let Some(mut site) = rm::site_for_run(d, project, cwd, task.map(|t| t.0), &uses, covered)
+    else {
         return Err(rm::env_err("the project has no [remote_runs] section"));
     };
     // A suite whose build runs as its own step here goes in `RunSpec.build`, which the runner
@@ -828,6 +829,14 @@ fn run_remote(
         spec = rm::split_for_grant(spec, s.shards, sc, runners, lists_partial(s), |n| {
             shard_lists(d, project, s, n)
         });
+        // A run that waits for a bigger grant (this machine cannot run it) is split again as
+        // this one was.
+        let (d, project, suite, sc) = (d.clone(), project.to_string(), s.clone(), sc.to_string());
+        site.resplit = Some(Arc::new(move |rs, n| {
+            rm::split_for_grant(rs, suite.shards, &sc, Some(n), lists_partial(&suite), |n| {
+                shard_lists(&d, &project, &suite, n)
+            })
+        }));
     }
     let stop = || match check() {
         Stop::No => None,

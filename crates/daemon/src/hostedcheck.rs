@@ -791,7 +791,7 @@ fn remote_check(
     // It goes in `RunSpec.build`, a separate process, not joined with `&&` (two `cd`s break).
     let build = build_choice(place.map(|(_, s)| s), &spec.cmd);
     let build = spec.build.as_deref().or(build);
-    let site = rm::site_for_run(
+    let mut site = rm::site_for_run(
         d,
         &project,
         &spec.cwd,
@@ -816,6 +816,19 @@ fn remote_check(
             Some(sc) => {
                 // Split as many ways as the lease was given runner units (a flexible request);
                 // one unit runs the whole command on one runner.
+                // A run that waits for a bigger grant (this machine cannot run it) is split
+                // again as this one is.
+                let (d2, p2, ps2, sc2) = (d.clone(), project.clone(), ps.clone(), sc.to_string());
+                site.resplit = Some(std::sync::Arc::new(move |rs, n| {
+                    rm::split_for_grant(
+                        rs,
+                        ps2.shards,
+                        &sc2,
+                        Some(n),
+                        crate::suites::lists_partial(&ps2),
+                        |n| crate::suites::shard_lists(&d2, &p2, &ps2, n),
+                    )
+                }));
                 rm::split_for_grant(
                     rs,
                     ps.shards,
