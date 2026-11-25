@@ -130,12 +130,12 @@ struct Tool {
         await until("the daemon's status") { got }
         target = max(target, floor)
         let end = Date().addingTimeInterval(60)
-        var last = model.lastSeq
+        var last = model.lastViewSeq
         var quiet = 0
-        while quiet < (model.lastSeq >= target ? 6 : 30) {
+        while quiet < (model.lastViewSeq >= target ? 6 : 30) {
             if Date() > end { fail("the screen did not reach the daemon's seq \(target) within 60 s") }
             try? await Task.sleep(nanoseconds: 50_000_000)
-            if model.lastSeq == last { quiet += 1 } else { quiet = 0; last = model.lastSeq }
+            if model.lastViewSeq == last { quiet += 1 } else { quiet = 0; last = model.lastViewSeq }
         }
     }
 
