@@ -7,7 +7,7 @@ The fallback in scripts/run-exit-scripts.sh (no timeout/gtimeout, i.e. macOS) ra
 The watcher runs with stdio on /dev/null, its sleep is killed when the script ends, and the script runs in its own process group (set -m) so the limit kills all descendants. exit-scripts-macos gets timeout-minutes 90 like exit-scripts, so the 3600 s per-script limit fires before the job is cancelled. MASON_EXIT_FALLBACK=1 forces the fallback for tests.
 
 ## Relation to 1065 and 1068
-Those landed first and fix the pipe hang by killing the watcher's sleep; their lines are kept. This record adds the process group, so a script's descendants cannot hold the pipe after the limit. It replaces 1068's "keep the 60-minute job timeout": with a 3600 s limit inside a 60-minute job, a hung script is never reported by name.
+Those and 1066 landed first and fix the pipe hang (1066 also raised the macOS job to 90 minutes); their lines are kept. This record adds the process group, so a script's descendants cannot hold the pipe after the limit. It replaces 1068's "keep the 60-minute job timeout": with a 3600 s limit inside a 60-minute job, a hung script is never reported by name.
 
 ## Rejected
 - Raising the job timeout alone: does not stop the pipe hang.
