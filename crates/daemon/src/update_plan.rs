@@ -415,49 +415,69 @@ pub fn decide(cfg: &AutoCfg, i: &DecideInput) -> Verdict {
 
 // ---- what is in flight ----------------------------------------------------------------------------
 
-static NO_REPLAY: AtomicUsize = AtomicUsize::new(0);
-static CHECKS: AtomicUsize = AtomicUsize::new(0);
-static TEST_STEPS: AtomicUsize = AtomicUsize::new(0);
-
-/// Held while an agent's `run_check` call runs.
-pub struct CheckGuard(bool);
-
-pub fn check_started(has_call_id: bool) -> CheckGuard {
-    CHECKS.fetch_add(1, Ordering::SeqCst);
-    if !has_call_id {
-        NO_REPLAY.fetch_add(1, Ordering::SeqCst);
-    }
-    CheckGuard(has_call_id)
+/// What runs in this process that a takeover would cut.
+#[derive(Debug)]
+pub struct InFlight {
+    checks_no_replay: AtomicUsize,
+    test_steps: AtomicUsize,
 }
 
-impl Drop for CheckGuard {
-    fn drop(&mut self) {
-        CHECKS.fetch_sub(1, Ordering::SeqCst);
-        if !self.0 {
-            NO_REPLAY.fetch_sub(1, Ordering::SeqCst);
+impl InFlight {
+    pub const fn new() -> InFlight {
+        InFlight {
+            checks_no_replay: AtomicUsize::new(0),
+            test_steps: AtomicUsize::new(0),
         }
     }
-}
 
-/// Held while a test step runs its suites.
-pub struct StepGuard;
-
-pub fn test_step_started() -> StepGuard {
-    TEST_STEPS.fetch_add(1, Ordering::SeqCst);
-    StepGuard
-}
-
-impl Drop for StepGuard {
-    fn drop(&mut self) {
-        TEST_STEPS.fetch_sub(1, Ordering::SeqCst);
+    /// Held while a `run_check` call runs; only one without a call id counts (#1051).
+    pub fn check(&'static self, has_call_id: bool) -> Option<Guard> {
+        (!has_call_id).then(|| Guard::new(&self.checks_no_replay))
     }
+
+    /// Held while a test step runs its suites.
+    pub fn test_step(&'static self) -> Guard {
+        Guard::new(&self.test_steps)
+    }
+}
+
+impl Default for InFlight {
+    fn default() -> Self {
+        InFlight::new()
+    }
+}
+
+static IN_FLIGHT: InFlight = InFlight::new();
+
+/// One count, given back when dropped.
+pub struct Guard(&'static AtomicUsize);
+
+impl Guard {
+    fn new(n: &'static AtomicUsize) -> Guard {
+        n.fetch_add(1, Ordering::SeqCst);
+        Guard(n)
+    }
+}
+
+impl Drop for Guard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+pub fn check_started(has_call_id: bool) -> Option<Guard> {
+    IN_FLIGHT.check(has_call_id)
+}
+
+pub fn test_step_started() -> Guard {
+    IN_FLIGHT.test_step()
 }
 
 /// The cost of a takeover now.
 pub fn cost_now(d: &Daemon) -> Cost {
     Cost {
-        checks_no_replay: NO_REPLAY.load(Ordering::SeqCst) as u32,
-        test_steps: TEST_STEPS.load(Ordering::SeqCst) as u32,
+        checks_no_replay: IN_FLIGHT.checks_no_replay.load(Ordering::SeqCst) as u32,
+        test_steps: IN_FLIGHT.test_steps.load(Ordering::SeqCst) as u32,
         batches: d.landing.busy_projects().len() as u32,
         exclusive: d.broker.exclusive_running(),
     }
@@ -765,9 +785,12 @@ fn run_planned(d: &Arc<Daemon>, first: Pending) {
                 continue;
             }
         }
+        // Only returns if the new runtime could not be started.
         update::take_over(d, &target);
         d.landing.set_draining(false);
-        lock(&d.update_plan).running = None;
+        let mut p = lock(&d.update_plan);
+        p.failed = Some((target, now_ms()));
+        p.running = None;
         return;
     }
 }
@@ -1063,22 +1086,20 @@ mod tests {
 
     #[test]
     fn guards_count_checks_without_a_call_id() {
-        let before = cost_counts();
-        let a = check_started(false);
-        let b = check_started(true);
-        let s = test_step_started();
-        let during = cost_counts();
-        assert_eq!(during.0, before.0 + 1);
-        assert_eq!(during.1, before.1 + 1);
+        // Its own counters: other tests of this process run checks too.
+        let f: &'static InFlight = Box::leak(Box::new(InFlight::new()));
+        let counts = || {
+            (
+                f.checks_no_replay.load(Ordering::SeqCst),
+                f.test_steps.load(Ordering::SeqCst),
+            )
+        };
+        let a = f.check(false);
+        let b = f.check(true);
+        let s = f.test_step();
+        assert_eq!(counts(), (1, 1));
         drop((a, b, s));
-        assert_eq!(cost_counts(), before);
-    }
-
-    fn cost_counts() -> (usize, usize) {
-        (
-            NO_REPLAY.load(Ordering::SeqCst),
-            TEST_STEPS.load(Ordering::SeqCst),
-        )
+        assert_eq!(counts(), (0, 0));
     }
 
     #[test]
