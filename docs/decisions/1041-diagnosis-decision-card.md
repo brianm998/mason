@@ -1,0 +1,3 @@
+# 1041: a diagnosis ends in a decision card, one per failure
+
+A diagnosis fixed on one verdict, ran only for code failures and twice per task in its life, and its `ask` could not be carried out. Decision: `submit_diagnosis` is a card of 2 to 4 options, exactly one recommended, each with an action (retry, explore, close, cancel) and its arguments, stored on the row. Automatic apply keeps its rule, on the recommended option only. Any failure is diagnosed unless an automatic retry is coming; the budget is one per entry into Failed and six per task; the owner may ask for one on a failed task. The contract only gains a stricter shape; no check is loosened. Older rows stay readable, so no data migration.
