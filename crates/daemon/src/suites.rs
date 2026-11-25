@@ -5722,8 +5722,11 @@ fn pay_ci(
     )
     .map_err(|e| format!("could not push {name}: {e}"))?;
     let started = Instant::now();
+    // The commit until the trigger names the run.
+    let mut run_id = tip.clone();
     let state = (|| -> Result<mason_adapter_api::service::CiState, String> {
         let run = ci.trigger(&name, &tip).map_err(|e| e.to_string())?;
+        run_id.clone_from(&run);
         loop {
             match ci.status(&run).map_err(|e| e.to_string())? {
                 mason_adapter_api::service::CiState::Pending => {
@@ -5736,6 +5739,11 @@ fn pay_ci(
             }
         }
     })();
+    // No verdict (timeout, an error): cancel the run, best effort, before its ref goes
+    // (task 1108). The debt's outcome does not depend on it.
+    if state.is_err() {
+        crate::landing::cancel_runs(ci.as_ref(), &run_id, &name);
+    }
     let _ = git::run(
         &p.path,
         &["push", &remote, "--delete", &format!("refs/heads/{name}")],

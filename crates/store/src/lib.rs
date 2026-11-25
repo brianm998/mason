@@ -3204,6 +3204,18 @@ impl Store {
         })
     }
 
+    /// Add `text` to the end of a batch's note.
+    pub fn append_batch_note(&self, id: u64, text: &str) -> Result<(), StoreError> {
+        let t = text.to_string();
+        self.write(move |c| {
+            c.execute(
+                "UPDATE batches SET note = CASE WHEN note = '' THEN ?2 ELSE note || '; ' || ?2 END WHERE id = ?1",
+                params![id as i64, t],
+            )
+            .map(|_| ())
+        })
+    }
+
     pub fn add_ref(
         &self,
         batch: u64,

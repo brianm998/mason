@@ -20,6 +20,7 @@ mod base_red;
 mod batch_remote_hold;
 mod blockers;
 mod bug_alerts;
+mod ci_cancel;
 mod ci_infra;
 mod ci_schedule;
 mod ci_stuck;
