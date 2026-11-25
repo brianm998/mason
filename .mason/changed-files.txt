@@ -1,0 +1,14 @@
+.mason/run.json
+crates/cli/src/main.rs
+crates/daemon/src/daemon.rs
+crates/daemon/src/http.rs
+crates/daemon/src/jobs.rs
+crates/daemon/src/lib.rs
+crates/daemon/src/sched.rs
+crates/daemon/src/suites.rs
+crates/daemon/src/update.rs
+crates/daemon/src/update_plan.rs
+crates/daemon/tests/it/update.rs
+docs/decisions/1048-update-by-priority.md
+docs/stages/s1059.md
+scripts/exit/s1059.sh
