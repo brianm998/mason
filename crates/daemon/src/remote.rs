@@ -2258,6 +2258,8 @@ fn poll(
                 st.save(rec);
             }
         }
+        // The run is still going: the health check does not call its step silent.
+        crate::remote_runs::polled(rec, st.picked_ms, now);
         if let Some(f) = &site.on_phase {
             let text = phase_text(jobs, st.shards.len(), now, st.pushed_ms);
             if live.said.as_deref() != Some(text.as_str()) {
@@ -3614,6 +3616,7 @@ impl HoldGuard {
             &spec.runs_on,
             shards,
             &record_path(dir, &spec.id),
+            spec.limit.as_millis() as u64,
         );
         write_hold(
             &holds,

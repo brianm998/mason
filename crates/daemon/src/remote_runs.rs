@@ -17,6 +17,10 @@ use std::sync::Mutex;
 /// A finished run stays in the list this long.
 pub const KEEP_MS: u64 = 10 * 60 * 1000;
 
+/// How long past its runner limit a run that was picked up may still excuse its step's silence:
+/// the poll cancels it at the limit and then waits for its output.
+const LIMIT_MARGIN_MS: u64 = 10 * 60 * 1000;
+
 #[derive(Clone, Debug, Default)]
 pub struct Job {
     pub name: String,
@@ -46,6 +50,11 @@ struct Entry {
     finished_ms: Option<u64>,
     outcome: String,
     jobs: Vec<Job>,
+    /// The runner limit, counted from `picked_ms`.
+    limit_ms: u64,
+    /// When a runner took the run, and when a poll last succeeded and found it still going.
+    picked_ms: Option<u64>,
+    polled_ms: Option<u64>,
 }
 
 static REG: Mutex<Vec<Entry>> = Mutex::new(Vec::new());
@@ -135,6 +144,7 @@ pub fn started(
     runs_on: &str,
     shards: u32,
     record: &Path,
+    limit_ms: u64,
 ) {
     let scope = scope.display().to_string();
     let (task, owner, kind) = classify(id, key, kind);
@@ -154,8 +164,56 @@ pub fn started(
         record: Some(record.to_path_buf()),
         since_ms: now,
         updated_ms: now,
+        limit_ms,
         ..Default::default()
     });
+}
+
+/// The run's poll succeeded at `now` and found it still going; `picked_ms` is when a runner
+/// took it, if one has.
+pub fn polled(record: &Path, picked_ms: Option<u64>, now: u64) {
+    for e in reg()
+        .iter_mut()
+        .filter(|e| e.record.as_deref() == Some(record))
+    {
+        e.picked_ms = picked_ms;
+        e.polled_ms = Some(now);
+    }
+}
+
+/// How long a step silent for `silent_ms` counts as silent when it waits on a run: a run that a
+/// runner took, that is within its limit (plus a margin), counts from its last successful poll.
+/// Otherwise `silent_ms` stands.
+fn quiet_ms(
+    silent_ms: u64,
+    picked_ms: Option<u64>,
+    polled_ms: Option<u64>,
+    limit_ms: u64,
+    now: u64,
+) -> u64 {
+    match (picked_ms, polled_ms) {
+        (Some(picked), Some(polled))
+            if now
+                < picked
+                    .saturating_add(limit_ms)
+                    .saturating_add(LIMIT_MARGIN_MS) =>
+        {
+            silent_ms.min(now.saturating_sub(polled))
+        }
+        _ => silent_ms,
+    }
+}
+
+/// [`quiet_ms`] over the unfinished GitHub runs of `task` under `scope`: the least silent one
+/// speaks for the step.
+pub fn remote_quiet_ms(scope: &Path, task: u64, silent_ms: u64, now: u64) -> u64 {
+    let scope = scope.display().to_string();
+    reg()
+        .iter()
+        .filter(|e| e.scope == scope && e.task == task)
+        .filter(|e| e.finished_ms.is_none() && !e.waiting && !is_node_run(e))
+        .map(|e| quiet_ms(silent_ms, e.picked_ms, e.polled_ms, e.limit_ms, now))
+        .fold(silent_ms, u64::min)
 }
 
 /// The run ended: how, from its record (collected with code 0 is green).
@@ -213,6 +271,7 @@ pub fn node_started(scope: &Path, id: &str, suite: &str, node: &str, record: &Pa
         &format!("node {node}"),
         1,
         record,
+        0,
     );
 }
 
@@ -343,5 +402,94 @@ pub fn view(
         pool_limit: limit,
         waiting,
         runs,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mason_core::health::{judge, Facts, Limits};
+
+    const MIN: u64 = 60 * 1000;
+    const LIMIT: u64 = 90 * MIN;
+    const PICKED: u64 = 1_000 * MIN;
+
+    fn reported(silent_ms: u64) -> bool {
+        let x = Facts {
+            silent_hosts: vec![(7, silent_ms)],
+            ..Default::default()
+        };
+        judge(&x, &Limits::default())
+            .iter()
+            .any(|f| f.key == "stuck:host:7")
+    }
+
+    /// A registry scope of the test's own, with one run of task 7 in it.
+    fn run(name: &str) -> (PathBuf, PathBuf) {
+        let scope = PathBuf::from(format!("/nowhere/{name}/hosts"));
+        let record = PathBuf::from(format!("/nowhere/{name}/t7r1-u.remote"));
+        started(
+            &scope,
+            "t7r1-u",
+            "task 7",
+            "test_step",
+            "u",
+            "ubuntu-latest",
+            1,
+            &record,
+            LIMIT,
+        );
+        (scope, record)
+    }
+
+    #[test]
+    fn a_picked_up_run_inside_its_limit_is_not_silent() {
+        let (scope, record) = run("inside");
+        let now = PICKED + 60 * MIN;
+        polled(&record, Some(PICKED), now - 2 * MIN);
+        let quiet = remote_quiet_ms(&scope, 7, 60 * MIN, now);
+        assert_eq!(quiet, 2 * MIN);
+        assert!(!reported(quiet));
+    }
+
+    #[test]
+    fn a_run_past_its_limit_and_margin_is_still_silent() {
+        let (scope, record) = run("past");
+        let now = PICKED + LIMIT + LIMIT_MARGIN_MS;
+        polled(&record, Some(PICKED), now - MIN);
+        let quiet = remote_quiet_ms(&scope, 7, 100 * MIN, now);
+        assert_eq!(quiet, 100 * MIN);
+        assert!(reported(quiet));
+        // Just inside the margin it is excused.
+        assert_eq!(remote_quiet_ms(&scope, 7, 100 * MIN, now - 1), MIN - 1);
+    }
+
+    #[test]
+    fn polls_that_keep_failing_are_reported() {
+        let (scope, record) = run("failing");
+        polled(&record, Some(PICKED), PICKED);
+        let quiet = remote_quiet_ms(&scope, 7, 45 * MIN, PICKED + 31 * MIN);
+        assert_eq!(quiet, 31 * MIN);
+        assert!(reported(quiet));
+    }
+
+    #[test]
+    fn only_a_live_picked_up_run_of_the_task_excuses_silence() {
+        let (scope, record) = run("others");
+        let now = PICKED + 50 * MIN;
+        let quiet = |task| remote_quiet_ms(&scope, task, 40 * MIN, now);
+        // Never polled, then still queued on GitHub.
+        assert_eq!(quiet(7), 40 * MIN);
+        polled(&record, None, now);
+        assert_eq!(quiet(7), 40 * MIN);
+        // A local step has no run, and another daemon's run is not this one's.
+        polled(&record, Some(PICKED), now);
+        assert_eq!(quiet(8), 40 * MIN);
+        assert!(reported(quiet(8)));
+        let elsewhere = Path::new("/nowhere/elsewhere/hosts");
+        assert_eq!(remote_quiet_ms(elsewhere, 7, 40 * MIN, now), 40 * MIN);
+        assert_eq!(quiet(7), 0);
+        finished(&scope, "t7r1-u", Some("green"));
+        assert_eq!(quiet(7), 40 * MIN);
     }
 }
