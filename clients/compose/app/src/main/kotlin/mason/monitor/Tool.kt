@@ -64,18 +64,18 @@ private fun settle(model: MonitorModel) {
     var prev = -1L
     var prevLast = -1L
     while (true) {
-        val target = daemonSeq(model, "settle") ?: fail("the daemon's /status gave no seq")
+        val seq = daemonSeq(model, "settle") ?: fail("the daemon's /status gave no seq")
         val missing = SUBSCRIBED - model.appliedKinds()
-        val reached = model.lastViewSeq >= target
-        val unmoved = !model.demo && target == prev && model.lastSeq == prevLast
-        if (missing.isEmpty() && (reached || unmoved)) agreed++ else agreed = 0
-        // Reached: one more round trip, so the rest of that batch of views has arrived.
-        if (reached && agreed >= 2) return
+        val covered = model.lastViewSeq >= seq
+        val unmoved = !model.demo && seq == prev && model.lastSeq == prevLast
+        if (missing.isEmpty() && (covered || unmoved)) agreed++ else agreed = 0
+        // Covered: one more round trip, so the rest of that batch of views has arrived.
+        if (covered && agreed >= 2) return
         if (agreed >= AGREEING_ROUND_TRIPS) return
-        prev = target
+        prev = seq
         prevLast = model.lastSeq
         if (System.currentTimeMillis() > end) {
-            fail("timed out waiting for " + if (missing.isNotEmpty()) "a view of kind ${missing.first()}" else "the views of seq $target (applied up to ${model.lastViewSeq})")
+            fail("timed out waiting for " + if (missing.isNotEmpty()) "a view of kind ${missing.first()}" else "the views of seq $seq (applied up to ${model.lastViewSeq})")
         }
         Thread.sleep(100)
     }
