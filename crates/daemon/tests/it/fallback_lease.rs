@@ -333,3 +333,160 @@ fn a_skip_ends_the_wait_for_this_machines_slots() {
     drop(first);
     assert_eq!(d.broker.used("compile"), 0);
 }
+
+fn uses(names: &[&str]) -> BTreeMap<String, u32> {
+    names.iter().map(|n| (n.to_string(), 1)).collect()
+}
+
+/// A lease as a step or a check holds one, ranked as ordinary pipeline work.
+fn step_lease(
+    d: &std::sync::Arc<mason_daemon::daemon::Daemon>,
+    task: u64,
+    amounts: &[(&str, u32)],
+) -> mason_daemon::sched::Lease {
+    d.broker
+        .acquire(
+            mason_core::TaskId(task),
+            &format!("#{task}"),
+            mason_scheduler::Rank::new(false, 1, 0, task, task, false),
+            mason_scheduler::Needs::of(amounts),
+            &|| true,
+            &mut |_| {},
+        )
+        .expect("a lease")
+}
+
+/// #1149: a run whose caller holds the slots takes nothing more, and one that lacks some asks
+/// for those only.
+#[test]
+fn a_run_borrows_what_its_caller_holds_and_asks_for_the_rest_only() {
+    use mason_daemon::remote::{fallback_lease_under, Grant};
+    let w = world("window = \"20m\"\n", &[]);
+    let d = w.d.clone();
+    d.broker.declare("test-suite", 1);
+    d.broker.set_limit("compile", 1).unwrap();
+    d.broker.set_limit("test-suite", 1).unwrap();
+    let grant = Grant::of(step_lease(&d, 1, &[("compile", 1)]));
+
+    let none =
+        fallback_lease_under(&d, "scratch", None, &compile(), "check", &grant, &|| false).unwrap();
+    assert!(none.is_none(), "the held slot is the run's");
+    assert_eq!(d.broker.used("compile"), 1);
+
+    let rest = fallback_lease_under(
+        &d,
+        "scratch",
+        None,
+        &uses(&["compile", "test-suite"]),
+        "check",
+        &grant,
+        &|| false,
+    )
+    .unwrap()
+    .expect("the slot it does not hold");
+    assert_eq!(d.broker.used("compile"), 1, "not asked for again");
+    assert_eq!(d.broker.used("test-suite"), 1);
+    drop(rest);
+    drop(grant);
+    assert_eq!(d.broker.used("compile"), 0);
+}
+
+/// #1149: what a run still has to ask for while its caller holds a slot goes ahead of a step
+/// start that queued first.
+#[test]
+fn a_request_made_while_holding_a_slot_goes_before_an_earlier_step_start() {
+    use mason_daemon::remote::{fallback_lease_under, Grant};
+    let w = world("window = \"20m\"\n", &[]);
+    let d = w.d.clone();
+    d.broker.declare("test-suite", 1);
+    d.broker.set_limit("test-suite", 1).unwrap();
+    let busy = step_lease(&d, 5, &[("test-suite", 1)]);
+    let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
+    let start = {
+        let (d, order) = (d.clone(), order.clone());
+        std::thread::spawn(move || {
+            let l = step_lease(&d, 2, &[("test-suite", 1)]);
+            order.lock().unwrap().push("step start");
+            l
+        })
+    };
+    wait_for("the step start to queue", 60, || {
+        d.broker.snapshot()["waiting"].as_array().unwrap().len() == 1
+    });
+    let check = {
+        let (d, order) = (d.clone(), order.clone());
+        std::thread::spawn(move || {
+            let grant = Grant::of(step_lease(&d, 1, &[("compile", 1)]));
+            let l = fallback_lease_under(
+                &d,
+                "scratch",
+                None,
+                &suite_slot(),
+                "own check",
+                &grant,
+                &|| false,
+            )
+            .unwrap();
+            order.lock().unwrap().push("check");
+            (l, grant)
+        })
+    };
+    wait_for("the check's request to queue", 60, || {
+        d.broker.snapshot()["waiting"].as_array().unwrap().len() == 2
+    });
+    drop(busy);
+    wait_for("one of them to be granted", 60, || {
+        !order.lock().unwrap().is_empty()
+    });
+    assert_eq!(order.lock().unwrap().clone(), vec!["check"]);
+    drop(check.join().unwrap());
+    drop(start.join().unwrap());
+}
+
+/// #1149: every unit held by checks that each wait for one more is a deadlock: `mason alerts`
+/// says so and `mason resources` explains the wait.
+#[test]
+fn checks_waiting_on_their_own_slots_are_alerted_and_explained() {
+    use mason_daemon::remote::{fallback_lease_under, Grant};
+    use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+    let w = world("window = \"20m\"\n", &[]);
+    let d = w.d.clone();
+    d.broker.set_limit("compile", 2).unwrap();
+    let grants = [
+        Grant::of(step_lease(&d, 1, &[("compile", 1)])),
+        Grant::of(step_lease(&d, 2, &[("compile", 1)])),
+    ];
+    assert!(d.broker.deadlock_alerts().is_empty(), "both are building");
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let two = BTreeMap::from([("compile".to_string(), 2)]);
+    let checks: Vec<_> = grants
+        .iter()
+        .map(|g| {
+            let (d, g, stop, two) = (d.clone(), g.clone(), stop.clone(), two.clone());
+            std::thread::spawn(move || {
+                fallback_lease_under(&d, "scratch", None, &two, "own check", &g, &|| {
+                    stop.load(SeqCst)
+                })
+                .map(|l| l.is_some())
+            })
+        })
+        .collect();
+    wait_for("the deadlock to be seen", 60, || {
+        !d.broker.deadlock_alerts().is_empty()
+    });
+    let alerts = d.broker.deadlock_alerts();
+    assert_eq!(alerts.len(), 1, "{alerts:?}");
+    let text = &alerts[0].1;
+    assert!(text.contains("#1, #2"), "{text}");
+    assert!(text.contains("mason resources limit compile 3"), "{text}");
+    let snap = d.broker.snapshot().to_string();
+    assert!(
+        snap.contains("Waiting for a slot its own agent holds"),
+        "{snap}"
+    );
+    stop.store(true, SeqCst);
+    for c in checks {
+        assert!(c.join().unwrap().is_err());
+    }
+    assert!(d.broker.deadlock_alerts().is_empty());
+}

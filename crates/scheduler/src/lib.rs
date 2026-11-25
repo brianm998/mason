@@ -11,12 +11,14 @@
 //! * [`Ledger`] is the stateful wrapper the daemon holds.
 
 mod cpu_hold;
+mod deadlock;
 mod explain;
 mod ledger;
 mod plan;
 mod rank;
 
 pub use cpu_hold::{CpuHold, MAX_GAP_MS};
+pub use deadlock::{self_deadlocks, Deadlock};
 pub use explain::{
     cause_class, describe_command, explain, label_parts, ordinal, since, Ahead, HeldBy, Wait,
     WaitCause, DESCRIPTION_LIMIT,
