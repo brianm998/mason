@@ -79,9 +79,11 @@ run_limited() {
   set +m
   ( sleep "$limit"
     if kill -0 "$pid" 2>/dev/null; then : > "$flag"; kill -TERM -- "-$pid" 2>/dev/null; sleep 2; kill -KILL -- "-$pid" 2>/dev/null; fi
-  ) >/dev/null 2>&1 &
+  ) </dev/null >/dev/null 2>&1 &
   local watcher=$!
   wait "$pid"; rc=$?
+  # Kill the watcher's sleep first: killing only the subshell orphans `sleep $limit`, which keeps
+  # the stdout pipe into `tee` open until the limit passes (a 60-minute hang on macOS CI).
   pkill -P "$watcher" 2>/dev/null
   kill "$watcher" 2>/dev/null; wait "$watcher" 2>/dev/null
   if [ -e "$flag" ]; then kill -KILL -- "-$pid" 2>/dev/null; rm -f "$flag"; return 2; fi
