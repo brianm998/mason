@@ -2,7 +2,7 @@
 
 ## Context
 
-The t1056 merges resolved `Tool.kt` to [1026](1026-compose-conformance-signal-settle.md)'s signal settle and dropped the quiet-exit line that [1057](1057-monitor-compose-settle-counts-events.md) relies on. `scripts/exit/s1068.sh` and `s1026.sh` went red on develop.
+The t1056 merges resolved `Tool.kt` to [1026](1026-compose-conformance-signal-settle.md)'s signal settle and dropped the quiet-exit line that [1057](1057-monitor-compose-settle-counts-events.md) relies on. `scripts/exit/s1068.sh` and `s1026.sh` went red on develop until s1100 changed what they check.
 
 ## Decision
 
@@ -10,6 +10,6 @@ The t1056 merges resolved `Tool.kt` to [1026](1026-compose-conformance-signal-se
 
 Rejected: restoring the `QUIET_TICKS` quiet window, which 1026 removed because a loaded runner outruns it.
 
-## Trust
+## Exit tests
 
-`scripts/exit/s1068.sh` and `scripts/exit/s1026.sh` are protected (`scripts/exit/**`), so the owner must approve the edits. Each drops its `QUIET_TICKS` assertion, and `s1068.sh` now greps for the covered test in place of the dropped `val reached` line.
+s1100 landed first and repaired `s1026.sh` and `s1068.sh` for the signal settle. It also refuses a `views at` check in either script, so the restored line is asserted by `scripts/exit/s1104.sh` alone, and this change edits no existing exit script.
