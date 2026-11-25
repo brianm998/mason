@@ -121,18 +121,25 @@ fn reached(screen_seq: u64, views: usize, target: u64) -> bool {
     screen_seq >= target && views >= 3
 }
 
-/// Whether to stop waiting: after the target is reached, 300 ms with no message (trailing views
-/// of the same step); otherwise 1.5 s with nothing new.
-fn done(reached: bool, quiet: Duration) -> bool {
-    if reached {
-        quiet >= Duration::from_millis(300)
-    } else {
-        quiet >= Duration::from_millis(1500)
-    }
+/// How long with no message, after the target is reached, before the step's views are all in.
+const TRAILING_QUIET: Duration = Duration::from_millis(300);
+
+/// Whether the views that follow the first one of a step have stopped arriving.
+fn trailing_done(quiet: Duration) -> bool {
+    quiet >= TRAILING_QUIET
+}
+
+/// How long without a new view seq before settle gives up on the target.
+const QUIET_WINDOW_MS: u64 = 5000;
+
+/// Whether settle should stop waiting: the target is reached, or the screen has been quiet for
+/// the whole window with enough views held.
+fn should_leave(screen_seq: u64, views: usize, target: u64, quiet_for_ms: u64) -> bool {
+    reached(screen_seq, views, target) || (views >= 3 && quiet_for_ms >= QUIET_WINDOW_MS)
 }
 
 /// Wait until the screen has reached the daemon's current seq and `after` (the seq a step
-/// reported), or 1.5 s pass with nothing new.
+/// reported) and then 300 ms pass with no message, or 5 s pass with nothing new.
 fn settle(c: &mut Client, screen: &mut Screen, after: u64) {
     let hard = std::time::Instant::now() + Duration::from_secs(60);
     let r = run(c, screen, "GET", "/status");
@@ -143,13 +150,20 @@ fn settle(c: &mut Client, screen: &mut Screen, after: u64) {
         .unwrap_or(0)
         .max(after);
     let mut quiet = std::time::Instant::now();
+    let mut last = screen.seq;
     loop {
-        let got = reached(screen.seq, screen.views.len(), target);
-        if done(got, quiet.elapsed()) && screen.views.len() >= 3 {
+        let q = quiet.elapsed();
+        if should_leave(screen.seq, screen.views.len(), target, q.as_millis() as u64)
+            && (!reached(screen.seq, screen.views.len(), target) || trailing_done(q))
+        {
             break;
         }
         if std::time::Instant::now() > hard {
             die("the screen did not reach the daemon's seq within 60 s");
+        }
+        if screen.seq > last {
+            last = screen.seq;
+            quiet = std::time::Instant::now();
         }
         if let Ok(Some(m)) = c.recv(Duration::from_millis(50)) {
             screen.absorb(m);
@@ -642,7 +656,7 @@ fn latency(args: &mut Vec<String>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{done, reached};
+    use super::{reached, should_leave, trailing_done, QUIET_WINDOW_MS};
     use std::time::Duration;
 
     #[test]
@@ -654,10 +668,18 @@ mod tests {
     }
 
     #[test]
-    fn done_waits_for_trailing_views() {
-        assert!(!done(true, Duration::from_millis(299)));
-        assert!(done(true, Duration::from_millis(300)));
-        assert!(!done(false, Duration::from_millis(1499)));
-        assert!(done(false, Duration::from_millis(1500)));
+    fn should_leave_waits_for_the_target_until_the_quiet_window() {
+        assert!(!should_leave(9, 3, 10, 1500));
+        assert!(!should_leave(9, 3, 10, QUIET_WINDOW_MS - 1));
+        assert!(should_leave(9, 3, 10, QUIET_WINDOW_MS));
+        assert!(should_leave(10, 3, 10, 0));
+        assert!(!should_leave(9, 2, 10, QUIET_WINDOW_MS));
+    }
+
+    #[test]
+    fn trailing_done_waits_for_trailing_views() {
+        assert!(!trailing_done(Duration::ZERO));
+        assert!(!trailing_done(Duration::from_millis(299)));
+        assert!(trailing_done(Duration::from_millis(300)));
     }
 }
