@@ -606,7 +606,9 @@ pub fn assess_range(
 /// Called after every look at the channel: file what a newer build brings. A newer build
 /// replaces a waiting one.
 pub fn found_newer(d: &Arc<Daemon>, cfg: &UpdateCfg, target: &str) {
-    if !cfg.auto.enabled {
+    // A channel switched to an improvement's own branch is the owner's to take over, as its
+    // `switch` setting says.
+    if !cfg.auto.enabled || crate::improve::switched(d).is_some() {
         lock(&d.update_plan).pending = None;
         return;
     }
