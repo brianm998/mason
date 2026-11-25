@@ -784,6 +784,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s1068**: The Compose conformance settle now waits until the model's last applied view reaches the daemon's seq (as step() and the Rust capturer do), and both capturers print a stderr line when they leave on the quiet fallback.
 - **s1072**: Windows clippy red on develop is fixed by compiling the unix-only CAFFEINATE and XCODEBUILD shim constants only under cfg(unix).
 - **s1073**: The Swift monitor-tool's settle now waits on `lastViewSeq` (moved only by views and snapshots) instead of `lastSeq`, which events also move, as Compose already does.
+- **s1074**: run-exit-scripts.sh runs each exit script in its own process group and ends the group when the script ends, so a leftover child or watcher `sleep` can no longer hold the output pipe and stall a shard.
 - **s1076**: the macOS exit-script watcher's `sleep` is now detached from the runner's output pipe as well as killed, so a leftover one cannot stall a shard.
 - **s1077**: The macOS exit-scripts job gets 90 minutes, and an exit test proves that a finished script no longer waits for the no-timeout watcher's sleep.
 - **s1078**: A new exit test checks that the macOS fallback in run-exit-scripts.sh runs one exit script after another, reports failures, and leaves no watcher `sleep` behind.
