@@ -1341,11 +1341,11 @@ fn a_node_with_the_documented_length_of_data_dir_runs_jobs_with_long_ids() {
     let coord = "ad7507fdc188cdd0";
     let mirror = jobs.mirror_path(coord, "scratch");
     std::fs::create_dir_all(mirror.parent().unwrap()).unwrap();
-    git(
+    sh(
         &p.sa.repo,
         &["clone", "-q", "--bare", ".", mirror.to_str().unwrap()],
     );
-    let sha = git(&p.sa.repo, &["rev-parse", "HEAD"]).trim().to_string();
+    let sha = sh(&p.sa.repo, &["rev-parse", "HEAD"]).trim().to_string();
     for id in [
         "t1113r6691-check-cargo-workspace-build3".to_string(),
         format!("b421-r1-bis6-7-{}", "x".repeat(45)),
