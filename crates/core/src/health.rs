@@ -455,7 +455,9 @@ pub fn judge(x: &Facts, l: &Limits) -> Vec<Finding> {
         ));
     }
     for (t, ms) in &x.silent_hosts {
-        if *ms > l.host_silent_ms {
+        // A host waiting on a resource is reported by stuck:wait, not as silent.
+        let waiting = x.tasks.iter().any(|k| k.id == *t && k.waiting.is_some());
+        if *ms > l.host_silent_ms && !waiting {
             out.push(f(
                 format!("stuck:host:{t}"),
                 "stuck",
@@ -806,6 +808,33 @@ mod tests {
             ..Default::default()
         };
         assert!(judge(&x, &l()).is_empty());
+    }
+
+    #[test]
+    fn a_silent_host_waiting_on_a_resource_is_not_stuck() {
+        let mut t = TaskFact {
+            id: 9,
+            state: "developing".into(),
+            is_step: true,
+            in_state_ms: 2 * H,
+            typical_hi_ms: None,
+            silent_ms: 2 * H,
+            waiting: Some(("exclusive".into(), 52 * MIN)),
+            holders: None,
+        };
+        let x = Facts {
+            tasks: vec![t.clone()],
+            silent_hosts: vec![(9, 2 * H)],
+            ..Default::default()
+        };
+        assert!(!keys(&judge(&x, &l())).contains(&"stuck:host:9".to_string()));
+        t.waiting = None;
+        let x = Facts {
+            tasks: vec![t],
+            silent_hosts: vec![(9, 2 * H)],
+            ..Default::default()
+        };
+        assert!(keys(&judge(&x, &l())).contains(&"stuck:host:9".to_string()));
     }
 
     #[test]

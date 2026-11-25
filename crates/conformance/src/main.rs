@@ -129,52 +129,74 @@ fn trailing_done(quiet: Duration) -> bool {
     quiet >= TRAILING_QUIET
 }
 
-/// How long without a new view seq before settle gives up on the target.
+/// How long without a new view seq before settle may give up on the target.
 const QUIET_WINDOW_MS: u64 = 5000;
 
-/// Whether settle should stop waiting: the target is reached, or the screen has been quiet for
+/// Whether settle may stop waiting: the target is reached, or the screen has been quiet for
 /// the whole window with enough views held.
 fn should_leave(screen_seq: u64, views: usize, target: u64, quiet_for_ms: u64) -> bool {
     reached(screen_seq, views, target) || (views >= 3 && quiet_for_ms >= QUIET_WINDOW_MS)
 }
 
 /// Wait until the screen has reached the daemon's current seq and `after` (the seq a step
-/// reported) and then 300 ms pass with no message, or 5 s pass with nothing new.
+/// reported). Once reached, 300 ms must also pass with no message (trailing views of the same
+/// step). The daemon sends no view whose content did not change, so the screen's seq may
+/// stay below the target; then a quiet window alone never decides: it must have passed, and
+/// three `/status` round trips in a row (the same ordered connection, so views sent before each
+/// answer have arrived) must agree on the seq with nothing new shown. The 60 s limit only fails,
+/// naming what was awaited.
 fn settle(c: &mut Client, screen: &mut Screen, after: u64) {
     let hard = std::time::Instant::now() + Duration::from_secs(60);
-    let r = run(c, screen, "GET", "/status");
-    let v: serde_json::Value = serde_json::from_str(&r.json).unwrap_or_default();
-    let target = v["seq"]
-        .as_u64()
-        .or_else(|| v["seq"].as_str().and_then(|s| s.parse().ok()))
-        .unwrap_or(0)
-        .max(after);
     let mut quiet = std::time::Instant::now();
-    let mut last = screen.seq;
+    let mut heard = std::time::Instant::now();
+    let mut agreed = 0;
+    let mut prev = (u64::MAX, u64::MAX);
     loop {
-        let q = quiet.elapsed();
-        if should_leave(screen.seq, screen.views.len(), target, q.as_millis() as u64)
-            && (!reached(screen.seq, screen.views.len(), target) || trailing_done(q))
-        {
-            break;
+        let r = run(c, screen, "GET", "/status");
+        let v: serde_json::Value = serde_json::from_str(&r.json).unwrap_or_default();
+        let target = v["seq"]
+            .as_u64()
+            .or_else(|| v["seq"].as_str().and_then(|s| s.parse().ok()))
+            .unwrap_or(0)
+            .max(after);
+        // Take in what is already on the wire.
+        while let Ok(Some(m)) = c.recv(Duration::from_millis(50)) {
+            screen.absorb(m);
+            heard = std::time::Instant::now();
+        }
+        if prev == (target, screen.seq) {
+            agreed += 1;
+        } else {
+            agreed = 0;
+        }
+        if screen.seq != prev.1 {
+            quiet = std::time::Instant::now();
+            heard = quiet;
+        }
+        prev = (target, screen.seq);
+        let reached = reached(screen.seq, screen.views.len(), target);
+        let q = quiet.elapsed().as_millis() as u64;
+        let settled = if reached {
+            trailing_done(heard.elapsed())
+        } else {
+            agreed >= 3
+        };
+        if should_leave(screen.seq, screen.views.len(), target, q) && settled {
+            if !reached {
+                eprintln!(
+                    "settle: quiet exit, screen at #{}, daemon seq #{target}",
+                    screen.seq
+                );
+            }
+            return;
         }
         if std::time::Instant::now() > hard {
-            die("the screen did not reach the daemon's seq within 60 s");
+            die(&format!(
+                "the screen did not reach the daemon's seq {target} within 60 s (at {}, {} views)",
+                screen.seq,
+                screen.views.len()
+            ));
         }
-        if screen.seq > last {
-            last = screen.seq;
-            quiet = std::time::Instant::now();
-        }
-        if let Ok(Some(m)) = c.recv(Duration::from_millis(50)) {
-            screen.absorb(m);
-            quiet = std::time::Instant::now();
-        }
-    }
-    if !reached(screen.seq, screen.views.len(), target) {
-        eprintln!(
-            "settle: quiet exit, screen at #{}, daemon seq #{target}",
-            screen.seq
-        );
     }
 }
 

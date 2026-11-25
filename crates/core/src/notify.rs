@@ -522,6 +522,69 @@ pub fn speakable(s: &str) -> String {
     out
 }
 
+/// One short line for a batch of announcements: how many, of what, in which project. `items` is
+/// (kind, project) per alert; kinds are "failed", "needs_you", "approval" (also proposals),
+/// "landed", or anything else. The project is named when every item has the same one.
+pub fn summary_sentence(items: &[(String, String)]) -> String {
+    let total = items.len();
+    let mut kinds: Vec<(String, usize)> = Vec::new();
+    for (k, _) in items {
+        match kinds.iter_mut().find(|(x, _)| x == k) {
+            Some(e) => e.1 += 1,
+            None => kinds.push((k.clone(), 1)),
+        }
+    }
+    // Most counted first; ties keep the order first seen.
+    kinds.sort_by_key(|k| std::cmp::Reverse(k.1));
+    let one_project = items
+        .first()
+        .map(|f| !f.1.is_empty() && items.iter().all(|i| i.1 == f.1))
+        .unwrap_or(false);
+    let noun = if total == 1 { "issue" } else { "issues" };
+    let who = match (one_project, items.first()) {
+        (true, Some(f)) => format!("{} {noun}", f.1),
+        _ => noun.to_string(),
+    };
+    let phrase = |k: &str, count: usize| -> &'static str {
+        let one = count == 1;
+        match (k, one) {
+            ("failed", false) => "have failed",
+            ("failed", true) => "has failed",
+            ("needs_you", false) => "need a decision",
+            ("needs_you", true) => "needs a decision",
+            ("approval" | "proposal" | "proposed", false) => "are waiting for your approval",
+            ("approval" | "proposal" | "proposed", true) => "is waiting for your approval",
+            ("landed", false) => "have landed",
+            ("landed", true) => "has landed",
+            (_, false) => "need a look",
+            (_, true) => "needs a look",
+        }
+    };
+    let text = if kinds.len() <= 1 {
+        let (k, c) = kinds.first().cloned().unwrap_or_default();
+        format!("{c} {who} {}; come have a look", phrase(&k, c))
+    } else {
+        // "failed" etc. in the list read as short verbs, not full phrases.
+        let short = |k: &str, c: usize| -> String {
+            let p = match k {
+                "approval" | "proposal" | "proposed" => "waiting for approval",
+                _ => phrase(k, c),
+            };
+            format!("{c} {}", p.strip_prefix("have ").unwrap_or(p))
+        };
+        let mut parts: Vec<String> = kinds.iter().take(3).map(|(k, c)| short(k, *c)).collect();
+        if kinds.len() > 3 {
+            let rest: usize = kinds.iter().skip(3).map(|k| k.1).sum();
+            parts.push(format!("and {rest} others"));
+        }
+        format!(
+            "{total} {who} need you: {}; come have a look",
+            parts.join(", ")
+        )
+    };
+    format!("{}.", speakable(&text))
+}
+
 /// The one sentence: the task, what happened or is wrong, what to do. `subject` is how the task
 /// is named aloud (see `spoken_subject`); `detail` is the question or the reason. The verb
 /// follows the short subject, and nothing in the result is all capitals.
@@ -611,6 +674,77 @@ pub fn daemon_should_speak(enabled: bool, last_claim_ms: Option<u64>, now_ms: u6
 
 #[cfg(test)]
 mod tests {
+
+    fn items(v: &[(&str, &str, usize)]) -> Vec<(String, String)> {
+        v.iter()
+            .flat_map(|(k, p, c)| std::iter::repeat_n((k.to_string(), p.to_string()), *c))
+            .collect()
+    }
+
+    #[test]
+    fn summary_one_kind_one_project() {
+        assert_eq!(
+            summary_sentence(&items(&[("failed", "mason", 3)])),
+            "3 mason issues have failed; come have a look."
+        );
+    }
+
+    #[test]
+    fn summary_two_projects_drops_the_name() {
+        assert_eq!(
+            summary_sentence(&items(&[("failed", "mason", 2), ("failed", "star", 1)])),
+            "3 issues have failed; come have a look."
+        );
+    }
+
+    #[test]
+    fn summary_mixed_kinds_most_counted_first() {
+        let s = summary_sentence(&items(&[
+            ("approval", "mason", 3),
+            ("failed", "mason", 20),
+            ("needs_you", "mason", 4),
+        ]));
+        assert_eq!(
+            s,
+            "27 mason issues need you: 20 failed, 4 need a decision, 3 waiting for approval; come have a look."
+        );
+    }
+
+    #[test]
+    fn summary_folds_kinds_past_three() {
+        let s = summary_sentence(&items(&[
+            ("failed", "a", 5),
+            ("needs_you", "a", 4),
+            ("approval", "a", 3),
+            ("landed", "a", 2),
+            ("disk", "a", 1),
+        ]));
+        assert!(s.contains("and 3 others"), "{s}");
+        assert!(!s.contains("landed"), "{s}");
+    }
+
+    #[test]
+    fn summary_is_short_and_not_shouted() {
+        let kinds = [
+            "failed",
+            "needs_you",
+            "approval",
+            "landed",
+            "a",
+            "b",
+            "c",
+            "d",
+        ];
+        let v: Vec<(String, String)> = (0..50)
+            .map(|i| (kinds[i % 8].to_string(), "MASON".to_string()))
+            .collect();
+        let s = summary_sentence(&v);
+        assert!(s.split_whitespace().count() <= 25, "{s}");
+        assert!(!s.split_whitespace().any(|w| {
+            let w = w.trim_matches(|c: char| !c.is_alphabetic());
+            w.len() >= 2 && w.chars().all(|c| c.is_uppercase())
+        }));
+    }
     use super::*;
 
     #[test]

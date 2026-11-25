@@ -10,6 +10,7 @@
 # script must run the crate (`-p <name>`) AND name the module stem as a whole word. Crate roots
 # (lib.rs, main.rs, build.rs, Cargo.toml) select only scripts naming the path; the workspace suite
 # builds everything. 2026-11-24: crate-wide -p selection picked ~300 of 648 scripts per change.
+# A test target's root (crates/<c>/tests/<target>/main.rs) selects only scripts naming its path.
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)"
 base=${1-}
@@ -54,7 +55,11 @@ while IFS= read -r f; do
           # A test file is matched by its module name only (s785): crate-wide and --test matches
           # would select hundreds of scripts; the cargo-workspace suite covers compile breaks.
           stem=$(basename "$f" .rs)
-          case "$stem" in mod|main) stem=$(basename "$(dirname "$f")") ;; esac
+          # A target's root (tests/<target>/main.rs) mostly gains `mod` lines for new test files,
+          # which select by their own names; matching the target name (`it`, an English word) as a
+          # word picked ~305 scripts. Only the path pick above applies, as for crate roots.
+          case "$f" in crates/$c/tests/*/main.rs) continue ;; esac
+          case "$stem" in mod) stem=$(basename "$(dirname "$f")") ;; esac
           pick -E "(^|[^A-Za-z0-9_])$stem([^A-Za-z0-9_-]|$)"
           continue ;;
       esac
