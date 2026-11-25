@@ -74,6 +74,7 @@ impl Repo {
             "MASON_RUN_BUDGET_MARGIN_S",
             "MASON_RUN_BUDGET_FLOOR_S",
             "MASON_TASK_CACHE",
+            "MASON_EXIT_CACHE",
             "MASON_EXIT_SHARD",
             "MASON_EXIT_SCRIPT_LIMIT_S",
             "MASON_EXIT_REPEAT",
@@ -194,6 +195,7 @@ fn passes_are_kept_for_the_same_tree_and_a_fail_is_not() {
     let mark = marks.path().join("mark");
     let env = [
         ("MASON_TASK_CACHE", cache.path().to_str().unwrap()),
+        ("MASON_EXIT_CACHE", "1"),
         ("MASON_TEST_MARK", mark.to_str().unwrap()),
     ];
     let (out, code) = r.run(&env);
@@ -220,6 +222,7 @@ fn a_change_to_the_tree_or_to_the_script_runs_it_again() {
     let mark = marks.path().join("mark");
     let env = [
         ("MASON_TASK_CACHE", cache.path().to_str().unwrap()),
+        ("MASON_EXIT_CACHE", "1"),
         ("MASON_TEST_MARK", mark.to_str().unwrap()),
     ];
     let p = r.path();
@@ -265,11 +268,15 @@ fn a_change_to_the_tree_or_to_the_script_runs_it_again() {
 fn a_cached_pass_is_shown_even_when_the_budget_is_spent() {
     let r = Repo::new(&[("s10", "exit 0"), ("s11", "exit 0")]);
     let cache = tempfile::tempdir().unwrap();
-    let env = [("MASON_TASK_CACHE", cache.path().to_str().unwrap())];
+    let env = [
+        ("MASON_TASK_CACHE", cache.path().to_str().unwrap()),
+        ("MASON_EXIT_CACHE", "1"),
+    ];
     let (_, code) = r.run(&env);
     assert_eq!(code, 0);
     let (out, code) = r.run(&[
         ("MASON_TASK_CACHE", cache.path().to_str().unwrap()),
+        ("MASON_EXIT_CACHE", "1"),
         ("MASON_RUN_BUDGET_S", "1"),
     ]);
     assert_eq!(code, 0, "{out}");
@@ -289,7 +296,10 @@ fn without_a_budget_or_a_cache_the_output_is_what_it_was() {
     assert_eq!(code, 0);
     assert_eq!(out, "PASS s10\nPASS s11\n");
     // A cache directory that does not exist (a remote run's coordinator path) is not used.
-    let (out, code) = r.run(&[("MASON_TASK_CACHE", "/nonexistent/mason/cache")]);
+    let (out, code) = r.run(&[
+        ("MASON_TASK_CACHE", "/nonexistent/mason/cache"),
+        ("MASON_EXIT_CACHE", "1"),
+    ]);
     assert_eq!(code, 0);
     assert_eq!(out, "PASS s10\nPASS s11\n");
 
@@ -297,4 +307,28 @@ fn without_a_budget_or_a_cache_the_output_is_what_it_was() {
     let (out, code) = r.run(&[]);
     assert_ne!(code, 0);
     assert_eq!(out, "FAIL s10\n    | boom\nPASS s11\n");
+}
+
+#[test]
+fn a_test_step_keeps_no_passes_without_the_check_opt_in() {
+    // A test step has MASON_TASK_CACHE but not MASON_EXIT_CACHE: its verdict counts only what
+    // it ran, so nothing is recorded or read.
+    let r = Repo::new(&[("s10", "echo s10 >> \"$MASON_TEST_MARK\"")]);
+    let cache = tempfile::tempdir().unwrap();
+    let marks = tempfile::tempdir().unwrap();
+    let mark = marks.path().join("mark");
+    let env = [
+        ("MASON_TASK_CACHE", cache.path().to_str().unwrap()),
+        ("MASON_TEST_MARK", mark.to_str().unwrap()),
+    ];
+    let (out, code) = r.run(&env);
+    assert_eq!(code, 0, "{out}");
+    let (out, code) = r.run(&env);
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(out, "PASS s10\n");
+    assert_eq!(runs_of(&mark, "s10"), 2);
+    assert!(
+        std::fs::read_dir(cache.path()).unwrap().next().is_none(),
+        "nothing written to the task cache"
+    );
 }

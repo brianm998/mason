@@ -15,8 +15,9 @@
 # no more start, and each script not run is `FAIL sNNN (not run: out of time; ...)`, so the run ends
 # red with the passes listed instead of being killed with no verdict.
 #
-# Passes kept between runs: with MASON_TASK_CACHE set to an existing directory (a task's checks and
-# test steps; never a landing run), each PASS is recorded under it, keyed by the script's path and
+# Passes kept between runs: with MASON_EXIT_CACHE=1 (an agent's run_check sets it; a test step and a
+# landing run never do, so a gate counts only what it ran itself) and MASON_TASK_CACHE set to an
+# existing directory, each PASS is recorded under it, keyed by the script's path and
 # content, MASON_EXIT_REPEAT and the tree (HEAD, the uncommitted diff, untracked files). A later run
 # on the same tree prints `PASS sNNN (cached)` for it. A FAIL is never recorded.
 # Scripts that need a real service, person or device (`sNN-real.sh`, `sNN-manual.sh`) are skipped,
@@ -85,7 +86,7 @@ hash_stdin() {
 # The cache: only for an existing directory MASON gave this task, and only in a real checkout.
 cache=
 tree_key=
-if [ -n "${MASON_TASK_CACHE:-}" ] && [ -d "$MASON_TASK_CACHE" ] && [ ! -f .mason/changed-files.txt ]; then
+if [ "${MASON_EXIT_CACHE:-}" = 1 ] && [ -n "${MASON_TASK_CACHE:-}" ] && [ -d "$MASON_TASK_CACHE" ] && [ ! -f .mason/changed-files.txt ]; then
   tree_key=$(
     {
       git rev-parse HEAD 2>/dev/null

@@ -2107,13 +2107,15 @@ impl TestChecks {
                 cwd: self.wt.clone(),
                 // MASON_TASK_CACHE: a runner that keeps its passes between checks of the same
                 // tree (the exit-scripts runner) finds them here; a landing check has no task
-                // and gets none.
+                // and gets none. MASON_EXIT_CACHE=1 lets the exit-scripts runner use it: only an
+                // agent's check sets it, so a test step's verdict never counts cached passes.
                 env: vec![
                     ("MASON_HELD".to_string(), held_text(uses)),
                     (
                         "MASON_TASK_CACHE".to_string(),
                         crate::taskcache::own_dir(&self.slots.d, self.task),
                     ),
+                    ("MASON_EXIT_CACHE".to_string(), "1".to_string()),
                 ],
                 limit,
                 tree: crate::hostedcheck::tree_key(&self.wt),
