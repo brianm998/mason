@@ -1412,6 +1412,9 @@ pub struct BatchCover {
     pub owner: Option<Arc<crate::remote::BatchOwner>>,
     /// What the batch's lease holds; `None` when it holds nothing.
     pub held: Option<Needs>,
+    /// The lease itself, for a suite on GitHub to give its runner units back and ask again at
+    /// the batch's rank (#820, #822).
+    pub giver: Option<crate::sched::Giver>,
 }
 
 impl BatchCover {
@@ -1434,7 +1437,7 @@ impl BatchCover {
         Cover {
             covered,
             batch: self.owner.clone().map(|o| (o, needs)),
-            giver: None,
+            giver: self.giver.clone(),
             runners: None,
         }
     }
@@ -2294,7 +2297,19 @@ fn run_suite(
     let mut recovered: Option<Recovered> = None;
     let mut remote_env_fails = 0u32;
     let mut waiting = false;
+    // The lease whose runner units a run gives back when GitHub fails it, and asks for again at
+    // its place in line (#822). It holds what was asked again until this function returns.
+    let mut own = who.clone();
+    let parked = crate::remote::Grant::borrowed(
+        who.cover.giver.clone(),
+        who.cover
+            .giver
+            .as_ref()
+            .map(|g| g.held())
+            .unwrap_or_default(),
+    );
     loop {
+        let who = &own;
         // A skip may arrive at any time, even before the suite starts.
         let check = who.check(&suite.name);
         match check() {
@@ -2420,13 +2435,28 @@ fn run_suite(
                 );
                 waiting = true;
                 attempt += 1;
-                // A runner that fails the same way again and again is not helped by trying at
-                // once: wait twice as long each time.
+                // The run keeps its place in line and holds nothing while it waits. A runner
+                // that fails the same way again and again is not helped by trying at once:
+                // from the second failure in a row, wait twice as long each time (#822).
                 remote_env_fails += 1;
-                std::thread::sleep(crate::remote::env_backoff(
+                let units = requeue_units(d, who, suite, &run_cmd);
+                let check = who.check(&suite.name);
+                let stop = || match check() {
+                    Stop::No => None,
+                    Stop::Skipped => Some(crate::remote::StopWhy::Skipped),
+                    Stop::Gone => Some(crate::remote::StopWhy::Gone),
+                };
+                if crate::remote::wait_again(
+                    &crate::remote::SystemClock,
                     d.cfg.env_retry,
-                    remote_env_fails - 1,
-                ));
+                    &parked,
+                    units,
+                    remote_env_fails,
+                    &stop,
+                ) {
+                    own.cover.giver = parked.giver();
+                }
+                // Told to stop while it waited: the top of the loop says which.
                 continue;
             }
             Err(e) => {
@@ -2438,6 +2468,7 @@ fn run_suite(
                 };
             }
         };
+        remote_env_fails = 0;
         let ran = Ran {
             narrowed: suite.narrowed || ran.resumed.is_some(),
             ..ran
@@ -2871,6 +2902,27 @@ fn run_suite(
             (other, _) => other,
         };
         return result;
+    }
+}
+
+/// The runner units a run of `cmd` asks for again after GitHub failed it (#822): those of the
+/// jobs it starts, and no more of any pool than the run's flexible lease was given.
+fn requeue_units(
+    d: &Daemon,
+    who: &Who,
+    suite: &Suite,
+    cmd: &str,
+) -> std::collections::BTreeMap<String, u32> {
+    use crate::remote as rm;
+    let task = who.task.map(|(t, _)| t);
+    match rm::run_place(d, &who.project, task, Some(suite), cmd, rm::Kind::Suite) {
+        rm::RunPlace::GitHub { mut units, .. } => {
+            if let Some(n) = who.cover.runners {
+                units.values_mut().for_each(|u| *u = (*u).min(n.max(1)));
+            }
+            units
+        }
+        rm::RunPlace::Local => Default::default(),
     }
 }
 
@@ -5349,7 +5401,11 @@ fn pay_with(d: &Arc<Daemon>, debt: u64, only: Option<&str>) -> Result<String, St
         trust_base: true,
         members: Members::default(),
         reuse: None,
-        cover: Cover::default(),
+        cover: Cover {
+            giver: _lease.as_ref().map(|l| l.giver()),
+            runners: _lease.as_ref().and_then(|l| l.granted_runners()),
+            ..Cover::default()
+        },
     };
     let tree_hash = git::run(&wt, &["rev-parse", "HEAD^{tree}"])
         .map(|s| s.trim().to_string())
@@ -7130,6 +7186,7 @@ mod batch_cover_tests {
         assert!(!none.holds(&Needs::default()), "no lease: not even nothing");
 
         let lease = BatchCover {
+            giver: None,
             owner: None,
             held: Some(needs(&[("test-suite", 2), ("compile", 1)])),
         };

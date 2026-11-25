@@ -2405,7 +2405,10 @@ impl TestChecks {
                         self.phase(mason_core::checks::CheckPhase::Building);
                         self.phase(mason_core::checks::CheckPhase::Building);
                         let grant = grant_of(lease);
-                        let res = crate::hostedcheck::run(&self.slots.d, &bspec, &grant);
+                        // A run that waits again at its place (#822) waits inside this call.
+                        let res = self.remote_credited(&bspec, || {
+                            crate::hostedcheck::run(&self.slots.d, &bspec, &grant)
+                        });
                         drop(grant);
                         if matches!(&res, Ok(o) if o.stopped.is_some()) {
                             if let Some(r) = self.skipped_run(&name) {
@@ -2529,8 +2532,9 @@ impl TestChecks {
             }
             match res {
                 Ok(o) if o.passed => lines.push(format!(
-                    "{name}: passed ({})",
-                    crate::hostedcheck::where_ran(&self.slots.d, &rspec)
+                    "{name}: passed ({}){}",
+                    crate::hostedcheck::where_ran(&self.slots.d, &rspec),
+                    waited_again_note(&o.output)
                 )),
                 Ok(o) => {
                     failed = true;
@@ -3021,7 +3025,10 @@ impl TestChecks {
                 };
                 self.phase(mason_core::checks::CheckPhase::Building);
                 let grant = grant_of(lease);
-                let res = crate::hostedcheck::run(&self.slots.d, &bspec, &grant);
+                // A run that waits again at its place (#822) waits inside this call.
+                let res = self.remote_credited(&bspec, || {
+                    crate::hostedcheck::run(&self.slots.d, &bspec, &grant)
+                });
                 drop(grant);
                 if let Some(t) = ctree.as_deref() {
                     let bk = crate::cmdreuse::build_key(build);
@@ -3247,6 +3254,23 @@ const FOLDED_STOP: &str = "stopped: develop was merged into your branch while th
 /// Was this run stopped because the red-develop watch folded develop in under it?
 fn stopped_by_fold(res: &Result<crate::hostedcheck::CheckOutcome, String>) -> bool {
     matches!(res, Ok(o) if o.stopped.as_deref() == Some(FOLDED_STOP))
+}
+
+/// What a passing check's line says of a run that waited again at its place in line (#822):
+/// the retry notes lead the output, and their number is how often it waited.
+fn waited_again_note(output: &str) -> String {
+    let n = output
+        .lines()
+        .take_while(|l| l.starts_with('('))
+        .filter(|l| l.contains("waiting again at its place in line"))
+        .count();
+    match n {
+        0 => String::new(),
+        1 => "; GitHub gave no result once, so the run waited again at its place in line".into(),
+        n => format!(
+            "; GitHub gave no result {n} times, so the run waited again at its place in line each time"
+        ),
+    }
 }
 
 /// The note a check's stop hook gives (#823): `Some` once the task's open run is no longer the
@@ -6503,5 +6527,21 @@ pub fn end_run_leases(d: &Arc<Daemon>, task: TaskId) {
             });
             d.broker.lease_close(l.id);
         });
+    }
+}
+
+#[cfg(test)]
+mod waited_again_tests {
+    use super::waited_again_note;
+
+    #[test]
+    fn a_passing_check_says_how_often_its_run_waited_again() {
+        let note =
+            "(no result from run 1 on GitHub (x); waiting again at its place in line (time 1))\n";
+        let two = format!("{note}{note}(ran on GitHub)\ntest a ... ok\n");
+        assert!(waited_again_note(&two).contains("2 times"));
+        assert!(waited_again_note(&format!("{note}ok\n")).contains("once"));
+        // Only the lines MASON put first count, not what the tests printed.
+        assert_eq!(waited_again_note(&format!("ok\n{note}")), "");
     }
 }

@@ -747,9 +747,9 @@ impl Giver {
         self.b.shrink(self.id, give);
     }
 
-    /// Whether the lease still holds anything.
-    pub fn is_held(&self) -> bool {
-        self.b.lease_holds(self.id)
+    /// The runner units the lease holds now.
+    pub fn held(&self) -> BTreeMap<String, u32> {
+        self.b.lease_units(self.id)
     }
 
     /// Ask again for `units`, at the lease's rank and from when it first began to wait.
@@ -3223,6 +3223,22 @@ impl Broker {
     /// Does lease `id` still hold what it was granted?
     pub fn lease_holds(&self, id: u64) -> bool {
         lock(&self.st).ledger.holds(id)
+    }
+
+    /// The runner units (`gha`, `gha-macos`) lease `id` holds now.
+    pub fn lease_units(&self, id: u64) -> BTreeMap<String, u32> {
+        lock(&self.st)
+            .ledger
+            .holder(id)
+            .map(|h| {
+                h.needs
+                    .amounts
+                    .iter()
+                    .filter(|(k, n)| **n > 0 && mason_scheduler::is_gha_pool(k))
+                    .map(|(k, n)| (k.clone(), *n))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Everything holding `compile` now, for the idle check: the lease, the task it
