@@ -165,3 +165,52 @@ fn a_task_that_is_not_failed_is_not_diagnosed() {
     assert_eq!(post(&d, &owner, format!("/tasks/{}/diagnose", t.0)).0, 409);
     assert_eq!(post(&d, &owner, "/tasks/9999/diagnose".into()).0, 404);
 }
+
+fn reject_pushes(s: &Scratch) {
+    let hook = s.origin.join("hooks/pre-receive");
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    std::fs::write(
+        &hook,
+        "#!/bin/sh\necho 'rejected by the hook' >&2\nexit 1\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[test]
+fn an_outside_failure_with_an_automatic_retry_coming_is_not_diagnosed() {
+    let mut script = happy_script();
+    script["steps"]["diagnose"] = json!([card_turn()]);
+    let s = Scratch::new("test -f hello.txt", script);
+    s.write_project("scratch", "test -f hello.txt", "auto_retry = true");
+    reject_pushes(&s);
+    let d = s.start_with(|c| {
+        c.auto_retry_delays = vec![std::time::Duration::ZERO];
+        c.auto_retry_tick = std::time::Duration::from_secs(3600);
+    });
+    let t = file_task(&d, "Push is rejected");
+    wait_for("the failure", 180, || task_of(&d, t).state == State::Failed);
+    let w = d.world().unwrap();
+    assert!(mason_daemon::autoretry::pending(
+        &d,
+        w.tasks.get(&t).unwrap()
+    ));
+    drop(w);
+    let why = mason_daemon::diagnose::start(&d, t, StepRunId(0), false).unwrap_err();
+    assert!(why.contains("automatic retry"), "{why}");
+    assert!(d.store.diagnoses(Some(t.0)).unwrap().is_empty());
+}
+
+#[test]
+fn an_outside_failure_with_no_retry_coming_is_diagnosed_by_itself() {
+    let mut script = happy_script();
+    script["steps"]["diagnose"] = json!([card_turn()]);
+    let s = Scratch::new("test -f hello.txt", script);
+    s.write_project("scratch", "test -f hello.txt", "auto_retry = false");
+    reject_pushes(&s);
+    let d = s.start();
+    let t = file_task(&d, "Push is rejected");
+    wait_for("the diagnosis", 180, || {
+        !d.store.diagnoses(Some(t.0)).unwrap().is_empty()
+    });
+}
