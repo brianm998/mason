@@ -849,6 +849,17 @@ const STEPS: &[&str] = &[
      );
      CREATE INDEX batch_phases_batch ON batch_phases(batch);
      ALTER TABLE batches ADD COLUMN round INTEGER NOT NULL DEFAULT 0;",
+    // The size of a suite at a base, from a run at the base itself (s980, #959): the expected
+    // total shown for a test step. Apart from `suite_green`, which task runs also write and
+    // which gates read; a task's own count must not become another task's total. Additive.
+    "CREATE TABLE suite_size (
+         project  TEXT NOT NULL,
+         suite    TEXT NOT NULL,
+         base     TEXT NOT NULL,
+         executed INTEGER NOT NULL,
+         at_ms    INTEGER NOT NULL,
+         PRIMARY KEY (project, suite, base)
+     );",
     // The nodes this coordinator is paired with (docs/multi-machine-nodes-plan.md, §3.3): who
     // they are and the fingerprint of the certificate each presents. A fingerprint is public;
     // no secret is kept. Additive, so an older runtime still opens the database.
