@@ -93,6 +93,10 @@ pub struct UpdateCfg {
     /// A real identity gives the binaries a stable designated requirement (team + identifier),
     /// so permissions granted to MASON survive self-updates.
     pub sign_identity: Option<String>,
+    /// The directory on the internal disk that holds the coordinator's app bundle (macOS,
+    /// `stable_app.rs`); `"off"` for none. Unset: `~/Applications`, for the owner's own signed
+    /// coordinator only.
+    pub app_dir: Option<String>,
     /// The release API of the `release` channel; tests point it at a fake (`file://` or http).
     pub release_api: String,
     /// The page that offers the installers; what a packaged monitor's button opens.
@@ -161,6 +165,7 @@ impl UpdateCfg {
                 .and_then(|v| v.as_integer())
                 .map_or(DEFAULT_TAKEOVER_WAIT_S, |n| n.max(0) as u64),
             sign_identity: s("sign_identity").filter(|v| !v.trim().is_empty()),
+            app_dir: s("app_dir").filter(|v| !v.trim().is_empty()),
             release_api: s("release_api").unwrap_or_else(|| crate::release::DEFAULT_API.into()),
             download_page: s("download_page")
                 .unwrap_or_else(|| crate::release::DEFAULT_PAGE.into()),
@@ -499,10 +504,22 @@ pub const SIGN_TIMEOUT: Duration = Duration::from_secs(120);
 /// designated requirement; without one it is signed ad hoc. Either way the identifier is
 /// `com.brianm998.mason.<name>`, the same across builds.
 pub fn codesign_args(path: &Path, identity: Option<&str>) -> Vec<std::ffi::OsString> {
+    codesign_args_as(path, &identifier_of(path), identity)
+}
+
+fn identifier_of(path: &Path) -> String {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
+    format!("com.brianm998.mason.{name}")
+}
+
+fn codesign_args_as(
+    path: &Path,
+    identifier: &str,
+    identity: Option<&str>,
+) -> Vec<std::ffi::OsString> {
     let mut a: Vec<std::ffi::OsString> = vec!["--sign".into()];
     match identity {
         Some(id) => {
@@ -514,7 +531,7 @@ pub fn codesign_args(path: &Path, identity: Option<&str>) -> Vec<std::ffi::OsStr
     }
     a.push("--force".into());
     a.push("--identifier".into());
-    a.push(format!("com.brianm998.mason.{name}").into());
+    a.push(identifier.into());
     a.push(path.into());
     a
 }
@@ -527,11 +544,16 @@ pub fn codesign_args(path: &Path, identity: Option<&str>) -> Vec<std::ffi::OsStr
 /// (2026-11-12). x86_64 linkers do not sign. A signing failure fails the build rather than
 /// installing an unsigned runtime.
 pub fn sign_installed(path: &Path, identity: Option<&str>) -> Result<(), String> {
+    sign_as(path, &identifier_of(path), identity)
+}
+
+/// [`sign_installed`] with the identifier named: an app bundle's is not its file name.
+pub fn sign_as(path: &Path, identifier: &str, identity: Option<&str>) -> Result<(), String> {
     if !cfg!(target_os = "macos") {
         return Ok(());
     }
     let mut child = Command::new("/usr/bin/codesign")
-        .args(codesign_args(path, identity))
+        .args(codesign_args_as(path, identifier, identity))
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -2072,6 +2094,9 @@ pub fn drain_and_take_over(d: &Arc<Daemon>, sha: &str, now: bool) -> String {
 /// would after any restart. Only returns if the exec fails.
 pub fn take_over(d: &Arc<Daemon>, sha: &str) -> String {
     let rt = Runtimes::new(&d.cfg.data_dir);
+    // The bundle is built and signed first (it takes a while), and swapped in only once nothing
+    // more can start from the old one: just before the exec.
+    let staged = crate::stable_app::stage(&d.cfg, &rt, sha);
     if let Err(e) = rt.set_current(sha) {
         return fail(d, format!("could not record the new runtime: {e}"));
     }
@@ -2093,8 +2118,12 @@ pub fn take_over(d: &Arc<Daemon>, sha: &str) -> String {
         args.extend(["--port".into(), port.to_string()]);
     }
     args.extend(["--runtime-sha".into(), sha.into()]);
-    let err = mason_platform::process::replace_process(Command::new(rt.masond(sha)).args(&args));
+    let exe = crate::stable_app::executable(staged.as_ref(), &rt, sha);
+    let err = mason_platform::process::replace_process(Command::new(exe).args(&args));
     // Still here: the exec failed. Put things back.
+    if let Some(s) = &staged {
+        s.revert();
+    }
     let _ = d.store.add_health("cancelled", "", None, sha, now_ms());
     if let Some(prev) = d.cfg.runtime_sha.as_deref() {
         let _ = rt.set_current(prev);

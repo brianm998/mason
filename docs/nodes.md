@@ -221,7 +221,8 @@ these permissions. Check System Settings → Privacy & Security → Profiles fir
 
 **On the iMac (the coordinator): Local Network.** The first time MASON connects to a node, macOS
 asks "Allow MASON to find devices on local networks?". Allow it: the answer is kept across updates
-because MASON is signed by your team. If it was ever answered "Don't Allow" (a scratch test daemon
+because MASON is signed by your team and runs from one path (see "The coordinator: Local Network"
+below). If it was ever answered "Don't Allow" (a scratch test daemon
 raised the same question on 2026-11-22 for the same app), turn it back on in System Settings →
 Privacy & Security → Local Network. `mason node list` says "local network access denied by macOS"
 for a node it cannot reach while that is off. ("No route to host" is also what a node that is off
@@ -265,6 +266,91 @@ sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp /Users/masonno
 the Studio is also on a VPN or a guest network, name only the LAN address:
 `bind = ["192.168.1.40"]`. The listener serves `/node/*` only, and only to certificates a
 pairing has trusted; anyone else gets a refusal before a request is read.
+
+## The coordinator: Local Network, and running `masond` from the internal disk
+
+macOS (15 and later) enforces Local Network permission by the executable's Mach-O UUID. It keeps
+one rule per executable path, made when it shows the prompt, and it has to be able to read that
+path to find the UUID. For a bare `masond` in `runtimes/<sha>/` on an external disk it never
+could: on 2026-11-25 the iMac's `masond` got "no route to host" (errno 65) for every connection to
+the LAN, while ping and Terminal reached the node and System Settings showed every `masond` entry
+allowed.
+
+**The log line to look for:**
+
+```bash
+log show --last 3h --predicate 'process == "nehelper"' | grep "0 UUID(s) for com.brianm998.mason.masond"
+```
+
+(Nearby: `Local network allowed by preference for masond (...), but received prompt` and
+`UUID cache miss ... Failed to find com.brianm998.mason.masond using neagent`.)
+
+**What MASON does.** The coordinator execs `masond` from one signed bundle whose path never
+changes, `~/Applications/MASON Coordinator.app` (bundle identifier `com.brianm998.mason.masond`,
+the identifier `masond` is signed with; not `MASON.app`, which is the monitor). Every start and
+every takeover puts that runtime's `masond`, `step-host`, `mason-mcp` and other binaries into
+`Contents/MacOS`, signs the bundle with `sign_identity` and verifies it, then execs it. The bundle
+it replaces is kept as `.MASON Coordinator.previous`. The runtimes stay in the data directory,
+wherever that is. The launch agent does not change.
+
+This happens when all of these hold: macOS, `sign_identity` is set in `update.toml`, the data
+directory is the default `~/Library/Application Support/mason` (or a link to the same place), and
+this daemon is not a node. `app_dir` in `update.toml` overrides the rule: an absolute (or `~/`)
+directory on the internal disk to keep the bundle in (use it if the home directory itself is
+external), or `"off"`. If the bundle cannot be made, `masond` logs a warning and runs from the
+runtime directory as before. At start-up it also warns if its executable is on a volume that is
+not internal.
+
+**After the first takeover with it,** `ps -o command= -p <pid in daemon.json>` should show the
+bundle's path. If macOS asks about the local network, allow it. If it does not ask and
+connections still fail, check the log line above: the old rules for the same identifier may still
+be what macOS finds. Run
+`/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f ~/Applications/"MASON Coordinator.app"`
+and restart `masond`. (Not yet confirmed on a real machine.)
+
+**What MASON says.** When a connection to a node on the LAN fails with "no route to host", the node
+answers ping and `masond` is on an external disk, `mason node list`, `mason node add` and the
+monitor say: "macOS has a Local Network rule for masond but cannot apply it (the binary lives on an
+external disk). Run MASON from the internal disk (see docs/nodes.md)". Otherwise they say "local
+network access denied by macOS". mDNS send failures show only in the daemon's log
+(`mdns_sd ... No route to host`).
+
+**Stopgap: a loopback relay.** Local Network privacy does not cover loopback, and Terminal has the
+permission. Run a small TCP relay in Terminal that listens on `127.0.0.1:17425` and forwards to the
+node's port (7425), and pair through it; keep it running. The node's certificate is still pinned
+end to end:
+
+```bash
+python3 - <<'PY'
+import asyncio
+
+NODE = ("10.10.10.5", 7425)  # the node
+
+async def pipe(r, w):
+    try:
+        while data := await r.read(65536):
+            w.write(data)
+            await w.drain()
+    finally:
+        w.close()
+
+async def serve(r, w):
+    nr, nw = await asyncio.open_connection(*NODE)
+    await asyncio.gather(pipe(r, nw), pipe(nr, w), return_exceptions=True)
+
+async def main():
+    async with await asyncio.start_server(serve, "127.0.0.1", 17425) as s:
+        await s.serve_forever()
+
+asyncio.run(main())
+PY
+```
+
+```bash
+mason node add --host 127.0.0.1:17425 --fp FINGERPRINT --code CODE --name studio
+```
+
+Remove the node and pair it by its own address once the coordinator can reach it.
 
 ## 2. Pair the iMac with the Studio
 
@@ -400,7 +486,10 @@ pair again.
   `AutomountDisksWithoutUserLogin` is set (section 1.6).
 - **`a runtime from this coordinator cannot be checked`.** The iMac's `masond` is not signed by a
   team, so it cannot send a runtime; update the Studio by hand (section 1.3).
-- **`local network access denied by macOS` on the iMac.** Turn Local Network on for MASON (section 1.6).
+- **`local network access denied by macOS` on the iMac.** Turn Local Network on for MASON (section
+  1.6). If it is already on, see "The coordinator: Local Network".
+- **`macOS has a Local Network rule for masond but cannot apply it`.** See "The coordinator: Local
+  Network".
 
 - **`mason node add` cannot find the Studio.** mDNS is blocked on some networks (a VPN, Wi-Fi
   isolation, a guest network). Use `--host ADDRESS:7425 --fp FINGERPRINT`, and consider

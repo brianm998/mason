@@ -90,6 +90,8 @@ pub enum NodeState {
     Incompatible(String),
     /// macOS will not let MASON on this Mac reach the local network (§3.14).
     LocalNetworkDenied,
+    /// macOS has a Local Network rule for `masond` that it cannot apply (s1118).
+    LocalNetworkUnapplied,
 }
 
 impl NodeState {
@@ -110,7 +112,8 @@ impl NodeState {
                 "its certificate is not the one paired; pair it again".into()
             }
             NodeState::Incompatible(m) => format!("incompatible ({m})"),
-            NodeState::LocalNetworkDenied => "local network access denied by macOS (or no route to it): turn on Local Network for MASON in System Settings → Privacy & Security → Local Network".into(),
+            NodeState::LocalNetworkDenied => "local network access denied by macOS (or no route to it): turn on Local Network for MASON in System Settings → Privacy & Security → Local Network; if it is already on, see docs/nodes.md".into(),
+            NodeState::LocalNetworkUnapplied => crate::node_client::LOCAL_NETWORK_UNAPPLIED.into(),
         }
     }
 }
@@ -134,6 +137,7 @@ pub enum Fault {
     WrongCertificate,
     Incompatible(String),
     LocalNetworkDenied,
+    LocalNetworkUnapplied,
 }
 
 /// The state a view amounts to. Pure.
@@ -143,6 +147,7 @@ pub fn state_of(v: &View, lost_after: u32) -> NodeState {
         Some(Fault::WrongCertificate) => return NodeState::WrongCertificate,
         Some(Fault::Incompatible(m)) => return NodeState::Incompatible(m.clone()),
         Some(Fault::LocalNetworkDenied) => return NodeState::LocalNetworkDenied,
+        Some(Fault::LocalNetworkUnapplied) => return NodeState::LocalNetworkUnapplied,
         None => {}
     }
     if v.failures >= lost_after.max(1) {
@@ -390,6 +395,11 @@ async fn poll_one(
             v.failures += 1;
             v.fault = Some(Fault::LocalNetworkDenied);
             v.last_error = Some(ClientError::LocalNetworkDenied(a).to_string());
+        }
+        Err(ClientError::LocalNetworkUnapplied(a)) => {
+            v.failures += 1;
+            v.fault = Some(Fault::LocalNetworkUnapplied);
+            v.last_error = Some(ClientError::LocalNetworkUnapplied(a).to_string());
         }
         Err(e) => {
             v.failures += 1;
@@ -657,6 +667,14 @@ pub fn alerts_for(
                 NodeState::LocalNetworkDenied => (
                     "local-network",
                     "macOS denies MASON the local network, so node ".to_string() + &r.name + " cannot be reached (System Settings → Privacy & Security → Local Network)",
+                ),
+                NodeState::LocalNetworkUnapplied => (
+                    "local-network",
+                    format!(
+                        "node {} cannot be reached: {}",
+                        r.name,
+                        crate::node_client::LOCAL_NETWORK_UNAPPLIED
+                    ),
                 ),
                 NodeState::WrongCertificate => (
                     "certificate",
@@ -1168,6 +1186,13 @@ mod tests {
         assert!(NodeState::LocalNetworkDenied
             .text()
             .contains("Local Network"));
+        let unapplied = state_of(&fault(Fault::LocalNetworkUnapplied), 6);
+        assert_eq!(unapplied, NodeState::LocalNetworkUnapplied);
+        assert!(!unapplied.usable());
+        assert_eq!(
+            unapplied.text(),
+            crate::node_client::LOCAL_NETWORK_UNAPPLIED
+        );
         assert!(NodeState::Accepting.usable() && !NodeState::Lost(7).usable());
         assert!(NodeState::NotPaired.text().contains("403"));
     }
