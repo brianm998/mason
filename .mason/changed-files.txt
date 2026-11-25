@@ -1,0 +1,7 @@
+.mason/run.json
+crates/daemon/src/jobs.rs
+crates/daemon/src/numbers.rs
+crates/daemon/tests/it/prompt_packs.rs
+docs/decisions/1081-review-is-told-the-reserved-numbers.md
+docs/stages/s1092.md
+scripts/exit/s1092.sh
