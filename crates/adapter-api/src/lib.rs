@@ -286,6 +286,21 @@ pub enum AgentEvent {
         status: Option<u32>,
         delay_ms: Option<u64>,
     },
+    /// The context window's fill: the input of the latest message (uncached, cache read
+    /// and cache write) against the model's window. Sent when the fill moves by a
+    /// percentage point or more, or the window becomes known. Only from adapters whose
+    /// stream says so.
+    Context {
+        used: u64,
+        window: u64,
+    },
+    /// The CLI compacted the conversation. `subtype` is the `system` line's own, so a
+    /// rename in a later CLI shows. The sizes are `None` when the stream did not say.
+    Compacted {
+        subtype: String,
+        before: Option<u64>,
+        after: Option<u64>,
+    },
     /// Always the last event.
     Finished(Outcome),
 }

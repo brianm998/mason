@@ -732,3 +732,11 @@ compose = "done"
 ios = "done"
 android = "todo"
 android_reason = "Not in the first Android phone app (stage 469): the Android module has no Settings page yet"
+
+[feature.step-context-fill]
+description = "A task page's step row shows how full the run's agent sessions got their context window, as the daemon's own line such as 'context peak 62%, final 40%, 1 compaction'; nothing when the run reported none; a filter or search finds it (s1108)"
+swift = "done"
+compose = "done"
+ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no task page step list yet"

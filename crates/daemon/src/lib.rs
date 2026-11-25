@@ -24,6 +24,7 @@ pub mod circling;
 pub mod closer;
 pub mod cmdreuse;
 pub mod config;
+pub mod context;
 pub mod covmap;
 pub mod cpu;
 pub mod cpuhistory;
