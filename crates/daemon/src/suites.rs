@@ -4507,6 +4507,28 @@ pub fn skip(
         .map_err(|e| e.to_string())
 }
 
+/// Whether an open debt skips a step that nothing reads a skip of (any step but the Test
+/// step), so it has no effect. Debts recorded before such skips were refused (s1007).
+pub fn skip_has_no_effect(d: &Arc<Daemon>, debt: &mason_store::DebtRow) -> bool {
+    let Some(("step", name)) = debt.scope.split_once(':') else {
+        return false;
+    };
+    if debt.status != "open" {
+        return false;
+    }
+    let Ok(w) = d.world() else {
+        return false;
+    };
+    let Some(t) = w.tasks.get(&TaskId(debt.task)) else {
+        return false;
+    };
+    let def = d
+        .pinned_def(&t.def)
+        .unwrap_or_else(|| d.current_def(t.project));
+    def.step(name)
+        .is_some_and(|s| s.kind != mason_definition::StepType::Test)
+}
+
 /// The scope a skip is recorded against. A task in landing is shown with its landing step, and
 /// the clients send that step's name, but what landing can honour is a skip of the Test step
 /// (`tests_skipped`, and a batch's verification, read `step:<Test step>`). So a `step:` scope

@@ -2776,6 +2776,9 @@ fn main() {
                         },
                         x["reason"].as_str().unwrap_or("")
                     );
+                    if x["no_effect"] == json!(true) {
+                        println!("      no effect: only a skip of the test step is honoured");
+                    }
                     if let Some(how) = x["how"].as_str().filter(|h| !h.is_empty()) {
                         println!("      paid: {how}");
                     }

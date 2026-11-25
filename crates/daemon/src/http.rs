@@ -2542,13 +2542,22 @@ async fn debts_list(
     let d2 = d.clone();
     let rows = d
         .pool
-        .run(move || d2.store.debts(None, open))
+        .run(move || {
+            let rows = d2.store.debts(None, open)?;
+            Ok::<_, mason_store::StoreError>(
+                rows.iter()
+                    .map(|x| {
+                        let mut v = debt_json(x);
+                        v["no_effect"] = json!(crate::suites::skip_has_no_effect(&d2, x));
+                        v
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        })
         .await
         .map_err(pool_err)?
         .map_err(store_err)?;
-    Ok(Json(
-        json!({"debts": rows.iter().map(debt_json).collect::<Vec<_>>()}),
-    ))
+    Ok(Json(json!({"debts": rows})))
 }
 
 /// Pay a debt by running the skipped suite on the base branch now.

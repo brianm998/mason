@@ -11,7 +11,7 @@
 
 mod support;
 use mason_core::*;
-use mason_daemon::suites::{landing_scope, skip, Members};
+use mason_daemon::suites::{landing_scope, skip, skip_has_no_effect, Members};
 use std::path::PathBuf;
 use support::lw::*;
 use support::*;
@@ -178,4 +178,24 @@ fn a_skip_of_a_step_that_is_not_the_test_step_is_refused() {
     assert_eq!(debt_scopes(&w, t).len(), before, "no debt is recorded");
     // The Test step still can be.
     skip(&w.d, t, "step:test", "r", "owner", false).unwrap();
+
+    // A debt recorded before the refusal is reported as having no effect.
+    let project =
+        w.d.project(w.d.project_id_by_name("scratch").unwrap())
+            .unwrap();
+    let old =
+        w.d.store
+            .add_debt(
+                t.0,
+                &project.id,
+                &format!("step:{non_test}"),
+                "r",
+                "owner",
+                false,
+                0,
+            )
+            .unwrap();
+    for x in w.d.store.debts(Some(t.0), true).unwrap() {
+        assert_eq!(skip_has_no_effect(&w.d, &x), x.id == old, "{}", x.scope);
+    }
 }
