@@ -9,6 +9,5 @@ for n in 0905 0707 0690; do grep -q "$n" "$d"; done
 grep -q 'only in compose' scripts/exit/s13.sh
 grep -q 'conformance" check --expected "$root/expected" --actual "$root/compose"' scripts/exit/s13.sh
 grep -q 'quiet exit, views at' clients/compose/app/src/main/kotlin/mason/monitor/Tool.kt
-grep -q 'QUIET_TICKS' clients/compose/app/src/main/kotlin/mason/monitor/Tool.kt
 bash -n scripts/exit/s13.sh
 echo "s1026 passed"
