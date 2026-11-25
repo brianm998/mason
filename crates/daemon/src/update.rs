@@ -1062,6 +1062,8 @@ pub fn run(d: &Arc<Daemon>, req: &Request) -> Result<String, String> {
         let cfg = UpdateCfg::load(&d.cfg.config_dir)?;
         let rt = Runtimes::new(&d.cfg.data_dir);
         let channel = req.channel.clone().unwrap_or_else(|| cfg.channel.clone());
+        // The cross-builds for the nodes, started beside the coordinator's own build.
+        let mut fleet: Option<crate::node_fleet::Handle> = None;
         let (target, running) = if channel == Channel::Release {
             prepare_release(d, req, &cfg, &rt)?
         } else {
@@ -1118,6 +1120,9 @@ pub fn run(d: &Arc<Daemon>, req: &Request) -> Result<String, String> {
                 "building",
                 &format!("building {target} into runtimes/{target}/"),
             );
+            if !req.check_only && !req.rollback {
+                fleet = Some(crate::node_fleet::begin(d, &cfg, &target, !req.auto));
+            }
             build_leased(d, &cfg, &rt, &target, !req.auto)?;
             (target, running)
         };
@@ -1165,6 +1170,13 @@ pub fn run(d: &Arc<Daemon>, req: &Request) -> Result<String, String> {
                 .phase = "idle".into();
             d.poke();
             return Ok(target);
+        }
+        // The nodes get the same commit before this daemon takes over, so the fleet changes
+        // version together. Nothing here can fail the update: a node that cannot be reached is
+        // sent its runtime when it returns.
+        if let Some(h) = &fleet {
+            let wait = Duration::from_secs(cfg.update_wait_max_s);
+            crate::node_fleet::deliver(d, &cfg, &target, h, wait);
         }
         say(
             d,

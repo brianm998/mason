@@ -61,6 +61,7 @@ pub mod newtests;
 pub mod node_client;
 pub mod node_doctor;
 pub mod node_exec;
+pub mod node_fleet;
 pub mod node_run;
 pub mod node_runtime;
 pub mod node_serve;

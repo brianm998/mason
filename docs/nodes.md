@@ -103,16 +103,47 @@ sudo chown -R masonnode "/Users/masonnode/Library/Application Support/mason"
 echo -n <sha> | sudo -u masonnode tee "/Users/masonnode/Library/Application Support/mason/runtimes/current"
 ```
 
-From then on **the iMac sends each new runtime itself** (`PUT /node/runtime`) after it has taken
-over one, cross-built and signed for the Studio. The Studio checks the package against the team it
-pinned when you paired (`codesign --verify --strict`, and the team id of the signature), installs
-it, and takes over once its running jobs have ended. A package that is ad hoc, unsigned, from
-another team or broken is refused and nothing of it is installed. This needs `sign_identity` in
-the iMac's `update.toml`, and the iMac itself running a signed `masond`; with neither the Studio is
-updated by hand, as above. `[nodes] push_runtime = false` turns the sending off.
+From then on **updates are automatic**: `mason update` (and the monitor's "Update masond") brings the
+iMac and every paired node to the same MASON version, and you do nothing by hand on the Studio.
 
-**Both Macs must run the same MASON version**: a node that speaks another node protocol is listed as
-incompatible and never used until it has been updated.
+What happens, in this order:
+
+1. The iMac builds its own new runtime. Beside it, under their own compile leases and the same
+   build-jobs cap, it cross-builds the same commit once for each node architecture it knows (the
+   Studio's `arm64`), signed with `sign_identity`.
+2. The iMac's build passes its self-test. Before it takes over, it sends each reachable node its
+   runtime (`PUT /node/runtime`). The Studio checks the package against the team it pinned when you
+   paired (`codesign --verify --strict`, and the team id of the signature), installs it, and takes over
+   once its running jobs have ended; until then it takes no new job. A package that is ad hoc,
+   unsigned, from another team or broken is refused and nothing of it is installed.
+3. The iMac takes over. Both Macs now run the commit, give or take the Studio's running jobs.
+
+This works across a protocol bump: a node that speaks an older node protocol is listed as
+`incompatible` and is sent the runtime all the same, which is how it stops being incompatible.
+
+**What you see.** `mason update status` lists a line for each node, and so does `mason node list` (in
+brackets) and the monitor's Nodes section:
+
+| Shown | Meaning |
+|---|---|
+| `building for arm64` | the cross-build is running |
+| `sending the new runtime` / `sent; installing` | on its way / the node has it |
+| `installed; waiting for 2 jobs to end` | installed; it takes over when its jobs end |
+| `up to date` | it runs the iMac's commit |
+| `failed (reason)` | the send failed; an alert says so too |
+| `will update when it returns` | it was off or silent; the first poll that finds it sends the runtime |
+
+**If a node misses one.** A failed send is tried again by the poll every ten minutes. To send now:
+`mason node update studio` (or `mason node update --all`; the monitor's Nodes row has the same
+button). It builds if it has to, sends, and `mason node list` shows how it goes. Nothing here can
+stop the iMac's own update: a node that cannot be reached is left for the next poll.
+
+This needs `sign_identity` in the iMac's `update.toml`, and the iMac itself running a signed `masond`;
+with neither the Studio is updated by hand, as above. `[nodes] push_runtime = false` turns the sending
+off. The `release` channel has no source to cross-build from, so it does not update nodes yet.
+
+**Both Macs must run the same MASON version** to work together: a node on another protocol takes no
+work until it has been updated.
 
 ### 1.4 `daemon.toml`
 
@@ -499,8 +530,9 @@ pair again.
   (`mason node remove studio`) and pair again.
 - **`not paired (403)`.** The Studio no longer trusts this iMac (its `coordinators.json` was
   cleared, or the coordinator was removed there). Pair again.
-- **`incompatible`.** The two Macs run different MASON versions: update the older one
-  (`mason update`).
+- **`incompatible`.** The two Macs run different MASON versions. `mason update` sends the node the
+  runtime itself; if it is still `failed` or `will update when it returns`, `mason node update NAME`
+  sends it now, and `mason update status` says why it did not go.
 - **A new binary hangs at 0 % CPU on its first launch.** macOS checks every new binary
   (`syspolicyd`). It has been slow to do so on the iMac; give it a few minutes, and check with
   `/usr/bin/pgrep -x syspolicyd`.
