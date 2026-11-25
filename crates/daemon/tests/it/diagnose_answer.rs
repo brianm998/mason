@@ -58,8 +58,16 @@ fn turn(rec: &Path) -> Value {
     ])
 }
 
-/// A scratch world whose test step is red until `gate/ok` exists, so a task fails after two
-/// develop rounds.
+/// An explore turn that records its prompt.
+fn plan_turn(rec: &Path) -> Value {
+    let mut t = explore_turn();
+    let record = json!({"sh": format!("printf '%s\\n{END}\\n' \"$FAKE_PROMPT\" >> {}/explore.txt", rec.display())});
+    t.as_array_mut().unwrap().insert(0, record);
+    t
+}
+
+/// A scratch world whose test step is red until `gate/ok` exists, so a task fails after one
+/// develop round.
 struct World {
     s: Scratch,
     rec: tempfile::TempDir,
@@ -70,7 +78,7 @@ fn world(extra: &str, mut steps: Value) -> World {
     let rec = tempfile::tempdir().unwrap();
     let gate = tempfile::tempdir().unwrap();
     if steps.get("explore").is_none() {
-        steps["explore"] = json!(vec![explore_turn(); 6]);
+        steps["explore"] = json!(vec![plan_turn(rec.path()); 6]);
     }
     if steps.get("develop").is_none() {
         steps["develop"] = json!(vec![turn(rec.path()); 12]);
@@ -84,7 +92,10 @@ fn world(extra: &str, mut steps: Value) -> World {
 impl World {
     /// The prompts the develop sessions were given, oldest first.
     fn prompts(&self) -> Vec<String> {
-        std::fs::read_to_string(self.rec.path().join("dev.txt"))
+        self.recorded("dev.txt")
+    }
+    fn recorded(&self, file: &str) -> Vec<String> {
+        std::fs::read_to_string(self.rec.path().join(file))
             .unwrap_or_default()
             .split(END)
             .map(str::to_string)
@@ -318,7 +329,7 @@ fn a_retry_option_retries_with_the_note_and_the_context() {
     assert_eq!(attention::metrics(&d, 0)["by_kind"]["answer"], 1);
     wait_state(&d, t, State::Landed, 600);
     let prompts = w.prompts();
-    let next = &prompts[2];
+    let next = &prompts[1];
     assert!(
         next.contains(
             "A note for this retry: DIAG-NOTE write the gate\nOwner's context: CTX-RETRY"
@@ -349,11 +360,16 @@ fn the_explore_close_and_cancel_options_do_what_they_say() {
     assert_eq!(status_of(&d, t), "applied");
     // The reason, with the context, is the next agent's note.
     wait_for("the second failure", 600, || {
-        let k = task_of(&d, t);
-        k.state == State::Failed && w.prompts().len() >= 3
+        task_of(&d, t).state == State::Failed && w.prompts().len() >= 2
     });
-    let prompts = w.prompts();
-    assert!(prompts[2].contains("CTX-EXPLORE"), "{}", prompts[2]);
+    let plans = w.recorded("explore.txt");
+    assert!(
+        plans[1].contains(
+            "A note for this retry: DIAG-REASON the plan has no gate\nOwner's context: CTX-EXPLORE"
+        ),
+        "{}",
+        plans[1]
+    );
     assert!(decisions(&d, t).contains("Plan it again\nOwner's context: CTX-EXPLORE"));
 
     let t = failed(&d, "Closed");
@@ -407,7 +423,7 @@ fn other_words_retry_from_the_default_step_as_the_owner_wrote_them() {
     assert_eq!(last_retry(&d, t), (State::Developing, "develop".into()));
     assert!(decisions(&d, t).contains(words));
     wait_state(&d, t, State::Landed, 600);
-    let next = &w.prompts()[2];
+    let next = &w.prompts()[1];
     assert!(
         next.contains(&format!(
             "A note for this retry: {words}\nOwner's context: CTX-OTHER"
@@ -473,6 +489,6 @@ fn the_cli_answers_a_failed_tasks_card_with_context() {
     assert!(said.contains("Retry the work"), "{said}");
     assert_ne!(w.s.task_json(0)["state"], "failed");
     w.s.wait_task(0, "landed", 600);
-    let next = &w.prompts()[2];
+    let next = &w.prompts()[1];
     assert!(next.contains("Owner's context: CTX-CLI"), "{next}");
 }
