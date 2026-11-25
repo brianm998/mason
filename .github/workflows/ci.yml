@@ -178,6 +178,7 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4, 5, 6]
     runs-on: macos-latest
+    # 90, as exit-scripts: the 3600 s per-script limit must fire first (decision 1064).
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4

@@ -151,7 +151,9 @@ pub fn gather(d: &Arc<Daemon>, now: u64) -> Facts {
                 .map(|p| p.updated_at_ms)
                 .max()
                 .map_or(in_state, |at| now.saturating_sub(at));
-            if running && silent > 0 {
+            // A host queued for a lease is judged by overloaded:slots and
+            // stuck:wait:N, not as silent.
+            if running && silent > 0 && wait.is_none() {
                 x.silent_hosts.push((t.id.0, silent));
             }
             x.tasks.push(TaskFact {

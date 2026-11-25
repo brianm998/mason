@@ -69,6 +69,9 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     /** The highest sequence number of a view applied so far; an older one is dropped. */
     private val appliedViewSeq = HashMap<String, Long>()
 
+    /** The kinds of view applied at least once, for tools that wait for every subscribed view. */
+    fun appliedKinds(): Set<String> = appliedViewSeq.keys.toSet()
+
     private fun viewKind(v: View): String = when {
         v.sidebar != null -> "sidebar"
         v.home != null -> "home"

@@ -96,6 +96,7 @@ mod single;
 mod stall;
 mod stop;
 mod stuck;
+mod suite_budget;
 mod suite_builds;
 mod suites_schedule;
 mod sweep;
