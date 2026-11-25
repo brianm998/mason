@@ -8,3 +8,6 @@ The usage view's text depends on the wall clock, so it can change with no change
 
 ## Alternatives
 A fixed clock for the demo daemon's views: a product change made only for one test. Dropping the usage assertion: loses the check for an identical resend.
+
+## Exit-script selection
+The owner chose to narrow `scripts/select-exit-scripts.sh` in this change: a changed integration-test file selects only exit scripts naming `<stem>::`, not every script containing the module name as a word, so a `protocol.rs` edit no longer selects scripts that only mention "protocol" in prose.
