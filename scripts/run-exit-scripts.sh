@@ -77,6 +77,8 @@ run_limited() {
   set -m
   bash "$s" & local pid=$!
   set +m
+  # A signal to the runner's group no longer reaches the script's: pass it on.
+  trap 'kill -KILL -- "-$pid" 2>/dev/null; exit 143' HUP INT TERM
   ( sleep "$limit"
     if kill -0 "$pid" 2>/dev/null; then : > "$flag"; kill -TERM -- "-$pid" 2>/dev/null; sleep 2; kill -KILL -- "-$pid" 2>/dev/null; fi
   ) </dev/null >/dev/null 2>&1 &

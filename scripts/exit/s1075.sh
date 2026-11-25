@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# s1075 exit test: the runner's no-timeout(1) fallback returns when a script ends and
-# kills a script's whole process group at the limit; a narrowed shard runs without --doc.
+# s1075 exit test: the runner's no-timeout(1) fallback returns when a script ends and kills
+# a script's whole process group at the limit or when the runner is killed; a narrowed shard runs without --doc.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 if [ -z "${S1075_GUARDED:-}" ]; then S1075_GUARDED=1 exec perl -e 'alarm 120; exec @ARGV' bash "$0"; fi
@@ -32,7 +32,19 @@ out=$(MASON_EXIT_FALLBACK=1 MASON_EXIT_DIR="$d" MASON_EXIT_WEIGHTS="$d/weights.t
 echo "$out"
 echo "$out" | grep -q 'FAILED: scripts/exit/s22.sh\|FAILED: .*s22.sh (over 2 s)' || { echo "limit not reported"; exit 1; }
 ! pgrep -f 'sleep 773[12]' >/dev/null || { echo "descendant left"; exit 1; }
-# (c) test-shard.py never puts --doc beside a target selector, which cargo refuses.
+# (c) killing the runner's process group also kills the script, which leads its own group.
+printf 'sleep 7734\n' > "$d/s22.sh"
+set -m
+MASON_EXIT_FALLBACK=1 MASON_EXIT_DIR="$d" MASON_EXIT_WEIGHTS="$d/weights.txt" \
+  MASON_EXIT_SCRIPT_LIMIT_S=7735 bash scripts/run-exit-scripts.sh >"$d/killed.txt" 2>&1 & runner=$!
+set +m
+until pgrep -f 'sleep 7734' >/dev/null; do sleep 0.1; done
+kill -TERM -- "-$runner"
+wait "$runner" 2>/dev/null || true
+# The hang guard above ends this wait if the script survives.
+while pgrep -f 'sleep 773[45]' >/dev/null; do sleep 0.1; done
+
+# (d) test-shard.py never puts --doc beside a target selector, which cargo refuses.
 t="$d/t"; mkdir "$t"
 printf '#!/bin/sh\n[ "$1" = --list ] && echo "a_t: test" && exit 0\necho "test a_t ... ok"\n' > "$t/a.sh"
 cat > "$t/cargo.sh" <<X
