@@ -178,7 +178,6 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4, 5, 6]
     runs-on: macos-latest
-    # As the ubuntu exit-scripts job: the repeat scripts need up to 90 minutes, and a hung script should fail by name at its limit.
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
