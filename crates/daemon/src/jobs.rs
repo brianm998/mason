@@ -3337,7 +3337,9 @@ impl CheckSlots {
             .ok()
             .and_then(|w| w.tasks.get(&self.task).cloned())
             .ok_or(crate::sched::Cancelled)?;
-        let rank = d.rank_for(&t, &self.def, as_step);
+        // A check goes after a landing and before a test step for runner units; with local
+        // slots it still ranks as the agent's step (s262).
+        let rank = d.rank_for(&t, &self.def, as_step).check();
         let (d2, task, run) = (d.clone(), self.task, self.run);
         let test_step = self
             .test_step

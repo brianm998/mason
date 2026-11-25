@@ -2177,6 +2177,8 @@ async fn update_status(Shared(d): Shared<Arc<Daemon>>) -> Res {
                 "plan": crate::update_plan::status_lines(&d2, now_ms()),
                 "cost_now": crate::update_plan::cost_line(&d2),
                 "phase": s.phase, "target": s.target, "error": s.error, "log": s.log,
+                // Where each paired node's update stands (`node_fleet`).
+                "nodes": crate::node_fleet::states_json(&d2),
             })
         })
         .await
@@ -4294,6 +4296,7 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/node/doctor", post(crate::node_serve::doctor))
         .route("/nodes", get(crate::nodes::list))
         .route("/nodes/add", post(crate::nodes::add))
+        .route("/nodes/update", post(crate::nodes::update))
         .route("/nodes/remove", post(crate::nodes::remove))
         .route("/nodes/use", post(crate::nodes::use_nodes))
         .route("/lan", get(crate::lan::status))

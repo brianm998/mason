@@ -695,6 +695,10 @@ pub struct Lease {
     held: Option<Held>,
     /// What the lease was asked for, so a remote run can name the units it holds (#818).
     amounts: BTreeMap<String, u32>,
+    /// Where its request stood in line, so a request made again keeps its place (#820).
+    rank: Rank,
+    asked_ms: u64,
+    label: String,
     /// The request was flexible: `amounts` is what it was given, not what it asked for.
     flex: bool,
 }
@@ -720,6 +724,82 @@ impl Lease {
             .filter(|(k, n)| **n > 0 && mason_scheduler::is_gha_pool(k))
             .map(|(k, n)| (k.clone(), *n))
             .collect()
+    }
+}
+
+/// What can give a lease's runner units back and ask for them again, without owning the lease
+/// (#820): the test step's lease is kept by the step, and the run that uses it only gives back
+/// the units of its jobs as they finish.
+#[derive(Clone)]
+pub struct Giver {
+    b: Arc<Broker>,
+    id: u64,
+    task: TaskId,
+    /// Where the lease's request stood in line, so a request made again keeps its place.
+    rank: Rank,
+    asked_ms: u64,
+    label: String,
+}
+
+impl Giver {
+    /// Give back `give` units; the next in line is granted at once.
+    pub fn shrink(&self, give: &BTreeMap<String, u32>) {
+        self.b.shrink(self.id, &self.with_debt_cap(give));
+    }
+
+    /// A debt payment holds its `gha` units against the `gha-debt` cap too (#821): units given
+    /// back or asked for again move the cap's share with them, or the cap would leak, or the
+    /// lease would never read as given back.
+    fn with_debt_cap(&self, units: &BTreeMap<String, u32>) -> BTreeMap<String, u32> {
+        let mut u = units.clone();
+        if let (true, Some(n)) = (self.rank.is_debt(), units.get(GHA)) {
+            u.insert(mason_scheduler::GHA_DEBT.to_string(), *n);
+        }
+        u
+    }
+
+    /// Whether the lease still holds anything.
+    pub fn is_held(&self) -> bool {
+        self.b.lease_holds(self.id)
+    }
+
+    /// Ask again for `units`, at the lease's rank and from when it first began to wait.
+    /// Waits as [`Broker::acquire`] does.
+    pub fn ask_again(
+        &self,
+        units: BTreeMap<String, u32>,
+        alive: &dyn Fn() -> bool,
+        on_wait: &mut dyn FnMut(&str),
+    ) -> Result<Lease, Cancelled> {
+        self.b.acquire_at(
+            self.task,
+            &self.label,
+            self.rank,
+            Needs {
+                exclusive: false,
+                amounts: self.with_debt_cap(&units),
+                flex: false,
+            },
+            alive,
+            on_wait,
+            true,
+            None,
+            false,
+            Some((self.rank, self.asked_ms)),
+        )
+    }
+}
+
+impl Lease {
+    pub fn giver(&self) -> Giver {
+        Giver {
+            b: self.b.clone(),
+            id: self.id,
+            task: self.task.unwrap_or(TaskId(0)),
+            rank: self.rank,
+            asked_ms: self.asked_ms,
+            label: self.label.clone(),
+        }
     }
 }
 
@@ -2235,12 +2315,47 @@ impl Broker {
         expected_ms: Option<u64>,
         nowait: bool,
     ) -> Result<Lease, Cancelled> {
+        self.acquire_at(
+            task,
+            label,
+            rank,
+            needs,
+            alive,
+            on_wait,
+            beside,
+            expected_ms,
+            nowait,
+            None,
+        )
+    }
+
+    /// [`Broker::acquire_as`]. `again`: a request made again for a lease that gave its units
+    /// back (#820): its rank as the first request had it, and when that began waiting, so it
+    /// keeps its place in line.
+    #[allow(clippy::too_many_arguments)]
+    fn acquire_at(
+        self: &Arc<Self>,
+        task: TaskId,
+        label: &str,
+        rank: Rank,
+        needs: Needs,
+        alive: &dyn Fn() -> bool,
+        on_wait: &mut dyn FnMut(&str),
+        beside: bool,
+        expected_ms: Option<u64>,
+        nowait: bool,
+        again: Option<(Rank, u64)>,
+    ) -> Result<Lease, Cancelled> {
+        let (rank, asked_ms) = {
+            let st = lock(&self.st);
+            match again {
+                Some((r, since)) => (r, since),
+                None => (order(&st, rank), crate::daemon::now_ms()),
+            }
+        };
         let id = {
             let mut st = lock(&self.st);
-            let rank = order(&st, rank);
-            let id = st
-                .ledger
-                .submit(rank, needs.clone(), label, crate::daemon::now_ms());
+            let id = st.ledger.submit(rank, needs.clone(), label, asked_ms);
             st.ledger.set_expected(id, expected_ms);
             st.meta.insert(id, Meta::Task);
             if beside {
@@ -2401,6 +2516,9 @@ impl Broker {
             task: Some(task),
             held: Some(held),
             amounts: granted,
+            rank,
+            asked_ms,
+            label: label.to_string(),
             flex: needs.flex,
         })
     }
@@ -2530,6 +2648,11 @@ impl Broker {
             .kernel_says_after
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = after;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn release_for_test(&self, id: u64, task: TaskId) {
+        self.release(id, Some(task));
     }
 
     fn release(&self, id: u64, task: Option<TaskId>) {
@@ -3017,6 +3140,17 @@ impl Broker {
                 })
                 .unwrap_or_else(|| "Waiting".into()),
         }
+    }
+
+    /// Give back `give` units of what lease `id` holds, and grant the next in line at once
+    /// (#820). Left with nothing, the lease is released whole.
+    pub fn shrink(&self, id: u64, give: &BTreeMap<String, u32>) -> bool {
+        let mut st = lock(&self.st);
+        let had = st.ledger.shrink(id, give);
+        st = self.pass(st);
+        drop(st);
+        self.cv.notify_all();
+        had
     }
 
     pub fn lease_close(&self, id: u64) -> bool {
@@ -4911,7 +5045,11 @@ pub(crate) mod tests {
     fn queue_ranked(b: &Broker, t: u64, landing: bool, uses: &BTreeMap<String, u32>) -> u64 {
         let mut st = lock(&b.st);
         st.rank_seq += 1;
-        let rank = order(&st, Rank::new(false, 3, 0, t, st.rank_seq, landing));
+        let mut rank = Rank::new(false, 3, 0, t, st.rank_seq, false);
+        if landing {
+            rank = rank.landing();
+        }
+        let rank = order(&st, rank);
         let id = st
             .ledger
             .submit(rank, needs_of(uses, None), &format!("#{t}"), t);
@@ -4919,6 +5057,149 @@ pub(crate) mod tests {
         st.by_task.insert(TaskId(t), id);
         drop(b.pass(st));
         id
+    }
+
+    /// Ask for runner units on a thread; the lease is sent back once granted.
+    fn ask_on_thread(
+        b: &Arc<Broker>,
+        name: &'static str,
+        task: u64,
+        rank: Rank,
+        tx: std::sync::mpsc::Sender<(&'static str, Lease)>,
+    ) {
+        let b = b.clone();
+        std::thread::spawn(move || {
+            let lease = b
+                .acquire(
+                    TaskId(task),
+                    name,
+                    rank,
+                    Needs::of(&[("gha", 1)]),
+                    &|| true,
+                    &mut |_| {},
+                )
+                .unwrap();
+            let _ = tx.send((name, lease));
+        });
+    }
+
+    fn wait_for_waiting(b: &Broker, n: usize) {
+        let began = Instant::now();
+        while b.gha_waiting() < n {
+            assert!(began.elapsed().as_secs() < 60, "{n} never queued");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// A check that gave its unit back and asks again keeps its kind (a check goes before a
+    /// test step even when the test step is more urgent and older) and the time it first began
+    /// to wait (it goes before a check that arrived after that but before it asked again).
+    #[test]
+    fn a_runner_request_made_again_keeps_its_kind_rank_and_its_wait_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = runner_broker(dir.path(), 1, 1, 0);
+        let check_rank = |id: u64| Rank::new(false, 3, 2, id, id, false).check();
+        let first = b
+            .acquire(
+                TaskId(1),
+                "#1 check",
+                check_rank(1),
+                Needs::of(&[("gha", 1)]),
+                &|| true,
+                &mut |_| {},
+            )
+            .unwrap();
+        let giver = first.giver();
+        giver.shrink(&gha(1));
+        assert!(!giver.is_held());
+        // The freed unit is taken, so everything after this queues.
+        let blocker = b
+            .acquire(
+                TaskId(9),
+                "#9 blocker",
+                Rank::new(false, 3, 2, 9, 9, false),
+                Needs::of(&[("gha", 1)]),
+                &|| true,
+                &mut |_| {},
+            )
+            .unwrap();
+        // Made later than the first check's request, so its wait start is later.
+        std::thread::sleep(Duration::from_millis(3));
+        let (tx, rx) = std::sync::mpsc::channel();
+        // An urgent test step that arrived before the first check began to wait.
+        ask_on_thread(
+            &b,
+            "test step",
+            2,
+            Rank::new(false, 1, 0, 0, 2, false),
+            tx.clone(),
+        );
+        wait_for_waiting(&b, 1);
+        ask_on_thread(&b, "later check", 3, check_rank(3), tx.clone());
+        wait_for_waiting(&b, 2);
+        let g = giver.clone();
+        let again_tx = tx.clone();
+        std::thread::spawn(move || {
+            let lease = g.ask_again(gha(1), &|| true, &mut |_| {}).unwrap();
+            let _ = again_tx.send(("again", lease));
+        });
+        wait_for_waiting(&b, 3);
+        let mut order = vec![];
+        drop(blocker);
+        for _ in 0..3 {
+            let (name, lease) = rx.recv_timeout(Duration::from_secs(60)).unwrap();
+            order.push(name);
+            // One unit: the next in line is granted when this one is dropped.
+            drop(lease);
+        }
+        assert_eq!(order, ["again", "later check", "test step"]);
+        drop(first);
+    }
+
+    /// A debt payment holds its `gha` units against the `gha-debt` cap: units it gives back
+    /// free the cap, and asking again takes the cap's share again, so a second debt that took
+    /// the freed share makes it wait.
+    #[test]
+    fn a_debt_asking_again_asks_the_debt_cap_again_and_gives_it_back_with_its_units() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = runner_broker(dir.path(), 8, 1, 0);
+        b.set_pool_units(mason_scheduler::GHA_DEBT, 4);
+        let debt_rank = |id: u64| Rank::new(false, 0, 0, id, id, false).debt();
+        let both = |n: u32| Needs::of(&[("gha", n), (mason_scheduler::GHA_DEBT, n)]);
+        let a = b
+            .acquire(
+                TaskId(1),
+                "debt a",
+                debt_rank(1),
+                both(4),
+                &|| true,
+                &mut |_| {},
+            )
+            .unwrap();
+        let giver = a.giver();
+        giver.shrink(&gha(4));
+        assert!(!giver.is_held(), "the cap's share goes back with the units");
+        let second = b
+            .acquire(
+                TaskId(2),
+                "debt b",
+                debt_rank(2),
+                both(4),
+                &|| true,
+                &mut |_| {},
+            )
+            .unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let g = giver.clone();
+        std::thread::spawn(move || {
+            let lease = g.ask_again(gha(1), &|| true, &mut |_| {}).unwrap();
+            let _ = tx.send(lease);
+        });
+        wait_for_waiting(&b, 1);
+        assert!(rx.try_recv().is_err(), "the cap is full: the rerun waits");
+        drop(second);
+        let again = rx.recv_timeout(Duration::from_secs(60)).unwrap();
+        assert_eq!(again.units(), gha(1));
     }
 
     #[test]
