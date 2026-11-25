@@ -11,6 +11,7 @@
 #                                 MASON_EXIT_DEFAULT_WEIGHT (60).
 #   MASON_EXIT_SCRIPT_LIMIT_S=N   kill a script after N seconds and report it as
 #                                 `FAILED: scripts/exit/sNN.sh (over N s)`. 0 or unset: no limit.
+#   MASON_EXIT_FALLBACK=1         use the watcher even where timeout(1) exists (tests).
 #   MASON_EXIT_PLAN=1             print the scripts of the shard and exit.
 #   MASON_EXIT_DIR, MASON_EXIT_WEIGHTS   other script directory / weights file (tests).
 #   MASON_EXIT_REPEAT=N           read by the repetition scripts (s80, s99, s169, s170, s482,
@@ -85,6 +86,7 @@ run_limited() {
   fi
   local t=""
   if command -v timeout >/dev/null; then t=timeout; elif command -v gtimeout >/dev/null; then t=gtimeout; fi
+  [ -n "${MASON_EXIT_FALLBACK:-}" ] && t=""
   if [ -n "$t" ]; then
     start_group "$t" -k 10 "$limit" bash "$s"; wait "$pid"; rc=$?; reap_group "$pid"
     [ $rc -eq 0 ] && return 0
