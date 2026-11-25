@@ -41,6 +41,7 @@ mod batch_ci;
 mod client;
 mod definition;
 mod doctor;
+mod guard;
 mod init;
 mod node;
 mod progress;
@@ -158,7 +159,9 @@ mason: command-line client for the MASON pipeline
                                       or one project; a task's own is `mason task run-on <id> <mode>|default`
   mason remote on|off|status [--json]  aliases for mode remote / local, and the mode per project and where it came from. Send every compile and test that can go to GitHub Actions there, or bring them back
                                       (suites with remote = false, a device or exclusive always stay here)
-  mason hook bash [--needs compile]   optional Claude Code PreToolUse hook: builds go through the queue
+  mason hook bash [--needs compile]   optional Claude Code PreToolUse hook: builds go through the queue, and in a
+                                      MASON agent session destructive git and rm commands are refused
+  mason hook guard                    that refusal alone; MASON registers it for every Claude agent it starts
   mason definition check [FILE] [--project P]
                                       validate a definition (default .mason/mason.toml) and dry-run it;
                                       --project also knows P's approved plugin step types
@@ -495,11 +498,23 @@ fn main() {
         let sub = a.pos().unwrap_or_default();
         let needs = a.opt("--needs").unwrap_or_else(|| "compile".into());
         finish(&a);
-        if sub != "bash" {
-            die("the only hook is `mason hook bash`");
+        if sub != "bash" && sub != "guard" {
+            die("the hooks are `mason hook bash` and `mason hook guard`");
         }
         let mut input = String::new();
         let _ = std::io::stdin().read_to_string(&mut input);
+        let env = |k: &str| std::env::var(k).ok();
+        // `hook bash` is also in a repository's own settings, which a person's session
+        // reads: it refuses only inside a session MASON started (s1107).
+        if sub == "guard" || env("MASON_STEP_KIND").is_some() || env("MASON_TASK").is_some() {
+            if let Some(out) = guard::hook_guard(&input, &env) {
+                println!("{out}");
+                return;
+            }
+        }
+        if sub == "guard" {
+            return;
+        }
         // The rewritten command runs in a shell that may not have `mason` on its PATH.
         let mason = std::env::current_exe()
             .ok()
