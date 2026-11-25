@@ -697,10 +697,89 @@ fn a_check_from_run_check_goes_to_the_node_when_placement_says_so() {
     ));
 }
 
+/// #1150: a project with no `[remote_runs]` and mode `remote` is nodes only: a check waits
+/// while no node takes work, never running here, and runs on the node once one does.
+#[test]
+fn a_nodes_only_projects_check_waits_for_a_node_and_never_runs_here() {
+    use mason_daemon::hostedcheck::{self, CheckSpec};
+    use mason_daemon::place::{self, Mode};
+    let p = working_pair(2);
+    let set = place::set_project_mode(&p.a, "scratch", Mode::Remote).unwrap();
+    assert_eq!(set["mode"], "remote", "{set}");
+    let status = place::status(&p.a);
+    let scratch = &status["projects"][0];
+    assert_eq!(
+        (&scratch["nodes_only"], &scratch["mode"], &scratch["source"]),
+        (&json!(true), &json!("remote"), &json!("project")),
+        "{status}"
+    );
+    set_switch(&p, false);
+    poll(&p);
+    let logs = tempfile::tempdir().unwrap();
+    let spec = CheckSpec {
+        id_prefix: "t0r1-only".into(),
+        log_dir: logs.path().to_path_buf(),
+        cmd: "echo node=$MASON_NODE".into(),
+        build: None,
+        cwd: p.sa.repo.clone(),
+        env: vec![],
+        limit: std::time::Duration::from_secs(120),
+        tree: "tree-only".into(),
+        stop: None,
+        holds: Default::default(),
+        label: String::new(),
+        place: None,
+        // The project's mode, not the global switch (which is local here).
+        global: true,
+    };
+    assert!(hostedcheck::goes_remote(&p.a, &spec));
+    assert!(hostedcheck::holds_nothing_here(&p.a, &spec));
+    // A stop ends the wait.
+    let base = remote::base_ref_of(&p.a, "scratch").unwrap();
+    let r = mason_daemon::node_exec::execute(
+        &p.a,
+        Some(&place::wait_nid("")),
+        &self::spec("only-stop", None, "echo no"),
+        &p.sa.repo,
+        &base,
+        logs.path(),
+        &|| Some(StopWhy::Skipped),
+        &mut |_, _| {},
+    );
+    assert!(matches!(r, Ok(Outcome::Stopped(StopWhy::Skipped))), "{r:?}");
+    std::thread::scope(|sc| {
+        let h = sc.spawn(|| hostedcheck::run(&p.a, &spec, &remote::Grant::attached()));
+        set_switch(&p, true);
+        poll(&p);
+        let out = h.join().unwrap().unwrap();
+        assert!(out.passed, "{}", out.output);
+        assert!(out.output.contains("ran on node b"), "{}", out.output);
+        assert!(out.full.contains("node=1"), "{}", out.full);
+    });
+    // Cleared, it always runs here again.
+    place::clear_project_mode(&p.a, "scratch").unwrap();
+    assert!(!hostedcheck::goes_remote(&p.a, &spec));
+}
+
 /// A batch of two tasks lands on the coordinator, which does every git step, while the suites of
 /// its test run on the node. The node never gets a way to push.
 #[test]
 fn a_batch_lands_on_the_coordinator_while_its_suites_run_on_the_node() {
+    batch_on_the_node(|d| {
+        mason_daemon::place::set_global(d, mason_daemon::place::Mode::Remote, "test").unwrap();
+    });
+}
+
+/// #1150: the same for a project with no `[remote_runs]` whose own mode is `remote`.
+#[test]
+fn a_nodes_only_projects_suites_run_on_the_node() {
+    batch_on_the_node(|d| {
+        let name = d.projects().values().next().unwrap().id.clone();
+        mason_daemon::place::set_project_mode(d, &name, mason_daemon::place::Mode::Remote).unwrap();
+    });
+}
+
+fn batch_on_the_node(set_mode: impl FnOnce(&Arc<Daemon>)) {
     use support::lw::world;
     std::env::set_var(
         "MASON_NODE_TOOLCHAINS",
@@ -755,7 +834,7 @@ fn a_batch_lands_on_the_coordinator_while_its_suites_run_on_the_node() {
         ))
         .unwrap();
     rt.block_on(nodes::poll_once(&w.d));
-    mason_daemon::place::set_global(&w.d, mason_daemon::place::Mode::Remote, "test").unwrap();
+    set_mode(&w.d);
 
     let t1 = w.task("one", &[("a/x1.txt", "1")]);
     let t2 = w.task("two", &[("b/x2.txt", "1")]);

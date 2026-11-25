@@ -2795,6 +2795,13 @@ pub fn suite_pool_needs(
     suite: &mason_testing::Suite,
     flexible: bool,
 ) -> Option<mason_scheduler::Needs> {
+    // A nodes-only project's run on a node holds none of this machine (#1150): in `remote` mode
+    // it never runs here, and one that comes back takes its slots then (`fallback_lease`).
+    if crate::place::nodes_only(d, project)
+        && executor_for(d, project, Kind::Suite, Some((task, suite))).is_off_machine()
+    {
+        return Some(with_units(needs, Default::default()));
+    }
     match run_place(d, project, task, Some(suite), &suite.command, Kind::Suite) {
         RunPlace::GitHub { units, .. } => {
             let n = with_units(needs, units);
@@ -3054,6 +3061,13 @@ pub fn pool_needs(
     const MACHINE: [&str; 3] = ["compile", "test-suite", "test-small"];
     if !needs.exclusive && !MACHINE.iter().any(|m| needs.amounts.contains_key(*m)) {
         return None;
+    }
+    // A nodes-only project's run on a node holds nothing here, not even the node's unit: the
+    // node itself refuses a job it has no room for.
+    if crate::place::nodes_only(d, project)
+        && executor_task(d, project, task.map(|t| t.0)).is_off_machine()
+    {
+        return Some(with_units(needs, Default::default()));
     }
     // The effective mode of the task (task, then project, then global; #761, #831): never
     // `executor_for(.., None)`, which is always local. A step whose suites are split between

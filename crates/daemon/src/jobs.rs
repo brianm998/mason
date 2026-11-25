@@ -3495,7 +3495,7 @@ pub(crate) enum Want {
 /// What `spec` asks for: nothing if it attaches to a pending run, the runner units of its jobs
 /// if it goes to GitHub, else its local slots.
 fn want_of(d: &Arc<Daemon>, spec: &crate::hostedcheck::CheckSpec) -> Want {
-    if crate::hostedcheck::pending(d, spec) {
+    if crate::hostedcheck::pending(d, spec) || crate::hostedcheck::holds_nothing_here(d, spec) {
         Want::Nothing
     } else if let Some(u) = crate::hostedcheck::pool_units(d, spec) {
         Want::Pool(u)

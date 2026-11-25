@@ -374,6 +374,43 @@ On the Studio: `mason node coordinators remove <name>` (as the node user). On th
 `mason node remove studio`. If the iMac's certificate is ever replaced (a new data directory),
 pair again.
 
+## Projects without GitHub Actions
+
+A project needs no `[remote_runs]`, token or repository on GitHub to use nodes. Give it a placement
+mode of its own:
+
+```bash
+mason node use on                              # once: runs may go to nodes
+mason remote mode remote --project P           # or the monitor's Settings, "Where runs go"
+mason remote status                            # P   remote (nodes only: no GitHub setup)
+```
+
+This writes to `~/.config/mason/projects/P.toml` (and re-reads it; edit it by hand and run `mason
+project reload --project P` for the same effect):
+
+```toml
+[placement]
+mode = "remote"      # or "favor-remote", "favor-local", "local"
+```
+
+| mode | a node has room | no node has room |
+| --- | --- | --- |
+| `remote` | the node | waits for one; never runs on the coordinator |
+| `favor-remote` | the node | runs on the coordinator, under its usual limits |
+| `favor-local` | the coordinator, a node while it is overloaded | the coordinator |
+| `local` | the coordinator | the coordinator |
+
+- A project with no mode always runs on the coordinator. Clearing the mode returns it to that.
+- A suite with `remote = false`, one whose environment leases a device or simulator, and one that
+  uses `exclusive` always run on the coordinator.
+- A node takes a suite only if it has its toolchain: Xcode for a suite named `swift*`, Java for
+  `compose*`, otherwise Rust; and the Xcode version the command names, if it names one.
+- A `remote` project waits while nodes are off or no node has the toolchain. The daemon log says
+  "waiting for a node".
+- Baseline runs, and landing's lint tier and build floor unless the definition sends them away,
+  still run on the coordinator.
+- A project with `[remote_runs]` keeps using `[remote_runs] mode`, which wins over `[placement]`.
+
 ## When something goes wrong
 
 - **You turn the switch off.** No new job starts. Jobs already running finish and the iMac collects
