@@ -7,12 +7,14 @@
 in parallel, but never two executables at once. This lists the executables with
 `<cargo test ...> --no-run --message-format=json`, runs them N at a time (default 4, or
 MASON_TEST_JOBS), runs the executables named in `.mason/serial-tests.txt` alone afterwards, then runs
-the doc tests with `<cargo test ...> --doc`.
+the doc tests with `<cargo test ...> --doc`. A command that selects targets (`--test x`, `--lib`)
+runs no doc tests, `--doc` runs only them, and the two together are refused, as cargo refuses them.
 
 Each executable's whole output is printed as one block, headed by cargo's own
 `     Running <src> (<exe>)` line, so a parser that reads cargo's lines (`test X ... ok`) works on
 it unchanged. A one-line summary closes the output. The exit status is 0 only when every executable
-and the doc tests passed and at least one executable was found.
+run and the doc-test run, if any, passed; unless only doc tests were asked for, at least one
+executable must be found.
 
 Name filters after the cargo flags (and everything after a second `--`) go to every executable.
 Each executable runs in its package's directory with CARGO_MANIFEST_DIR set, as cargo does.
@@ -32,6 +34,12 @@ VALUE_FLAGS = {
     "-p", "--package", "--exclude", "--target-dir", "--manifest-path", "--features", "-F",
     "--test", "--bin", "--example", "--bench", "-j", "--jobs", "--target", "--profile",
     "--message-format", "--color", "--config", "-Z", "--lockfile-path", "--timings",
+}
+
+# `cargo test` flags that pick targets. Cargo refuses `--doc` beside any of them.
+TARGET_FLAGS = {
+    "--lib", "--bins", "--bin", "--tests", "--test", "--benches", "--bench", "--examples",
+    "--example", "--all-targets",
 }
 
 SERIAL_FILE = ".mason/serial-tests.txt"
@@ -165,8 +173,14 @@ def main():
     flags, filters, libtest = split_cargo(words)
     root = os.getcwd()
     started = time.monotonic()
-    items = list_executables(flags, root)
-    if not items:
+    # Cargo refuses `--doc` with --no-run and with a target selector.
+    doc_only = "--doc" in flags
+    flags = [f for f in flags if f != "--doc"]
+    selected = any(f.split("=", 1)[0] in TARGET_FLAGS for f in flags)
+    if doc_only and selected:
+        raise SystemExit("test-parallel: --doc cannot be combined with a target selector (cargo refuses it)")
+    items = [] if doc_only else list_executables(flags, root)
+    if not items and not doc_only:
         print("test-parallel: no test executable found", file=sys.stderr)
         return 1
     serial_names = read_serial(root)
@@ -192,15 +206,21 @@ def main():
         if rc != 0:
             failed.append(item["name"])
     # Doc tests: cargo's own run, so that the count includes them.
-    doc = subprocess.run(
-        flags + ["--doc"] + filters + (["--"] + libtest if libtest else []),
-        cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-    )
-    sys.stdout.write(doc.stdout.decode("utf-8", "replace"))
-    if doc.returncode != 0:
-        failed.append("doc tests")
+    if not selected:
+        doc = subprocess.run(
+            flags + ["--doc"] + filters + (["--"] + libtest if libtest else []),
+            cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        )
+        sys.stdout.write(doc.stdout.decode("utf-8", "replace"))
+        if doc.returncode != 0:
+            failed.append("doc tests")
     secs = time.monotonic() - started
-    print(f"test-parallel: {ran} executables ({len(serial)} serial) and doc tests, "
+    what = f"{ran} executables ({len(serial)} serial)"
+    if doc_only:
+        what = "doc tests only"
+    elif not selected:
+        what += " and doc tests"
+    print(f"test-parallel: {what}, "
           f"{len(failed)} failed, {secs:.0f} s, {max(1, args.jobs)} at a time"
           + (": " + ", ".join(failed) if failed else ""))
     sys.stdout.flush()
