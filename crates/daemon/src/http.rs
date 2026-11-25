@@ -4077,6 +4077,10 @@ fn progress_runs(d: &Daemon, id: TaskId) -> Vec<Value> {
                         "succeeded": j.succeeded, "failed": j.failed,
                         "running_names": j.running_names}))})).collect::<Vec<_>>(),
                 "todo": p.todo.iter().map(|t| json!({"text": t.text, "status": t.status})).collect::<Vec<_>>(),
+                // The agent's checks, each worded as the task page shows it.
+                "checks": (0..p.checks.len()).map(|i| json!({
+                    "n": p.checks[i].n, "phase": p.checks[i].phase.name(),
+                    "text": p.check_line(i, crate::daemon::now_ms())})).collect::<Vec<_>>(),
                 // The tokens the step's sessions have used so far; null until one reported.
                 "tokens": p.token_total().map(|t| json!({
                     "input": t.input, "output": t.output,

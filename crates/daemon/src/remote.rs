@@ -3216,7 +3216,27 @@ pub fn reap_hold_etag(site: &Site, holds: &Path, record: &Path, etag: &mut Optio
             Err(_) => return false,
         },
     };
-    let Some(run) = run else { return false };
+    let Some(run) = run else {
+        // GitHub lists a run as soon as it exists, queued or not. A record that never learned
+        // its run's id and still has none on GitHub long after its push never had one (the
+        // dispatch was lost): nobody will collect it, and kept, it held a runner unit across
+        // every restart (debt602, 36 h on 2026-11-24). Give it up.
+        if st.run_id.is_none()
+            && site.clock.now_ms().saturating_sub(st.pushed_ms) >= orphan_after_ms(site)
+        {
+            tracing::info!(
+                run = %id,
+                "no GitHub run was ever made for {}; freeing its runner unit",
+                st.ref_name
+            );
+            st.released = true;
+            delete_ref(site, &mut st, record);
+            let _ = std::fs::remove_file(record);
+            remove_hold(holds, &id);
+            return true;
+        }
+        return false;
+    };
     if run.status != "completed" {
         return false;
     }
@@ -3232,6 +3252,12 @@ pub fn reap_hold_etag(site: &Site, holds: &Path, record: &Path, etag: &mut Optio
     }
     remove_hold(holds, &id);
     true
+}
+
+/// How long after its push a record with no run on GitHub is given up: the pickup timeout, and
+/// never under half an hour.
+fn orphan_after_ms(site: &Site) -> u64 {
+    (site.pickup_timeout.as_millis() as u64).max(30 * 60 * 1000)
 }
 
 /// Cancel an adopted run nobody will collect, delete its ref, end its record and remove its
@@ -4875,6 +4901,39 @@ mod tests {
         // The result is still there for a call that attaches later.
         let st = State::load(&rec).unwrap();
         assert!(st.released && st.ref_deleted && !st.collected);
+    }
+
+    #[test]
+    fn a_hold_with_no_run_on_github_is_kept_while_young_and_freed_once_old() {
+        token();
+        let r = repo();
+        let t = tempfile::tempdir().unwrap();
+        let zip = artifact(t.path(), GREEN, 0, None);
+        // Nothing was dispatched: GitHub lists no run for the commit.
+        let gh = FakeGh::new(&r, &zip, Mode::Normal);
+        let clk = clock();
+        let s = site(&r, gh, clk.clone(), false);
+        let logs = tempfile::tempdir().unwrap();
+        let (holds, rec) = adopted(&r, logs.path(), "d9");
+        let mut st = State::load(&rec).unwrap();
+        st.run_id = None;
+        st.pushed_ms = clk.now_ms();
+        st.save(&rec);
+        assert!(
+            !reap_hold(&s, &holds, &rec),
+            "a fresh push may still get its run"
+        );
+        assert_eq!(running_holds(&holds).len(), 1);
+        clk.sleep(orphan_after_ms(&s) - 1);
+        assert!(!reap_hold(&s, &holds, &rec), "not yet past the window");
+        clk.sleep(1);
+        assert!(
+            reap_hold(&s, &holds, &rec),
+            "no run was ever made: the unit is freed"
+        );
+        assert!(running_holds(&holds).is_empty());
+        assert!(record_ended(&rec), "the record no longer counts as out");
+        assert_eq!(refs(&r.bare), "", "the ref is deleted");
     }
 
     #[test]

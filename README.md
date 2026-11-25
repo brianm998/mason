@@ -782,6 +782,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s1068**: The Compose conformance settle now waits until the model's last applied view reaches the daemon's seq (as step() and the Rust capturer do), and both capturers print a stderr line when they leave on the quiet fallback.
 - **s1072**: Windows clippy red on develop is fixed by compiling the unix-only CAFFEINATE and XCODEBUILD shim constants only under cfg(unix).
 - **s1073**: The Swift monitor-tool's settle now waits on `lastViewSeq` (moved only by views and snapshots) instead of `lastSeq`, which events also move, as Compose already does.
+- **s1076**: the macOS exit-script watcher's `sleep` is now detached from the runner's output pipe as well as killed, so a leftover one cannot stall a shard.
 - **s1079**: The exit-script runner kills the limit watcher's sleep when a script ends, so the macOS legs no longer wait out the whole job limit.
 - **s1081**: The Rust conformance capturer no longer leaves its settle after 1.5 s of quiet; it waits for the step's view, with a 5 s quiet fallback that is logged.
 - **s1086**: s101 now starts its ad-hoc range at 9960 and expects the daemon's real ceiling (9999), so it raises the `numbers` alert again.
