@@ -635,6 +635,7 @@ fn run_hosted_resuming(
                 &env,
                 runs_on,
                 covered,
+                cover.giver.clone(),
                 cover.runners,
             )?,
             crate::remote::Executor::Node { nid, .. } => run_on_node(
@@ -797,13 +798,15 @@ fn run_remote(
     env: &[(String, String)],
     runs_on: &str,
     covered: bool,
+    giver: Option<crate::sched::Giver>,
     runners: Option<u32>,
 ) -> Result<Option<Ran>, String> {
     use crate::remote as rm;
     let task = run.and_then(|r| d.world().ok().and_then(|w| w.task_of_open_run(r)));
     // The slots a fallback takes when it is placed here: the same ones `run_one` asks for.
     let uses = test_step_uses(d, project);
-    let Some(site) = rm::site_for_run(d, project, cwd, task.map(|t| t.0), &uses, covered) else {
+    let Some(mut site) = rm::site_for_run(d, project, cwd, task.map(|t| t.0), &uses, covered)
+    else {
         return Err(rm::env_err("the project has no [remote_runs] section"));
     };
     // A suite whose build runs as its own step here goes in `RunSpec.build`, which the runner
@@ -826,6 +829,14 @@ fn run_remote(
         spec = rm::split_for_grant(spec, s.shards, sc, runners, lists_partial(s), |n| {
             shard_lists(d, project, s, n)
         });
+        // A run that waits for a bigger grant (this machine cannot run it) is split again as
+        // this one was.
+        let (d, project, suite, sc) = (d.clone(), project.to_string(), s.clone(), sc.to_string());
+        site.resplit = Some(Arc::new(move |rs, n| {
+            rm::split_for_grant(rs, suite.shards, &sc, Some(n), lists_partial(&suite), |n| {
+                shard_lists(&d, &project, &suite, n)
+            })
+        }));
     }
     let stop = || match check() {
         Stop::No => None,
@@ -837,6 +848,8 @@ fn run_remote(
         Some(t) => (format!("task {}", t.0), format!("#{}", t.0)),
         None => (id.to_string(), id.to_string()),
     };
+    let grant = rm::Grant::borrowed(giver, rm::units_for(&spec.runs_on, spec.shards.max(1)));
+    grant.note_hold(&rm::holds_dir(&d.cfg.hosts_dir()), &spec.id);
     let _hold = rm::HoldGuard::new(
         &d.cfg.hosts_dir(),
         &spec,
@@ -852,13 +865,7 @@ fn run_remote(
         task.map_or(0, |t| t.0),
     );
     Ok(
-        match rm::run_or_fallback(
-            &site,
-            &spec,
-            log_dir,
-            &stop,
-            &rm::Grant::unplumbed("run_remote: the enclosing step, debt or batch hold"),
-        )? {
+        match rm::run_or_fallback(&site, &spec, log_dir, &stop, &grant)? {
             None => None,
             Some(rm::Outcome::Stopped(why)) => Some(Ran {
                 code: -1,
@@ -1399,6 +1406,9 @@ pub struct Cover {
     /// A landing batch's own run that its lease does not hold: the batch, and what the suite
     /// needs here. Such a run takes its slots, as the batch, when it comes to run here.
     batch: Option<(Arc<crate::remote::BatchOwner>, Needs)>,
+    /// The lease the suite's run holds its runner units in: a run on GitHub gives back the unit
+    /// of each job as it finishes, and asks again for the shards it runs again (#820).
+    giver: Option<crate::sched::Giver>,
     /// The runner units the run's own flexible lease was given: it splits into that many shards
     /// (see [`crate::remote::shards_granted`]). `None`: no flexible lease, all its shards.
     runners: Option<u32>,
@@ -1433,6 +1443,7 @@ impl BatchCover {
         Cover {
             covered,
             batch: self.owner.clone().map(|o| (o, needs)),
+            giver: None,
             runners: None,
         }
     }
@@ -3587,6 +3598,7 @@ fn run_side_by_side(
                             }
                         }
                     };
+                    who.cover.giver = lease.as_ref().map(|l| l.giver());
                     who.cover.runners = lease.as_ref().and_then(|l| l.granted_runners());
                     let ran = run_suite(
                         &who,
@@ -4017,12 +4029,11 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
                 }
             }
         }
-        who.cover.runners = c
-            .lease
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .and_then(|l| l.granted_runners());
+        {
+            let held = c.lease.lock().unwrap_or_else(|e| e.into_inner());
+            who.cover.giver = held.as_ref().map(|l| l.giver());
+            who.cover.runners = held.as_ref().and_then(|l| l.granted_runners());
+        }
         let ran = match ran_beside {
             Some(r) => r,
             None if reused_whole.is_some() => SuiteRun::Done {
