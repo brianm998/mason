@@ -1332,6 +1332,15 @@ fn sidebar_views(msgs: &[ServerMessage]) -> Vec<mason_protocol::SidebarView> {
 
 #[test]
 fn an_unchanged_view_is_not_sent_again_and_a_changed_one_is() {
+    let usage_views = |msgs: &[ServerMessage]| -> Vec<mason_protocol::UsageView> {
+        views_of(msgs)
+            .into_iter()
+            .filter_map(|v| match v.body {
+                Some(Body::Usage(u)) => Some(u),
+                _ => None,
+            })
+            .collect()
+    };
     let (d, port, _dir) = demo();
     let mut c = Client::connect(port, Encoding::Protobuf).unwrap();
     c.hello(0, true).unwrap();
@@ -1344,7 +1353,7 @@ fn an_unchanged_view_is_not_sent_again_and_a_changed_one_is() {
         has(m, is_usage) && has(m, is_side)
     });
     assert!(has(&first, is_usage) && has(&first, is_side));
-    // The same subscription again rebuilds everything; nothing differs, then one task is filed.
+    // The same subscription again rebuilds everything, then one task is filed.
     c.subscribe(&kinds, "", 0).unwrap();
     let pid = ProjectId(1);
     d.emit(EventKind::ProjectRegistered {
@@ -1367,7 +1376,15 @@ fn an_unchanged_view_is_not_sent_again_and_a_changed_one_is() {
     let mut got = collect(&mut c, Duration::from_secs(10), |m| has(m, is_side));
     got.extend(collect(&mut c, Duration::from_millis(800), |_| false));
     assert_eq!(sidebar_views(&got).len(), 1, "the changed sidebar, once");
-    assert!(!has(&got, is_usage), "usage did not change: not sent again");
+    // Usage text counts down to resets and up from readings by the wall clock, so
+    // it may truly change between rebuilds and be sent again. What must never
+    // arrive is the content that was already sent last.
+    let mut usage = usage_views(&first);
+    usage.extend(usage_views(&got));
+    assert!(
+        usage.windows(2).all(|w| w[0] != w[1]),
+        "usage identical to the last one sent: not sent again"
+    );
 }
 
 #[test]
