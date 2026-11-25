@@ -29,6 +29,7 @@ mod crash;
 mod credentials;
 mod deadline_extension;
 mod definitions;
+mod diagnose_answer;
 mod diagnose_retry;
 mod disk;
 mod e2e;

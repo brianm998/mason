@@ -275,7 +275,7 @@ impl<'a> Ctx<'a> {
             ],
             State::Landing => vec!["cancel", "skip_test", "land_now", "force"],
             State::NeedsAttention => vec!["answer", "cancel", "retry", "open_session"],
-            State::Failed => vec!["retry", "cancel", "open_session"],
+            State::Failed => self.failed_actions(t),
             State::Canceled if t.cancel_keeps_branch => vec!["revive"],
             State::Canceled | State::Landed => vec![],
         };
@@ -303,6 +303,25 @@ impl<'a> Ctx<'a> {
             a.push("skip_all_tests");
         }
         a.into_iter().map(String::from).collect()
+    }
+
+    /// A failed task's actions: `answer` first when it holds a diagnosis card, and `diagnose`
+    /// when one may be asked for (none pending or running, and the budget allows).
+    fn failed_actions(&self, t: &Task) -> Vec<&'static str> {
+        let rows = self.d.store.diagnoses(Some(t.id.0)).unwrap_or_default();
+        let pending = crate::diagnose::pending_in(&rows, t);
+        let mut a = vec![];
+        if pending.and_then(crate::diagnose::row_card).is_some() {
+            a.push("answer");
+        }
+        a.extend(["retry", "cancel", "open_session"]);
+        if pending.is_none()
+            && crate::diagnose::running(t.id.0).is_none()
+            && crate::diagnose::budget(&rows, t.state_entered_at.0).is_ok()
+        {
+            a.push("diagnose");
+        }
+        a
     }
 
     /// A self-hosting hold nobody has approved yet, for a task still going.

@@ -16,9 +16,11 @@
 //! The card is stored on the diagnosis row (`card`, with each option's action next to it). The
 //! **recommended** option's `retry` is applied by itself when the failure was not the code (any
 //! project), or when the diagnosis says no code change is needed, at most once per task per day.
-//! Everything else waits as a pending card: the alert says what it suggests, and the owner applies
-//! or dismisses it (`mason task diagnosis`). A failed task cannot hold a question in the engine, so
-//! the card is that alert and these actions, not a `QuestionAsked`.
+//! Everything else waits as a pending card. A failed task cannot hold a question in the engine, so
+//! the card is not a `QuestionAsked`: while the failure it speaks of lasts, it is served as the
+//! task's card ([`pending_card`]) and answered like any other (`attention::answer_with`, s1116):
+//! an option carries out its action, and other words are a retry with them. `mason task diagnosis`
+//! still applies the recommended option or dismisses the card.
 //!
 //! Budget: one diagnosis per entry into Failed (`state_entered_at`), at most [`MAX_PER_TASK`] per
 //! task, a session without a verdict counted. The owner may ask for one on a failed task
@@ -26,7 +28,7 @@
 //! shape stay readable.
 
 use crate::daemon::{now_ms, Daemon};
-use mason_adapter_api::card::{OPTION_MAX, WHY_MAX};
+use mason_adapter_api::card::{Card, OPTION_MAX, WHY_MAX};
 use mason_adapter_api::contract::{ContractHandle, NoChecks};
 use mason_adapter_api::{SessionSpec, StepKind};
 use mason_adapters::runner::{RunnerConfig, StepEnd, StepRunner};
@@ -172,7 +174,7 @@ pub fn recommended(a: &Value) -> (String, Value) {
 /// action arguments under `action`. `None` for an older single-verdict submission.
 pub fn build_card(id: u64, task: u64, a: &Value) -> Option<Value> {
     use mason_adapter_api::card::{
-        truncate, Card, CardOption, Origin, EVIDENCE_LINES, EVIDENCE_LINE_MAX,
+        truncate, CardOption, Origin, EVIDENCE_LINES, EVIDENCE_LINE_MAX,
     };
     let opts = a["options"].as_array()?;
     let card = Card {
@@ -289,7 +291,7 @@ pub fn row_text(r: &DiagnosisRow) -> String {
     let a: Value = serde_json::from_str(&r.args).unwrap_or(json!({}));
     let card = serde_json::from_str::<Value>(&r.card)
         .ok()
-        .and_then(|v| mason_adapter_api::card::Card::from_json(&v));
+        .and_then(|v| Card::from_json(&v));
     match card {
         Some(c) => format!(
             "Task #{} failed. Diagnosis #{}: {}. Options: {}",
@@ -678,11 +680,106 @@ pub fn apply_args(
     }
 }
 
+/// An owner's decision on a pending diagnosis is checked and carried out under this, so two sent
+/// together cannot both pass.
+static DECIDE_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Hold this from reading a pending diagnosis until its new status is written.
+pub fn decide_gate() -> std::sync::MutexGuard<'static, ()> {
+    DECIDE_GATE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Refuse unless the row is pending now: the caller may have read it before it held the gate.
+fn still_pending(d: &Daemon, row: &DiagnosisRow) -> Result<(), String> {
+    let now = d
+        .store
+        .diagnoses(Some(row.task))
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|r| r.id == row.id)
+        .map_or_else(|| "gone".to_string(), |r| r.status);
+    if now != "pending" {
+        return Err(format!("diagnosis #{} is {now}", row.id));
+    }
+    Ok(())
+}
+
+/// The newest pending diagnosis among a task's `rows` that speaks of the failure it is in now.
+pub fn pending_in<'a>(rows: &'a [DiagnosisRow], t: &Task) -> Option<&'a DiagnosisRow> {
+    rows.iter()
+        .rev()
+        .find(|r| r.status == "pending" && still_needs_you(Some(t), r.at_ms))
+}
+
+/// The decision card a diagnosis stored, with its hash. The hash covers the diagnosis id, so an
+/// answer to a superseded diagnosis' card is stale even when the words are the same. An older row
+/// has no card.
+pub fn row_card(r: &DiagnosisRow) -> Option<(Card, String)> {
+    let card = Card::from_json(&serde_json::from_str::<Value>(&r.card).ok()?)?;
+    let hash = mason_adapter_api::card::hash(&format!("diagnosis:{}\n{}", r.id, r.card));
+    Some((card, hash))
+}
+
+/// The pending diagnosis whose card a failed task holds.
+pub fn pending_card(d: &Daemon, t: &Task) -> Option<DiagnosisRow> {
+    if t.state != State::Failed {
+        return None;
+    }
+    let rows = d.store.diagnoses(Some(t.id.0)).ok()?;
+    pending_in(&rows, t)
+        .filter(|r| row_card(r).is_some())
+        .cloned()
+}
+
+/// Carry out the owner's answer to a diagnosis card and mark the row. `picked` is an option's
+/// index: its action runs and the row is `applied`. `None` means `words` are the owner's own: a
+/// retry from the default step with them as the message, and the row is `answered`. `context` goes
+/// into the note or reason the next agent gets (a `cancel` has neither); it is never read for an
+/// option or an action. The caller holds [`decide_gate`].
+pub fn answer_card(
+    d: &Arc<Daemon>,
+    row: &DiagnosisRow,
+    picked: Option<usize>,
+    words: &str,
+    context: Option<&str>,
+) -> Result<(), String> {
+    use crate::attention::with_context;
+    still_pending(d, row)?;
+    let (verdict, args, status) = match picked {
+        Some(i) => {
+            let card: Value = serde_json::from_str(&row.card).map_err(|e| e.to_string())?;
+            let mut args = card["options"][i]["action"].clone();
+            let verdict = args["action"].as_str().unwrap_or("none").to_string();
+            let told = match verdict.as_str() {
+                "retry" => Some("note"),
+                "explore" => Some("reason"),
+                "close" => Some("evidence"),
+                _ => None,
+            };
+            if let (Some(key), Some(_)) = (told, context) {
+                let text = with_context(args[key].as_str().unwrap_or(""), context);
+                args[key] = json!(text);
+            }
+            (verdict, args, "applied")
+        }
+        None => (
+            "retry".to_string(),
+            json!({"note": with_context(words, context)}),
+            "answered",
+        ),
+    };
+    apply_args(d, row.task, &verdict, &args, false)?;
+    d.store
+        .set_diagnosis_status(row.id, status, now_ms())
+        .map_err(|e| e.to_string())?;
+    d.poke();
+    Ok(())
+}
+
 /// Apply a pending diagnosis the owner chose.
 pub fn apply(d: &Arc<Daemon>, row: &DiagnosisRow) -> Result<String, String> {
-    if row.status != "pending" {
-        return Err(format!("diagnosis #{} is {}", row.id, row.status));
-    }
+    let _gate = decide_gate();
+    still_pending(d, row)?;
     let a: Value = serde_json::from_str(&row.args).unwrap_or(json!({}));
     let (verdict, args) = recommended(&a);
     let r = apply_args(d, row.task, &verdict, &args, false)?;
@@ -691,9 +788,8 @@ pub fn apply(d: &Arc<Daemon>, row: &DiagnosisRow) -> Result<String, String> {
 }
 
 pub fn dismiss(d: &Arc<Daemon>, row: &DiagnosisRow) -> Result<(), String> {
-    if row.status != "pending" {
-        return Err(format!("diagnosis #{} is {}", row.id, row.status));
-    }
+    let _gate = decide_gate();
+    still_pending(d, row)?;
     d.store
         .set_diagnosis_status(row.id, "dismissed", now_ms())
         .map_err(|e| e.to_string())?;
@@ -724,16 +820,24 @@ pub fn alerts(d: &Daemon) -> Vec<(String, String, String)> {
             (
                 format!("diagnosis:{}", r.id),
                 "needs_you".to_string(),
-                format!(
-                    "{}. `mason task diagnosis {} apply|dismiss {}`",
-                    row_text(&r),
-                    r.task,
-                    r.id
-                ),
+                pending_notice(&r),
             )
         })
         .chain(applied_alerts(d))
         .collect()
+}
+
+/// A pending diagnosis' notice line. An older row has no card to answer, only to apply or dismiss.
+fn pending_notice(r: &DiagnosisRow) -> String {
+    let how = if row_card(r).is_some() {
+        format!(
+            "To decide, answer it on the task page or with `mason task answer {} <option>`",
+            r.task
+        )
+    } else {
+        format!("`mason task diagnosis {} apply|dismiss {}`", r.task, r.id)
+    };
+    format!("{}. {how}", row_text(r))
 }
 
 /// How long an alert says what a diagnosis applied by itself.
@@ -747,6 +851,8 @@ fn applied_alerts(d: &Daemon) -> Vec<(String, String, String)> {
         .unwrap_or_default()
         .into_iter()
         .filter(|r| r.status == "applied" && now.saturating_sub(r.decided_ms) < APPLIED_ALERT_MS)
+        // One the daemon applied was decided as it was written; the owner's came later.
+        .filter(|r| r.decided_ms == r.at_ms)
         .map(|r| {
             (
                 format!("diagnosis-applied:{}", r.id),
