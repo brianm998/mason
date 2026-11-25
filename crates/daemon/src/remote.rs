@@ -3007,13 +3007,38 @@ impl Grant {
         self.lock().owned.as_ref().and_then(|l| l.granted_runners())
     }
     /// Give the units back: the run is not going to GitHub after all (`fallback = "local"`).
-    /// Returns whether it held any.
+    /// Returns whether it held any. A lease with no runner units, this machine's own slots, is
+    /// kept: the run goes on under it (#1149).
     pub fn give_back(&self) -> bool {
         let mut g = self.lock();
+        if g.owned
+            .as_ref()
+            .is_some_and(|l| l.units().is_empty() && l.holds_local_slot())
+        {
+            return false;
+        }
         let held = g.owned.take();
         g.giver = None;
         g.held.clear();
-        held.is_some_and(|l| !l.units().is_empty())
+        held.is_some()
+    }
+    /// What of `uses` the grant's own lease does not hold: all of it when it owns none.
+    pub fn shortfall(
+        &self,
+        uses: &std::collections::BTreeMap<String, u32>,
+    ) -> std::collections::BTreeMap<String, u32> {
+        self.lock()
+            .owned
+            .as_ref()
+            .map_or_else(|| uses.clone(), |l| l.shortfall(uses))
+    }
+    /// The id of the grant's own lease, when it holds a slot of this machine.
+    pub fn local_slot_lease(&self) -> Option<u64> {
+        self.lock()
+            .owned
+            .as_ref()
+            .filter(|l| l.holds_local_slot())
+            .map(|l| l.id())
     }
     /// For the tests of the push itself.
     #[cfg(test)]
@@ -3207,21 +3232,47 @@ pub fn fallback_lease_until(
     label: &str,
     stopped: &dyn Fn() -> bool,
 ) -> Result<Option<crate::sched::Lease>, String> {
+    fallback_lease_under(d, project, task, uses, label, &Grant::attached(), stopped)
+}
+
+/// [`fallback_lease_until`] for a run whose caller holds `grant` until the run ends (#1149): the
+/// slots that lease holds are the run's, and only what it lacks is asked of the broker, beside
+/// it. Asking for all of `uses` again made a check queue for the slot its own agent held, which
+/// at a low limit deadlocked the whole queue. `Ok(None)`: nothing more to take.
+pub fn fallback_lease_under(
+    d: &Arc<Daemon>,
+    project: &str,
+    task: Option<mason_core::TaskId>,
+    uses: &std::collections::BTreeMap<String, u32>,
+    label: &str,
+    grant: &Grant,
+    stopped: &dyn Fn() -> bool,
+) -> Result<Option<crate::sched::Lease>, String> {
     // A run that `Site::local_room` found room for took its lease before it gave up GitHub
     // (#1025): that one is used, not a second request.
     if let Some(l) = take_pretaken(d, project, task, uses) {
         tracing::info!(project, %label, ?uses, "no GitHub runner: running here on the lease taken before the GitHub run was cancelled (fallback = local)");
         return Ok(Some(l));
     }
-    let Some((needs, rank, who)) = fallback_request(d, project, task, uses) else {
+    let short = grant.shortfall(uses);
+    let Some((needs, rank, who)) = fallback_request(d, project, task, &short) else {
+        if !uses.is_empty() {
+            tracing::info!(project, %label, ?uses, "running here under the slots the run already holds");
+        }
         return Ok(None);
     };
     let alive = || !stopped() && task_alive(d, task);
-    tracing::info!(project, %label, ?uses, "no GitHub runner: queueing for this machine's slots (fallback = local)");
-    d.broker
-        .acquire_beside(who, label, rank, needs, &alive, &mut |_| {})
-        .map(Some)
-        .map_err(|_| format!("{label}: the wait for this machine's slots was ended"))
+    tracing::info!(project, %label, uses = ?short, "no GitHub runner: queueing for this machine's slots (fallback = local)");
+    match grant.local_slot_lease() {
+        Some(held) => d
+            .broker
+            .acquire_for_check(who, label, rank, needs, held, &alive),
+        None => d
+            .broker
+            .acquire_beside(who, label, rank, needs, &alive, &mut |_| {}),
+    }
+    .map(Some)
+    .map_err(|_| format!("{label}: the wait for this machine's slots was ended"))
 }
 
 fn task_alive(d: &Daemon, task: Option<mason_core::TaskId>) -> bool {

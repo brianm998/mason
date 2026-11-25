@@ -1033,15 +1033,20 @@ fn collect(
     }
     // Meant for GitHub but sent here (`fallback = "local"`): it skipped this machine's queue,
     // so it takes the slots it holds when placed here before it starts, under the same limits
-    // and CPU and thermal holds as any local run. Held until the command ends.
+    // and CPU and thermal holds as any local run. What the caller's lease already holds is not
+    // asked for again (#1149). Held until the command ends.
     let _fallback = if bound_remote && !dir_has_host(d, id) {
         match crate::remote::project_of(d, &spec.cwd) {
-            Some(project) => match crate::remote::fallback_lease_until(
+            Some(project) => match crate::remote::fallback_lease_under(
                 d,
                 &project,
-                spec.place.as_ref().and_then(|(t, _)| *t),
+                spec.place
+                    .as_ref()
+                    .and_then(|(t, _)| *t)
+                    .or_else(|| check_owner(id).map(|(t, _)| mason_core::TaskId(t))),
                 &spec.holds,
                 &format!("{} (no GitHub runner, run here)", spec.label),
+                grant,
                 // A skip ends the wait for this machine's slots too (#873).
                 &|| spec.stop.as_ref().is_some_and(|f| f().is_some()),
             ) {

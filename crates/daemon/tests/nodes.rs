@@ -964,6 +964,95 @@ fn a_cancelled_job_is_run_again_here_and_the_node_cleans_up() {
     }
 }
 
+/// #1149: a check holds the machine's compile slots while a node has it. The node gives it
+/// back, and it runs here under those slots: with every unit held and a step start waiting, each
+/// check still finishes. Before, it queued for a second slot behind its own.
+#[test]
+fn a_check_the_node_gives_back_runs_under_the_slot_its_task_holds() {
+    use mason_daemon::hostedcheck::{run as run_check, CheckSpec};
+    use mason_daemon::remote::Grant;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
+    for n in [1u32, 2] {
+        let p = working_pair(2);
+        mason_daemon::place::set_global(&p.a, mason_daemon::place::Mode::Remote, "test").unwrap();
+        p.a.broker.set_limit("compile", n).unwrap();
+        let logs = tempfile::tempdir().unwrap();
+        let step_lease = |a: &std::sync::Arc<mason_daemon::daemon::Daemon>, task: u64| {
+            a.broker
+                .acquire(
+                    mason_core::TaskId(task),
+                    &format!("#{task}"),
+                    mason_scheduler::Rank::new(false, 1, 0, task, task, false),
+                    mason_scheduler::Needs::of(&[("compile", 1)]),
+                    &|| true,
+                    &mut |_| {},
+                )
+                .expect("a lease")
+        };
+        let grants: Vec<Grant> = (1..=n)
+            .map(|t| Grant::of(step_lease(&p.a, u64::from(t))))
+            .collect();
+        // Another task's step start waits for a slot.
+        let started = std::sync::Arc::new(AtomicBool::new(false));
+        let start = {
+            let (a, started) = (p.a.clone(), started.clone());
+            std::thread::spawn(move || {
+                let l = step_lease(&a, 99);
+                started.store(true, SeqCst);
+                l
+            })
+        };
+        let finished = std::sync::Arc::new(AtomicUsize::new(0));
+        // One at a time: two first jobs for the same repository race to create the node's
+        // mirror of it, which is not what this test is about.
+        let mut checks = vec![];
+        for (grant, t) in grants.iter().zip(1u64..) {
+            let spec = CheckSpec {
+                id_prefix: format!("t{t}r1-check"),
+                log_dir: logs.path().to_path_buf(),
+                // On the node this hangs; anywhere else it ends at once.
+                cmd: "if [ -n \"$MASON_NODE\" ]; then sleep 300; else echo local-ok; fi".into(),
+                build: None,
+                cwd: p.sa.repo.clone(),
+                env: vec![],
+                limit: std::time::Duration::from_secs(120),
+                tree: format!("tree-borrow-{t}"),
+                stop: None,
+                holds: [("compile".to_string(), 1)].into(),
+                label: format!("#{t} check"),
+                place: None,
+                global: true,
+            };
+            let (a, grant, finished) = (p.a.clone(), grant.clone(), finished.clone());
+            checks.push(std::thread::spawn(move || {
+                let r = run_check(&a, &spec, &grant);
+                finished.fetch_add(1, SeqCst);
+                r
+            }));
+            support::wait_for("the job to run on the node", 60, || {
+                p.b.node.jobs.running() == t as u32
+            });
+        }
+        support::wait_for("the step start to queue", 60, || {
+            p.a.broker.snapshot()["waiting"].as_array().unwrap().len() == 1
+        });
+        let _ = run(&p, node_serve::stop_jobs(State(p.b.clone()))).unwrap();
+        support::wait_for("every check to finish here", 60, || {
+            finished.load(SeqCst) == n as usize
+        });
+        for c in checks {
+            let r = c.join().unwrap().unwrap();
+            assert!(r.passed && r.full.contains("local-ok"), "{}", r.full);
+        }
+        assert!(!started.load(SeqCst), "the step start is still waiting");
+        let snap = p.a.broker.snapshot();
+        let waiting = snap["waiting"].as_array().unwrap();
+        assert_eq!(waiting.len(), 1, "only the step start: {waiting:?}");
+        drop(grants);
+        drop(start.join().unwrap());
+    }
+}
+
 /// A node that goes away mid-job: after `lost_after_polls` polls in a row the run is
 /// environmental (placed again, no task charged), the coordinator alerts, and the node's lease
 /// then expires and it kills the orphan.
