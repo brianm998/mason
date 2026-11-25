@@ -13,3 +13,14 @@ final class FormatPercentTests: XCTestCase {
         XCTAssertEqual(Format.percent(done: 400, total: 340), 100)
     }
 }
+
+final class CountTextOverTotalTests: XCTestCase {
+    func testDoneAboveTotalShowsNoDenominator() {
+        let t = Format.countText(
+            unit: "tests", done: 184, doneSource: .sourceCounted,
+            total: 181, totalSource: .sourceExpected, totalLow: 0)
+        XCTAssertEqual(t, "184 tests")
+        XCTAssertFalse(t.contains("of 181"))
+        XCTAssertFalse(t.contains("100%"))
+    }
+}

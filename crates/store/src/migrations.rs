@@ -902,6 +902,19 @@ const STEPS: &[&str] = &[
          at_ms   INTEGER NOT NULL,
          PRIMARY KEY (project, suite, tip, tests)
      );",
+    // The size of a suite at a base, from a run at the base itself (s980, #959): the expected
+    // total shown for a test step. Apart from `suite_green`, which task runs also write and
+    // which gates read; a task's own count must not become another task's total. Additive.
+    // Steps are applied by position, so a new one goes last: this one was first merged in the
+    // middle, and a database already past it skipped it and re-ran the next.
+    "CREATE TABLE suite_size (
+         project  TEXT NOT NULL,
+         suite    TEXT NOT NULL,
+         base     TEXT NOT NULL,
+         executed INTEGER NOT NULL,
+         at_ms    INTEGER NOT NULL,
+         PRIMARY KEY (project, suite, base)
+     );",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;
