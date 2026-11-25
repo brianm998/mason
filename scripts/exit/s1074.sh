@@ -5,6 +5,7 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 . scripts/lib/bounded.sh
+unset MASON_EXIT_SHARD MASON_EXIT_PLAN
 root=$(mktemp -d); trap 'rm -rf "$root"' EXIT
 mkdir -p "$root/bin" "$root/x"
 for t in bash git awk sed grep tee mktemp rm cat tail head cut tr printf basename dirname sleep pkill kill env perl wait; do
