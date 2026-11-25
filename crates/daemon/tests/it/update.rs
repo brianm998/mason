@@ -646,7 +646,11 @@ fn a_daemon_with_no_update_toml_says_nothing() {
 fn auto_cfg(s: &Scratch, auto: &str) {
     let p = s.config_dir.join("update.toml");
     let t = std::fs::read_to_string(&p).unwrap();
-    std::fs::write(&p, format!("check_interval_s = 1\nupdate_wait_max_s = 0\n{t}\n[auto]\n{auto}\n")).unwrap();
+    std::fs::write(
+        &p,
+        format!("check_interval_s = 1\nupdate_wait_max_s = 0\n{t}\n[auto]\n{auto}\n"),
+    )
+    .unwrap();
 }
 
 /// A new commit on the channel, with `msg` as its message.
