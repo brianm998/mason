@@ -94,6 +94,9 @@ public final class MonitorModel {
         get { live.lastSeq }
         set { live.lastSeq = newValue }
     }
+    /// The highest seq a view or snapshot has carried. Events arrive before the views of the same
+    /// seq, so `lastSeq` alone does not say the screen has caught up.
+    @ObservationIgnored public private(set) var lastViewSeq: UInt64 = 0
     /// The daemon's clock minus this device's, ms, as of the last message that carried the daemon's
     /// time (the welcome, each StepProgress): "updated 4 s ago" counts on the local clock, corrected by this.
     public private(set) var clockOffsetMs: Int64 {
@@ -1276,6 +1279,7 @@ public final class MonitorModel {
             announcer.connectionRestored()
             if !pending.isEmpty { pending = [:] }
             if w.resume == .snapshot, lastSeq != 0 { lastSeq = 0 }
+            if w.resume == .snapshot { lastViewSeq = 0 }
             if daemonVersion != w.version { daemonVersion = w.version }
             if localDaemon != w.role.isEmpty { localDaemon = w.role.isEmpty }
             // A build asked for on the connection that just went has no answer coming.
@@ -1288,11 +1292,13 @@ public final class MonitorModel {
             if readOnlyReason != why { readOnlyReason = why }
         case .snapshot(let s)?:
             setSeq(max(lastSeq, s.seq))
+            lastViewSeq = max(lastViewSeq, s.seq)
             s.views.forEach(apply)
         case .events(let e)?:
             if let last = e.events.last?.seq { setSeq(max(lastSeq, last)) }
         case .view(let u)?:
             setSeq(max(lastSeq, u.seq))
+            lastViewSeq = max(lastViewSeq, u.seq)
             apply(u.view)
         case .result(let r)?:
             let shown: String? = r.ok ? nil : r.error
