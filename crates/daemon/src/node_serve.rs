@@ -45,6 +45,17 @@ pub const DEFAULT_NODE_PORT: u16 = 7425;
 /// The node protocol. A coordinator and a node that disagree do not work together.
 pub const NODE_PROTO: u32 = 1;
 
+/// The one route a coordinator uses to bring a node up to date. It is not versioned by
+/// [`NODE_PROTO`]: a node on any protocol must be able to take a runtime from a coordinator on
+/// any other, or a protocol bump would strand it until someone installed by hand (s1122).
+pub const RUNTIME_ROUTE: &str = "/node/runtime";
+
+/// The keys of the node's status that [`RUNTIME_ROUTE`] relies on, kept stable across
+/// [`NODE_PROTO`] versions: what the node is (`arch`), what it runs (`runtime_sha`) and holds
+/// (`runtimes`), and its protocol (`node_proto`, which says why it is incompatible). A node may
+/// add to its status (`pending_runtime`, for a display only) but never drop or rename these.
+pub const RUNTIME_STATUS_KEYS: [&str; 4] = ["node_proto", "arch", "runtime_sha", "runtimes"];
+
 type Res = Result<Json<Value>, (StatusCode, Json<Value>)>;
 
 fn fail(code: u16, msg: impl Into<String>) -> (StatusCode, Json<Value>) {
@@ -684,6 +695,8 @@ pub fn status_value(d: &Daemon, s: &NodeSettings, coord: Option<&str>) -> Value 
         "settings": s.to_json(),
         "runtime_sha": d.cfg.runtime_sha,
         "runtimes": installed_runtimes(&d.cfg.data_dir),
+        // A runtime that arrived and waits for the jobs to end (a display; not part of the contract).
+        "pending_runtime": d.node.pending_runtime.lock().unwrap_or_else(|e| e.into_inner()).clone(),
         "doctor": d.node.doctor.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|r| r.to_json()),
     })
 }
@@ -900,7 +913,7 @@ pub fn router(d: Arc<Daemon>) -> Router {
         .route("/node/jobs/{id}/log", get(job_log))
         .route("/node/jobs/{id}/artifact", get(job_artifact))
         .route("/node/jobs/{id}/ack", post(job_ack))
-        .route("/node/runtime", put(runtime_put))
+        .route(RUNTIME_ROUTE, put(runtime_put))
         .layer(axum::middleware::from_fn_with_state(d.clone(), guard))
         .with_state(d.clone());
     Router::new()

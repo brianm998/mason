@@ -7,6 +7,7 @@
 //! in mDNS). No token is sent anywhere.
 
 use crate::lan::sha256_hex;
+use crate::stable_app::Location;
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper_util::rt::TokioIo;
@@ -52,6 +53,9 @@ pub enum ClientError {
     /// without Local Network permission gets (§3.14). A node that is simply off the network
     /// answers the same, so the words say both.
     LocalNetworkDenied(String),
+    /// "No route to host" although the node answers ping, from an executable on an external
+    /// disk: macOS has a Local Network rule it cannot apply (`stable_app.rs`).
+    LocalNetworkUnapplied(String),
     /// The connection broke or the node spoke something else than HTTP.
     Protocol(String),
 }
@@ -62,8 +66,11 @@ impl std::fmt::Display for ClientError {
             ClientError::Unreachable(m) | ClientError::Protocol(m) => write!(f, "{m}"),
             ClientError::LocalNetworkDenied(addr) => write!(
                 f,
-                "local network access denied by macOS for MASON ({addr}: no route to host; if the node is up, turn Local Network on for MASON in System Settings → Privacy & Security → Local Network)"
+                "local network access denied by macOS for MASON ({addr}: no route to host; if the node is up, turn Local Network on for MASON in System Settings → Privacy & Security → Local Network; if it is already on, see docs/nodes.md)"
             ),
+            ClientError::LocalNetworkUnapplied(addr) => {
+                write!(f, "{addr}: {LOCAL_NETWORK_UNAPPLIED}")
+            }
             ClientError::WrongFingerprint { expected } => write!(
                 f,
                 "that node's certificate is not the one paired (expected fingerprint {}…); pair it again if it was reinstalled",
@@ -72,6 +79,9 @@ impl std::fmt::Display for ClientError {
         }
     }
 }
+
+/// What a Local Network rule macOS cannot apply is called, wherever it is reported.
+pub const LOCAL_NETWORK_UNAPPLIED: &str = "macOS has a Local Network rule for masond but cannot apply it (the binary lives on an external disk). Run MASON from the internal disk (see docs/nodes.md)";
 
 /// Accepts the server certificate whose fingerprint is `expected`, and no other.
 #[derive(Debug)]
@@ -226,13 +236,27 @@ impl NodeClient {
         payload: Vec<u8>,
     ) -> Result<Response, ClientError> {
         let addr = format!("{}:{}", self.host, self.port);
-        let tcp = tokio::net::TcpStream::connect(&addr).await.map_err(|e| {
-            if denied_by_macos(&e, &self.host) {
-                ClientError::LocalNetworkDenied(addr.clone())
-            } else {
-                ClientError::Unreachable(format!("{addr}: {e}"))
+        let tcp = match tokio::net::TcpStream::connect(&addr).await {
+            Ok(t) => t,
+            Err(e) if denied_by_macos(&e, &self.host) => {
+                let (code, host, a) = (e.raw_os_error(), self.host.clone(), addr.clone());
+                let found = tokio::task::spawn_blocking(move || {
+                    let ping = answers_ping(&host);
+                    let location = if ping {
+                        crate::stable_app::own_location()
+                    } else {
+                        Location::Unknown
+                    };
+                    local_network_error(code, &host, &a, ping, location)
+                })
+                .await;
+                return Err(found
+                    .ok()
+                    .flatten()
+                    .unwrap_or(ClientError::LocalNetworkDenied(addr)));
             }
-        })?;
+            Err(e) => return Err(ClientError::Unreachable(format!("{addr}: {e}"))),
+        };
         let name = ServerName::try_from(self.host.clone())
             .map_err(|_| ClientError::Unreachable(format!("{} is not a host name", self.host)))?;
         let tls = tokio_rustls::TlsConnector::from(self.cfg.clone())
@@ -294,7 +318,49 @@ pub fn is_lan_host(host: &str) -> bool {
 /// Does this connect error look like macOS refusing Local Network access? A process without the
 /// permission gets `EHOSTUNREACH` (65, "No route to host") connecting to a machine on the LAN.
 pub fn denied_by_macos(e: &std::io::Error, host: &str) -> bool {
-    cfg!(target_os = "macos") && e.raw_os_error() == Some(65) && is_lan_host(host)
+    cfg!(target_os = "macos") && e.raw_os_error() == Some(MACOS_EHOSTUNREACH) && is_lan_host(host)
+}
+
+/// `EHOSTUNREACH` on macOS.
+const MACOS_EHOSTUNREACH: i32 = 65;
+
+/// Which Local Network failure a macOS connect error is, if it is one: `EHOSTUNREACH` to a
+/// machine on the LAN. A node that answers ping while this executable is on an external disk is
+/// the rule macOS cannot apply; anything else may be a denial or a node that is off. Pure.
+pub fn local_network_error(
+    code: Option<i32>,
+    host: &str,
+    addr: &str,
+    answers_ping: bool,
+    executable: Location,
+) -> Option<ClientError> {
+    if code != Some(MACOS_EHOSTUNREACH) || !is_lan_host(host) {
+        return None;
+    }
+    Some(if answers_ping && executable == Location::External {
+        ClientError::LocalNetworkUnapplied(addr.to_string())
+    } else {
+        ClientError::LocalNetworkDenied(addr.to_string())
+    })
+}
+
+/// Does `host` answer one ping? A ping that cannot run counts as no answer.
+fn answers_ping(host: &str) -> bool {
+    let host = host.trim_matches(['[', ']']);
+    // A leading `-` would be read as an option.
+    if host.starts_with('-') {
+        return false;
+    }
+    let program = if host.contains(':') {
+        "/sbin/ping6"
+    } else {
+        "/sbin/ping"
+    };
+    mason_landing::proc::output(
+        std::process::Command::new(program).args(["-c", "1", host]),
+        Duration::from_secs(3),
+    )
+    .is_ok_and(|o| o.status.success())
 }
 
 /// Run `f` to its end from a thread that is not a tokio worker: the daemon's blocking code
@@ -346,6 +412,31 @@ mod tests {
         for h in ["127.0.0.1", "8.8.8.8", "example.com", "::1"] {
             assert!(!is_lan_host(h), "{h}");
         }
+    }
+
+    #[test]
+    fn no_route_to_a_private_address_that_pings_from_an_external_disk_is_an_unapplied_rule() {
+        let of = |code, host: &str, ping, at| local_network_error(code, host, "a:1", ping, at);
+        let unapplied = of(Some(65), "10.10.10.5", true, Location::External).unwrap();
+        assert_eq!(unapplied, ClientError::LocalNetworkUnapplied("a:1".into()));
+        let m = unapplied.to_string();
+        assert!(m.contains(LOCAL_NETWORK_UNAPPLIED), "{m}");
+        assert!(!m.contains("turn Local Network on"), "{m}");
+        // No ping answer, or an executable that is not known to be external: not that claim.
+        for (ping, at) in [
+            (false, Location::External),
+            (true, Location::Internal),
+            (true, Location::Unknown),
+        ] {
+            assert_eq!(
+                of(Some(65), "10.10.10.5", ping, at),
+                Some(ClientError::LocalNetworkDenied("a:1".into()))
+            );
+        }
+        // Other errors, and other hosts, are left alone.
+        assert_eq!(of(Some(61), "10.10.10.5", true, Location::External), None);
+        assert_eq!(of(None, "10.10.10.5", true, Location::External), None);
+        assert_eq!(of(Some(65), "8.8.8.8", true, Location::External), None);
     }
 
     #[cfg(target_os = "macos")]

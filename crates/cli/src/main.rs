@@ -77,8 +77,9 @@ mason: command-line client for the MASON pipeline
   mason task cancel <id> [--delete-branch]
   mason task retry <id> [--from STEP] [--restart] [--message TEXT]
                                       the message is shown once in the next round's prompt
-  mason task diagnosis <id> [apply|dismiss N]   what the diagnosis agent said about a task that
-                                      failed on its own code; apply or dismiss a pending one
+  mason task diagnose <id>            ask for a diagnosis of a failed task (owner only)
+  mason task diagnosis <id> [apply|dismiss N]   what the diagnosis agent said about a failed task;
+                                      apply (its recommended option) or dismiss a pending one
   mason task approve <id> [--priority P]   let a proposed or deferred task start (queued at P: urgent,
                                       high, normal or low), or an approval step go on
   mason task defer <id>               put a proposed task aside (state deferred); it comes back only
@@ -172,6 +173,7 @@ mason: command-line client for the MASON pipeline
   mason node pair-code | accept on|off | status | doctor | jobs | stop-jobs | coordinators [remove NAME]
                                       this Mac as a node, taking compile and test runs from a coordinator
   mason node list | add [NAME | --host H:PORT --fp F] [--code C] | remove NAME | use on|off
+  mason node update NAME | --all      send a node the runtime this coordinator runs, now (`mason update` does it for every node)
   mason node export-runtime --arch arm64|x86_64 --out DIR   the signed runtime and MASON Daemon.app for a node
                                       the coordinator's nodes: found, paired, whether each takes work
   mason lan status                    whether LAN access is on, its port and certificate fingerprint
@@ -2251,6 +2253,13 @@ fn main() {
                             local_clock(next)
                         );
                     }
+                    for n in r["nodes"].as_array().into_iter().flatten() {
+                        println!(
+                            "node      {:<16} {}",
+                            n["name"].as_str().unwrap_or("?"),
+                            n["text"].as_str().unwrap_or("?")
+                        );
+                    }
                     if let Some(w) = r["waiting"].as_str().filter(|w| !w.is_empty()) {
                         println!("waiting   {w}");
                         println!("          `mason update --now` takes over at once and abandons those batches");
@@ -2776,6 +2785,9 @@ fn main() {
                         },
                         x["reason"].as_str().unwrap_or("")
                     );
+                    if x["no_effect"] == json!(true) {
+                        println!("      no effect: only a skip of the test step is honoured");
+                    }
                     if let Some(how) = x["how"].as_str().filter(|h| !h.is_empty()) {
                         println!("      paid: {how}");
                     }
@@ -3349,6 +3361,13 @@ fn main() {
                         if let Some(r) = t["diagnosis_ran_on"].as_str() {
                             println!("  diagnosis: {r}");
                         }
+                        if t["diagnosis_running"].is_object() {
+                            println!(
+                                "  diagnosis running since {} ms, on {}",
+                                t["diagnosis_running"]["started_ms"],
+                                t["diagnosis_running"]["ran_on"].as_str().unwrap_or("?")
+                            );
+                        }
                         if let Some(n) = t["auto_retries"].as_u64() {
                             let next = match t["next_auto_retry_ms"].as_u64() {
                                 Some(at) => {
@@ -3554,6 +3573,12 @@ fn main() {
                         "Retrying task #{id} from {}",
                         r["to"].as_str().unwrap_or("developing")
                     );
+                }
+                "diagnose" => {
+                    let id = task_id(&mut a);
+                    finish(&a);
+                    or_die(d.call("POST", &format!("/tasks/{id}/diagnose"), Some(&json!({}))));
+                    println!("Diagnosis of task #{id} started; see `mason task diagnosis {id}`");
                 }
                 "diagnosis" => {
                     let id = task_id(&mut a);
