@@ -6,7 +6,7 @@
 use crate::{Store, StoreError};
 use rusqlite::params;
 
-/// `start`, `check`, `handled` (a finding a session took up), `session`, `verdict` or `action`.
+/// `start`, `planned` (a takeover is about to exec), `cancelled` (that exec failed), `check`, `handled` (a finding a session took up), `session`, `verdict` or `action`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HealthRow {
     pub id: u64,
