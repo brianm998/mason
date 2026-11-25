@@ -115,6 +115,6 @@ MASON_ADHOC_EXIT_START=100 start_daemon
 t=$(take "far from the end")
 [ "$(num "$t" exit)" = 100 ] || fail "expected s100, got $(num "$t" exit)"
 sleep 1
-if m alerts | grep -q 'numbers'; then fail "a numbers alert with 899 numbers left"; fi
-echo "   no numbers alert with 899 left"
+if m alerts | grep -q 'numbers'; then fail "a numbers alert with 9899 numbers left"; fi
+echo "   no numbers alert with 9899 left"
 echo "s101 OK"
