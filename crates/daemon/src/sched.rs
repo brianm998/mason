@@ -747,6 +747,11 @@ impl Giver {
         self.b.shrink(self.id, give);
     }
 
+    /// Whether the lease still holds anything.
+    pub fn is_held(&self) -> bool {
+        self.b.lease_holds(self.id)
+    }
+
     /// Ask again for `units`, at the lease's rank and from when it first began to wait.
     /// Waits as [`Broker::acquire`] does.
     pub fn ask_again(

@@ -2484,6 +2484,11 @@ pub fn execute_sharded(
     stop: &dyn Fn() -> Option<StopWhy>,
     grant: &Grant,
 ) -> Result<Outcome, Fail> {
+    // A lease emptied by an earlier run of the same suite or check asks again before this one
+    // is pushed (#820).
+    if !grant.regain(units_for(&spec.runs_on, spec.shards.max(1)), stop) {
+        return Ok(Outcome::Stopped(stop().unwrap_or(StopWhy::Gone)));
+    }
     if !spec.sharded() {
         return execute(site, spec, dir, stop, grant);
     }
@@ -2494,7 +2499,10 @@ pub fn execute_sharded(
             attempt_spec.id = format!("{}-s{attempt}", spec.id);
             // The shards run again ask for their units again, at the run's own rank and from
             // when it began to wait, before anything is pushed (#820).
-            if !grant.ask_again(units_for(&spec.runs_on, attempt_spec.only.len() as u32), stop) {
+            if !grant.ask_again(
+                units_for(&spec.runs_on, attempt_spec.only.len() as u32),
+                stop,
+            ) {
                 return Ok(Outcome::Stopped(stop().unwrap_or(StopWhy::Gone)));
             }
         }
@@ -2821,13 +2829,19 @@ impl Grant {
             Err(_) => false,
         }
     }
+    /// Ask for `units` again if every unit of the lease has already been given back (its jobs
+    /// finished and the run is made again). `false`: told to stop while it waited.
+    pub fn regain(
+        &self,
+        units: std::collections::BTreeMap<String, u32>,
+        stop: &dyn Fn() -> Option<StopWhy>,
+    ) -> bool {
+        let released = self.lock().giver.as_ref().is_some_and(|g| !g.is_held());
+        !released || self.ask_again(units, stop)
+    }
     /// How many runner units the lease was given when it asked for 1 to N, if it was flexible.
     pub fn granted_runners(&self) -> Option<u32> {
-        self.lease
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .and_then(|l| l.granted_runners())
+        self.lock().owned.as_ref().and_then(|l| l.granted_runners())
     }
     /// Give the units back: the run is not going to GitHub after all (`fallback = "local"`).
     /// Returns whether it held any.
