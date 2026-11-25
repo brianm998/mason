@@ -233,6 +233,11 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
                 "launches": crate::launchview::history(d, r.id.0).iter().map(crate::launchview::json_of).collect::<Vec<_>>(),
             }))
             .collect::<Vec<_>>());
+        // What each run said it tried and gave up (task 1128), newest first.
+        v["tried"] = json!(crate::tried::rounds(&d.task_dir(t.id))
+            .iter()
+            .map(crate::tried::Round::to_json)
+            .collect::<Vec<_>>());
     }
     v
 }
