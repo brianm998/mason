@@ -786,7 +786,8 @@ const SUITE_LIMIT_DEFAULT: Duration = Duration::from_secs(1800);
 
 /// What a test step's suites may run for, as a run budget: the shortest limit among the step's
 /// suites. A suite that reads [`RUN_BUDGET_ENV`] is then never given more time than it has, and
-/// one that ignores it is unaffected. `None` for any other step.
+/// one that ignores it is unaffected. `None` for any other step. A suite run through
+/// `suites::run_hosted_once` gets its own limit instead, which replaces this value.
 pub(crate) fn test_step_budget(
     def: &mason_definition::Definition,
     step: &mason_definition::Step,
