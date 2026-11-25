@@ -11,7 +11,7 @@ for t in bash sed grep awk tee mktemp basename tail cut tr sleep pkill pgrep kil
   [ -n "$p" ] && [ -x "$p" ] && ln -sf "$p" "$tmp/bin/$t"
 done
 printf '#!/usr/bin/env bash\ntrue\n' > "$tmp/scripts/s01.sh"
-out=$(cd "$root" && PATH="$tmp/bin" MASON_EXIT_DIR="$tmp/scripts" MASON_EXIT_SCRIPT_LIMIT_S=7717 \
+out=$(cd "$root" && PATH="$tmp/bin" MASON_EXIT_DIR="$tmp/scripts" MASON_EXIT_SCRIPT_LIMIT_S=7717 MASON_EXIT_SHARD=1/1 \
   bash scripts/run-exit-scripts.sh 2>&1)
 echo "$out" | grep -q '^s01: [0-9]* s$' || { echo "no timing line: $out" >&2; exit 1; }
 if pgrep -f 'sleep 7717' >/dev/null; then echo "leftover sleep 7717" >&2; exit 1; fi
