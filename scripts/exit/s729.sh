@@ -77,6 +77,6 @@ for k in 1 2 3; do
 done
 n=$(echo "$all" | tr ' ' '\n' | grep -c .)
 [ "$n" = 7 ] || { echo "FAILED: the shards ran $n tests together, wanted 7 (each once)" >&2; exit 1; }
-[ "$(echo "$all" | tr ' ' '\n' | grep . | sort | uniq -d | wc -l)" = 0 ] \
+[ "$(echo "$all" | tr ' ' '\n' | grep . | sort | uniq -d | wc -l)" -eq 0 ] \
     || { echo "FAILED: a test ran on two shards" >&2; exit 1; }
 echo "ok: shard 2 of 3 ran exactly its tests; the three shards ran all 7 once"
