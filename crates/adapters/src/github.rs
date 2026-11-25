@@ -1299,6 +1299,8 @@ pub struct ActionJob {
     pub name: String,
     pub status: String,
     pub started_at: Option<String>,
+    /// When the job ended (absent while it runs).
+    pub completed_at: Option<String>,
     /// success, failure, cancelled... once the job is done.
     pub conclusion: Option<String>,
     /// The runner labels the job asked for (`macos-latest`, `ubuntu-24.04`).
@@ -1324,6 +1326,7 @@ fn action_jobs(v: &Value) -> Vec<ActionJob> {
             name: j["name"].as_str().unwrap_or_default().to_string(),
             status: j["status"].as_str().unwrap_or_default().to_string(),
             started_at: j["started_at"].as_str().map(String::from),
+            completed_at: j["completed_at"].as_str().map(String::from),
             conclusion: j["conclusion"].as_str().map(String::from),
             labels: j["labels"]
                 .as_array()
