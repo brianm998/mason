@@ -86,6 +86,7 @@ git -C "$root/repo" push -q origin main
 git -C "$root/repo" fetch -q origin
 
 cat > "$root/agent.sh" <<'SH'
+mkdir -p src
 printf '#[test]\nfn needs_the_code() {}\n' > src/a.rs
 git add -A; git -c user.name=t -c user.email=t@t commit -qm "only a test"
 SH
