@@ -66,6 +66,7 @@ mod owner_notes;
 mod owner_session;
 mod panics;
 mod pause_banners;
+mod pause_record;
 mod placement_monitors;
 mod plugin_adapters;
 mod plugins;
