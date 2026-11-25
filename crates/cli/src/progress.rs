@@ -73,6 +73,15 @@ pub fn lines(r: &Value) -> String {
                 group(bytes)
             ));
         }
+        // The agent's open check (its `run_check`): where it is and how long, as the daemon
+        // words it ("check 2: waiting on GitHub (a pool unit, a runner, the run), 40 s").
+        for c in p["checks"].as_array().into_iter().flatten() {
+            if c["phase"].as_str().is_some_and(|ph| ph != "done") {
+                if let Some(t) = c["text"].as_str().filter(|t| !t.is_empty()) {
+                    out.push(format!("    {t}"));
+                }
+            }
+        }
         for s in p["subs"].as_array().into_iter().flatten() {
             if let Some(j) = s["jobs"].as_object() {
                 let k = |n: &str| j.get(n).and_then(|v| v.as_u64()).unwrap_or(0);
@@ -247,6 +256,21 @@ mod tests {
             line(&r, 100_000 + 360_000),
             "develop  37 tool calls; reading the code; no output for 6 min"
         );
+    }
+
+    #[test]
+    fn an_open_check_is_shown_and_a_finished_one_is_not() {
+        let mut r = rec((1, "reported"), (0, "none"));
+        r["checks"] = json!([
+            {"phase": "done", "text": "check 1 (all): waited 0 s, ran 9 s, green"},
+            {"phase": "running", "text": "check 2: waiting on GitHub (a pool unit, a runner, the run), 40 s"}
+        ]);
+        let s = lines(&json!({"now_ms": 101_000, "runs": [r]}));
+        assert!(
+            s.contains("    check 2: waiting on GitHub (a pool unit, a runner, the run), 40 s"),
+            "{s}"
+        );
+        assert!(!s.contains("check 1"), "{s}");
     }
 
     #[test]
