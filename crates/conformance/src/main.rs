@@ -138,14 +138,24 @@ fn should_leave(screen_seq: u64, views: usize, target: u64, quiet_for_ms: u64) -
     reached(screen_seq, views, target) || (views >= 3 && quiet_for_ms >= QUIET_WINDOW_MS)
 }
 
+/// How a checkpoint's wait ended, as `expected` prints it: at the target, or by the quiet
+/// fallback with the screen still below the daemon's seq.
+fn settle_note(reached: bool, screen_seq: u64, target: u64) -> String {
+    if reached {
+        "target".into()
+    } else {
+        format!("quiet at #{screen_seq} / daemon #{target}")
+    }
+}
+
 /// Wait until the screen has reached the daemon's current seq and `after` (the seq a step
 /// reported). Once reached, 300 ms must also pass with no message (trailing views of the same
 /// step). The daemon sends no view whose content did not change, so the screen's seq may
 /// stay below the target; then a quiet window alone never decides: it must have passed, and
 /// three `/status` round trips in a row (the same ordered connection, so views sent before each
 /// answer have arrived) must agree on the seq with nothing new shown. The 60 s limit only fails,
-/// naming what was awaited.
-fn settle(c: &mut Client, screen: &mut Screen, after: u64) {
+/// naming what was awaited. Returns how the wait ended ([`settle_note`]).
+fn settle(c: &mut Client, screen: &mut Screen, after: u64) -> String {
     let hard = std::time::Instant::now() + Duration::from_secs(60);
     let mut quiet = std::time::Instant::now();
     let mut heard = std::time::Instant::now();
@@ -188,7 +198,7 @@ fn settle(c: &mut Client, screen: &mut Screen, after: u64) {
                     screen.seq
                 );
             }
-            return;
+            return settle_note(reached, screen.seq, target);
         }
         if std::time::Instant::now() > hard {
             die(&format!(
@@ -328,7 +338,7 @@ fn main() {
             )
             .unwrap_or_else(|e| die(&e));
             loop {
-                settle(&mut c, &mut screen, after);
+                let settled = settle(&mut c, &mut screen, after);
                 let items: Vec<serde_json::Value> = conformance::visible(&screen.views(), owner)
                     .iter()
                     .map(|i| i.to_json())
@@ -339,7 +349,10 @@ fn main() {
                     serde_json::to_string_pretty(&items).unwrap_or_default(),
                 )
                 .unwrap_or_else(|e| die(&e.to_string()));
-                println!("checkpoint {k}: {} visible items", items.len());
+                println!(
+                    "checkpoint {k}: {} visible items (settled: {settled})",
+                    items.len()
+                );
                 if now_only {
                     break;
                 }
@@ -678,7 +691,7 @@ fn latency(args: &mut Vec<String>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{reached, should_leave, trailing_done, QUIET_WINDOW_MS};
+    use super::{reached, settle_note, should_leave, trailing_done, QUIET_WINDOW_MS};
     use std::time::Duration;
 
     #[test]
@@ -696,6 +709,12 @@ mod tests {
         assert!(should_leave(9, 3, 10, QUIET_WINDOW_MS));
         assert!(should_leave(10, 3, 10, 0));
         assert!(!should_leave(9, 2, 10, QUIET_WINDOW_MS));
+    }
+
+    #[test]
+    fn settle_note_tells_a_quiet_exit_from_the_target() {
+        assert_eq!(settle_note(true, 10, 10), "target");
+        assert_eq!(settle_note(false, 9, 10), "quiet at #9 / daemon #10");
     }
 
     #[test]
