@@ -81,6 +81,9 @@ pub struct Wait {
     pub thawed_compile: bool,
     /// For a GitHub runner pool: (units held, limit), for "4 of 4 in use" (#700).
     pub pool: Option<(u32, u32)>,
+    /// For a runner pool: how many requests ahead of this one are landing runs, checks, test
+    /// steps and debt payments, in that order (2026-11-21).
+    pub runs_ahead: [u32; 4],
 }
 
 pub fn ordinal(n: usize) -> String {
@@ -364,10 +367,12 @@ fn explain_cause(w: &Wait, now_ms: u64) -> String {
     };
     match &w.cause {
         WaitCause::Full { resource } | WaitCause::Behind { resource }
-            if crate::plan::is_gha_pool(resource) =>
+            if crate::plan::is_gha_pool(resource) || resource == crate::plan::GHA_DEBT =>
         {
             let what = if resource == crate::plan::GHA_MACOS {
                 "a GitHub macOS runner"
+            } else if resource == crate::plan::GHA_DEBT {
+                "a GitHub runner (debt payments are capped)"
             } else {
                 "a GitHub runner"
             };
@@ -381,6 +386,26 @@ fn explain_cause(w: &Wait, now_ms: u64) -> String {
             }
             if w.position > 1 {
                 text.push_str(&format!(", {} in line", ordinal(w.position)));
+            }
+            let [l, c, t, dbt] = w.runs_ahead;
+            let mut ahead = vec![];
+            for (n, one, many) in [
+                (l, "landing run", "landing runs"),
+                (c, "check", "checks"),
+                (t, "test step", "test steps"),
+                (dbt, "debt payment", "debt payments"),
+            ] {
+                if n > 0 {
+                    ahead.push(format!("{n} {}", if n == 1 { one } else { many }));
+                }
+            }
+            if let Some(last) = ahead.pop() {
+                let list = if ahead.is_empty() {
+                    last
+                } else {
+                    format!("{} and {last}", ahead.join(", "))
+                };
+                text.push_str(&format!(": {list} ahead"));
             }
             text
         }
@@ -523,6 +548,7 @@ mod tests {
             thawed_ms: None,
             thawed_compile: false,
             pool: None,
+            runs_ahead: [0; 4],
         };
         // (wait, the code, a fragment the sentence must have)
         let cases = [
@@ -691,6 +717,7 @@ mod tests {
             thawed_ms: None,
             thawed_compile: false,
             pool: None,
+            runs_ahead: [0; 4],
         }
     }
 
@@ -743,6 +770,7 @@ mod tests {
             thawed_ms: None,
             thawed_compile: false,
             pool: None,
+            runs_ahead: [0; 4],
         };
         let s = explain(&w, 30_000);
         assert_eq!(
