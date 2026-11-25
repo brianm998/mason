@@ -90,6 +90,8 @@ pub enum NodeState {
     Incompatible(String),
     /// macOS will not let MASON on this Mac reach the local network (§3.14).
     LocalNetworkDenied,
+    /// macOS has a Local Network rule for `masond` that it cannot apply (s1118).
+    LocalNetworkUnapplied,
 }
 
 impl NodeState {
@@ -110,7 +112,8 @@ impl NodeState {
                 "its certificate is not the one paired; pair it again".into()
             }
             NodeState::Incompatible(m) => format!("incompatible ({m})"),
-            NodeState::LocalNetworkDenied => "local network access denied by macOS (or no route to it): turn on Local Network for MASON in System Settings → Privacy & Security → Local Network".into(),
+            NodeState::LocalNetworkDenied => "local network access denied by macOS (or no route to it): turn on Local Network for MASON in System Settings → Privacy & Security → Local Network; if it is already on, see docs/nodes.md".into(),
+            NodeState::LocalNetworkUnapplied => crate::node_client::LOCAL_NETWORK_UNAPPLIED.into(),
         }
     }
 }
@@ -134,6 +137,7 @@ pub enum Fault {
     WrongCertificate,
     Incompatible(String),
     LocalNetworkDenied,
+    LocalNetworkUnapplied,
 }
 
 /// The state a view amounts to. Pure.
@@ -143,6 +147,7 @@ pub fn state_of(v: &View, lost_after: u32) -> NodeState {
         Some(Fault::WrongCertificate) => return NodeState::WrongCertificate,
         Some(Fault::Incompatible(m)) => return NodeState::Incompatible(m.clone()),
         Some(Fault::LocalNetworkDenied) => return NodeState::LocalNetworkDenied,
+        Some(Fault::LocalNetworkUnapplied) => return NodeState::LocalNetworkUnapplied,
         None => {}
     }
     if v.failures >= lost_after.max(1) {
@@ -169,6 +174,8 @@ pub fn state_of(v: &View, lost_after: u32) -> NodeState {
 /// What the registry knows.
 pub struct Nodes {
     inner: Mutex<Inner>,
+    /// What building and sending a runtime to a node go through; tests stand in for it.
+    io: Mutex<Option<Arc<dyn crate::node_fleet::FleetIo>>>,
 }
 
 #[derive(Default)]
@@ -193,7 +200,28 @@ impl Nodes {
     pub fn new() -> Self {
         Nodes {
             inner: Mutex::new(Inner::default()),
+            io: Mutex::new(None),
         }
+    }
+
+    /// The paired nodes and what the last poll of each left.
+    pub fn snapshot(&self) -> (Vec<mason_store::NodeRow>, BTreeMap<String, View>) {
+        let g = self.lock();
+        (g.paired.clone(), g.views.clone())
+    }
+
+    /// How a runtime is built and sent: the real way unless a test set another.
+    pub fn io(&self) -> Arc<dyn crate::node_fleet::FleetIo> {
+        self.io
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .unwrap_or_else(|| Arc::new(crate::node_fleet::RealIo))
+    }
+
+    /// Stand in for building and sending (tests).
+    pub fn set_io(&self, io: Arc<dyn crate::node_fleet::FleetIo>) {
+        *self.io.lock().unwrap_or_else(|e| e.into_inner()) = Some(io);
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
@@ -391,6 +419,11 @@ async fn poll_one(
             v.fault = Some(Fault::LocalNetworkDenied);
             v.last_error = Some(ClientError::LocalNetworkDenied(a).to_string());
         }
+        Err(ClientError::LocalNetworkUnapplied(a)) => {
+            v.failures += 1;
+            v.fault = Some(Fault::LocalNetworkUnapplied);
+            v.last_error = Some(ClientError::LocalNetworkUnapplied(a).to_string());
+        }
         Err(e) => {
             v.failures += 1;
             v.fault = None;
@@ -423,35 +456,26 @@ pub async fn poll_once(d: &Arc<Daemon>) {
     push_runtimes(d, &cfg);
 }
 
-/// What was last tried for a node: the commit, when, and whether it is still going.
-type Pushes = BTreeMap<String, (String, u64, bool)>;
-
-fn pushes() -> &'static Mutex<Pushes> {
-    static P: std::sync::OnceLock<Mutex<Pushes>> = std::sync::OnceLock::new();
-    P.get_or_init(|| Mutex::new(BTreeMap::new()))
-}
-
-/// How long after a failed push the next is tried.
-const PUSH_RETRY_MS: u64 = 10 * 60 * 1000;
-
-/// Does a node need the runtime this coordinator runs? It is on the same protocol, has not got
-/// that runtime installed and is not running it. Pure.
+/// Does a node need the runtime `mine`? It is not running it, does not hold it (installed, and
+/// waiting to take over) and is of an architecture there is a build for. Its protocol does not
+/// matter: `PUT /node/runtime` is how a node on another protocol is brought up to date, so a
+/// protocol bump must not strand it (s1122). Pure.
 pub fn needs_runtime(status: &Value, mine: &str) -> bool {
-    status["node_proto"].as_u64() == Some(u64::from(NODE_PROTO))
-        && status["runtime_sha"].as_str() != Some(mine)
+    status["runtime_sha"].as_str() != Some(mine)
         && !status["runtimes"]
             .as_array()
             .is_some_and(|a| a.iter().any(|x| x.as_str() == Some(mine)))
         && crate::node_runtime::triple_for(status["arch"].as_str().unwrap_or("")).is_some()
 }
 
-/// After this coordinator has taken over (and so on each poll after), send every paired node that
-/// lacks the runtime this daemon runs the runtime cross-built and signed for its architecture
-/// (`PUT /node/runtime`). The node verifies it against the team it pinned at pairing and takes
-/// over once its jobs have ended. One push at a time per node, and a failed one is tried again
-/// after ten minutes. Nothing happens without a `sign_identity` in `update.toml`.
+/// After each poll, send every paired node that lacks the runtime this daemon runs the runtime
+/// cross-built and signed for its architecture (`PUT /node/runtime`): the nodes an update could
+/// not reach, and any that came back since. The node verifies it against the team it pinned at
+/// pairing and takes over once its jobs have ended. One push at a time per node, and a failed one
+/// is tried again after ten minutes (`mason node update` does not wait). Nothing happens without
+/// a `sign_identity` in `update.toml`, nor while an update is under way (it sends its own).
 fn push_runtimes(d: &Arc<Daemon>, cfg: &NodesCfg) {
-    if !cfg.push_runtime {
+    if !cfg.push_runtime || crate::node_fleet::update_under_way(d) {
         return;
     }
     let Some(mine) = d.cfg.runtime_sha.clone() else {
@@ -463,97 +487,87 @@ fn push_runtimes(d: &Arc<Daemon>, cfg: &NodesCfg) {
     if ucfg.sign_identity.is_none() {
         return;
     }
-    let (rows, views) = {
-        let g = d.nodes.lock();
-        (g.paired.clone(), g.views.clone())
-    };
-    for r in rows {
-        let Some(status) = views.get(&r.nid).and_then(|v| v.status.clone()) else {
-            continue;
-        };
-        if !needs_runtime(&status, &mine) {
-            continue;
-        }
-        {
-            let mut p = pushes().lock().unwrap_or_else(|e| e.into_inner());
-            if let Some((sha, at, inflight)) = p.get(&r.nid) {
-                if sha == &mine && (*inflight || now_ms().saturating_sub(*at) < PUSH_RETRY_MS) {
-                    continue;
-                }
-            }
-            p.insert(r.nid.clone(), (mine.clone(), now_ms(), true));
-        }
-        let (d, ucfg, mine, nid, name) = (
-            d.clone(),
-            ucfg.clone(),
-            mine.clone(),
-            r.nid.clone(),
-            r.name.clone(),
-        );
-        let arch = status["arch"].as_str().unwrap_or("").to_string();
-        let _ = std::thread::Builder::new()
-            .name("node-runtime-push".into())
-            .spawn(move || {
-                let r = push_one(&d, &ucfg, &nid, &arch);
-                match &r {
-                    Ok(()) => {
-                        tracing::info!(node = %name, runtime = %mine, "sent a runtime to a node")
-                    }
-                    Err(e) => {
-                        tracing::warn!(node = %name, "could not send a runtime to a node: {e}")
-                    }
-                }
-                let ok = r.is_ok();
-                if let Some(e) = pushes()
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .get_mut(&nid)
-                {
-                    e.2 = false;
-                    if ok {
-                        e.1 = u64::MAX / 2; // done for this commit
-                    }
-                }
-            });
+    for c in crate::node_fleet::candidates(d, &mine) {
+        let _ = crate::node_fleet::start_push(d, &ucfg, &c, &mine, false);
     }
 }
 
-/// Build (cross-build, signed) and send the runtime to one node, holding a `compile` slot while
-/// it builds.
-fn push_one(
-    d: &Arc<Daemon>,
-    ucfg: &crate::update::UpdateCfg,
-    nid: &str,
-    arch: &str,
-) -> Result<(), String> {
-    let rt = crate::update::Runtimes::new(&d.cfg.data_dir);
-    let started = std::time::Instant::now();
-    let (_, bytes) = crate::update::with_compile_lease(
-        &d.broker,
-        "node runtime build",
-        false,
-        Duration::from_secs(ucfg.update_wait_max_s),
-        &|| started.elapsed(),
-        &|| {},
-        || crate::node_runtime::package_for(ucfg, &rt, arch),
-    )?;
-    let (_, client, _) = d
-        .nodes
-        .client_for(d, nid)
-        .ok_or("the node is not paired any more")?;
-    let client = client.with_timeout(Duration::from_secs(900));
-    let r = crate::node_client::block_on(client.send(
-        "PUT",
-        "/node/runtime",
-        Some("application/octet-stream"),
-        bytes,
-    ))
-    .map_err(|e| e.to_string())?;
-    if r.status == 200 {
-        Ok(())
-    } else {
-        Err(r.error_text())
+/// `POST /nodes/update {name?, all?}`: send the runtime this coordinator runs to a node, or to
+/// every node, now, whatever the retry wait says (`mason node update`). It answers when the
+/// sends have started; `GET /nodes` shows how each goes.
+pub async fn update(
+    axum::extract::State(d): axum::extract::State<Arc<Daemon>>,
+    axum::Json(b): axum::Json<Value>,
+) -> Res {
+    let name = b["name"].as_str().map(String::from);
+    let all = b["all"].as_bool().unwrap_or(false);
+    if name.is_none() && !all {
+        return Err(fail(400, "which node? `mason node update NAME` or `--all`"));
     }
+    let Some(mine) = d.cfg.runtime_sha.clone() else {
+        return Err(fail(
+            409,
+            "this daemon is not running from a runtime (`mason update` first): there is nothing to send",
+        ));
+    };
+    if crate::node_fleet::update_under_way(&d) {
+        return Err(fail(
+            409,
+            "an update is under way; it sends the nodes their runtime itself (`mason update status`)",
+        ));
+    }
+    let ucfg = crate::update::UpdateCfg::load(&d.cfg.config_dir).map_err(|e| fail(409, e))?;
+    if ucfg.sign_identity.is_none() {
+        return Err(fail(
+            409,
+            "update.toml has no `sign_identity`: a node takes only a runtime signed by a team",
+        ));
+    }
+    let (rows, views) = d.nodes.snapshot();
+    let chosen: Vec<&mason_store::NodeRow> = rows
+        .iter()
+        .filter(|r| all || name.as_deref() == Some(r.name.as_str()))
+        .collect();
+    if chosen.is_empty() {
+        return Err(match name {
+            Some(n) => fail(404, format!("no paired node is called {n}")),
+            None => fail(404, "no node is paired"),
+        });
+    }
+    let out: Vec<Value> = chosen
+        .iter()
+        .map(|r| {
+            let status = views.get(&r.nid).and_then(|v| v.status.clone());
+            let result = |started: bool, state: String, note: String| {
+                json!({"name": r.name, "started": started, "state": state, "note": note})
+            };
+            let Some(status) = status else {
+                return result(
+                    false,
+                    crate::node_fleet::Fleet::WillUpdateWhenBack.text(),
+                    "it has not answered yet; it is sent the runtime when it does".into(),
+                );
+            };
+            if !needs_runtime(&status, &mine) {
+                let f = crate::node_fleet::fleet_state(Some(&status), true, &mine, None);
+                return result(false, f.text(), "it has the runtime already".into());
+            }
+            let c = crate::node_fleet::Candidate {
+                nid: r.nid.clone(),
+                name: r.name.clone(),
+                arch: status["arch"].as_str().unwrap_or_default().to_string(),
+            };
+            match crate::node_fleet::start_push(&d, &ucfg, &c, &mine, true) {
+                Ok(()) => result(
+                    true,
+                    crate::node_fleet::Fleet::Building(c.arch.clone()).text(),
+                    "sending; `mason node list` shows how it goes".into(),
+                ),
+                Err(why) => result(false, "not started".into(), why),
+            }
+        })
+        .collect();
+    Ok(axum::Json(json!({"runtime": mine, "nodes": out})))
 }
 
 /// The broker resource a node's units are leased from.
@@ -632,8 +646,12 @@ pub fn alerts(d: &Daemon) -> Vec<(String, String, String)> {
     if !cfg.enabled {
         return vec![];
     }
-    let g = d.nodes.lock();
-    alerts_for(&g.paired, &g.views, cfg.lost_after_polls)
+    let mut out = {
+        let g = d.nodes.lock();
+        alerts_for(&g.paired, &g.views, cfg.lost_after_polls)
+    };
+    out.extend(crate::node_fleet::alerts(d));
+    out
 }
 
 /// [`alerts`] from what the poller knows. Pure.
@@ -657,6 +675,14 @@ pub fn alerts_for(
                 NodeState::LocalNetworkDenied => (
                     "local-network",
                     "macOS denies MASON the local network, so node ".to_string() + &r.name + " cannot be reached (System Settings → Privacy & Security → Local Network)",
+                ),
+                NodeState::LocalNetworkUnapplied => (
+                    "local-network",
+                    format!(
+                        "node {} cannot be reached: {}",
+                        r.name,
+                        crate::node_client::LOCAL_NETWORK_UNAPPLIED
+                    ),
                 ),
                 NodeState::WrongCertificate => (
                     "certificate",
@@ -797,10 +823,22 @@ fn fail(code: u16, msg: impl Into<String>) -> (axum::http::StatusCode, axum::Jso
 }
 
 /// One row of `mason node list`.
-fn row_json(row: &mason_store::NodeRow, v: &View, cfg: &NodesCfg) -> Value {
+fn row_json(row: &mason_store::NodeRow, v: &View, cfg: &NodesCfg, goal: Option<&str>) -> Value {
     let state = state_of(v, cfg.lost_after_polls);
     let s = v.status.clone().unwrap_or(Value::Null);
+    // Where its update stands against the commit the fleet is moving to (`node_fleet`).
+    let update = goal.map(|g| {
+        crate::node_fleet::fleet_state(
+            v.status.as_ref(),
+            v.failures == 0,
+            g,
+            crate::node_fleet::record_of(&row.nid).as_ref(),
+        )
+    });
     json!({
+        "update": update.as_ref().map(|f| f.text()),
+        "update_state": update.as_ref().map(|f| f.key()),
+        "runtime_sha": s["runtime_sha"], "node_proto": s["node_proto"],
         "name": row.name, "nid": row.nid, "host": row.host, "port": row.port,
         "paired": true, "paired_at": row.paired_at,
         "state": state.text(), "usable": state.usable(),
@@ -818,9 +856,17 @@ fn row_json(row: &mason_store::NodeRow, v: &View, cfg: &NodesCfg) -> Value {
 pub async fn list(axum::extract::State(d): axum::extract::State<Arc<Daemon>>) -> Res {
     let cfg = load_nodes(&d.cfg.config_dir).unwrap_or_default();
     let rows = paired(&d);
+    let goal = crate::node_fleet::goal(&d);
     let mut out: Vec<Value> = rows
         .iter()
-        .map(|r| row_json(r, &d.nodes.view(&r.nid).unwrap_or_default(), &cfg))
+        .map(|r| {
+            row_json(
+                r,
+                &d.nodes.view(&r.nid).unwrap_or_default(),
+                &cfg,
+                goal.as_deref(),
+            )
+        })
         .collect();
     for n in d.nodes.discovered() {
         if rows.iter().any(|r| r.nid == n.nid) {
@@ -1168,6 +1214,13 @@ mod tests {
         assert!(NodeState::LocalNetworkDenied
             .text()
             .contains("Local Network"));
+        let unapplied = state_of(&fault(Fault::LocalNetworkUnapplied), 6);
+        assert_eq!(unapplied, NodeState::LocalNetworkUnapplied);
+        assert!(!unapplied.usable());
+        assert_eq!(
+            unapplied.text(),
+            crate::node_client::LOCAL_NETWORK_UNAPPLIED
+        );
         assert!(NodeState::Accepting.usable() && !NodeState::Lost(7).usable());
         assert!(NodeState::NotPaired.text().contains("403"));
     }
@@ -1187,13 +1240,32 @@ mod tests {
             "installed, waiting to take over"
         );
         assert!(
-            !needs_runtime(&st(2, None, &[], "arm64"), &sha),
-            "another protocol is not updated blind"
-        );
-        assert!(
             !needs_runtime(&st(1, None, &[], "riscv"), &sha),
             "no build for that"
         );
+    }
+
+    /// s1122: a protocol bump must not strand a node. Whatever protocol it reports, a node that
+    /// lacks the runtime is sent it, and one that runs or holds it is not.
+    #[test]
+    fn a_node_on_an_older_protocol_that_lacks_the_runtime_is_sent_it() {
+        let sha = "a".repeat(40);
+        let st = |proto: u64, running: Option<&str>, installed: &[&str]| json!({"node_proto": proto, "runtime_sha": running, "runtimes": installed, "arch": "arm64"});
+        let bumped = u64::from(NODE_PROTO) + 1;
+        for proto in [0, u64::from(NODE_PROTO), bumped] {
+            assert!(
+                needs_runtime(&st(proto, Some("old"), &["old"]), &sha),
+                "protocol {proto} lacking it"
+            );
+            assert!(
+                !needs_runtime(&st(proto, Some(&sha), &[&sha]), &sha),
+                "protocol {proto} running it"
+            );
+            assert!(
+                !needs_runtime(&st(proto, Some("old"), &["old", &sha]), &sha),
+                "protocol {proto} holding it"
+            );
+        }
     }
 
     #[test]
