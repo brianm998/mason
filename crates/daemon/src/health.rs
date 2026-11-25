@@ -261,11 +261,19 @@ pub fn gather(d: &Arc<Daemon>, now: u64) -> Facts {
     let rows = d
         .store
         .health_since(
-            &["start", "late", "update_failed", "update_ok"],
+            &[
+                "start",
+                "planned",
+                "cancelled",
+                "late",
+                "update_failed",
+                "update_ok",
+            ],
             now.saturating_sub(DAY_MS),
         )
         .unwrap_or_default();
-    x.restarts = rows.iter().filter(|r| r.kind == "start").count() as u32;
+    let seq: Vec<&str> = rows.iter().map(|r| r.kind.as_str()).collect();
+    x.restarts = health::unplanned_starts(&seq);
     x.late_loops = rows.iter().filter(|r| r.kind == "late").count() as u32;
     let mut fails = 0;
     for r in rows.iter().filter(|r| r.kind.starts_with("update_")) {

@@ -111,10 +111,17 @@ until [ "$(landed)" -ge 2 ]; do [ $SECONDS -lt $end ] || fail "both tasks did no
 echo "   both landed"
 
 echo "== a run made by hand, with no task, is still interactive"
-m run --needs compile --label "by hand" -- sleep 4 2>/dev/null &
+m run --needs compile --label "by hand" --origin person -- sleep 4 2>/dev/null &
 first=$!
-sleep 1
-m run --needs compile --label "by hand 2" -- true 2>/dev/null &
+holding=""; end=$((SECONDS + 20))
+until [ -n "$holding" ]; do
+  [ $SECONDS -lt $end ] || fail "the first hand run was not seen holding compile"
+  holding=$(m resources --json | python3 -c "
+import json,sys
+h=[x for x in json.load(sys.stdin)['holders'] if x['label']=='by hand' and x['uses'].get('compile')]
+print('y' if h else '')")
+done
+m run --needs compile --label "by hand 2" --origin person -- true 2>/dev/null &
 second=$!
 ok=""; end=$((SECONDS + 20))
 until [ -n "$ok" ]; do
