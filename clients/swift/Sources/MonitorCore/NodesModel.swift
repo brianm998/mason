@@ -58,10 +58,17 @@ public struct NodeRow: Equatable, Sendable, Identifiable {
     public var dieC: Int?
     public var running = 0
     public var maxJobs = 0
+    /// Where this node's update to the coordinator's runtime stands: "up to date", "building for arm64",
+    /// "installed; waiting for 2 jobs to end", "failed (…)", "will update when it returns". Empty when unknown.
+    public var update = ""
+    /// A word to key on: `up-to-date`, `building`, `sending`, `sent`, `installing`, `failed`, `pending`, `queued`.
+    public var updateState = ""
 
     public init() {}
 
     public init(json v: [String: Any]) {
+        update = v["update"] as? String ?? ""
+        updateState = v["update_state"] as? String ?? ""
         name = v["name"] as? String ?? "?"
         nid = v["nid"] as? String ?? ""
         paired = v["paired"] as? Bool ?? false
@@ -72,6 +79,12 @@ public struct NodeRow: Equatable, Sendable, Identifiable {
         let jobs = v["jobs"] as? [String: Any]
         running = (jobs?["running"] as? NSNumber)?.intValue ?? 0
         maxJobs = (jobs?["max"] as? NSNumber)?.intValue ?? 0
+    }
+
+    /// A paired node whose runtime is not the coordinator's and is not already on its way: the row
+    /// offers "Update now" (`POST /nodes/update`).
+    public var canUpdateNow: Bool {
+        paired && ["failed", "pending", "queued"].contains(updateState)
     }
 
     /// "CPU 23%, 61 °C, 1 of 4 jobs" for a node that answered.
@@ -113,7 +126,33 @@ public struct NodesSnapshot: Equatable, Sendable {
     }
 }
 
+extension NodesSnapshot {
+    /// What the update banner adds under "Update masond": how the paired nodes stand, or `nil`
+    /// when there is nothing to say (no node is paired, or the daemon did not report updates).
+    /// "2 nodes up to date", "marmot: building for arm64", "marmot: failed (the node said no)".
+    public var updateSummary: String? {
+        let rows = nodes.filter { $0.paired && !$0.updateState.isEmpty }
+        if rows.isEmpty { return nil }
+        let behind = rows.filter { $0.updateState != "up-to-date" }
+        if behind.isEmpty { return "\(rows.count) node\(rows.count == 1 ? "" : "s") up to date" }
+        return behind.map { "\($0.name): \($0.update)" }.joined(separator: "; ")
+    }
+}
+
 extension MonitorModel {
+    /// Send the coordinator's runtime to one node (`name`), or to every node (`nil`), now. The answer
+    /// reloads the list, which shows how each goes.
+    public func updateNode(_ name: String?) {
+        let body: String
+        if let name {
+            let data = try? JSONSerialization.data(withJSONObject: ["name": name], options: [.sortedKeys])
+            body = data.flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        } else {
+            body = "{\"all\":true}"
+        }
+        raw("POST", "/nodes/update", json: body, id: "node-update")
+    }
+
     /// Ask for both views; each answer lands in `nodeSelf` and `nodes`.
     public func loadNodes() {
         raw("GET", "/node/status", id: "node-self")
