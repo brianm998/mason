@@ -1070,7 +1070,7 @@ fn collect(
                 },
             ],
             cwd: Some(spec.cwd.clone()),
-            env: spec.env.clone(),
+            env: crate::jobs::with_run_budget(spec.env.clone(), spec.limit),
             clear_env: false,
             stdin: None,
             linger: Duration::from_secs(600),

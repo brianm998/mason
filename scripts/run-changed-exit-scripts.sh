@@ -7,9 +7,23 @@
 # Prints one line per script, `PASS sNNN` or `FAIL sNNN`, which the suite's regex parser reads, and
 # keeps each failing script's output after its FAIL line. Exits non-zero if any failed. A change
 # that adds or edits no runnable exit script prints `PASS none` (a deleted script has nothing to run).
+#
+# Time budget: MASON_RUN_BUDGET_S (set by the daemon to the run's limit, counted from when the
+# command starts) is the time this run has. Before each script the runner checks what is left
+# (budget, minus the time used, minus a margin of MASON_RUN_BUDGET_MARGIN_S, default 120); a script
+# that starts gets at most that long; when less than MASON_RUN_BUDGET_FLOOR_S (default 60) is left,
+# no more start, and each script not run is `FAIL sNNN (not run: out of time; ...)`, so the run ends
+# red with the passes listed instead of being killed with no verdict.
+#
+# Passes kept between runs: with MASON_TASK_CACHE set to an existing directory (a task's checks and
+# test steps; never a landing run), each PASS is recorded under it, keyed by the script's path and
+# content, MASON_EXIT_REPEAT and the tree (HEAD, the uncommitted diff, untracked files). A later run
+# on the same tree prints `PASS sNNN (cached)` for it. A FAIL is never recorded.
 # Scripts that need a real service, person or device (`sNN-real.sh`, `sNN-manual.sh`) are skipped,
 # as scripts/run-exit-scripts.sh skips them.
 set -uo pipefail
+# The budget counts from here, selection included.
+SECONDS=0
 here=$(cd "$(dirname "$0")" && pwd)
 cd "$(git rev-parse --show-toplevel)"
 base_ref=${MASON_BASE:-origin/develop}
@@ -58,6 +72,39 @@ if [ -n "${MASON_EXIT_SHARD:-}" ]; then
 fi
 # One script must not use a whole run: over the limit it is killed and reported, the rest still run (s843).
 limit=${MASON_EXIT_SCRIPT_LIMIT_S:-900}
+budget=${MASON_RUN_BUDGET_S:-}
+margin=${MASON_RUN_BUDGET_MARGIN_S:-120}
+floor=${MASON_RUN_BUDGET_FLOOR_S:-60}
+case "$budget" in ''|*[!0-9]*) budget= ;; esac
+case "$margin" in ''|*[!0-9]*) margin=120 ;; esac
+case "$floor" in ''|*[!0-9]*) floor=60 ;; esac
+# hash_stdin: the SHA-256 of stdin (macOS shasum, else GNU sha256sum).
+hash_stdin() {
+  if command -v shasum >/dev/null 2>&1; then shasum -a 256 | cut -d' ' -f1; else sha256sum | cut -d' ' -f1; fi
+}
+# The cache: only for an existing directory MASON gave this task, and only in a real checkout.
+cache=
+tree_key=
+if [ -n "${MASON_TASK_CACHE:-}" ] && [ -d "$MASON_TASK_CACHE" ] && [ ! -f .mason/changed-files.txt ]; then
+  tree_key=$(
+    {
+      git rev-parse HEAD 2>/dev/null
+      git diff HEAD --binary 2>/dev/null
+      git ls-files -o --exclude-standard 2>/dev/null | while IFS= read -r f; do
+        printf '%s\n' "$f"
+        if [ -f "$f" ]; then hash_stdin < "$f"; fi
+      done
+    } | hash_stdin
+  ) || tree_key=
+  if [ -n "$tree_key" ] && mkdir -p "$MASON_TASK_CACHE/exit-scripts-pass" 2>/dev/null; then
+    cache="$MASON_TASK_CACHE/exit-scripts-pass"
+  fi
+fi
+cache_file() { # cache_file SCRIPT: the record that this script passed on this tree
+  printf '%s\n' "$1" "$(hash_stdin < "$1")" "$tree_key" "${MASON_EXIT_REPEAT:-}" | hash_stdin
+}
+passed=0; failed=0; notrun=0; out_of_time=0
+left=
 for s in $selected; do
   case "$s" in
     *-real.sh|*-manual.sh) continue ;;
@@ -65,17 +112,45 @@ for s in $selected; do
   [ -e "$s" ] || continue
   id=$(basename "$s" .sh)
   n=$((n + 1))
+  ckey=
+  if [ -n "$cache" ]; then
+    ckey="$cache/$(cache_file "$s")"
+    if [ -e "$ckey" ]; then
+      echo "PASS $id (cached)"
+      passed=$((passed + 1))
+      continue
+    fi
+  fi
+  this=$limit
+  if [ -n "$budget" ]; then
+    left=$((budget - SECONDS - margin))
+    if [ "$left" -lt "$floor" ]; then out_of_time=1; fi
+    if [ "$out_of_time" -eq 1 ]; then
+      echo "FAIL $id (not run: out of time; run the check again to continue)"
+      notrun=$((notrun + 1))
+      fail=1
+      continue
+    fi
+    # The script gets at most what is left, so this runner ends before the daemon's kill.
+    if ! [ "$this" -gt 0 ] 2>/dev/null || [ "$left" -lt "$this" ]; then this=$left; fi
+  fi
   rc=0
-  run_limited "$s" "$limit" "$log" || rc=$?
+  run_limited "$s" "$this" "$log" || rc=$?
   if [ "$rc" -eq 0 ]; then
     echo "PASS $id"
+    passed=$((passed + 1))
+    if [ -n "$ckey" ]; then : > "$ckey" 2>/dev/null || true; fi
   else
-    if [ "$rc" -eq 124 ]; then echo "FAIL $id (over $limit s)"; else echo "FAIL $id"; fi
+    if [ "$rc" -eq 124 ]; then echo "FAIL $id (over $this s)"; else echo "FAIL $id"; fi
     tail -n 30 "$log" | sed 's/^/    | /'
+    failed=$((failed + 1))
     fail=1
   fi
 done
 if [ "$n" -eq 0 ]; then
   echo "PASS none"
+fi
+if [ -n "$budget" ]; then
+  echo "exit-scripts: $passed passed, $failed failed, $notrun not run (time budget $budget s)"
 fi
 exit $fail
