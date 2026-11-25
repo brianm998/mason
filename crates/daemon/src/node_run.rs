@@ -283,6 +283,32 @@ fn key(coord: &str, id: &str) -> String {
     format!("{coord}/{id}")
 }
 
+/// The length of a [`host_key`].
+pub const HOST_KEY_LEN: usize = 16;
+
+/// The file in a node host's directory that says which job and phase it is for.
+const HOST_NAME_FILE: &str = "name";
+
+/// What a node host is called for people: which coordinator's job, and which phase of it.
+fn host_name(coord: &str, id: &str, phase: &str) -> String {
+    format!("{coord}-{id}-{phase}")
+}
+
+/// The name of the directory of a node's step host: the first [`HOST_KEY_LEN`] hex digits of
+/// SHA-256 over the coordinator, the job id and the phase, each ended by a zero byte but the
+/// last. Bounded, whatever the ids are.
+pub fn host_key(coord: &str, id: &str, phase: &str) -> String {
+    let mut k = crate::lan::sha256_hex(format!("{coord}\0{id}\0{phase}").as_bytes());
+    k.truncate(HOST_KEY_LEN);
+    k
+}
+
+/// The socket of a step host of the node whose data directory is `data_dir`. Every one has the
+/// same length, so this also stands for the longest.
+pub fn host_socket(data_dir: &Path, key: &str) -> PathBuf {
+    Jobs::new(data_dir).hosts_dir().join(key).join("sock")
+}
+
 impl Jobs {
     pub fn new(data_dir: &Path) -> Jobs {
         Jobs {
@@ -317,6 +343,18 @@ impl Jobs {
 
     fn hosts_dir(&self) -> PathBuf {
         self.root.join("hosts")
+    }
+
+    /// The directory of the step host of one phase of a job. Its name is [`host_key`], so that
+    /// the socket path under it does not grow with the job's id. A directory with the readable
+    /// name an older node gave it is still used, so that a restart onto this build finds it.
+    fn host_dir(&self, coord: &str, id: &str, phase: &str) -> PathBuf {
+        let hosts = self.hosts_dir();
+        let old = hosts.join(host_name(coord, id, phase));
+        if old.join("host.kv").exists() {
+            return old;
+        }
+        hosts.join(host_key(coord, id, phase))
     }
 
     fn lock_live(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, Arc<Handle>>> {
@@ -409,10 +447,10 @@ impl Jobs {
             .values()
             .filter_map(|h| {
                 let j = h.job.lock().ok()?;
-                (j.state == JobState::Running).then(|| format!("{}-{}-{}", j.coord, j.id, j.phase))
+                (j.state == JobState::Running).then(|| self.host_dir(&j.coord, &j.id, &j.phase))
             })
-            .filter_map(|host| {
-                mason_step_host::registry::HostInfo::read(&self.hosts_dir().join(host))
+            .filter_map(|dir| {
+                mason_step_host::registry::HostInfo::read(&dir)
                     .ok()
                     .map(|i| i.child_pid)
             })
@@ -1031,13 +1069,21 @@ fn run_phase(
         (j.coord.clone(), j.id.clone())
     };
     let hosts = jobs.hosts_dir();
-    let host_id = format!("{coord}-{id}-{name}");
-    let dir = hosts.join(&host_id);
+    let dir = jobs.host_dir(&coord, &id, name);
     if !dir.join("host.kv").exists() {
+        let host_id = host_key(&coord, &id, name);
+        std::fs::create_dir_all(&dir)
+            .and_then(|()| {
+                std::fs::write(
+                    dir.join(HOST_NAME_FILE),
+                    format!("{}\n", host_name(&coord, &id, name)),
+                )
+            })
+            .map_err(|e| format!("cannot start the {name}: {}: {e}", dir.display()))?;
         let o = SpawnOptions {
             host_bin: d.cfg.host_bin.clone(),
             root: hosts.clone(),
-            id: host_id.clone(),
+            id: host_id,
             cmd: vec!["sh".into(), "-c".into(), cmd.to_string()],
             cwd: Some(slot.to_path_buf()),
             env,
@@ -1168,6 +1214,10 @@ fn drive(jobs: &Arc<Jobs>, d: &Arc<Daemon>, h: &Arc<Handle>) {
                 }
             }
             Err(e) => {
+                eprintln!(
+                    "node job {} of coordinator {} failed: {e}",
+                    job.id, job.coord
+                );
                 finish(jobs, h, |j| {
                     j.state = JobState::Failed;
                     j.why = e;
@@ -1275,6 +1325,53 @@ pub fn base64_decode(s: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The data directory `docs/nodes.md` sets a node up with.
+    const DOCUMENTED: &str = "/Users/masonnode/Library/Application Support/mason";
+
+    #[test]
+    fn a_host_key_is_stable_and_differs_when_any_part_does() {
+        let k = host_key("ad7507fdc188cdd0", "t1113r6691-check", "run");
+        assert_eq!(k.len(), HOST_KEY_LEN);
+        assert!(k.bytes().all(|c| c.is_ascii_hexdigit()), "{k}");
+        assert_eq!(k, host_key("ad7507fdc188cdd0", "t1113r6691-check", "run"));
+        for other in [
+            host_key("ad7507fdc188cdd1", "t1113r6691-check", "run"),
+            host_key("ad7507fdc188cdd0", "t1113r6692-check", "run"),
+            host_key("ad7507fdc188cdd0", "t1113r6691-check", "build"),
+            // The parts are kept apart: moving a character between two is another key.
+            host_key("ad7507fdc188cdd0t", "1113r6691-check", "run"),
+        ] {
+            assert_ne!(k, other);
+        }
+    }
+
+    #[test]
+    fn a_long_job_id_fits_a_socket_path_under_the_documented_data_dir() {
+        let id = "x".repeat(60);
+        let key = host_key("ad7507fdc188cdd0", &id, "build");
+        let sock = host_socket(Path::new(DOCUMENTED), &key);
+        assert!(
+            sock.as_os_str().len() <= mason_step_host::host::MAX_SOCK_PATH,
+            "{}",
+            sock.display()
+        );
+        assert!(mason_step_host::host::check_sock_path(&sock).is_ok());
+    }
+
+    #[test]
+    fn a_host_an_older_node_named_is_found_again() {
+        let t = tempfile::tempdir().unwrap();
+        let jobs = Jobs::new(t.path());
+        let hosts = t.path().join("node/hosts");
+        let new = hosts.join(host_key("c", "j", "run"));
+        assert_eq!(jobs.host_dir("c", "j", "run"), new);
+        let old = hosts.join("c-j-run");
+        std::fs::create_dir_all(&old).unwrap();
+        assert_eq!(jobs.host_dir("c", "j", "run"), new, "no host came up there");
+        std::fs::write(old.join("host.kv"), "id=c-j-run\n").unwrap();
+        assert_eq!(jobs.host_dir("c", "j", "run"), old);
+    }
 
     #[test]
     fn names_and_commits_are_checked() {

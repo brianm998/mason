@@ -791,7 +791,7 @@ fn remote_check(
     // It goes in `RunSpec.build`, a separate process, not joined with `&&` (two `cd`s break).
     let build = build_choice(place.map(|(_, s)| s), &spec.cmd);
     let build = spec.build.as_deref().or(build);
-    let site = rm::site_for_run(
+    let mut site = rm::site_for_run(
         d,
         &project,
         &spec.cwd,
@@ -816,6 +816,19 @@ fn remote_check(
             Some(sc) => {
                 // Split as many ways as the lease was given runner units (a flexible request);
                 // one unit runs the whole command on one runner.
+                // A run that waits for a bigger grant (this machine cannot run it) is split
+                // again as this one is.
+                let (d2, p2, ps2, sc2) = (d.clone(), project.clone(), ps.clone(), sc.to_string());
+                site.resplit = Some(std::sync::Arc::new(move |rs, n| {
+                    rm::split_for_grant(
+                        rs,
+                        ps2.shards,
+                        &sc2,
+                        Some(n),
+                        crate::suites::lists_partial(&ps2),
+                        |n| crate::suites::shard_lists(&d2, &p2, &ps2, n),
+                    )
+                }));
                 rm::split_for_grant(
                     rs,
                     ps.shards,
@@ -844,6 +857,7 @@ fn remote_check(
         },
         place.and_then(|(t, _)| t).map_or(0, |t| t.0),
     );
+    grant.note_hold(&rm::holds_dir(&d.cfg.hosts_dir()), &rs.id);
     let note: Mutex<Option<String>> = Mutex::new(None);
     let stop = || {
         let asked = cancel_requests()
@@ -1019,15 +1033,20 @@ fn collect(
     }
     // Meant for GitHub but sent here (`fallback = "local"`): it skipped this machine's queue,
     // so it takes the slots it holds when placed here before it starts, under the same limits
-    // and CPU and thermal holds as any local run. Held until the command ends.
+    // and CPU and thermal holds as any local run. What the caller's lease already holds is not
+    // asked for again (#1149). Held until the command ends.
     let _fallback = if bound_remote && !dir_has_host(d, id) {
         match crate::remote::project_of(d, &spec.cwd) {
-            Some(project) => match crate::remote::fallback_lease_until(
+            Some(project) => match crate::remote::fallback_lease_under(
                 d,
                 &project,
-                spec.place.as_ref().and_then(|(t, _)| *t),
+                spec.place
+                    .as_ref()
+                    .and_then(|(t, _)| *t)
+                    .or_else(|| check_owner(id).map(|(t, _)| mason_core::TaskId(t))),
                 &spec.holds,
                 &format!("{} (no GitHub runner, run here)", spec.label),
+                grant,
                 // A skip ends the wait for this machine's slots too (#873).
                 &|| spec.stop.as_ref().is_some_and(|f| f().is_some()),
             ) {

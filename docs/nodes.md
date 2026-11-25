@@ -103,16 +103,47 @@ sudo chown -R masonnode "/Users/masonnode/Library/Application Support/mason"
 echo -n <sha> | sudo -u masonnode tee "/Users/masonnode/Library/Application Support/mason/runtimes/current"
 ```
 
-From then on **the iMac sends each new runtime itself** (`PUT /node/runtime`) after it has taken
-over one, cross-built and signed for the Studio. The Studio checks the package against the team it
-pinned when you paired (`codesign --verify --strict`, and the team id of the signature), installs
-it, and takes over once its running jobs have ended. A package that is ad hoc, unsigned, from
-another team or broken is refused and nothing of it is installed. This needs `sign_identity` in
-the iMac's `update.toml`, and the iMac itself running a signed `masond`; with neither the Studio is
-updated by hand, as above. `[nodes] push_runtime = false` turns the sending off.
+From then on **updates are automatic**: `mason update` (and the monitor's "Update masond") brings the
+iMac and every paired node to the same MASON version, and you do nothing by hand on the Studio.
 
-**Both Macs must run the same MASON version**: a node that speaks another node protocol is listed as
-incompatible and never used until it has been updated.
+What happens, in this order:
+
+1. The iMac builds its own new runtime. Beside it, under their own compile leases and the same
+   build-jobs cap, it cross-builds the same commit once for each node architecture it knows (the
+   Studio's `arm64`), signed with `sign_identity`.
+2. The iMac's build passes its self-test. Before it takes over, it sends each reachable node its
+   runtime (`PUT /node/runtime`). The Studio checks the package against the team it pinned when you
+   paired (`codesign --verify --strict`, and the team id of the signature), installs it, and takes over
+   once its running jobs have ended; until then it takes no new job. A package that is ad hoc,
+   unsigned, from another team or broken is refused and nothing of it is installed.
+3. The iMac takes over. Both Macs now run the commit, give or take the Studio's running jobs.
+
+This works across a protocol bump: a node that speaks an older node protocol is listed as
+`incompatible` and is sent the runtime all the same, which is how it stops being incompatible.
+
+**What you see.** `mason update status` lists a line for each node, and so does `mason node list` (in
+brackets) and the monitor's Nodes section:
+
+| Shown | Meaning |
+|---|---|
+| `building for arm64` | the cross-build is running |
+| `sending the new runtime` / `sent; installing` | on its way / the node has it |
+| `installed; waiting for 2 jobs to end` | installed; it takes over when its jobs end |
+| `up to date` | it runs the iMac's commit |
+| `failed (reason)` | the send failed; an alert says so too |
+| `will update when it returns` | it was off or silent; the first poll that finds it sends the runtime |
+
+**If a node misses one.** A failed send is tried again by the poll every ten minutes. To send now:
+`mason node update studio` (or `mason node update --all`; the monitor's Nodes row has the same
+button). It builds if it has to, sends, and `mason node list` shows how it goes. Nothing here can
+stop the iMac's own update: a node that cannot be reached is left for the next poll.
+
+This needs `sign_identity` in the iMac's `update.toml`, and the iMac itself running a signed `masond`;
+with neither the Studio is updated by hand, as above. `[nodes] push_runtime = false` turns the sending
+off. The `release` channel has no source to cross-build from, so it does not update nodes yet.
+
+**Both Macs must run the same MASON version** to work together: a node on another protocol takes no
+work until it has been updated.
 
 ### 1.4 `daemon.toml`
 
@@ -129,6 +160,13 @@ That is the whole configuration of a node. Its tunables (how many jobs, how much
 own work it tolerates, how much disk to keep free, the lease) are set **on the coordinator**
 and sent to the node (see section 3). A node that has heard nothing uses safe defaults
 (2 jobs, other work at most 50 % of the CPU, 50 GB free).
+
+**Keep the data directory's path short.** Each job's step host listens on a unix socket at
+`<data-dir>/node/hosts/<16 characters>/sock`, and macOS limits the length of such a path (MASON
+refuses one over 100 characters). So the data directory may be at most 67 characters; the one used
+on this page, `/Users/masonnode/Library/Application Support/mason`, is 51. `mason node doctor`
+checks it. A node running an older MASON put the job's whole id in the path, and could run no job
+under that directory: update it, or until then give it a short one (`/Users/masonnode/m`).
 
 **Keep the node's data on the Studio's internal disk** (the default: everything is under
 `/Users/masonnode`: mirrors, slots, `~/.cache/mason-target`, cargo). Then no volume permission is
@@ -221,7 +259,8 @@ these permissions. Check System Settings → Privacy & Security → Profiles fir
 
 **On the iMac (the coordinator): Local Network.** The first time MASON connects to a node, macOS
 asks "Allow MASON to find devices on local networks?". Allow it: the answer is kept across updates
-because MASON is signed by your team. If it was ever answered "Don't Allow" (a scratch test daemon
+because MASON is signed by your team and runs from one path (see "The coordinator: Local Network"
+below). If it was ever answered "Don't Allow" (a scratch test daemon
 raised the same question on 2026-11-22 for the same app), turn it back on in System Settings →
 Privacy & Security → Local Network. `mason node list` says "local network access denied by macOS"
 for a node it cannot reach while that is off. ("No route to host" is also what a node that is off
@@ -243,6 +282,7 @@ is lost shows up before a job meets it:
   mirrors, slots, the build cache, cargo), within ten seconds each, so a stalled disk or a denial
   is reported and never hangs it; a denied volume says "give MASON Daemon.app Full Disk Access";
 - **volumes:** a volume it uses is mounted;
+- **socket path:** the sockets of its jobs' step hosts fit under the data directory;
 - **listener and mDNS:** the node listener is bound, and mDNS is advertising (a node that is not
   advertised can still be added by address);
 - **toolchains:** `cargo`, `xcode-select` and `java` run as that user without a prompt.
@@ -265,6 +305,91 @@ sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp /Users/masonno
 the Studio is also on a VPN or a guest network, name only the LAN address:
 `bind = ["192.168.1.40"]`. The listener serves `/node/*` only, and only to certificates a
 pairing has trusted; anyone else gets a refusal before a request is read.
+
+## The coordinator: Local Network, and running `masond` from the internal disk
+
+macOS (15 and later) enforces Local Network permission by the executable's Mach-O UUID. It keeps
+one rule per executable path, made when it shows the prompt, and it has to be able to read that
+path to find the UUID. For a bare `masond` in `runtimes/<sha>/` on an external disk it never
+could: on 2026-11-25 the iMac's `masond` got "no route to host" (errno 65) for every connection to
+the LAN, while ping and Terminal reached the node and System Settings showed every `masond` entry
+allowed.
+
+**The log line to look for:**
+
+```bash
+log show --last 3h --predicate 'process == "nehelper"' | grep "0 UUID(s) for com.brianm998.mason.masond"
+```
+
+(Nearby: `Local network allowed by preference for masond (...), but received prompt` and
+`UUID cache miss ... Failed to find com.brianm998.mason.masond using neagent`.)
+
+**What MASON does.** The coordinator execs `masond` from one signed bundle whose path never
+changes, `~/Applications/MASON Coordinator.app` (bundle identifier `com.brianm998.mason.masond`,
+the identifier `masond` is signed with; not `MASON.app`, which is the monitor). Every start and
+every takeover puts that runtime's `masond`, `step-host`, `mason-mcp` and other binaries into
+`Contents/MacOS`, signs the bundle with `sign_identity` and verifies it, then execs it. The bundle
+it replaces is kept as `.MASON Coordinator.previous`. The runtimes stay in the data directory,
+wherever that is. The launch agent does not change.
+
+This happens when all of these hold: macOS, `sign_identity` is set in `update.toml`, the data
+directory is the default `~/Library/Application Support/mason` (or a link to the same place), and
+this daemon is not a node. `app_dir` in `update.toml` overrides the rule: an absolute (or `~/`)
+directory on the internal disk to keep the bundle in (use it if the home directory itself is
+external), or `"off"`. If the bundle cannot be made, `masond` logs a warning and runs from the
+runtime directory as before. At start-up it also warns if its executable is on a volume that is
+not internal.
+
+**After the first takeover with it,** `ps -o command= -p <pid in daemon.json>` should show the
+bundle's path. If macOS asks about the local network, allow it. If it does not ask and
+connections still fail, check the log line above: the old rules for the same identifier may still
+be what macOS finds. Run
+`/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f ~/Applications/"MASON Coordinator.app"`
+and restart `masond`. (Not yet confirmed on a real machine.)
+
+**What MASON says.** When a connection to a node on the LAN fails with "no route to host", the node
+answers ping and `masond` is on an external disk, `mason node list`, `mason node add` and the
+monitor say: "macOS has a Local Network rule for masond but cannot apply it (the binary lives on an
+external disk). Run MASON from the internal disk (see docs/nodes.md)". Otherwise they say "local
+network access denied by macOS". mDNS send failures show only in the daemon's log
+(`mdns_sd ... No route to host`).
+
+**Stopgap: a loopback relay.** Local Network privacy does not cover loopback, and Terminal has the
+permission. Run a small TCP relay in Terminal that listens on `127.0.0.1:17425` and forwards to the
+node's port (7425), and pair through it; keep it running. The node's certificate is still pinned
+end to end:
+
+```bash
+python3 - <<'PY'
+import asyncio
+
+NODE = ("10.10.10.5", 7425)  # the node
+
+async def pipe(r, w):
+    try:
+        while data := await r.read(65536):
+            w.write(data)
+            await w.drain()
+    finally:
+        w.close()
+
+async def serve(r, w):
+    nr, nw = await asyncio.open_connection(*NODE)
+    await asyncio.gather(pipe(r, nw), pipe(nr, w), return_exceptions=True)
+
+async def main():
+    async with await asyncio.start_server(serve, "127.0.0.1", 17425) as s:
+        await s.serve_forever()
+
+asyncio.run(main())
+PY
+```
+
+```bash
+mason node add --host 127.0.0.1:17425 --fp FINGERPRINT --code CODE --name studio
+```
+
+Remove the node and pair it by its own address once the coordinator can reach it.
 
 ## 2. Pair the iMac with the Studio
 
@@ -396,11 +521,18 @@ pair again.
   environment skips this check; its privacy grants will not survive an update.
 - **`macOS denied access to /Volumes/X: give MASON Daemon.app Full Disk Access`.** Add the app under
   Privacy & Security → Full Disk Access (section 1.6), or move the node's data to the internal disk.
+- **`step host exited before it was up (...)`.** The text after it is what the host said; all of it
+  is in `host.err` in the job's folder under `<data-dir>/node/hosts/`, where the file `name` says
+  which job and phase the folder is for.
+- **`socket path too long`.** The data directory's path is too long (section 1.4).
 - **`/Volumes/X is not mounted`.** The disk mounts only after a login unless
   `AutomountDisksWithoutUserLogin` is set (section 1.6).
 - **`a runtime from this coordinator cannot be checked`.** The iMac's `masond` is not signed by a
   team, so it cannot send a runtime; update the Studio by hand (section 1.3).
-- **`local network access denied by macOS` on the iMac.** Turn Local Network on for MASON (section 1.6).
+- **`local network access denied by macOS` on the iMac.** Turn Local Network on for MASON (section
+  1.6). If it is already on, see "The coordinator: Local Network".
+- **`macOS has a Local Network rule for masond but cannot apply it`.** See "The coordinator: Local
+  Network".
 
 - **`mason node add` cannot find the Studio.** mDNS is blocked on some networks (a VPN, Wi-Fi
   isolation, a guest network). Use `--host ADDRESS:7425 --fp FINGERPRINT`, and consider
@@ -410,8 +542,9 @@ pair again.
   (`mason node remove studio`) and pair again.
 - **`not paired (403)`.** The Studio no longer trusts this iMac (its `coordinators.json` was
   cleared, or the coordinator was removed there). Pair again.
-- **`incompatible`.** The two Macs run different MASON versions: update the older one
-  (`mason update`).
+- **`incompatible`.** The two Macs run different MASON versions. `mason update` sends the node the
+  runtime itself; if it is still `failed` or `will update when it returns`, `mason node update NAME`
+  sends it now, and `mason update status` says why it did not go.
 - **A new binary hangs at 0 % CPU on its first launch.** macOS checks every new binary
   (`syspolicyd`). It has been slow to do so on the iMac; give it a few minutes, and check with
   `/usr/bin/pgrep -x syspolicyd`.
