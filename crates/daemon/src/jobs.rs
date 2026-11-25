@@ -1917,9 +1917,24 @@ impl TestChecks {
         }
     }
 
+    /// How many times develop was merged into this worktree while checks ran: by the session's
+    /// own sync (s525) and by the red-develop watch (#1023). A check that sees it change while
+    /// it waited has a different tree from the one it started with.
+    fn merges(&self) -> u64 {
+        self.reds.merges() + self.slots.d.store.red_folds(self.task).unwrap_or(0)
+    }
+
     /// Remember which known-red tests the run `id` of `scope` failed, from its whole log.
     fn remember_red(&self, scope: &str, id: &str) {
         let text = read_whole_log(&self.log_dir.join(format!("{id}.log"))).unwrap_or_default();
+        // The tests that are not known red: if several tasks fail one, develop may be red
+        // (#1023), and if it is fixed these tasks are told.
+        if self.base_fold.is_some() {
+            let store = &self.slots.d.store;
+            let known = crate::knownred::known_for(store, scope);
+            let (new, _) = crate::knownred::split(&crate::rerun::failing_names(&text), &known);
+            let _ = store.put_red_sightings(self.task, scope, &new, crate::daemon::now_ms());
+        }
         let known: Vec<String> = crate::knownred::known_for(&self.slots.d.store, scope)
             .into_iter()
             .map(|k| k.test)
@@ -2306,7 +2321,7 @@ impl TestChecks {
                         );
                         let want = want_of(&self.slots.d, &bspec);
                         self.phase(mason_core::checks::CheckPhase::Waiting);
-                        let merges = self.reds.merges();
+                        let merges = self.merges();
                         let swapped = self.queued(|| {
                             self.slots.swap_for(
                                 want,
@@ -2318,7 +2333,7 @@ impl TestChecks {
                         let Ok(lease) = swapped else {
                             return over();
                         };
-                        let bspec = if self.reds.merges() == merges {
+                        let bspec = if self.merges() == merges {
                             bspec
                         } else {
                             placed(
@@ -2340,6 +2355,10 @@ impl TestChecks {
                             if let Some(r) = self.skipped_run(&name) {
                                 return r;
                             }
+                        }
+                        // develop was folded in under the build: made again on the new tree.
+                        if stopped_by_fold(&res) {
+                            return self.run_suites(dev, scope, light);
                         }
                         let ok = matches!(&res, Ok(o) if o.passed);
                         if !ok {
@@ -2397,7 +2416,7 @@ impl TestChecks {
             );
             let want = want_of(&self.slots.d, &rspec);
             self.phase(mason_core::checks::CheckPhase::Waiting);
-            let merges = self.reds.merges();
+            let merges = self.merges();
             let swapped = self.queued(|| {
                 self.slots
                     .swap_for(want, &rspec.id_prefix, &uses, self.estimate(&name, "run"))
@@ -2405,7 +2424,7 @@ impl TestChecks {
             let Ok(lease) = swapped else {
                 return over();
             };
-            let rspec = if self.reds.merges() == merges {
+            let rspec = if self.merges() == merges {
                 rspec
             } else {
                 placed(
@@ -2434,8 +2453,21 @@ impl TestChecks {
                     return r;
                 }
             }
+            // develop was folded in under a run that began before it: that answer is about the
+            // old tree, so it is dropped and the check is made again on the new one (#1023). The
+            // agent sees one result.
+            if stopped_by_fold(&res) {
+                return self.run_suites(dev, scope, light);
+            }
             match &res {
-                Ok(o) if o.passed => self.reds.passed(&name),
+                Ok(o) if o.passed => {
+                    self.reds.passed(&name);
+                    let _ = self
+                        .slots
+                        .d
+                        .store
+                        .clear_red_sightings(self.task, &name, None);
+                }
                 Ok(o) => self.remember_red(&name, &o.id),
                 Err(_) => {}
             }
@@ -2651,6 +2683,14 @@ impl CheckHandler for TestChecks {
         // What was merged while the check waited, told on its result (s525).
         let mut notes: Vec<String> = note.into_iter().collect();
         notes.extend(self.reds.take_notes());
+        // What the red-develop watch found while the check waited or ran (#1023).
+        notes.extend(
+            self.slots
+                .d
+                .store
+                .take_red_notes(self.task)
+                .unwrap_or_default(),
+        );
         if let (false, CheckRun::Done { passed, summary }) = (notes.is_empty(), &r) {
             r = CheckRun::Done {
                 passed: *passed,
@@ -2702,10 +2742,17 @@ impl TestChecks {
             self.slots.test_step.clone(),
         );
         let suite = suite.to_string();
+        // Also stopped when the red-develop watch folds develop in under the run (#1023).
+        let folds = d.store.red_folds(task.0).unwrap_or(0);
         Arc::new(move || {
-            let step = step.as_deref()?;
-            crate::suites::skip_for(&d, task, &suite, step)
-                .map(|debt| format!("skipped by the owner (debt #{debt})"))
+            let skipped = step.as_deref().and_then(|step| {
+                crate::suites::skip_for(&d, task, &suite, step)
+                    .map(|debt| format!("skipped by the owner (debt #{debt})"))
+            });
+            skipped.or_else(|| {
+                (d.store.red_folds(task.0).unwrap_or(folds) != folds)
+                    .then(|| FOLDED_STOP.to_string())
+            })
         })
     }
 
@@ -2876,7 +2923,7 @@ impl TestChecks {
                 global: true,
             }
         };
-        let merges = self.reds.merges();
+        let merges = self.merges();
         // On GitHub the build is part of the same run as the tests (#771): a second runner
         // starts from nothing and would compile everything again.
         let mut folded: Option<String> = None;
@@ -2910,7 +2957,7 @@ impl TestChecks {
                 let Ok(lease) = swapped else {
                     return over();
                 };
-                let bspec = if self.reds.merges() == merges {
+                let bspec = if self.merges() == merges {
                     bspec
                 } else {
                     ctree = crate::cmdreuse::content_tree(&self.wt);
@@ -2981,7 +3028,7 @@ impl TestChecks {
             return over();
         };
         let grant = grant_of(test_lease);
-        let tspec = if self.reds.merges() == merges {
+        let tspec = if self.merges() == merges {
             tspec
         } else {
             ctree = crate::cmdreuse::content_tree(&self.wt);
@@ -2994,6 +3041,9 @@ impl TestChecks {
         });
         drop(grant);
         self.slots.take_agent_slot_back();
+        if stopped_by_fold(&res) {
+            return self.check_unskipped(name, scope, light);
+        }
         // The build ran inside this run: what it says of the build is recorded for the tree.
         if let (Some(build), Ok(o), Some(t)) = (&folded, &res, &ctree) {
             let bk = crate::cmdreuse::build_key(build);
@@ -3135,6 +3185,14 @@ fn credit_remote_wait<T>(
     credit_wait_with(&|d| extra.add_remote(d), every, wait)
 }
 
+/// The stop note of a check that ran on a tree from before develop was folded in (#1023).
+const FOLDED_STOP: &str = "stopped: develop was merged into your branch while the check ran";
+
+/// Was this run stopped because the red-develop watch folded develop in under it?
+fn stopped_by_fold(res: &Result<crate::hostedcheck::CheckOutcome, String>) -> bool {
+    matches!(res, Ok(o) if o.stopped.as_deref() == Some(FOLDED_STOP))
+}
+
 /// The note a check's stop hook gives (#823): `Some` once the task's open run is no longer the
 /// check's own (`open` is `Some(false)`); `None` while it is open or the world cannot be read.
 fn run_over_note(open: Option<bool>, task: u64) -> Option<String> {
@@ -3169,11 +3227,19 @@ impl CheckSlots {
     /// GitHub is cancelled then and not left holding a runner until a restart.
     fn run_over(&self) -> crate::hostedcheck::StopFn {
         let (d, task, run) = (self.d.clone(), self.task, self.run);
+        // The folds of the red-develop watch when this run was set up: one more means develop was
+        // merged into the tree under a run that started before it (#1023), so the run is stopped
+        // and made again on the folded tree.
+        let folds = d.store.red_folds(task.0).unwrap_or(0);
         std::sync::Arc::new(move || {
             run_over_note(
                 d.world().map(|w| w.open_run(task) == Some(run)).ok(),
                 task.0,
             )
+            .or_else(|| {
+                (d.store.red_folds(task.0).unwrap_or(folds) != folds)
+                    .then(|| FOLDED_STOP.to_string())
+            })
         })
     }
 
