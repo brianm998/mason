@@ -755,8 +755,53 @@ fn execute(c: &Ctx, step: State) {
     }
 }
 
+/// The variable that tells a command how long its run may last, in seconds, counted from when the
+/// command starts (so clock skew between machines does not matter). A suite's runner that can stop
+/// early with a clear verdict reads it (scripts/run-changed-exit-scripts.sh); one that ignores it
+/// is unaffected.
+pub(crate) const RUN_BUDGET_ENV: &str = "MASON_RUN_BUDGET_S";
+
+/// `env` with [`RUN_BUDGET_ENV`] set to `limit`, the limit the daemon holds the run to. A value
+/// the caller set already is replaced: the daemon's limit is the one that kills.
+pub(crate) fn with_run_budget(
+    mut env: Vec<(String, String)>,
+    limit: Duration,
+) -> Vec<(String, String)> {
+    env.retain(|(k, _)| k != RUN_BUDGET_ENV);
+    env.push((RUN_BUDGET_ENV.to_string(), limit.as_secs().to_string()));
+    env
+}
+
 /// The facts a script step or plugin gets about its task, as `MASON_*` variables.
 pub(crate) fn step_env_pairs(c: &Ctx) -> Vec<(String, String)> {
+    let env = step_env_facts(c);
+    match test_step_budget(&c.def, &c.step) {
+        Some(limit) => with_run_budget(env, limit),
+        None => env,
+    }
+}
+
+/// The limit a suite's command is held to when its definition names none (`suites.rs`).
+const SUITE_LIMIT_DEFAULT: Duration = Duration::from_secs(1800);
+
+/// What a test step's suites may run for, as a run budget: the shortest limit among the step's
+/// suites. A suite that reads [`RUN_BUDGET_ENV`] is then never given more time than it has, and
+/// one that ignores it is unaffected. `None` for any other step.
+pub(crate) fn test_step_budget(
+    def: &mason_definition::Definition,
+    step: &mason_definition::Step,
+) -> Option<Duration> {
+    if step.kind != StepType::Test {
+        return None;
+    }
+    step.suites
+        .iter()
+        .filter_map(|n| def.testing.suite(n))
+        .map(|s| s.timeout.unwrap_or(SUITE_LIMIT_DEFAULT))
+        .min()
+}
+
+fn step_env_facts(c: &Ctx) -> Vec<(String, String)> {
     vec![
         ("MASON_TASK".into(), c.task.0.to_string()),
         (
@@ -2060,7 +2105,18 @@ impl TestChecks {
                 cmd: cmd.to_string(),
                 build: None,
                 cwd: self.wt.clone(),
-                env: vec![("MASON_HELD".to_string(), held_text(uses))],
+                // MASON_TASK_CACHE: a runner that keeps its passes between checks of the same
+                // tree (the exit-scripts runner) finds them here; a landing check has no task
+                // and gets none. MASON_EXIT_CACHE=1 lets the exit-scripts runner use it: only an
+                // agent's check sets it, so a test step's verdict never counts cached passes.
+                env: vec![
+                    ("MASON_HELD".to_string(), held_text(uses)),
+                    (
+                        "MASON_TASK_CACHE".to_string(),
+                        crate::taskcache::own_dir(&self.slots.d, self.task),
+                    ),
+                    ("MASON_EXIT_CACHE".to_string(), "1".to_string()),
+                ],
                 limit,
                 tree: crate::hostedcheck::tree_key(&self.wt),
                 holds: uses.clone(),
@@ -5762,6 +5818,69 @@ pub fn cleanup(d: &Arc<Daemon>, task: TaskId, delete_branch: bool) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_run_is_given_its_limit_as_its_budget() {
+        let env = vec![
+            ("MASON_HELD".to_string(), "".to_string()),
+            (super::RUN_BUDGET_ENV.to_string(), "7".to_string()),
+        ];
+        let env = super::with_run_budget(env, std::time::Duration::from_secs(5400));
+        let get = |k: &str| {
+            env.iter()
+                .filter(|(n, _)| n == k)
+                .map(|(_, v)| v.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(get("MASON_RUN_BUDGET_S"), vec!["5400"]);
+        assert_eq!(get("MASON_HELD"), vec![""]);
+    }
+
+    #[test]
+    fn a_remote_run_spec_carries_the_budget_of_its_limit() {
+        let spec = crate::remote::spec_for(
+            "p",
+            "t1r1-check",
+            None,
+            "true",
+            std::time::Duration::from_secs(5400),
+            &[("A".to_string(), "b".to_string())],
+            "ubuntu",
+            "",
+        );
+        assert!(spec
+            .env
+            .contains(&("MASON_RUN_BUDGET_S".to_string(), "5400".to_string())));
+        assert!(spec.env.contains(&("A".to_string(), "b".to_string())));
+    }
+
+    #[test]
+    fn a_test_step_budget_is_its_shortest_suite_limit_and_other_steps_have_none() {
+        let mut def = mason_definition::Definition::empty();
+        let mk = |name: &str, t: Option<u64>| {
+            let mut s = mason_testing::Suite::new(name, "true", mason_testing::ParserKind::Regex);
+            s.timeout = t.map(std::time::Duration::from_secs);
+            s
+        };
+        def.testing.suites = vec![mk("a", Some(3600)), mk("b", None), mk("c", Some(900))];
+        let mut step = mason_definition::Step::new(
+            "test",
+            mason_definition::StepType::Test,
+            mason_core::State::Testing,
+        );
+        step.suites = vec!["a".into(), "b".into()];
+        assert_eq!(
+            super::test_step_budget(&def, &step),
+            Some(std::time::Duration::from_secs(1800))
+        );
+        step.suites = vec!["a".into(), "c".into()];
+        assert_eq!(
+            super::test_step_budget(&def, &step),
+            Some(std::time::Duration::from_secs(900))
+        );
+        step.kind = mason_definition::StepType::Command;
+        assert_eq!(super::test_step_budget(&def, &step), None);
+    }
+
     #[test]
     fn a_check_is_told_to_stop_once_its_run_is_no_longer_the_open_one() {
         assert!(super::run_over_note(Some(false), 7).is_some());
