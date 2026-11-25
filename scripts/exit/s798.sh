@@ -20,7 +20,15 @@ bin=$PWD/target/debug
 owner=${USER:-owner}
 m() { "$bin/mason" --data-dir "$root/d" --config-dir "$root/c" "$@"; }
 jq_state() { sed -n 's/^  "state": "\(.*\)",$/\1/p'; }
-fail() { echo "FAILED: $*" >&2; set +e; m task show 0 >&2 2>&1; m logs 0 >&2 2>&1; tail -30 "$root/masond.log" >&2; exit 1; }
+# The first line names the state and the last log line: the runner's `cause s798:` summary keeps only that line.
+fail() {
+  set +e
+  local state last
+  state=$(m task show 0 --json 2>/dev/null | jq_state)
+  last=$(m logs 0 2>/dev/null | grep -v '^[[:space:]]*$' | tail -n 1)
+  echo "FAILED: $* (task state: ${state:-unknown}; last log line: ${last:-none})" >&2
+  m task show 0 >&2 2>&1; m logs 0 >&2 2>&1; tail -30 "$root/masond.log" >&2; exit 1
+}
 
 echo "== setup: a repository with one suite that can run tests by name"
 mkdir -p "$root/c/projects"
@@ -78,6 +86,7 @@ git -C "$root/repo" push -q origin main
 git -C "$root/repo" fetch -q origin
 
 cat > "$root/agent.sh" <<'SH'
+mkdir -p src
 printf '#[test]\nfn needs_the_code() {}\n' > src/a.rs
 git add -A; git -c user.name=t -c user.email=t@t commit -qm "only a test"
 SH
