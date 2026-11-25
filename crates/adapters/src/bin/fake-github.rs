@@ -29,9 +29,10 @@
 //! Remote runs (#697), when `run-artifact.zip` exists in DIR: `GET .../actions/runs?head_sha=SHA`
 //! answers with one completed, successful run (id 9001, or one per commit when `run-artifact-red.zip` exists: its runs whose commit holds a file `red.marker` get that zip instead) whose branch is the `mason/run/**` ref of
 //! the bare repository named in `origin-path` that points at SHA (none: no run). Its jobs, its
-//! artifact list and the artifact's zip (the file's bytes) are answered, and
+//! artifact list, the run itself (`GET .../actions/runs/N`) and the artifact's zip (the file's
+//! bytes) are answered, and
 //! `POST .../actions/runs/9001/cancel` is appended to `cancel.log`. While a file `run-hold`
-//! exists in DIR the run is `queued`, not completed.
+//! exists in DIR the run and its job are `queued`, not completed.
 //!
 //! A comment is appended to `comments.log`; closing an issue (`PATCH`) marks it
 //! closed in `issues.json`. Every request is appended to `requests.log`.
@@ -270,6 +271,31 @@ fn serve(dir: &Path, stream: std::net::TcpStream) {
                 &json!({"total_count": runs.len(), "workflow_runs": runs}).to_string(),
             );
         }
+        // One run, as the remote executor polls it once it knows the id (`run_changed`).
+        ("GET", ["repos", _, _, "actions", "runs", n])
+            if is_run(dir, n) && dir.join("run-artifact.zip").exists() =>
+        {
+            let held = dir.join("run-hold").exists();
+            let (status, conclusion) = if held {
+                ("queued", Value::Null)
+            } else {
+                ("completed", json!("success"))
+            };
+            let branch = std::fs::read_to_string(dir.join(format!("run-{n}.sha")))
+                .ok()
+                .and_then(|sha| run_branch(dir, sha.trim()));
+            let id = n.parse::<u64>().unwrap_or(9001);
+            reply(
+                &mut out,
+                "200 OK",
+                &[],
+                &json!({"id": id, "status": status, "conclusion": conclusion,
+                        "head_branch": branch, "event": "push",
+                        "html_url": format!("https://github.com/o/r/actions/runs/{id}"),
+                        "created_at": "2026-11-20T10:00:00Z"})
+                .to_string(),
+            );
+        }
         ("GET", ["repos", _, _, "actions", "runs", n, "artifacts"]) if is_run(dir, n) => {
             let url = format!("http://{host}/repos/o/r/actions/artifacts/{n}/zip");
             reply(
@@ -355,8 +381,13 @@ fn serve(dir: &Path, stream: std::net::TcpStream) {
         ("GET", ["repos", _, _, "actions", "runs", n, "jobs"]) => {
             let mut jobs = read_json(&dir.join(format!("jobs-{n}.json")), json!([]));
             if is_run(dir, n) && jobs.as_array().is_some_and(Vec::is_empty) {
-                jobs = json!([{"name": "run", "status": "completed",
-                               "started_at": "2026-11-20T10:00:06Z"}]);
+                // A held run's job has no runner yet.
+                jobs = if dir.join("run-hold").exists() {
+                    json!([{"name": "run", "status": "queued", "started_at": null}])
+                } else {
+                    json!([{"name": "run", "status": "completed",
+                            "started_at": "2026-11-20T10:00:06Z"}])
+                };
             }
             let c = jobs.as_array().map_or(0, Vec::len);
             reply(
