@@ -739,6 +739,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s975**: an owner's retry note is also kept per task and shown to the reviewer and later develop rounds as "Owner decisions on this task"; see decision 0968.
 - **s978**: `lint_files` now reads the repository guards' `<path>: <message>` and `<path>:<line>: <message>` lines, for paths in the batch's union diff only, so the existing file blame parks the one task that added the file instead of bisecting.
 - **s979**: Every notification row in both monitors is one line, and a row with more to say has a "?" button that opens a dialog with the full reason, the choices and an "Open task #N" action for each task it names; `Banner` gained a `detail` field.
+- **s980**: A test step's expected total now comes only from runs at the base itself (new `suite_size` table), never from another task's green count, and a live count past an expected total raises it; the monitor shows "N tests" when done exceeds total.
 - **s982**: the daemon serves `GET /onboarding/candidates`, `POST /onboarding/plan` and `POST /onboarding/apply` (owner only) over the `mason-onboard` crate, with `[onboarding] roots` (default `["~/git"]`), so a desktop monitor can add a local repository and answer the same questions as `mason init`; see decision 0975.
 - **s983**: The monitor draws a task's blockers as one wrapping text of whole links (a sidebar row names three and "and N more"; the task page drops its "waiting for" line when the blocker list is shown), so 29 blockers no longer crush into one-character columns.
 - **s984**: A double click on the Failed tile now opens the lone failed task, or a Failed page listing every failed task (with "N of M" when capped); the phone tile tap and `mason://section/failed` do the same.
@@ -779,5 +780,9 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s1066**: s43 now expects the daemon's real ceiling (9999) and s49 picks the highest-numbered checkpoint, fixing two of the exit scripts red on shard 6.
 - **s1067**: `mason project rename` now sets MASON_AS from USER, LOGNAME or "owner" like the daemon's default owner, so s965 passes where USER is unset or differs.
 - **s1068**: The Compose conformance settle now waits until the model's last applied view reaches the daemon's seq (as step() and the Rust capturer do), and both capturers print a stderr line when they leave on the quiet fallback.
+- **s1072**: Windows clippy red on develop is fixed by compiling the unix-only CAFFEINATE and XCODEBUILD shim constants only under cfg(unix).
+- **s1073**: The Swift monitor-tool's settle now waits on `lastViewSeq` (moved only by views and snapshots) instead of `lastSeq`, which events also move, as Compose already does.
+- **s1079**: The exit-script runner kills the limit watcher's sleep when a script ends, so the macOS legs no longer wait out the whole job limit.
 - **s1081**: The Rust conformance capturer no longer leaves its settle after 1.5 s of quiet; it waits for the step's view, with a 5 s quiet fallback that is logged.
+- **s1086**: s101 now starts its ad-hoc range at 9960 and expects the daemon's real ceiling (9999), so it raises the `numbers` alert again.
 <!-- status:end -->
