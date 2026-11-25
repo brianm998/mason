@@ -793,5 +793,6 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s1080**: `conformance expected` now waits 300 ms of quiet after reaching the daemon's seq, so its checkpoint dumps include the step's trailing views.
 - **s1081**: The Rust conformance capturer no longer leaves its settle after 1.5 s of quiet; it waits for the step's view, with a 5 s quiet fallback that is logged.
 - **s1082**: daemon:restarts counts only unplanned starts, so a takeover from `mason update` no longer counts as a restart.
+- **s1083**: A step host queued for a lease is no longer reported as silent (stuck:host); the wait is left to overloaded:slots and stuck:wait.
 - **s1086**: s101 now starts its ad-hoc range at 9960 and expects the daemon's real ceiling (9999), so it raises the `numbers` alert again.
 <!-- status:end -->
