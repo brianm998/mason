@@ -137,7 +137,7 @@ public enum Format {
         let u = unit.isEmpty ? "" : " \(unit)"
         switch totalSource {
         case .sourceReported, .sourceCounted, .sourceExpected, .sourceMinimum:
-            if total > 0 {
+            if total > 0 && (done <= total || totalSource == .sourceReported) {
                 return "\(group(done)) of \(group(total))\(u), \(percent(done: done, total: total) ?? 0)%"
             }
         case .sourceHistory:
