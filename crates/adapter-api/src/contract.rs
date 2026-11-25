@@ -246,25 +246,29 @@ pub fn tool_spec(tool: &str) -> Option<(String, Value)> {
             &["summary"],
         ),
         "submit_diagnosis" => s(
-            "End your diagnosis with exactly one of these verdicts: 'retry' (run again from a step, \
-             with a note for the next agent), 'explore' (the plan does not hold: back to exploring, \
-             with the reason), 'close' (the work is already done or a duplicate, with evidence) or \
-             'ask' (only the owner can decide: your recommendation first). You may not change files.",
+            "End your diagnosis with a decision card for the owner: 2 to 4 options, exactly one \
+             recommended, each complete enough to carry out without further questions. An option's \
+             action is 'retry' (run again from a step, with a note for the next agent), 'explore' \
+             (the plan does not hold: back to exploring, with the reason), 'close' (the work is \
+             already done or a duplicate, with evidence) or 'cancel'. Splitting, landing a part or \
+             re-scoping are notes on a retry or explore. You may not change files.",
             json!({
-                "verdict": {"type": "string", "enum": ["retry", "explore", "close", "ask"]},
-                "summary": {"type": "string", "description": "What went wrong and why, up to 2000 characters"},
-                "step": {"type": "string", "description": "retry: the step to run again from (default: the step that failed)"},
-                "note": {"type": "string", "description": "retry: what the next agent must know, up to 2000 characters"},
-                "no_code_change": {"type": "boolean", "description": "retry: true only if the task's code needs no change and running it again is expected to pass (a flaky or environment failure); the daemon then retries by itself"},
-                "reason": {"type": "string", "description": "explore: why the plan does not hold"},
-                "kind": {"type": "string", "enum": ["already_done", "duplicate"], "description": "close: which"},
-                "duplicate_of": {"type": "integer", "description": "close, duplicate: the other task's number"},
-                "evidence": {"type": "string", "description": "close: what shows it (commit, file, test, task)"},
-                "question": {"type": "string", "description": "ask: the one decision, one sentence"},
-                "recommendation": {"type": "string", "description": "ask: the answer you recommend, first on the card"},
-                "alternatives": {"type": "array", "items": {"type": "string"}, "description": "ask: other answers"}
+                "summary": {"type": "string", "description": "What went wrong and why, and why the recommended option beats the others; up to 2000 characters"},
+                "options": {"type": "array", "minItems": 2, "maxItems": 4, "items": {"type": "object", "properties": {
+                    "label": {"type": "string", "description": "What choosing it does, up to 160 characters"},
+                    "recommended": {"type": "boolean", "description": "true on exactly one option"},
+                    "action": {"type": "string", "enum": ["retry", "explore", "close", "cancel"]},
+                    "step": {"type": "string", "description": "retry: the step to run again from (default: the step that failed)"},
+                    "note": {"type": "string", "description": "retry: what the next agent must know, up to 2000 characters"},
+                    "reason": {"type": "string", "description": "explore: why the plan does not hold, and what to do instead"},
+                    "kind": {"type": "string", "enum": ["already_done", "duplicate"], "description": "close: which"},
+                    "duplicate_of": {"type": "integer", "description": "close, duplicate: the other task's number"},
+                    "evidence": {"type": "string", "description": "close: what shows it (commit, file, test, task)"}},
+                    "required": ["label", "recommended", "action"]}},
+                "no_code_change": {"type": "boolean", "description": "true only if the task's code needs no change and running it again is expected to pass (a flaky or environment failure); a recommended retry is then applied by itself"},
+                "evidence_lines": {"type": "array", "maxItems": 10, "items": {"type": "string"}, "description": "The decisive lines, at most 10"}
             }),
-            &["verdict", "summary"],
+            &["summary", "options"],
         ),
         "submit_review" => s(
             "Submit your review. verdict is 'approve' or 'changes'. Every finding has a severity: only \
@@ -400,6 +404,81 @@ fn scope_list(a: &Value, key: &str, out: &mut Vec<String>) {
             }
         }
         Some(_) => out.push(format!("{key}: must be a list of strings")),
+    }
+}
+
+/// The problems of a `submit_diagnosis`: a card of 2 to 4 options, exactly one recommended,
+/// each with an action that carries what it needs.
+fn diagnosis_problems(a: &Value, p: &mut Vec<String>) {
+    text(a, "summary", 2000, p);
+    if a.get("no_code_change").is_some_and(|c| !c.is_boolean()) {
+        p.push("no_code_change: must be true or false".into());
+    }
+    match a.get("evidence_lines") {
+        None => {}
+        Some(Value::Array(l))
+            if l.len() <= crate::card::EVIDENCE_LINES && l.iter().all(Value::is_string) => {}
+        Some(_) => p.push(format!(
+            "evidence_lines: at most {} strings",
+            crate::card::EVIDENCE_LINES
+        )),
+    }
+    let Some(opts) = a.get("options").and_then(Value::as_array) else {
+        p.push(
+            "options: required, 2 to 4 options (a single `verdict` is no longer accepted)".into(),
+        );
+        return;
+    };
+    if !(2..=4).contains(&opts.len()) {
+        p.push(format!("options: {} given, need 2 to 4", opts.len()));
+    }
+    let recommended = opts
+        .iter()
+        .filter(|o| o.get("recommended").and_then(Value::as_bool) == Some(true))
+        .count();
+    if recommended != 1 {
+        p.push(format!(
+            "options: {recommended} are recommended, exactly one must be"
+        ));
+    }
+    for (i, o) in opts.iter().enumerate() {
+        let mut q: Vec<String> = vec![];
+        text(o, "label", crate::card::OPTION_MAX, &mut q);
+        if o.get("recommended").is_some_and(|r| !r.is_boolean()) {
+            q.push("recommended: must be true or false".into());
+        }
+        match o.get("action").and_then(Value::as_str) {
+            Some("retry") => {
+                text(o, "note", 2000, &mut q);
+                if o.get("step").is_some_and(|s| !s.is_string()) {
+                    q.push("step: must be a string".into());
+                }
+            }
+            Some("explore") => {
+                text(o, "reason", 2000, &mut q);
+            }
+            Some("close") => {
+                text(o, "evidence", 2000, &mut q);
+                match o.get("kind").and_then(Value::as_str) {
+                    Some("already_done") => {}
+                    Some("duplicate") => {
+                        if o.get("duplicate_of").and_then(Value::as_u64).is_none() {
+                            q.push(
+                                "duplicate_of: the other task's number is required for a duplicate"
+                                    .into(),
+                            );
+                        }
+                    }
+                    _ => q.push("kind: required, 'already_done' or 'duplicate'".into()),
+                }
+            }
+            Some("cancel") => {}
+            Some(v) => q.push(format!(
+                "action: {v:?} must be 'retry', 'explore', 'close' or 'cancel'"
+            )),
+            None => q.push("action: required, 'retry', 'explore', 'close' or 'cancel'".into()),
+        }
+        p.extend(q.into_iter().map(|m| format!("options[{i}].{m}")));
     }
 }
 
@@ -566,37 +645,7 @@ pub fn validate(tool: &str, a: &Value) -> Result<(), Vec<String>> {
             }
         }
         "submit_health" => health_problems(a, &mut p),
-        "submit_diagnosis" => {
-            text(a, "summary", 2000, &mut p);
-            match a.get("verdict").and_then(Value::as_str) {
-                Some("retry") => {
-                    text(a, "note", 2000, &mut p);
-                }
-                Some("explore") => {
-                    text(a, "reason", 2000, &mut p);
-                }
-                Some("close") => {
-                    text(a, "evidence", 2000, &mut p);
-                    match a.get("kind").and_then(Value::as_str) {
-                        Some("already_done") => {}
-                        Some("duplicate") => {
-                            if a.get("duplicate_of").and_then(Value::as_u64).is_none() {
-                                p.push("duplicate_of: the other task's number is required for a duplicate".into());
-                            }
-                        }
-                        _ => p.push("kind: required, 'already_done' or 'duplicate'".into()),
-                    }
-                }
-                Some("ask") => {
-                    text(a, "question", 400, &mut p);
-                    text(a, "recommendation", 600, &mut p);
-                }
-                Some(v) => p.push(format!(
-                    "verdict: {v:?} must be 'retry', 'explore', 'close' or 'ask'"
-                )),
-                None => p.push("verdict: required, 'retry', 'explore', 'close' or 'ask'".into()),
-            }
-        }
+        "submit_diagnosis" => diagnosis_problems(a, &mut p),
         "submit_review" => {
             text(a, "summary", 4000, &mut p);
             let findings: &[Value] = a
@@ -1291,37 +1340,77 @@ mod tests {
     }
 
     #[test]
-    fn a_diagnosis_needs_what_its_verdict_needs() {
+    fn a_diagnosis_is_a_card_of_two_to_four_options_with_one_recommended() {
         let ok = |v: Value| validate("submit_diagnosis", &v).is_ok();
-        assert!(ok(
-            json!({"verdict": "retry", "summary": "s", "note": "use the fixture"})
-        ));
+        let retry = |rec: bool| {
+            json!({"label": "Retry with a note", "recommended": rec,
+                                        "action": "retry", "note": "use the fixture"})
+        };
+        let explore = |rec: bool| {
+            json!({"label": "Re-scope", "recommended": rec,
+                                          "action": "explore", "reason": "the plan names a gone file"})
+        };
+        let close = json!({"label": "Close it", "recommended": false, "action": "close",
+                           "kind": "already_done", "evidence": "commit abc"});
+        let cancel = json!({"label": "Cancel it", "recommended": false, "action": "cancel"});
+        let card = |o: Vec<Value>| json!({"summary": "s", "options": o});
+        assert!(ok(card(vec![retry(true), explore(false)])));
+        assert!(ok(card(vec![
+            retry(true),
+            explore(false),
+            close.clone(),
+            cancel.clone()
+        ])));
+        assert!(!ok(card(vec![retry(true)])), "one option");
         assert!(
-            !ok(json!({"verdict": "retry", "summary": "s"})),
-            "a retry needs a note"
+            !ok(card(vec![
+                retry(true),
+                explore(false),
+                close.clone(),
+                cancel.clone(),
+                cancel.clone()
+            ])),
+            "five options"
         );
-        assert!(ok(
-            json!({"verdict": "explore", "summary": "s", "reason": "the plan names a file that is gone"})
-        ));
-        assert!(ok(
-            json!({"verdict": "close", "summary": "s", "kind": "already_done", "evidence": "commit abc"})
-        ));
         assert!(
-            !ok(
-                json!({"verdict": "close", "summary": "s", "kind": "duplicate", "evidence": "same"})
-            ),
+            !ok(card(vec![retry(false), explore(false)])),
+            "none recommended"
+        );
+        assert!(
+            !ok(card(vec![retry(true), explore(true)])),
+            "two recommended"
+        );
+        assert!(!ok(card(vec![
+            retry(true),
+            json!({"label": "x", "recommended": false, "action": "rm_rf"})
+        ])));
+        assert!(
+            !ok(card(vec![
+                retry(true),
+                json!({"label": "x", "recommended": false, "action": "close", "kind": "duplicate", "evidence": "same"})
+            ])),
             "a duplicate names its task"
         );
-        assert!(ok(
-            json!({"verdict": "close", "summary": "s", "kind": "duplicate", "duplicate_of": 4, "evidence": "same"})
-        ));
-        assert!(ok(
-            json!({"verdict": "ask", "summary": "s", "question": "Keep it?", "recommendation": "Keep it"})
-        ));
-        assert!(!ok(
-            json!({"verdict": "ask", "summary": "s", "question": "Keep it?"})
-        ));
-        assert!(!ok(json!({"verdict": "maybe", "summary": "s"})));
+        assert!(ok(card(vec![
+            retry(true),
+            json!({"label": "x", "recommended": false, "action": "close", "kind": "duplicate", "duplicate_of": 4, "evidence": "same"})
+        ])));
+        assert!(
+            !ok(card(vec![
+                json!({"label": "x", "recommended": true, "action": "retry"}),
+                explore(false)
+            ])),
+            "a retry needs a note"
+        );
+        let long = "x".repeat(crate::card::OPTION_MAX + 1);
+        assert!(!ok(card(vec![
+            json!({"label": long, "recommended": true, "action": "cancel"}),
+            cancel.clone()
+        ])));
+        assert!(
+            !ok(json!({"verdict": "retry", "summary": "s", "note": "n"})),
+            "old shape"
+        );
         // Only a diagnosis session has the tool, and it changes nothing.
         assert_eq!(StepKind::Diagnose.terminal_tools(), &["submit_diagnosis"]);
         assert!(StepKind::Diagnose.read_only());
