@@ -8,11 +8,11 @@ Three exit scripts asserted on behaviour that later changes replaced on purpose:
 
 Change the tests, not the code.
 
-- s1068 and s1026 check the current `Tool.kt` markers: the view-seq predicate, the agreeing round trips, and the 60 s failure naming what was awaited. The Rust capturer's quiet-exit line is still checked, because it still exists.
+- s1068 and s1026 check the current `Tool.kt` markers, as s1100 landed them. The Rust capturer's quiet-exit line is still checked, because it still exists.
 - s70 still requires the passed count to rise to 40 and the final total to be 40, with source "minimum" or "expected". It no longer requires every record to show a total of 40: a minimum total follows the count.
 
 Rejected: sizing suites from task greens again, which would undo #959 and contradict its store test.
 
 ## Trust
 
-`scripts/exit/**` is protected; editing s70, s1068 and s1026 needs the owner's approval.
+`scripts/exit/**` is protected; editing s70 needs the owner's approval.
