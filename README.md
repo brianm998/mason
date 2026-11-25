@@ -786,6 +786,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s1072**: Windows clippy red on develop is fixed by compiling the unix-only CAFFEINATE and XCODEBUILD shim constants only under cfg(unix).
 - **s1073**: The Swift monitor-tool's settle now waits on `lastViewSeq` (moved only by views and snapshots) instead of `lastSeq`, which events also move, as Compose already does.
 - **s1074**: run-exit-scripts.sh runs each exit script in its own process group and ends the group when the script ends, so a leftover child or watcher `sleep` can no longer hold the output pipe and stall a shard.
+- **s1075**: The exit-script runner's no-timeout(1) fallback can now be forced and tested with MASON_EXIT_FALLBACK=1, and a narrowed test shard no longer passes `--doc` beside a target selector.
 - **s1076**: the macOS exit-script watcher's `sleep` is now detached from the runner's output pipe as well as killed, so a leftover one cannot stall a shard.
 - **s1077**: The macOS exit-scripts job gets 90 minutes, and an exit test proves that a finished script no longer waits for the no-timeout watcher's sleep.
 - **s1078**: A new exit test checks that the macOS fallback in run-exit-scripts.sh runs one exit script after another, reports failures, and leaves no watcher `sleep` behind.
