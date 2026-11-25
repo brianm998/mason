@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# s1074: on a machine with no timeout(1) the runner's fallback watcher must not leave a
-# `sleep` holding the output pipe after a script passes.
+# s1074: neither the runner's fallback watcher (used with no timeout(1)) nor a child a script
+# leaves behind may hold the output pipe after the script ends.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 . scripts/lib/bounded.sh
 unset MASON_EXIT_SHARD MASON_EXIT_PLAN
 root=$(mktemp -d); trap 'rm -rf "$root"' EXIT
-mkdir -p "$root/bin" "$root/x"
+mkdir -p "$root/bin" "$root/x" "$root/y"
 for t in bash git awk sed grep tee mktemp rm cat tail head cut tr printf basename dirname sleep pkill kill env perl wait; do
   p=$(command -v "$t" 2>/dev/null || true)
   case $p in /*) ln -sf "$p" "$root/bin/$t" ;; esac
@@ -30,6 +30,17 @@ rc=0; out=$(run 2>&1) || rc=$?
 [ "$rc" -ne 0 ]
 case $out in *"FAILED: "*s02.sh*) ;; *) echo "no FAILED line: $out"; exit 1 ;; esac
 case $out in *"(over "*) echo "wrongly reported over"; exit 1 ;; esac
+# a child left behind with stdout inherited is reaped, with a limit and without one. The guard
+# is only a hang detector: the child would otherwise hold the pipe past it.
+printf '#!/usr/bin/env bash\nsleep 600 &\necho $! > "%s"\nexit 0\n' "$root/child" > "$root/y/s04.sh"
+for lim in 1234 0; do
+  rc=0; out=$(bounded 120 env PATH="$root/bin" MASON_EXIT_DIR="$root/y" MASON_EXIT_WEIGHTS=/dev/null \
+    MASON_EXIT_SCRIPT_LIMIT_S=$lim "$(command -v bash)" scripts/run-exit-scripts.sh 2>&1) || rc=$?
+  child=$(cat "$root/child"); rm "$root/child"
+  if kill -0 "$child" 2>/dev/null; then kill "$child"; echo "leftover sleep 600 (limit $lim)"; exit 1; fi
+  [ "$rc" -eq 0 ] || { echo "runner exit $rc (limit $lim): $out"; exit 1; }
+  case $out in *"s04: "*" s"*) ;; *) echo "no pass line (limit $lim): $out"; exit 1 ;; esac
+done
 # a script over the limit is reported over N s
 rm "$root/x/s02.sh"
 printf '#!/usr/bin/env bash\nsleep 30\n' > "$root/x/s03.sh"
