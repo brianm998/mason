@@ -3674,7 +3674,7 @@ pub fn spec_for(
         rerun: suite.and_then(|s| s.rerun.clone()),
         results_file: suite.and_then(|s| s.results_file.clone()),
         limit,
-        env: env.to_vec(),
+        env: crate::jobs::with_run_budget(env.to_vec(), limit),
         runs_on: runs_on.to_string(),
         tree_key: tree_key.to_string(),
         shards: 0,
