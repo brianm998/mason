@@ -4903,7 +4903,11 @@ pub(crate) mod tests {
     fn queue_ranked(b: &Broker, t: u64, landing: bool, uses: &BTreeMap<String, u32>) -> u64 {
         let mut st = lock(&b.st);
         st.rank_seq += 1;
-        let rank = order(&st, Rank::new(false, 3, 0, t, st.rank_seq, landing));
+        let mut rank = Rank::new(false, 3, 0, t, st.rank_seq, false);
+        if landing {
+            rank = rank.landing();
+        }
+        let rank = order(&st, rank);
         let id = st
             .ledger
             .submit(rank, needs_of(uses, None), &format!("#{t}"), t);

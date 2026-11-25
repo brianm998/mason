@@ -3,7 +3,7 @@
 //! The order of GitHub runner units (2026-11-21): landing, then checks, then test steps, then
 //! debt payments; urgent first; the longest wait first. Local slots keep their own rule.
 
-use mason_scheduler::{Kind, Ledger, Needs, Rank};
+use mason_scheduler::{explain, Kind, Ledger, Needs, Rank, WaitCause};
 
 fn rank(steps: u32, priority: u8, id: u64) -> Rank {
     Rank::new(false, steps, priority, id, id, false)
@@ -85,11 +85,32 @@ fn debts_together_hold_at_most_debt_units_and_a_second_waits() {
     let b = l.submit(rank(0, 0, 2).debt(), both, "debt b", 2);
     let p = l.schedule(10, None, None);
     assert_eq!(p.grants, vec![a], "gha has room, the debt cap does not");
-    let w = &p.waits[&b];
-    assert!(w.runs_ahead.iter().sum::<u32>() >= 1);
+    assert_eq!(
+        p.waits[&b].cause,
+        WaitCause::Full {
+            resource: "gha-debt".into()
+        }
+    );
     // A test step still gets the free units meanwhile.
     let step = l.submit(rank(2, 2, 3), gha(8), "test step", 11);
     assert_eq!(l.schedule(11, None, None).grants, vec![step]);
     l.release(a);
     assert_eq!(l.schedule(12, None, None).grants, vec![b]);
+}
+
+#[test]
+fn a_wait_names_the_kinds_ahead() {
+    let mut l = Ledger::new();
+    l.set_capacity("gha", 1, Kind::Pool);
+    l.adopt(gha(1), "other", 0);
+    l.submit(rank(1, 2, 1).landing(), gha(1), "a", 1);
+    l.submit(rank(1, 2, 2).landing(), gha(1), "b", 2);
+    l.submit(rank(1, 2, 3).check(), gha(1), "c", 3);
+    let last = l.submit(rank(1, 2, 4), gha(1), "d", 4);
+    let p = l.schedule(10, None, None);
+    let text = explain(&p.waits[&last], 10);
+    assert!(
+        text.ends_with(": 2 landing runs and 1 check ahead"),
+        "{text}"
+    );
 }
