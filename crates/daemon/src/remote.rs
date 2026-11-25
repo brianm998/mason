@@ -270,9 +270,35 @@ pub struct RunSpec {
     /// The lists name tests of the whole suite, not only of this narrowed run (#873): a shard
     /// that ran none of them is then no defect, so no shard is counted as listing any.
     pub partial_lists: bool,
+    /// How many shards the suite asked for, when this run was split for a grant of fewer
+    /// runner units ([`split_for_grant`]); 0 when it was not sized by a grant.
+    pub shards_wanted: u32,
 }
 
 impl RunSpec {
+    /// The runners this run is on: its shards, or one.
+    pub fn runners(&self) -> u32 {
+        self.shards.max(1)
+    }
+
+    /// Why this run must not start on GitHub: it was granted fewer runners than the fewest that
+    /// can finish the suite inside its limit ([`min_shards`]). `None` when it may.
+    pub fn too_few_runners(&self) -> Option<String> {
+        let min = min_shards(self.shards_wanted);
+        (self.shards_wanted > 1 && self.runners() < min).then(|| {
+            format!(
+                "granted {} of {} runner units; the suite needs at least {min} to finish inside its limit",
+                self.runners(),
+                self.shards_wanted
+            )
+        })
+    }
+
+    /// Did this run have fewer runners than the suite asked for?
+    pub fn short_of_runners(&self) -> bool {
+        self.shards_wanted > 1 && self.runners() < self.shards_wanted
+    }
+
     fn sharded(&self) -> bool {
         self.shards > 1
     }
@@ -855,7 +881,7 @@ pub fn run_json(spec: &RunSpec) -> String {
     }
     // The `run` step stops a couple of minutes before MASON cancels the run, so the upload step
     // still runs and the output so far reaches us (#776).
-    let timeout_min = spec.limit.as_secs().div_ceil(60).saturating_sub(2).max(1);
+    let timeout_min = step_timeout_min(spec.limit);
     serde_json::json!({
         "toolchains": toolchains(&spec.suite),
         "run": spec.id,
@@ -1517,6 +1543,36 @@ fn unzip_program() -> &'static str {
     }
 }
 
+/// What `read_artifact` says of an artifact the runner made no `result.json` for.
+const NO_RESULT_JSON: &str = "the artifact has no result.json";
+
+/// The minutes the workflow's `run` step may take of a run limited to `limit`: a couple of
+/// minutes less, so the upload step still runs (#776).
+fn step_timeout_min(limit: Duration) -> u64 {
+    limit.as_secs().div_ceil(60).saturating_sub(2).max(1)
+}
+
+/// Did a job of the run stay on its runner for the whole of the `run` step's allowance? Such a
+/// job was stopped by GitHub at the step limit, before it could write `result.json` (and before
+/// MASON's own limit, which is two minutes later). The job's own start and end say so; a job
+/// with no end time is measured to `now` from when the run was picked up.
+fn hit_step_limit(
+    jobs: &[mason_adapters::github::ActionJob],
+    picked_ms: Option<u64>,
+    now_ms: u64,
+    limit: Duration,
+) -> bool {
+    let allowed_s = step_timeout_min(limit) * 60;
+    jobs.iter().filter(|j| is_run_job(&j.name)).any(|j| {
+        let started = j.started_at.as_deref().and_then(parse_iso);
+        let ended = j.completed_at.as_deref().and_then(parse_iso);
+        match (started, ended) {
+            (Some(a), Some(b)) => b.saturating_sub(a) >= allowed_s,
+            _ => picked_ms.is_some_and(|p| now_ms.saturating_sub(p) / 1000 >= allowed_s),
+        }
+    })
+}
+
 /// What the artifact holds.
 struct Artifact {
     /// 1-based; 1 for a run that is not sharded.
@@ -1586,7 +1642,7 @@ fn read_artifact(zip: &Path, into: &Path) -> Result<Artifact, String> {
         std::fs::read(p).ok()
     };
     let output = regular("output.log").ok_or("the artifact has no output.log")?;
-    let meta = regular("result.json").ok_or("the artifact has no result.json")?;
+    let meta = regular("result.json").ok_or(NO_RESULT_JSON)?;
     let v: serde_json::Value =
         serde_json::from_slice(&meta).map_err(|e| format!("result.json: {e}"))?;
     Ok(Artifact {
@@ -1602,6 +1658,47 @@ fn read_artifact(zip: &Path, into: &Path) -> Result<Artifact, String> {
             .map(str::to_string),
         results: regular_files(&into.join("results")),
     })
+}
+
+/// The `output.log` of an artifact that was read into `into` (the one a cut-off run uploads
+/// without a `result.json`).
+fn cut_output(into: &Path) -> Vec<u8> {
+    std::fs::read(into.join("output.log")).unwrap_or_default()
+}
+
+/// A run that was stopped at the limit (MASON's, or the workflow step's): recorded as timed out
+/// with the output kept and a closing line naming the tests that never finished, so the
+/// failing-names and still-running logic see it as it sees a cut-off run. `kept` is the output
+/// so far; `note` is the cut-off line.
+fn record_cut(
+    site: &Site,
+    st: &mut State,
+    log: &Path,
+    rec: &Path,
+    kept: &[u8],
+    note: &str,
+) -> Outcome {
+    st.timed_out = true;
+    st.code = -1;
+    st.signal = 9;
+    st.collected = true;
+    let mut text = String::from_utf8_lossy(kept).into_owned();
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(note);
+    text.push('\n');
+    let hung = crate::suites::still_running(&text);
+    if !hung.is_empty() {
+        text.push_str(&format!(
+            "Tests that started and never finished: {}\n",
+            hung.join(", ")
+        ));
+    }
+    let _ = std::fs::write(log, &text);
+    st.save(rec);
+    delete_ref(site, st, rec);
+    Outcome::Done(finished_from(st, log))
 }
 
 fn finished_from(st: &State, log: &Path) -> Finished {
@@ -1786,33 +1883,15 @@ pub fn execute(
         if let Some(p) = st.picked_ms {
             if now >= p.saturating_add(spec.limit.as_millis() as u64) {
                 cancel(site, &st);
-                st.timed_out = true;
-                st.code = -1;
-                st.signal = 9;
-                st.collected = true;
                 // The output so far (the workflow uploads it even for a cut-off run), then the
                 // cut-off line naming the tests that never finished.
                 let kept = output_after_cancel(site, &st, &scratch);
-                let mut text = String::from_utf8_lossy(&kept).into_owned();
-                if !text.is_empty() && !text.ends_with('\n') {
-                    text.push('\n');
-                }
-                text.push_str(&format!(
-                    "(the run was cancelled after its limit of {} s on the runner)\n",
-                    spec.limit.as_secs()
-                ));
-                let hung = crate::suites::still_running(&text);
-                if !hung.is_empty() {
-                    text.push_str(&format!(
-                        "Tests that started and never finished: {}\n",
-                        hung.join(", ")
-                    ));
-                }
                 let _ = std::fs::remove_dir_all(&scratch);
-                let _ = std::fs::write(&log, &text);
-                st.save(&rec);
-                delete_ref(site, &mut st, &rec);
-                return Ok(Outcome::Done(finished_from(&st, &log)));
+                let note = format!(
+                    "(the run was cancelled after its limit of {} s on the runner)",
+                    spec.limit.as_secs()
+                );
+                return Ok(record_cut(site, &mut st, &log, &rec, &kept, &note));
             }
         } else if github_budget::wait_s().is_some() {
             // GitHub's quota is used up until its reset: whether a runner has the run cannot be
@@ -1902,6 +1981,7 @@ pub fn execute(
             &scratch,
             &rec,
             now,
+            spec.limit,
         );
         // Each `run` job that has finished gives its runner unit back at once, so the next in
         // line need not wait for the slowest shard (#820). Until the run's jobs exist (the
@@ -1918,6 +1998,15 @@ pub fn execute(
                 abandon(&mut st);
                 let _ = std::fs::remove_dir_all(&scratch);
                 return Err(Fail::Environmental(why));
+            }
+            Ok(Step::Cut(kept)) => {
+                let _ = std::fs::remove_dir_all(&scratch);
+                let note = format!(
+                    "(the run was cancelled after its limit of {} s on the runner: GitHub stopped the run step at {} min)",
+                    spec.limit.as_secs(),
+                    step_timeout_min(spec.limit)
+                );
+                return Ok(record_cut(site, &mut st, &log, &rec, &kept, &note));
             }
             Ok(Step::Parts(got, missing)) => {
                 let _ = std::fs::remove_dir_all(&scratch);
@@ -2173,6 +2262,8 @@ enum Step {
     /// A sharded run's artifacts, and the shards that sent none.
     Parts(Vec<Artifact>, Vec<u32>),
     Fail(String),
+    /// The run ended at the workflow step's limit with no `result.json`: its output so far.
+    Cut(Vec<u8>),
 }
 
 /// One look at the run: find it, see whether a runner has it, and when it is over take its
@@ -2187,6 +2278,7 @@ fn poll(
     scratch: &Path,
     rec: &Path,
     now: u64,
+    limit: Duration,
 ) -> Result<Step, mason_adapter_api::service::ApiError> {
     let secs = now / 1000;
     let mut run_changed = true;
@@ -2310,6 +2402,7 @@ fn poll(
     })?;
     if !st.shards.is_empty() {
         let (mut got, mut absent) = (vec![], vec![]);
+        let mut cut: Vec<(u32, Vec<u8>)> = vec![];
         for k in st.shards.clone() {
             let zip = scratch.join(format!("artifact-{k}.zip"));
             if !site
@@ -2328,8 +2421,24 @@ fn poll(
                     a.shard = k;
                     got.push(a);
                 }
+                Err(e) if e == NO_RESULT_JSON => cut.push((k, cut_output(&into))),
                 Err(e) => return Ok(Step::Fail(format!("run {}: shard {k}: {e}", run.url))),
             }
+        }
+        if !cut.is_empty() {
+            let jobs = fresh_jobs(site, run.id)?;
+            if hit_step_limit(&jobs, st.picked_ms, now, limit) {
+                let mut out = vec![];
+                for (k, o) in cut {
+                    out.extend(format!("--- shard {k} ---\n").into_bytes());
+                    out.extend(o);
+                }
+                return Ok(Step::Cut(out));
+            }
+            return Ok(Step::Fail(format!(
+                "run {}: shard {}: {NO_RESULT_JSON}",
+                run.url, cut[0].0
+            )));
         }
         if !absent.is_empty() && *misses < 2 {
             *misses += 1;
@@ -2363,8 +2472,30 @@ fn poll(
     })?;
     match read_artifact(&zip, &into) {
         Ok(a) => Ok(Step::Got(a)),
+        Err(e) if e == NO_RESULT_JSON => {
+            // GitHub stopped the `run` step at its limit: the output uploaded, no result. That is
+            // a timeout, not a run without a result.
+            let jobs = fresh_jobs(site, run.id)?;
+            if hit_step_limit(&jobs, st.picked_ms, now, limit) {
+                Ok(Step::Cut(cut_output(&into)))
+            } else {
+                Ok(Step::Fail(format!("run {}: {e}", run.url)))
+            }
+        }
         Err(e) => Ok(Step::Fail(format!("run {}: {e}", run.url))),
     }
+}
+
+/// The jobs of a run as GitHub has them now (not the last answer of the jobs' ETag).
+fn fresh_jobs(
+    site: &Site,
+    id: u64,
+) -> Result<Vec<mason_adapters::github::ActionJob>, mason_adapter_api::service::ApiError> {
+    Ok(site
+        .gh
+        .remote_run_jobs_changed(id, None)?
+        .map(|(jobs, _)| jobs)
+        .unwrap_or_default())
 }
 
 /// The jobs of a run as the monitor lists them.
@@ -2484,6 +2615,11 @@ pub fn execute_sharded(
     stop: &dyn Fn() -> Option<StopWhy>,
     grant: &Grant,
 ) -> Result<Outcome, Fail> {
+    // Granted too few runners to finish the suite inside its limit: nothing is pushed, and the
+    // lease is not asked for again (the caller drops it whole).
+    if let Some(why) = spec.too_few_runners() {
+        return Err(Fail::Environmental(why));
+    }
     // A lease emptied by an earlier run of the same suite or check asks again before this one
     // is pushed (#820).
     if !grant.regain(units_for(&spec.runs_on, spec.shards.max(1)), stop) {
@@ -2656,6 +2792,14 @@ pub fn shards_granted(shards: u32, granted: Option<u32>) -> u32 {
     granted.map_or(shards, |g| g.clamp(1, shards.max(1)))
 }
 
+/// The fewest runners a suite of `shards` shards can finish on inside its limit. The suite's
+/// shard count was sized for its limit, so half as many runners is taken to be the most it can
+/// be squeezed to: a workspace sized for 8 runners does not finish in an hour on one (the
+/// 47 runs in 36 h that hit the step limit).
+pub fn min_shards(shards: u32) -> u32 {
+    shards.div_ceil(2).max(1)
+}
+
 /// `rs` split for a run of `shards` shards that was granted `granted` runner units: that many
 /// ways (`lists` makes the tests of each), with `shard_command` on each runner; one unit runs
 /// `rs`'s own command whole on one runner. Suite runs and agents' checks both split by this.
@@ -2668,6 +2812,7 @@ pub fn split_for_grant(
     lists: impl FnOnce(u32) -> Vec<Vec<String>>,
 ) -> RunSpec {
     let n = shards_granted(shards, granted);
+    rs.shards_wanted = shards;
     if n > 1 {
         rs.shards = n;
         rs.shard_command = Some(shard_command.to_string());
@@ -3820,6 +3965,7 @@ pub fn spec_for(
         shard_lists: vec![],
         shard_command: None,
         partial_lists: false,
+        shards_wanted: 0,
     }
 }
 
@@ -3888,6 +4034,28 @@ pub fn no_result(r: &Result<Outcome, Fail>, limit: Duration) -> Option<String> {
     }
 }
 
+/// A run that is not to go (again) to GitHub: the local path when the project's `fallback` is
+/// `local`, else an [`env_err`]. Told to `said` and logged.
+fn no_github_run(
+    site: &Site,
+    spec: &RunSpec,
+    why: String,
+    said: &dyn Fn(&str),
+    grant: &Grant,
+    mut notes: Vec<String>,
+) -> Result<(Option<Outcome>, Vec<String>), String> {
+    tracing::warn!(run = %spec.id, "{why}");
+    if site.fallback_local {
+        let note = format!("{why}; running it on this Mac");
+        said(&note);
+        notes.push(note);
+        grant.give_back();
+        return Ok((None, notes));
+    }
+    said(&why);
+    Err(env_err(&why))
+}
+
 /// A run that did not give a result, tried again once on GitHub (#873). Both misses are told to
 /// `said`, which shows them in the check's progress. `Ok((outcome, notes))`: `outcome` is the
 /// result of the run that gave one; `None` means both runs missed and the project's `fallback`
@@ -3904,6 +4072,11 @@ pub fn run_retrying(
     let mut notes: Vec<String> = vec![];
     let mut whys: Vec<String> = vec![];
     let mut attempt = spec.clone();
+    // Too few runners for the suite to finish inside its limit: not pushed at all, and not tried
+    // again either (the same shape would be refused again).
+    if let Some(why) = spec.too_few_runners() {
+        return no_github_run(site, spec, why, said, grant, notes);
+    }
     for n in 0..2u32 {
         if n > 0 {
             if let Some(why) = stop() {
@@ -3933,6 +4106,20 @@ pub fn run_retrying(
                 said(&format!("{why}; running it on this Mac"));
                 grant.give_back();
                 return Ok((None, notes));
+            }
+            // A run that hit the runner's limit on fewer runners than the suite asked for would
+            // hit it again as the same shape: it is not run again on GitHub.
+            Some(why)
+                if n == 0
+                    && spec.short_of_runners()
+                    && matches!(&r, Ok(Outcome::Done(f)) if f.timed_out) =>
+            {
+                let why = format!(
+                    "the run hit the runner's limit on {} of {} shards; not running it again on one runner ({why})",
+                    spec.runners(),
+                    spec.shards_wanted
+                );
+                return no_github_run(site, spec, why, said, grant, notes);
             }
             Some(why) => whys.push(why),
         }
@@ -4102,6 +4289,7 @@ mod tests {
             shard_lists: vec![],
             shard_command: None,
             partial_lists: false,
+            shards_wanted: 0,
         }
     }
 
@@ -4133,6 +4321,9 @@ mod tests {
         Hung,
         /// As `Hung`, but no artifact ever appears.
         HungNoArtifact,
+        /// GitHub stops the `run` step at its limit: the job ends 480 s after it started and the
+        /// artifact holds `output.log` and no `result.json`.
+        StepTimeout,
     }
 
     struct FakeGh {
@@ -4338,6 +4529,11 @@ mod tests {
             }
             if u.contains("/actions/runs/4242/jobs") {
                 let (_, job) = self.phase();
+                let ended = (job == "completed").then_some(if self.mode == Mode::StepTimeout {
+                    "2026-11-20T10:08:06Z"
+                } else {
+                    "2026-11-20T10:00:30Z"
+                });
                 // The jobs the workflow makes from the dispatch's inputs, as GitHub lists them.
                 let last = self.dispatches.lock().unwrap().last().cloned();
                 let inputs: serde_json::Value = last
@@ -4364,8 +4560,10 @@ mod tests {
                             .and_then(|v| v.get(i).copied());
                         let status = own.unwrap_or(job);
                         let started = (status != "queued").then_some("2026-11-20T10:00:06Z");
+                        // A job that completed has an end time, as GitHub gives it.
+                        let completed = (status == "completed").then_some(ended).flatten();
                         serde_json::json!({"id": 9000 + i, "name": n, "status": status,
-                            "started_at": started})
+                            "started_at": started, "completed_at": completed})
                     })
                     .collect();
                 return ok(serde_json::json!({ "jobs": jobs }));
@@ -4430,6 +4628,24 @@ mod tests {
             "zip: {}",
             String::from_utf8_lossy(&o.stderr)
         );
+        zip
+    }
+
+    /// A zip of a run GitHub stopped at the step limit: the output, no `result.json`.
+    fn cut_artifact(dir: &Path, output: &str) -> PathBuf {
+        let src = dir.join("cut-src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("output.log"), output).unwrap();
+        let zip = dir.join("cut.zip");
+        let _ = std::fs::remove_file(&zip);
+        let o = Command::new("zip")
+            .arg("-qr")
+            .arg(&zip)
+            .arg("output.log")
+            .current_dir(&src)
+            .output()
+            .unwrap();
+        assert!(o.status.success());
         zip
     }
 
@@ -5405,6 +5621,172 @@ mod tests {
     }
 
     #[test]
+    fn a_run_the_step_limit_stopped_is_timed_out_with_its_output_not_a_run_without_a_result() {
+        token();
+        let r = repo();
+        let zip = cut_artifact(r._t.path(), HUNG_OUT);
+        let gh = FakeGh::new(&r, &zip, Mode::StepTimeout);
+        let s = site(&r, gh.clone(), clock(), false);
+        let logs = tempfile::tempdir().unwrap();
+        let Outcome::Done(f) =
+            execute(&s, &spec("st1"), logs.path(), &|| None, &Grant::test()).unwrap()
+        else {
+            panic!("not done");
+        };
+        assert!(f.timed_out && f.code == -1 && f.signal == 9);
+        assert!(f.output.starts_with("test a ... ok\n"), "{}", f.output);
+        assert!(f
+            .output
+            .contains("the run was cancelled after its limit of 600 s"));
+        assert!(
+            f.output.contains("never finished: holds_one\n"),
+            "{}",
+            f.output
+        );
+        assert!(
+            gh.cancels.lock().unwrap().is_empty(),
+            "it had ended already"
+        );
+    }
+
+    /// `run_retrying` of a run on one runner of `wanted` that GitHub stops at the step limit.
+    fn step_timeout_retry(wanted: u32, fallback: bool) -> (Retried, usize) {
+        token();
+        let r = repo();
+        let zip = cut_artifact(r._t.path(), "test a ... ok\n");
+        let gh = FakeGh::new(&r, &zip, Mode::StepTimeout);
+        let s = site(&r, gh.clone(), clock(), fallback);
+        let said = Mutex::new(vec![]);
+        let dir = r._t.path().join("runs");
+        let mut sp = spec("st2");
+        sp.shards_wanted = wanted;
+        let out = run_retrying(
+            &s,
+            &sp,
+            &dir,
+            &|| None,
+            &|t| said.lock().unwrap().push(t.to_string()),
+            &Grant::test(),
+        );
+        let pushes = gh.dispatches.lock().unwrap().len();
+        ((out, gh, said.into_inner().unwrap()), pushes)
+    }
+
+    #[test]
+    fn a_short_run_that_hit_the_step_limit_is_not_pushed_again_as_the_same_shape() {
+        // 1 runner of 2 wanted (fewest 1): it ran, hit the limit, and goes to this Mac.
+        let ((out, _, said), pushes) = step_timeout_retry(2, true);
+        let (o, notes) = out.unwrap();
+        assert!(o.is_none(), "the caller runs it here");
+        assert_eq!(pushes, 1, "pushed once, not again");
+        assert!(
+            notes[0].contains("hit the runner's limit on 1 of 2 shards; not running it again"),
+            "{notes:?}"
+        );
+        assert_eq!(said, notes);
+        // Without a fallback it is an environmental error with the same wording.
+        let ((out, _, _), pushes) = step_timeout_retry(2, false);
+        let e = out.unwrap_err();
+        assert!(
+            environmental(&e).unwrap().contains("not running it again"),
+            "{e}"
+        );
+        assert_eq!(pushes, 1);
+    }
+
+    #[test]
+    fn a_run_with_its_full_runners_that_hit_the_step_limit_keeps_its_one_retry() {
+        let ((out, _, _), pushes) = step_timeout_retry(1, false);
+        let e = out.unwrap_err();
+        assert!(environmental(&e).unwrap().contains("; then "), "{e}");
+        assert_eq!(pushes, 2, "the one retry on GitHub");
+    }
+
+    #[test]
+    fn a_run_granted_too_few_runners_is_never_pushed() {
+        token();
+        let r = repo();
+        let zip = artifact(r._t.path(), GREEN, 0, None);
+        let gh = FakeGh::new(&r, &zip, Mode::Normal);
+        let s = site(&r, gh.clone(), clock(), true);
+        let dir = r._t.path().join("runs");
+        let mut sp = spec("st3");
+        sp.shards_wanted = 8;
+        let (o, notes) = run_retrying(&s, &sp, &dir, &|| None, &|_| {}, &Grant::test()).unwrap();
+        assert!(o.is_none());
+        assert!(
+            notes[0].contains("granted 1 of 8 runner units"),
+            "{notes:?}"
+        );
+        assert!(gh.dispatches.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_refused_or_fallen_back_run_with_an_emptied_lease_asks_for_no_units_and_holds_none() {
+        use crate::sched::tests::{is_held, queue_gha, runner_broker};
+        token();
+        for fallback in [false, true] {
+            let r = repo();
+            let zip = artifact(r._t.path(), GREEN, 0, None);
+            let gh = FakeGh::new(&r, &zip, Mode::Normal);
+            let s = site(&r, gh.clone(), clock(), fallback);
+            let dir = r._t.path().join("runs");
+            let bdir = tempfile::tempdir().unwrap();
+            let b = runner_broker(bdir.path(), 2, 1, 0);
+            let lease = b
+                .acquire(
+                    mason_core::TaskId(1),
+                    "#1 test step",
+                    mason_scheduler::Rank::new(false, 3, 0, 1, 1, false),
+                    mason_scheduler::Needs::of(&[("gha", 2)]),
+                    &|| true,
+                    &mut |_| {},
+                )
+                .unwrap();
+            let grant = Grant::of(lease);
+            // An earlier run of the same lease finished all its jobs: nothing is held.
+            grant.give(&units_of(2));
+            assert!(grant.units().is_empty());
+            let mut sp = spec("rf");
+            sp.shards_wanted = 8;
+            let refused = execute_sharded(&s, &sp, &dir, &|| None, &grant);
+            assert!(matches!(refused, Err(Fail::Environmental(_))));
+            let r = run_retrying(&s, &sp, &dir, &|| None, &|_| {}, &grant);
+            if fallback {
+                assert!(r.unwrap().0.is_none(), "it runs on this Mac");
+            } else {
+                assert!(r.is_err());
+            }
+            // Nothing was pushed, nothing waits for units, and the grant holds none.
+            assert!(gh.dispatches.lock().unwrap().is_empty());
+            assert_eq!(b.gha_waiting(), 0);
+            assert!(grant.units().is_empty());
+            // So the whole pool is free for the next in line.
+            let next = queue_gha(&b, 5);
+            assert!(is_held(&b, next));
+        }
+    }
+
+    #[test]
+    fn the_fewest_runners_is_half_the_shards_and_a_grant_below_it_is_refused() {
+        let lists = |n: u32| vec![vec![]; n as usize];
+        let mk = |granted| split_for_grant(spec("m"), 8, "c", granted, false, lists);
+        assert!(mk(Some(1)).too_few_runners().is_some());
+        assert!(mk(Some(3)).too_few_runners().is_some());
+        let five = mk(Some(5));
+        assert_eq!(five.shards, 5);
+        assert!(five.too_few_runners().is_none());
+        assert!(mk(Some(4)).too_few_runners().is_none());
+        let all = mk(None);
+        assert_eq!(all.shards, 8);
+        assert!(all.too_few_runners().is_none());
+        // A suite of two or one shards can always run on one runner.
+        let two = split_for_grant(spec("m"), 2, "c", Some(1), false, lists);
+        assert!(two.too_few_runners().is_none());
+        assert_eq!((min_shards(8), min_shards(3), min_shards(1)), (4, 2, 1));
+    }
+
+    #[test]
     fn a_run_past_its_limit_whose_artifact_never_comes_keeps_only_the_cut_off_line() {
         token();
         let r = repo();
@@ -6351,6 +6733,7 @@ mod tests {
             name: name.into(),
             status: status.into(),
             started_at: None,
+            completed_at: None,
             conclusion: None,
             labels: vec![],
             steps: steps
