@@ -153,7 +153,10 @@ fn bad_settings_are_refused_and_a_change_keeps_the_comments_and_says_who() {
     .unwrap();
     let text = std::fs::read_to_string(review::path(d)).unwrap();
     assert!(text.contains("# my review"), "{text}");
-    assert!(text.contains("at = \"03:30\" # after the backups"), "{text}");
+    assert!(
+        text.contains("at = \"03:30\" # after the backups"),
+        "{text}"
+    );
     assert!(text.contains("changed_by = \"brian\""), "{text}");
     assert!(text.contains("changed_at = "), "{text}");
     let s = review::status(d)["settings"].clone();
@@ -182,9 +185,17 @@ fn it_is_filed_at_the_next_midnight_once_after_a_gap_and_never_while_one_is_open
     // Open: not filed again, however late.
     assert_eq!(review::tick_at(d, day0 + 3 * DAY, 0), None);
     let row = d.store.schedule(review::ROW).unwrap().unwrap();
-    assert!(row.last_status.contains("still open"), "{}", row.last_status);
+    assert!(
+        row.last_status.contains("still open"),
+        "{}",
+        row.last_status
+    );
     assert!(review::file(d, day0 + 3 * DAY).is_err(), "nor by hand");
-    answer(d, first, &json!({"findings": [], "nothing_found": nothing(&[])}));
+    answer(
+        d,
+        first,
+        &json!({"findings": [], "nothing_found": nothing(&[])}),
+    );
     cancel(d, first);
 
     // Not watched for days: one catch-up run, and no second.
@@ -437,7 +448,11 @@ fn findings_are_proposed_capped_at_ten_and_the_run_is_summed_up() {
         "crash (because the facts show none)",
         "1 not filed, over the cap of 10",
     ] {
-        assert!(row.last_status.contains(part), "{part}: {}", row.last_status);
+        assert!(
+            row.last_status.contains(part),
+            "{part}: {}",
+            row.last_status
+        );
     }
     let refused = std::fs::read_to_string(dir.path().join("analyst-refused.txt")).unwrap();
     assert!(refused.contains("unknown category"), "{refused}");

@@ -1840,7 +1840,10 @@ mod tests {
 
     #[test]
     fn a_duplicate_refusal_names_the_task() {
-        let why = format!("{}12: \"x\"; do not file it again", crate::proposals::DUPLICATE_OF);
+        let why = format!(
+            "{}12: \"x\"; do not file it again",
+            crate::proposals::DUPLICATE_OF
+        );
         assert_eq!(duplicated_task(&why), Some(12));
         assert_eq!(duplicated_task("evidence is empty"), None);
     }
