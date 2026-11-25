@@ -8,7 +8,6 @@ cd "$(git rev-parse --show-toplevel)"
 root=$(mktemp -d /tmp/mason-s965.XXXXXX); daemon=""
 cleanup() { [ -n "$daemon" ] && kill -9 "$daemon" 2>/dev/null || true; rm -rf "$root"; }
 trap cleanup EXIT
-export USER="${USER:-owner}"
 cargo build -q --workspace --bins
 bin=$PWD/target/debug
 sha=0123456789abcdef0123456789abcdef01234567
