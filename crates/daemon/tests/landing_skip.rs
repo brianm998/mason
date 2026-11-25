@@ -163,39 +163,42 @@ fn skipping_stops_the_build_floor_of_a_batch_with_no_batch_tier() {
 #[test]
 fn a_skip_of_a_step_that_is_not_the_test_step_is_refused() {
     let w = world_built("window = \"60s\"\n", &[]);
-    let t = w.task("one", &[("x/one.txt", "1")]);
-    let def = w.d.current_def(w.d.project_id_by_name("scratch").unwrap());
-    let non_test = def
-        .steps
-        .iter()
-        .find(|s| s.kind != mason_definition::StepType::Test)
-        .expect("the definition has a step that is not the test step")
-        .name
-        .clone();
-    let before = debt_scopes(&w, t).len();
-    let err = skip(&w.d, t, &format!("step:{non_test}"), "r", "owner", false).unwrap_err();
-    assert!(err.contains("only the test step"), "{err}");
-    assert_eq!(debt_scopes(&w, t).len(), before, "no debt is recorded");
-    // The Test step still can be.
-    skip(&w.d, t, "step:test", "r", "owner", false).unwrap();
+    // Checked before the task is admitted: a task already in landing has a skip of any other
+    // step renamed to the Test step's (`landing_scope`), which is kept and is not a refusal.
+    w.task_with("one", &[("x/one.txt", "1")], |w, t| {
+        let def = w.d.current_def(w.d.project_id_by_name("scratch").unwrap());
+        let non_test = def
+            .steps
+            .iter()
+            .find(|s| s.kind != mason_definition::StepType::Test)
+            .expect("the definition has a step that is not the test step")
+            .name
+            .clone();
+        let before = debt_scopes(w, t).len();
+        let err = skip(&w.d, t, &format!("step:{non_test}"), "r", "owner", false).unwrap_err();
+        assert!(err.contains("only the test step"), "{err}");
+        assert_eq!(debt_scopes(w, t).len(), before, "no debt is recorded");
+        // The Test step still can be.
+        skip(&w.d, t, "step:test", "r", "owner", false).unwrap();
 
-    // A debt recorded before the refusal is reported as having no effect.
-    let project =
-        w.d.project(w.d.project_id_by_name("scratch").unwrap())
-            .unwrap();
-    let old =
-        w.d.store
-            .add_debt(
-                t.0,
-                &project.id,
-                &format!("step:{non_test}"),
-                "r",
-                "owner",
-                false,
-                0,
-            )
-            .unwrap();
-    for x in w.d.store.debts(Some(t.0), true).unwrap() {
-        assert_eq!(skip_has_no_effect(&w.d, &x), x.id == old, "{}", x.scope);
-    }
+        // A debt recorded before the refusal is reported as having no effect.
+        let project =
+            w.d.project(w.d.project_id_by_name("scratch").unwrap())
+                .unwrap();
+        let old =
+            w.d.store
+                .add_debt(
+                    t.0,
+                    &project.id,
+                    &format!("step:{non_test}"),
+                    "r",
+                    "owner",
+                    false,
+                    0,
+                )
+                .unwrap();
+        for x in w.d.store.debts(Some(t.0), true).unwrap() {
+            assert_eq!(skip_has_no_effect(&w.d, &x), x.id == old, "{}", x.scope);
+        }
+    });
 }

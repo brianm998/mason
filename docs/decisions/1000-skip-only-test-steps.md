@@ -11,5 +11,9 @@ review (b) would change verdict logic. Trust: `suites.rs` is in PROTECTED and ne
 its only skip actions are "Skip testing", offered for tasks in testing or landing, and "all
 tests"; it has no menu for choosing another step.
 
-Not verified: tests and the exit script were not run locally (they run on GitHub via run_check);
-the monitor was not exercised.
+Verified locally: `cargo test -p mason-daemon --test landing_skip` (12 passed, including the refusal
+and no-effect test, which checks before the task is admitted because a task already in landing has
+a skip renamed to the Test step's, by design) and `scripts/exit/s1007.sh` (a real masond).
+
+Not verified: the monitor was not exercised; its menu was read in code only
+(`views.rs::allowed_actions` offers `skip_test` only in testing and landing).
