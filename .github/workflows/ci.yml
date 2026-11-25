@@ -9,8 +9,8 @@ run-name: "${{ github.event_name == 'workflow_dispatch' && 'CI: full' || github.
 on:
   push:
     branches: [develop, "stage/**"]
-    # The landing's status-block commit touches only README.md; it must not
-    # cancel the run of the batch it follows (decision 0447).
+    # A push that touches only README.md changes nothing CI checks; it must not
+    # cancel or replace the run of the push before it (decision 0447).
     paths-ignore: ["README.md"]
   pull_request:
   # The full matrix runs only from here (decision 0793): MASON's full-test schedule

@@ -363,22 +363,16 @@ fn a_red_reverification_after_the_base_moved_ends_and_does_not_hang() {
 
 #[test]
 fn the_retest_after_a_moved_base_holds_a_compile_lease_and_not_the_repository_lock() {
-    // `scripts/gen-status.sh` runs after the batch is assembled; here it announces
-    // itself and waits, which is the time to move the base in.
+    // The worktree setup runs after the batch is assembled; here it announces itself and
+    // waits, which is the time to move the base in.
     let started;
     {
         let probe = tempfile::tempdir().unwrap();
         started = probe.path().join("started");
         std::mem::forget(probe);
     }
-    let gen = format!("touch {}\nsleep 2\n", started.display());
-    let w = world_full(
-        "window = \"1s\"\n",
-        &|_| String::new(),
-        &[("scripts/gen-status.sh", &gen)],
-        "sleep 5",
-        true,
-    );
+    let hook = format!("touch {}; sleep 2", started.display());
+    let w = world_assembled(&|_| String::new(), &hook, "sleep 5");
     let t = w.task("moves", &[("x/m.txt", "1")]);
     wait_for("the batch to be assembled", 90, || started.exists());
     w.s.push_files(&[("other.txt", "o")], "the base moves");
@@ -407,28 +401,22 @@ fn the_retest_after_a_moved_base_holds_a_compile_lease_and_not_the_repository_lo
 fn the_retest_builds_holding_compile_then_tests_without_it() {
     // The project's overlay names a `build` beside its `test`: the re-test after a
     // moved base builds first holding the compile slot, then lets it go to test.
-    let gen_started;
+    let assembled;
     let built;
     let tested;
     {
         let probe = tempfile::tempdir().unwrap();
-        gen_started = probe.path().join("started");
+        assembled = probe.path().join("started");
         built = probe.path().join("built");
         tested = probe.path().join("tested");
         std::mem::forget(probe);
     }
-    let gen = format!("touch {}\nsleep 2\n", gen_started.display());
+    let hook = format!("touch {}; sleep 2", assembled.display());
     let build = format!("build = \"sleep 1; touch {}\"\n", built.display());
     let test_cmd = format!("touch {}; sleep 3", tested.display());
-    let w = world_full(
-        "window = \"1s\"\n",
-        &|_| build.clone(),
-        &[("scripts/gen-status.sh", &gen)],
-        &test_cmd,
-        true,
-    );
+    let w = world_assembled(&|_| build.clone(), &hook, &test_cmd);
     let t = w.task("moves", &[("x/m.txt", "1")]);
-    wait_for("the batch to be assembled", 90, || gen_started.exists());
+    wait_for("the batch to be assembled", 90, || assembled.exists());
     w.s.push_files(&[("other.txt", "o")], "the base moves");
     wait_for("the re-test's build to hold the compile slot", 60, || {
         w.d.broker.used("compile") >= 1 && !built.exists()
@@ -449,26 +437,20 @@ fn a_batch_whose_testing_was_skipped_is_rebuilt_but_not_retested_when_the_base_m
     // s429: the owner skipped every task's test step to land a backlog. A base move used to
     // re-test such a batch in full, the only full run it got, holding the queue for half an
     // hour; now it is rebuilt and lands.
-    let gen_started;
+    let assembled;
     let built;
     let tested;
     {
         let probe = tempfile::tempdir().unwrap();
-        gen_started = probe.path().join("started");
+        assembled = probe.path().join("started");
         built = probe.path().join("built");
         tested = probe.path().join("tested");
         std::mem::forget(probe);
     }
-    let gen = format!("touch {}\nsleep 2\n", gen_started.display());
+    let hook = format!("touch {}; sleep 2", assembled.display());
     let build = format!("build = \"touch {}\"\n", built.display());
     let test_cmd = format!("touch {}", tested.display());
-    let w = world_full(
-        "window = \"1s\"\n",
-        &|_| build.clone(),
-        &[("scripts/gen-status.sh", &gen)],
-        &test_cmd,
-        true,
-    );
+    let w = world_assembled(&|_| build.clone(), &hook, &test_cmd);
     let t = w.task("skipped", &[("x/s.txt", "1")]);
     w.d.store
         .add_debt(
@@ -481,7 +463,7 @@ fn a_batch_whose_testing_was_skipped_is_rebuilt_but_not_retested_when_the_base_m
             0,
         )
         .unwrap();
-    wait_for("the batch to be assembled", 90, || gen_started.exists());
+    wait_for("the batch to be assembled", 90, || assembled.exists());
     w.s.push_files(&[("other.txt", "o")], "the base moves");
     wait_for("the batch to land", 90, || w.landed(t));
     assert!(w.on_main("x/s.txt") && w.on_main("other.txt"));
