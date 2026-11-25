@@ -350,6 +350,24 @@ pub fn no_room_for(
     LocalLoad::from_reading(r, &needs).no_room(covered)
 }
 
+/// Why this machine cannot run a run that `uses` slots at all now, or `None` when it can: a hold
+/// is active ("this machine held for heat (die 94 C)", the wording [`LocalLoad::no_room`] uses),
+/// or a slot the run needs has a limit of 0. Unlike [`no_room_for`] a slot that is merely busy
+/// is no reason: it frees. A run bound for GitHub that has come back is sent here only when this
+/// says `None`, and otherwise waits on GitHub. Pure.
+pub fn cannot_run_here(
+    r: &crate::sched::LoadReading,
+    uses: &BTreeMap<String, u32>,
+) -> Option<String> {
+    if let Some(h) = &r.held {
+        return Some(format!("this machine {h}"));
+    }
+    local_needs(uses)
+        .into_iter()
+        .find(|n| r.limits.get(n) == Some(&0))
+        .map(|n| format!("{n} limit 0"))
+}
+
 /// The slots a local run of a suite needs: compile and what the suite `uses`.
 pub fn local_needs(uses: &BTreeMap<String, u32>) -> Vec<String> {
     let mut needs = vec![mason_scheduler::COMPILE.to_string()];
@@ -2238,5 +2256,35 @@ mod tests {
                 .overloaded(1_000)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn this_machine_cannot_run_a_run_when_a_hold_is_active_or_a_slot_it_needs_has_limit_0() {
+        let uses = BTreeMap::from([("test-suite".to_string(), 1)]);
+        let at = |held: Option<&str>, suite: u32, compile: u32| crate::sched::LoadReading {
+            limits: [
+                ("compile".to_string(), compile),
+                ("test-suite".to_string(), suite),
+            ]
+            .into(),
+            used: [("test-suite".to_string(), suite)].into(),
+            held: held.map(str::to_string),
+            ..Default::default()
+        };
+        assert_eq!(cannot_run_here(&at(None, 2, 3), &uses), None);
+        // Busy is not a reason: a full slot frees.
+        assert_eq!(cannot_run_here(&at(None, 2, 3), &uses), None);
+        assert_eq!(
+            cannot_run_here(&at(None, 0, 3), &uses).as_deref(),
+            Some("test-suite limit 0")
+        );
+        assert_eq!(
+            cannot_run_here(&at(None, 2, 0), &uses).as_deref(),
+            Some("compile limit 0")
+        );
+        let why = cannot_run_here(&at(Some("held for heat (die 94 C)"), 2, 3), &uses).unwrap();
+        assert_eq!(why, "this machine held for heat (die 94 C)");
+        // A slot the run does not use is not looked at.
+        assert_eq!(cannot_run_here(&at(None, 0, 3), &BTreeMap::new()), None);
     }
 }

@@ -12,5 +12,5 @@ grep -q '^Summary: ' docs/stages/s1119.md
 cargo test -q -p mason-step-host --test host -- exits_before_it_is_up over_the_limit
 cargo test -q -p mason-daemon --lib -- node_run:: node_doctor::
 cargo test -q -p mason-daemon --test nodes -- documented_length
-cargo test -q -p mason-cli --bin mason -- doctor::
+cargo test -q -p mason-pipeline --bin mason -- doctor::
 echo "OK s1119"
