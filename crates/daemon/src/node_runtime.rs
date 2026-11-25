@@ -395,9 +395,32 @@ pub fn cross_build(
     Ok(done)
 }
 
+/// The node user's `mason`: sets the `PATH` of docs/nodes.md and runs the current runtime's CLI,
+/// which each update moves.
+pub const WRAPPER: &str = r#"#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Installed as ~/.local/bin/mason on a MASON node (docs/nodes.md).
+export PATH="$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+runtimes="$HOME/Library/Application Support/mason/runtimes"
+exec "$runtimes/$(cat "$runtimes/current")/mason" "$@"
+"#;
+
+/// Write [`WRAPPER`] as `out/mason`, executable.
+fn write_wrapper(out: &Path) -> Result<(), String> {
+    let p = out.join("mason");
+    std::fs::write(&p, WRAPPER).map_err(|e| format!("{}: {e}", p.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| format!("{}: {e}", p.display()))?;
+    }
+    Ok(())
+}
+
 /// `mason node export-runtime`: write the package for a node of `arch` into `out`: `runtimes/<sha>/`
-/// (what an update sends) and `MASON Daemon.app` (what a first install needs, once). Returns the
-/// commit.
+/// (what an update sends), and what a first install needs, once: `MASON Daemon.app` and the node
+/// user's `mason` wrapper. Returns the commit.
 pub fn export(cfg: &UpdateCfg, rt: &Runtimes, arch: &str, out: &Path) -> Result<String, String> {
     let (sha, dir) = runtime_for(cfg, rt, arch)?;
     let target = out.join("runtimes").join(&sha);
@@ -413,6 +436,7 @@ pub fn export(cfg: &UpdateCfg, rt: &Runtimes, arch: &str, out: &Path) -> Result<
         }
     }
     std::fs::write(target.join("READY"), "").map_err(|e| e.to_string())?;
+    write_wrapper(out)?;
     let app = dir.join("app").join("MASON Daemon.app");
     if app.is_dir() {
         shell(
@@ -483,6 +507,36 @@ mod tests {
                 bytes: SHA.as_bytes().to_vec(),
             },
         ]
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_wrapper_runs_the_current_runtimes_mason_with_the_nodes_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        write_wrapper(t.path()).unwrap();
+        let rt = t.path().join("Library/Application Support/mason/runtimes");
+        std::fs::create_dir_all(rt.join(SHA)).unwrap();
+        std::fs::write(rt.join("current"), SHA).unwrap();
+        let mason = rt.join(SHA).join("mason");
+        std::fs::write(&mason, "#!/bin/sh\necho \"$PATH|$1|$2\"\n").unwrap();
+        std::fs::set_permissions(&mason, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Through `sh`, so that the wrapper just written is never executed directly.
+        let o = std::process::Command::new("/bin/sh")
+            .arg(t.path().join("mason"))
+            .args(["node", "two words"])
+            .env_clear()
+            .env("HOME", t.path())
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{o:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&o.stdout).trim(),
+            format!(
+                "{}/.cargo/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin|node|two words",
+                t.path().display()
+            )
+        );
     }
 
     #[test]

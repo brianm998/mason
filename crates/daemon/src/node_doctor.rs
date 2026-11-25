@@ -13,6 +13,7 @@
 //! What is checked is data (`Inputs`), judged by a pure function (`evaluate`), so the table of
 //! failures is a table test; `gather` is the part that touches the machine.
 
+use crate::node_run::job_path;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -242,6 +243,8 @@ pub fn evaluate(i: &Inputs, at_ms: u64) -> Report {
                     "`{tool}` does not run as this user: {why}{}",
                     if tool == "xcode-select" {
                         " (a new user may need `sudo xcodebuild -license accept` and `sudo xcodebuild -runFirstLaunch`)"
+                    } else if tool == "cargo" && why.contains(NO_TOOLCHAIN) {
+                        " (rustup has no default toolchain: run `rustup default <version>` as this user, for example `rustup default 1.96.0`)"
                     } else {
                         ""
                     }
@@ -278,8 +281,17 @@ pub fn parse_signature(requirement: &str, details: &str) -> Signature {
 /// Run a program within `limit` and give back whether it succeeded and what it printed (both
 /// streams), or why it did not finish.
 pub fn run_status(cmd: &str, args: &[&str], limit: Duration) -> Result<(bool, String), String> {
-    let mut child = std::process::Command::new(cmd)
-        .args(args)
+    let mut command = std::process::Command::new(cmd);
+    command.args(args);
+    finish_within(command, limit)
+}
+
+/// [`run_status`] for a command already set up (its environment and directory).
+fn finish_within(
+    mut command: std::process::Command,
+    limit: Duration,
+) -> Result<(bool, String), String> {
+    let mut child = command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -306,15 +318,54 @@ pub fn run_status(cmd: &str, args: &[&str], limit: Duration) -> Result<(bool, St
 
 /// [`run_status`] where a failing exit is an error, with the first line it printed.
 pub fn run_deadline(cmd: &str, args: &[&str], limit: Duration) -> Result<String, String> {
-    match run_status(cmd, args, limit)? {
-        (true, text) => Ok(text),
-        (false, text) => Err(text
-            .trim()
-            .lines()
-            .next()
-            .unwrap_or("it failed")
-            .to_string()),
+    judge(run_status(cmd, args, limit)?)
+}
+
+/// What rustup says when `cargo` is there and no toolchain is chosen for it.
+const NO_TOOLCHAIN: &str = "could not choose a version";
+
+/// What a tool printed, or the line of it that says why it failed.
+fn judge((ok, text): (bool, String)) -> Result<String, String> {
+    if ok {
+        return Ok(text);
     }
+    let lines = || text.trim().lines();
+    Err(lines()
+        .find(|l| l.contains(NO_TOOLCHAIN))
+        .or_else(|| lines().next())
+        .unwrap_or("it failed")
+        .to_string())
+}
+
+/// [`run_deadline`] for a tool as a job would find it: on the `PATH` a job gets
+/// ([`job_path`]), from the node user's home, so that no project's `rust-toolchain.toml` is in
+/// force.
+fn run_as_a_job(
+    cmd: &str,
+    args: &[&str],
+    base: &dyn Fn(&str) -> Option<String>,
+) -> Result<String, String> {
+    let home = base("HOME").unwrap_or_default();
+    let mut command = std::process::Command::new(cmd);
+    command.args(args).env(
+        "PATH",
+        job_path(None, &home, &base("PATH").unwrap_or_default()),
+    );
+    for k in [
+        "HOME",
+        "CARGO_HOME",
+        "RUSTUP_HOME",
+        "DEVELOPER_DIR",
+        "JAVA_HOME",
+    ] {
+        if let Some(v) = base(k) {
+            command.env(k, v);
+        }
+    }
+    if Path::new(&home).is_dir() {
+        command.current_dir(&home);
+    }
+    judge(finish_within(command, DEADLINE)?)
 }
 
 /// How `exe` is signed, read with `codesign` (macOS), within the deadline.
@@ -376,7 +427,7 @@ pub fn probe_path(dir: &Path, limit: Duration) -> PathState {
 
 /// Every path the node writes, for the checks: its data directory and what is under it, the
 /// build cache and the toolchain homes.
-pub fn paths_of(data_dir: &Path, home: &Path) -> Vec<PathBuf> {
+pub fn paths_of(data_dir: &Path, home: &Path, cargo_home: Option<&str>) -> Vec<PathBuf> {
     let mut v = vec![
         data_dir.to_path_buf(),
         data_dir.join("node").join("mirrors"),
@@ -384,7 +435,7 @@ pub fn paths_of(data_dir: &Path, home: &Path) -> Vec<PathBuf> {
         data_dir.join("runtimes"),
         home.join(".cache").join("mason-target"),
     ];
-    if let Some(c) = std::env::var_os("CARGO_HOME") {
+    if let Some(c) = cargo_home {
         v.push(PathBuf::from(c));
     } else {
         v.push(home.join(".cargo"));
@@ -401,17 +452,28 @@ pub fn gather(
     mdns: Mdns,
     allow_unsigned: bool,
 ) -> Inputs {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_default();
-    let paths = paths_of(data_dir, &home)
+    let base = |k: &str| std::env::var(k).ok();
+    gather_in(&base, exe, data_dir, listener_bound, mdns, allow_unsigned)
+}
+
+/// [`gather`] with the environment given: `base` is this process's variables.
+pub fn gather_in(
+    base: &dyn Fn(&str) -> Option<String>,
+    exe: &Path,
+    data_dir: &Path,
+    listener_bound: bool,
+    mdns: Mdns,
+    allow_unsigned: bool,
+) -> Inputs {
+    let home = PathBuf::from(base("HOME").unwrap_or_default());
+    let paths = paths_of(data_dir, &home, base("CARGO_HOME").as_deref())
         .into_iter()
         .map(|p| {
             let st = probe_path(&p, DEADLINE);
             (p, st)
         })
         .collect();
-    let tool = |cmd: &str, args: &[&str]| run_deadline(cmd, args, DEADLINE);
+    let tool = |cmd: &str, args: &[&str]| run_as_a_job(cmd, args, base);
     let tools = vec![
         ("cargo".to_string(), tool("cargo", &["--version"])),
         (
@@ -521,6 +583,9 @@ mod tests {
         let mut i = good();
         i.tools[0].1 = Err("No such file or directory".into());
         rows.push(("no cargo", i, "`cargo` does not run as this user"));
+        let mut i = good();
+        i.tools[0].1 = Err("error: rustup could not choose a version of cargo to run".into());
+        rows.push(("no default toolchain", i, "run `rustup default <version>`"));
         for (name, i, want) in rows {
             let p = problem(&i).unwrap_or_else(|| panic!("{name}: no problem"));
             assert!(p.contains(want), "{name}: {p}");

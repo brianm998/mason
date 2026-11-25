@@ -1215,6 +1215,59 @@ fn what_the_doctor_finds_stops_the_node_taking_work_until_it_is_fixed() {
     assert_eq!(listed(&p, "b")["usable"], true);
 }
 
+/// The doctor looks for tools where a job does: a `cargo` in `$HOME/.cargo/bin` counts although
+/// the `PATH` it was started with (`sudo -H`, a LaunchDaemon) does not name that folder.
+#[cfg(unix)]
+#[test]
+fn the_doctor_finds_cargo_on_the_path_a_job_gets() {
+    use mason_daemon::node_doctor::{evaluate, gather_in, Check, Mdns};
+    use std::os::unix::fs::PermissionsExt;
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path().join("home");
+    let bin = home.join(".cargo/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let base = |k: &str| match k {
+        "HOME" => Some(home.to_string_lossy().into_owned()),
+        "PATH" => Some("/usr/bin:/bin".to_string()),
+        _ => None,
+    };
+    let cargo = || -> Check {
+        let data = t.path().join("data");
+        let i = gather_in(&base, &data, &data, true, Mdns::Off, true);
+        evaluate(&i, 1)
+            .checks
+            .into_iter()
+            .find(|c| c.name == "cargo")
+            .unwrap()
+    };
+    let stub = |body: &str| {
+        let f = bin.join("cargo");
+        std::fs::write(&f, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    // A machine with a cargo of its own in a system folder cannot be made to have none.
+    let system = mason_daemon::node_run::job_path(None, "", "/usr/bin:/bin");
+    if !std::env::split_paths(&system).any(|d| d.join("cargo").exists()) {
+        let c = cargo();
+        assert!(!c.ok && c.blocks, "{c:?}");
+        assert!(c.detail.contains("does not run as this user"), "{c:?}");
+    }
+    // It runs from the home folder.
+    stub(r#"[ "$(pwd -P)" = "$(cd "$HOME" && pwd -P)" ] || exit 1; echo "cargo 9.9.9 (stub)""#);
+    let c = cargo();
+    assert!(c.ok, "{c:?}");
+    assert_eq!(c.detail, "cargo: cargo 9.9.9 (stub)");
+    stub(
+        r#"echo "info: syncing" >&2
+echo "error: rustup could not choose a version of cargo to run, because one wasn't specified explicitly" >&2
+exit 1"#,
+    );
+    let c = cargo();
+    assert!(!c.ok && c.blocks, "{c:?}");
+    assert!(c.detail.contains("could not choose a version"), "{c:?}");
+    assert!(c.detail.contains("rustup default"), "{c:?}");
+}
+
 /// A runtime waiting for the node's jobs to end holds the node, and says so.
 #[test]
 fn a_node_that_is_to_take_over_a_runtime_takes_no_new_job_and_says_why() {

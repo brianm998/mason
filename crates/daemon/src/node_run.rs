@@ -841,6 +841,33 @@ pub fn prepare_slot(mirror: &Path, slot: &Path, sha: &str) -> Result<(), String>
 
 // ---- the environment --------------------------------------------------------------------------
 
+/// The `PATH` a job runs with: the shims first (when there are any), `$HOME/.cargo/bin`, the
+/// node's own entries, then the system's, each once. The doctor finds tools with it too, so that
+/// what it reports is what a job gets (neither `sudo -H` nor a LaunchDaemon puts `~/.cargo/bin`
+/// on `PATH`).
+pub fn job_path(shims: Option<&Path>, home: &str, base_path: &str) -> String {
+    let mut path: Vec<String> = shims
+        .map(|s| s.to_string_lossy().into_owned())
+        .into_iter()
+        .collect();
+    if !home.is_empty() {
+        path.push(format!("{home}/.cargo/bin"));
+    }
+    for p in base_path.split(':').chain([
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+    ]) {
+        if !p.is_empty() && !path.iter().any(|have| have == p) {
+            path.push(p.to_string());
+        }
+    }
+    path.join(":")
+}
+
 /// The shims a node puts first on `PATH`: nothing a job does may appear on the screen. `caffeinate`
 /// loses its `-u` (which wakes the display) and `xcodebuild` refuses a test run that selects a UI
 /// test bundle (the "Automation Running" overlay).
@@ -935,31 +962,8 @@ pub fn job_env(
         env.push((k.to_string(), v));
     };
     let home = base("HOME").unwrap_or_default();
-    let mut path: Vec<String> = vec![shims.to_string_lossy().into_owned()];
-    if !home.is_empty() {
-        path.push(format!("{home}/.cargo/bin"));
-    }
-    for p in base("PATH")
-        .unwrap_or_default()
-        .split(':')
-        .map(String::from)
-        .chain(
-            [
-                "/opt/homebrew/bin",
-                "/usr/local/bin",
-                "/usr/bin",
-                "/bin",
-                "/usr/sbin",
-                "/sbin",
-            ]
-            .map(String::from),
-        )
-    {
-        if !p.is_empty() && !path.contains(&p) {
-            path.push(p);
-        }
-    }
-    put("PATH", path.join(":"));
+    let base_path = base("PATH").unwrap_or_default();
+    put("PATH", job_path(Some(shims), &home, &base_path));
     for k in [
         "HOME",
         "USER",
@@ -1481,6 +1485,22 @@ mod tests {
                 .map(|(_, v)| v.as_str()),
             Some("node")
         );
+    }
+
+    #[test]
+    fn the_job_path_puts_cargo_right_after_the_shims_and_keeps_the_base_entries() {
+        let p = job_path(
+            Some(Path::new("/n/shims")),
+            "/Users/n",
+            "/opt/mine:/usr/bin::/bin",
+        );
+        assert_eq!(
+            p,
+            "/n/shims:/Users/n/.cargo/bin:/opt/mine:/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin:/usr/sbin:/sbin"
+        );
+        // Without shims (the doctor) cargo's folder leads; without a home there is none.
+        assert!(job_path(None, "/Users/n", "/usr/bin").starts_with("/Users/n/.cargo/bin:/usr/bin:"));
+        assert!(!job_path(None, "", "/usr/bin").contains(".cargo"));
     }
 
     #[test]
