@@ -860,6 +860,61 @@ const STEPS: &[&str] = &[
          fingerprint TEXT NOT NULL,
          paired_at   INTEGER NOT NULL
      );",
+    // A red develop that gets fixed (#1023). A baseline row may be partial: only the tests of an
+    // earlier red baseline were run at a newer tip, so it says nothing of the rest of the suite
+    // and is never a whole-suite cache. `red_sightings` holds the tests a task's last check of a
+    // suite failed; `red_notes` what the agent is told at its next tool result; `red_folds` how
+    // often a watcher merged develop into its tree; `red_fix_pending` the fixes a branch has
+    // not taken yet. Additive.
+    "ALTER TABLE baselines ADD COLUMN partial INTEGER NOT NULL DEFAULT 0;
+     CREATE TABLE red_sightings (
+         task  INTEGER NOT NULL,
+         suite TEXT NOT NULL,
+         test  TEXT NOT NULL,
+         at_ms INTEGER NOT NULL,
+         PRIMARY KEY (task, suite, test)
+     );
+     CREATE TABLE red_notes (
+         id    INTEGER PRIMARY KEY AUTOINCREMENT,
+         task  INTEGER NOT NULL,
+         text  TEXT NOT NULL,
+         at_ms INTEGER NOT NULL
+     );
+     CREATE TABLE red_folds (
+         task INTEGER PRIMARY KEY,
+         n    INTEGER NOT NULL
+     );
+     CREATE TABLE red_fix_pending (
+         task     INTEGER PRIMARY KEY,
+         tests    TEXT NOT NULL,
+         base     TEXT NOT NULL,
+         why      TEXT NOT NULL,
+         since_ms INTEGER NOT NULL
+     );",
+    // Each (project, suite, tip, test set) the red-develop watch looked at (#1023), whether or
+    // not the run could say anything, so a probe that gave no answer is not repeated until the
+    // tip moves, and a restart does not probe the fleet again. Additive.
+    "CREATE TABLE red_probes (
+         project TEXT NOT NULL,
+         suite   TEXT NOT NULL,
+         tip     TEXT NOT NULL,
+         tests   TEXT NOT NULL,
+         at_ms   INTEGER NOT NULL,
+         PRIMARY KEY (project, suite, tip, tests)
+     );",
+    // The size of a suite at a base, from a run at the base itself (s980, #959): the expected
+    // total shown for a test step. Apart from `suite_green`, which task runs also write and
+    // which gates read; a task's own count must not become another task's total. Additive.
+    // Steps are applied by position, so a new one goes last: this one was first merged in the
+    // middle, and a database already past it skipped it and re-ran the next.
+    "CREATE TABLE suite_size (
+         project  TEXT NOT NULL,
+         suite    TEXT NOT NULL,
+         base     TEXT NOT NULL,
+         executed INTEGER NOT NULL,
+         at_ms    INTEGER NOT NULL,
+         PRIMARY KEY (project, suite, base)
+     );",
     // The decision card a diagnosis ends in (s1048, decision 1041): `card` is the card's JSON with
     // each option's action next to it (empty for a row of the older single-verdict shape), and
     // `failed_at` the `state_entered_at` of the failure it diagnosed, so one failure is diagnosed

@@ -326,6 +326,28 @@ fn list(ids: &[u64]) -> String {
 }
 
 /// Facts to findings, sorted by key. Healthy facts give none.
+/// Starts that were not a planned takeover. `events` are the `start`, `planned` and `cancelled`
+/// health rows in order; a `start` right after `planned` is the successor of a takeover.
+pub fn unplanned_starts(events: &[&str]) -> u32 {
+    let mut planned = false;
+    let mut n = 0;
+    for e in events {
+        match *e {
+            "planned" => planned = true,
+            "cancelled" => planned = false,
+            "start" => {
+                if planned {
+                    planned = false;
+                } else {
+                    n += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    n
+}
+
 pub fn judge(x: &Facts, l: &Limits) -> Vec<Finding> {
     let mut out = vec![];
     // stuck
@@ -1016,6 +1038,19 @@ mod tests {
             keys(&judge(&x, &l())),
             ["daemon:late-loop", "daemon:restarts"]
         );
+    }
+
+    #[test]
+    fn a_planned_start_is_not_a_restart() {
+        assert_eq!(unplanned_starts(&["planned", "start"]), 0);
+        assert_eq!(unplanned_starts(&["start", "start", "start"]), 3);
+        assert_eq!(unplanned_starts(&["planned", "cancelled", "start"]), 1);
+        assert_eq!(unplanned_starts(&["planned", "start", "start", "start"]), 2);
+        let x = Facts {
+            restarts: unplanned_starts(&["planned", "start", "start", "start", "start"]),
+            ..Default::default()
+        };
+        assert_eq!(keys(&judge(&x, &l())), ["daemon:restarts"]);
     }
 
     #[test]

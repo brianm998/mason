@@ -739,9 +739,11 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s975**: an owner's retry note is also kept per task and shown to the reviewer and later develop rounds as "Owner decisions on this task"; see decision 0968.
 - **s978**: `lint_files` now reads the repository guards' `<path>: <message>` and `<path>:<line>: <message>` lines, for paths in the batch's union diff only, so the existing file blame parks the one task that added the file instead of bisecting.
 - **s979**: Every notification row in both monitors is one line, and a row with more to say has a "?" button that opens a dialog with the full reason, the choices and an "Open task #N" action for each task it names; `Banner` gained a `detail` field.
+- **s980**: A test step's expected total now comes only from runs at the base itself (new `suite_size` table), never from another task's green count, and a live count past an expected total raises it; the monitor shows "N tests" when done exceeds total.
 - **s982**: the daemon serves `GET /onboarding/candidates`, `POST /onboarding/plan` and `POST /onboarding/apply` (owner only) over the `mason-onboard` crate, with `[onboarding] roots` (default `["~/git"]`), so a desktop monitor can add a local repository and answer the same questions as `mason init`; see decision 0975.
 - **s983**: The monitor draws a task's blockers as one wrapping text of whole links (a sidebar row names three and "and N more"; the task page drops its "waiting for" line when the blocker list is shown), so 29 blockers no longer crush into one-character columns.
 - **s984**: A double click on the Failed tile now opens the lone failed task, or a Failed page listing every failed task (with "N of M" when capped); the phone tile tap and `mason://section/failed` do the same.
+- **s989**: a background watch reruns a stale red baseline's tests narrowed at develop's tip and records a partial baseline, so a fixed test stops being "red on develop"; it folds develop into the developing tasks that failed those tests and tells their agents on the next `run_check`, alerts the owner when a branch stays behind 30 minutes, and checks a test that fails unexplained in three tasks at the tip (red there: recorded and one urgent task; green: the tasks are behind).
 - **s996**: A run GitHub has not picked up comes back here only when this machine would grant its lease at once (queue counted, hold settled, lease taken before the GitHub run is cancelled).
 - **s998**: masons_own_impact_map_selects_suites_by_path now expects the eight unit-level suites bound to run_check and the test step, instead of six.
 - **s1000**: The diagnosis session runs on `diagnose_model`/`diagnose_effort` from the project registration, else the provider file's `[diagnose]` table, else Opus at medium (Codex: its CLI's model at medium), and each diagnosis and `mason task show` print what it ran on.
@@ -755,6 +757,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s1027**: CpuDiskRow's layout arithmetic is a pure `placement` function and the DiskSectionTests layout tests assert its exact frames instead of sampling ImageRenderer pixels, so CI/monitor-swift stops failing on runner rendering differences.
 - **s1028**: The Compose and Swift conformance tools now read the daemon's seq from GET /status before each capture and wait for the model to reach it, as the Rust capturer does.
 - **s1030**: The Land now freeze test holds the fix at a gate so the freeze is certainly in force, then waits for the fix and `other` to land instead of asserting `other` never does.
+- **s1033**: The Compose conformance tool and the Rust dump wait for the daemon's seq to be covered by applied views (or agree across round trips) instead of a wall-clock quiet window, fixing the red full/monitor-compose CI.
 - **s1035**: s22, s244 and s728 are named in weights.txt and s1035 checks them, but their cause is not diagnosed because the failed-step log was not readable from the pipeline.
 - **s1036**: Recorded that the s77, s117 and s902 reds on ubuntu shard 2 could not be traced without the full CI log, and changed no code.
 - **s1037**: The `the_note_says_how_the_modules_were_picked` failure on a0f67a2 was fixed by 9c18e970f (stop unit narrowing from pushing a note into Group.notes); no source change is needed.
@@ -775,6 +778,20 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s1058**: The Mac monitor has an "Accept work from other Macs" switch on Home and in Settings (on a Mac that serves as a node) and a Nodes section on a coordinator, the GitHub section is now "Remote runs" and a run on a node is a row in it, and `docs/nodes.md` says how to reach a node daemon of another macOS user.
 - **s1061**: s759 clears the CI shard env and s664 finds its test binary from cargo's JSON output, fixing two of the five red shard-3 exit scripts.
 - **s1063**: scripts/exit/s899.sh now checks the current 304 test and its source() helper, so CI/exit-scripts stops failing on a stale test name.
+- **s1064**: The causes of the red `exit-scripts (ubuntu-latest, 1)` job on 0de921ceb are already fixed on develop, and s1064 now checks them together.
+- **s1065**: The s77 exit script starts its two hand runs with `--origin person` and waits to see the first one holding `compile` before starting the second, in place of a one-second sleep.
 - **s1066**: s43 now expects the daemon's real ceiling (9999) and s49 picks the highest-numbered checkpoint, fixing two of the exit scripts red on shard 6.
+- **s1067**: `mason project rename` now sets MASON_AS from USER, LOGNAME or "owner" like the daemon's default owner, so s965 passes where USER is unset or differs.
 - **s1068**: The Compose conformance settle now waits until the model's last applied view reaches the daemon's seq (as step() and the Rust capturer do), and both capturers print a stderr line when they leave on the quiet fallback.
+- **s1072**: Windows clippy red on develop is fixed by compiling the unix-only CAFFEINATE and XCODEBUILD shim constants only under cfg(unix).
+- **s1073**: The Swift monitor-tool's settle now waits on `lastViewSeq` (moved only by views and snapshots) instead of `lastSeq`, which events also move, as Compose already does.
+- **s1074**: run-exit-scripts.sh runs each exit script in its own process group and ends the group when the script ends, so a leftover child or watcher `sleep` can no longer hold the output pipe and stall a shard.
+- **s1076**: the macOS exit-script watcher's `sleep` is now detached from the runner's output pipe as well as killed, so a leftover one cannot stall a shard.
+- **s1077**: The macOS exit-scripts job gets 90 minutes, and an exit test proves that a finished script no longer waits for the no-timeout watcher's sleep.
+- **s1078**: A new exit test checks that the macOS fallback in run-exit-scripts.sh runs one exit script after another, reports failures, and leaves no watcher `sleep` behind.
+- **s1079**: The exit-script runner kills the limit watcher's sleep when a script ends, so the macOS legs no longer wait out the whole job limit.
+- **s1080**: `conformance expected` now waits 300 ms of quiet after reaching the daemon's seq, so its checkpoint dumps include the step's trailing views.
+- **s1081**: The Rust conformance capturer no longer leaves its settle after 1.5 s of quiet; it waits for the step's view, with a 5 s quiet fallback that is logged.
+- **s1082**: daemon:restarts counts only unplanned starts, so a takeover from `mason update` no longer counts as a restart.
+- **s1086**: s101 now starts its ad-hoc range at 9960 and expects the daemon's real ceiling (9999), so it raises the `numbers` alert again.
 <!-- status:end -->

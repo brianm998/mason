@@ -39,31 +39,43 @@ private fun until(what: String, seconds: Int = 15, cond: () -> Boolean) {
     }
 }
 
-/** About 1.5 s of quiet, so a busy runner cannot pass before same-burst views land. */
-private const val QUIET_TICKS = 30
+/** The view kinds the monitor subscribes to; a dump is not taken before each has been applied. */
+private val SUBSCRIBED = setOf("sidebar", "home", "header")
+
+/** Consecutive round trips that must agree before the screen counts as settled. */
+private const val AGREEING_ROUND_TRIPS = 3
+
+private fun daemonSeq(model: MonitorModel, id: String): Long? {
+    val status = call(model, Command(raw = mason.v1.Raw(method = "GET", path = "/status")), id)
+    return (Codec.json(status.json)?.get("seq") as? Number)?.toLong()
+}
 
 /**
- * Let the views settle: read the daemon's seq from GET /status, wait until the model has reached
- * it, and give up on it only after 1.5 s with no new sequence number (the daemon sends no view
- * for a change that altered nothing). A hard limit of 60 s fails.
+ * Settled is a signal, not a quiet window: every subscribed kind has been applied, and the
+ * daemon's seq (asked over the same ordered connection, so views sent before the answer have
+ * arrived) is either covered by an applied view or has not moved across several round trips
+ * with nothing new arriving. The daemon sends no view whose content did not change, so the
+ * applied view seq may legitimately stay below the daemon's. A timeout fails, naming what
+ * was awaited; it never decides.
  */
 private fun settle(model: MonitorModel) {
-    val status = call(model, Command(raw = mason.v1.Raw(method = "GET", path = "/status")), "settle-status")
-    val raw = Codec.json(status.json)?.get("seq")
-    val target = (raw as? Number)?.toLong() ?: (raw as? String)?.toLongOrNull() ?: 0L
     val end = System.currentTimeMillis() + 60_000
-    var last = model.lastSeq
-    var quiet = 0
+    var agreed = 0
+    var prev = -1L
+    var prevLast = -1L
     while (true) {
-        val reached = model.lastViewSeq >= target
-        // Reached: a short quiet for trailing views. Not reached: the full 1.5 s fallback.
-        if (quiet >= (if (reached) 6 else QUIET_TICKS)) break
-        if (System.currentTimeMillis() > end) fail("the screen did not reach the daemon's seq $target within 60 s")
-        Thread.sleep(50)
-        if (model.lastSeq == last) quiet++ else { quiet = 0; last = model.lastSeq }
-    }
-    if (model.lastViewSeq < target) {
-        System.err.println("settle: quiet exit, views at #${model.lastViewSeq}, daemon seq #$target")
+        val seq = daemonSeq(model, "settle") ?: fail("the daemon's /status gave no seq")
+        val missing = SUBSCRIBED - model.appliedKinds()
+        val covered = model.lastViewSeq >= seq
+        if (missing.isEmpty() && (covered || (seq == prev && model.lastSeq == prevLast))) agreed++ else agreed = 0
+        if (missing.isEmpty() && covered && agreed >= 1) return
+        if (agreed >= AGREEING_ROUND_TRIPS) return
+        prev = seq
+        prevLast = model.lastSeq
+        if (System.currentTimeMillis() > end) {
+            fail("timed out waiting for " + if (missing.isNotEmpty()) "a view of kind ${missing.first()}" else "the views of seq $seq (applied up to ${model.lastViewSeq})")
+        }
+        Thread.sleep(100)
     }
 }
 
@@ -80,25 +92,6 @@ private fun step(model: MonitorModel): Boolean {
     val r = call(model, Command(raw = mason.v1.Raw(method = "POST", path = "/demo/next")), "step")
     val reply = Codec.json(r.json)
     val advanced = reply?.get("advanced") == true
-    // The views for this step carry a sequence number at least the daemon's (from /status,
-    // read after the step): wait for them, then let any trailing view land.
-    val status = call(model, Command(raw = mason.v1.Raw(method = "GET", path = "/status")), "status")
-    val seq = (Codec.json(status.json)?.get("seq") as? Number)?.toLong()
-    // The daemon sends no view whose content did not change, so lastViewSeq may never reach
-    // seq: a bounded quiet window (QUIET_TICKS x 50 ms without a view or event) then decides.
-    if (seq != null) {
-        val end = System.currentTimeMillis() + 60_000
-        var last = model.lastSeq
-        var quiet = 0
-        while (model.lastViewSeq < seq && quiet < QUIET_TICKS) {
-            if (System.currentTimeMillis() > end) fail("timed out waiting for the views of seq $seq")
-            Thread.sleep(50)
-            if (model.lastSeq == last) quiet++ else { quiet = 0; last = model.lastSeq }
-        }
-        if (model.lastViewSeq < seq) {
-            System.err.println("step: quiet exit, views at #${model.lastViewSeq}, daemon seq #$seq")
-        }
-    }
     settle(model)
     return advanced
 }
