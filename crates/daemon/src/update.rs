@@ -2078,6 +2078,8 @@ pub fn take_over(d: &Arc<Daemon>, sha: &str) -> String {
     Boots::new(&rt).record(now_ms(), sha, "start");
     // Let an event being appended finish; nothing is half-written when we go.
     d.quiesce();
+    // A planned restart: the successor's `start` row is not a crash.
+    let _ = d.store.add_health("planned", "", None, sha, now_ms());
     let mut args = d.cfg.exec_args.clone();
     // The same port, so clients that reconnect find it where it was.
     if let Some(port) = std::fs::read_to_string(d.cfg.info_path())
@@ -2093,6 +2095,7 @@ pub fn take_over(d: &Arc<Daemon>, sha: &str) -> String {
     args.extend(["--runtime-sha".into(), sha.into()]);
     let err = mason_platform::process::replace_process(Command::new(rt.masond(sha)).args(&args));
     // Still here: the exec failed. Put things back.
+    let _ = d.store.add_health("cancelled", "", None, sha, now_ms());
     if let Some(prev) = d.cfg.runtime_sha.as_deref() {
         let _ = rt.set_current(prev);
     }
