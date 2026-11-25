@@ -883,6 +883,7 @@ pub fn write_shims(dir: &Path, path: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 const CAFFEINATE: &str = r#"# `-u` declares the user active and turns a sleeping display on: never on a node. Options are read
 # up to the first word that is not one (the command to run), skipping the value of -t and -w.
 n=$#; rest=0; skip=0
@@ -900,6 +901,7 @@ done
 exec "$real" "$@"
 "#;
 
+#[cfg(unix)]
 const XCODEBUILD: &str = r#"# A UI test bundle drives the screen ("Automation Running"): refuse a run that selects one.
 for a in "$@"; do
   case "$a" in
