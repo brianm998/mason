@@ -128,6 +128,11 @@ uses = { test-suite = 1 }
 # The exit scripts this change adds or edits, relative to its merge base (s249). One `PASS sNNN` or
 # `FAIL sNNN` line per script; CI runs all of them, this runs the ones the change can have broken.
 [suite.exit-scripts]
+# The scripts run one after another, up to 900 s each; on a heat-throttled machine 21 of them took
+# 135 min, and the 1800 s default stopped the test step's run long before an agent's check (held to
+# the project's 5400 s) would have. 90 min matches the check. The runner reads MASON_RUN_BUDGET_S
+# (this limit) and stops starting scripts before it, reporting the rest as not run.
+timeout = "90m"
 command = "bash scripts/run-changed-exit-scripts.sh"
 # On GitHub the selected scripts are split four ways (#880, decision 0836): every runner selects the
 # same scripts and keeps those scripts/run-exit-scripts.sh plans for its shard; each script is also
