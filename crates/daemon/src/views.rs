@@ -1808,7 +1808,8 @@ pub fn banner_level(kind: &str) -> &'static str {
         | "provider_overage"
         | "provider_extra_billing"
         | "provider_warning"
-        | "ci_watch_quiet" => "info",
+        | "ci_watch_quiet"
+        | "review" => "info",
         _ => "warning",
     }
 }
@@ -2597,6 +2598,7 @@ mod banner_level_tests {
             ("paused", "warning"),
             ("ci_watch", "warning"),
             ("ci_watch_quiet", "info"),
+            ("review", "info"),
             ("provider_limit", "info"),
             ("provider_outage", "info"),
             ("provider_overage", "info"),

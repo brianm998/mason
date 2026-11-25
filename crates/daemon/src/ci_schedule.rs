@@ -182,7 +182,7 @@ pub fn follow_view(row: &ScheduleRow) -> Option<Value> {
 // ---- time ---------------------------------------------------------------------------------------------------
 
 /// The local offset from UTC in minutes (`date +%z`); 0 if it cannot be read.
-fn local_offset_min() -> i32 {
+pub(crate) fn local_offset_min() -> i32 {
     let out = std::process::Command::new("/bin/date")
         .arg("+%z")
         .output()

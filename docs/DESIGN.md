@@ -647,9 +647,9 @@ Any graph can run on a schedule: nightly test tiers, base-branch health, mutatio
 | Layer | Cadence | Examples |
 | --- | --- | --- |
 | **Rule-based detectors** | Daily, no LLM | Step no-result rate above a threshold; share of time spent waiting; same failure signature three times; a retry loop on a permanent error; ready tasks waiting while the landing queue idles; frequent force-skips of one suite; expired switches |
-| **Analyst agent** | Weekly by default | Reads the digest and event history, finds what the rules can't, and writes proposals with evidence and a metric it expects to move |
+| **Pipeline review** | Nightly by default, set in Settings | One agent session for the whole pipeline asks where it was stuck, slow, over-tested, untested, crashing or needing the owner, and files proposals with evidence that wait for the owner |
 
-One manual review of three days of history found a tool-timeout misfire, a serial landing queue and a permanent-error retry loop. Those patterns are now rules, and the analyst exists to find the next ones.
+One manual review of three days of history found a tool-timeout misfire, a serial landing queue and a permanent-error retry loop. Those patterns are now rules, and the pipeline review exists to find the next ones.
 
 ### Closing the loop
 

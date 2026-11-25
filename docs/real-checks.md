@@ -68,7 +68,7 @@ that line into the Results section at the bottom, with anything you saw that the
 - **Costs:** nothing; needs Xcode, the Android SDK or a device.
 - **Record:** the RESULT line, and for each device kind whether the sample's suite ran on it.
 
-## The analyst and live-adapter jobs against a real model (s22)
+## The review and live-adapter jobs against a real model (s22)
 
 - **What was never run:** the scheduled `cargo-mutants` run and the scheduled live adapter run
   (`docs/stages/s22.md`).

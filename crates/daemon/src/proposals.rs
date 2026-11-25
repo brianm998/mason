@@ -167,7 +167,23 @@ pub struct Filing {
     /// For an introspection finding: its estimated impact and cost. The owner's
     /// `[proposals.introspection]` table then decides proposed or queued.
     pub estimate: Option<(Impact, Cost)>,
+    /// How far back a duplicate is looked for. `None` is the usual rule: open proposals,
+    /// and those landed, closed or rejected in the last 7 days.
+    pub lookback: Option<Lookback>,
 }
+
+/// A wider duplicate search than the usual one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lookback {
+    /// Every task of the target project, in every state, with no time limit, whether or not
+    /// it was filed as a proposal. For the pipeline review: what it files always waits for
+    /// the owner, whatever the policy says, and is capped by the review (not by `[proposals]
+    /// per_task` or `per_day`).
+    All,
+}
+
+/// How a duplicate refusal starts; the number of the task it duplicates follows.
+pub const DUPLICATE_OF: &str = "duplicate of #";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Filed {
@@ -257,7 +273,24 @@ pub fn file(d: &Arc<Daemon>, f: &Filing) -> Result<Filed, String> {
     let (tid, tproj) = target;
     let now = now_ms();
 
+    let all = f.lookback == Some(Lookback::All);
+    if all {
+        let mut tasks: Vec<&Task> = w.tasks.values().filter(|t| t.project == tid).collect();
+        tasks.sort_by_key(|t| t.id.0);
+        if let Some(t) = tasks
+            .into_iter()
+            .find(|t| similar(&title, &f.body, &t.title, &t.body))
+        {
+            return Err(format!(
+                "{DUPLICATE_OF}{}: {:?} ({}); do not file it again",
+                t.id.0,
+                t.title,
+                mason_store::state_name(t.state)
+            ));
+        }
+    }
     // Duplicates: against what is still open in the target, and what the owner just turned down.
+    // (With the wide search, also the proposals' own titles, which an edit may have changed.)
     for row in d.store.proposals_in(&tproj.id).map_err(|e| e.to_string())? {
         let Some(t) = w.tasks.get(&TaskId(row.task)) else {
             continue;
@@ -268,9 +301,15 @@ pub fn file(d: &Arc<Daemon>, f: &Filing) -> Result<Filed, String> {
         // A task that landed or was closed within the lookback has already answered it (s551).
         let recently_over = matches!(t.state, State::Landed | State::Canceled)
             && now.saturating_sub(t.state_entered_at.0) < REJECTED_MEMORY_MS;
-        if (live || recently_rejected || recently_over)
+        if (all || live || recently_rejected || recently_over)
             && similar(&title, &f.body, &row.title, &row.body)
         {
+            if all && !(live || recently_rejected || recently_over) {
+                return Err(format!(
+                    "{DUPLICATE_OF}{}: {:?}; do not file it again",
+                    row.task, row.title
+                ));
+            }
             return Err(if recently_over && !live && !recently_rejected {
                 format!(
                     "duplicate of #{}: {:?}, which already landed or was closed in the last 7 days; do not file it again",
@@ -299,14 +338,16 @@ pub fn file(d: &Arc<Daemon>, f: &Filing) -> Result<Filed, String> {
         .store
         .proposals_since(&tproj.id, now.saturating_sub(DAY_MS))
         .map_err(|e| e.to_string())?;
-    cfg_here.caps.check(by_task, in_day)?;
+    if !all {
+        cfg_here.caps.check(by_task, in_day)?;
+    }
 
     let severity = if f.blocks_task {
         Severity::Blocks
     } else {
         Severity::Normal
     };
-    let (disposition, severity_name, rule) = match f.estimate {
+    let (mut disposition, severity_name, mut rule) = match f.estimate {
         Some((impact, cost)) => (
             cfg_here.policy.introspection.decide(impact, cost),
             impact.name(),
@@ -321,9 +362,19 @@ pub fn file(d: &Arc<Daemon>, f: &Filing) -> Result<Filed, String> {
             format!("proposals.agent_{}", severity.name()),
         ),
     };
+    if all {
+        disposition = Disposition::Proposed;
+        rule = "review: always proposed".into();
+    }
     let proposed = disposition == Disposition::Proposed;
     if tproj.self_cfg.is_some() {
-        crate::selfguard::check_filing_as(d, tid, TrustSource::OwnerAgent)?;
+        // A review filing only waits for the owner, so it spends none of the self-task
+        // limits (decision 0046); the cooldown after a rollback still refuses it.
+        if all {
+            crate::selfguard::check_filing_proposal(d, tid)?;
+        } else {
+            crate::selfguard::check_filing_as(d, tid, TrustSource::OwnerAgent)?;
+        }
     }
     let appended = d
         .emit(EventKind::TaskFiled {
@@ -408,6 +459,7 @@ pub fn file_from_report(
             blocks_task: p["blocks_task"].as_bool().unwrap_or(false),
             explored: p["explored"].as_bool().unwrap_or(false),
             estimate: None,
+            lookback: None,
         };
         match file(d, &f) {
             Ok(done) => tracing::info!(

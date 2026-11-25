@@ -30,6 +30,73 @@ pub fn due_at(last_run_ms: u64, now_ms: u64, at_min: u32, tz_min: i32) -> bool {
     (last_run_ms as i64) < start - off
 }
 
+/// The latest start time at or before `now_ms` of a daily job at `at_min` (as [`due_at`]
+/// counts it), in UTC milliseconds.
+pub fn latest_start(now_ms: u64, at_min: u32, tz_min: i32) -> i64 {
+    let off = i64::from(tz_min) * 60_000;
+    let local_now = now_ms as i64 + off;
+    let mut start = local_now.div_euclid(DAY_MS) * DAY_MS + i64::from(at_min) * 60_000;
+    if start > local_now {
+        start -= DAY_MS;
+    }
+    start - off
+}
+
+fn local_day(ms: i64, tz_min: i32) -> i64 {
+    (ms + i64::from(tz_min) * 60_000).div_euclid(DAY_MS)
+}
+
+/// A job run at a time of day, every `every_days` days.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Daily {
+    /// Local minutes after midnight.
+    pub at_min: u32,
+    pub every_days: u32,
+}
+
+impl Daily {
+    /// Due when its time of day has passed since it last started (`last_started_ms`), and
+    /// `every_days` local calendar days lie between the last completed run
+    /// (`last_completed_ms`, the time that run started) and that start time. A job that was
+    /// not watched for a while is due once: starting it moves `last_started_ms` past the
+    /// latest start time.
+    pub fn due(
+        &self,
+        last_started_ms: u64,
+        last_completed_ms: u64,
+        now_ms: u64,
+        tz_min: i32,
+    ) -> bool {
+        let start = latest_start(now_ms, self.at_min, tz_min);
+        due_at(last_started_ms, now_ms, self.at_min, tz_min)
+            && local_day(start, tz_min) - local_day(last_completed_ms as i64, tz_min)
+                >= i64::from(self.every_days)
+    }
+
+    /// When it will next be due: `now_ms` if it is due now.
+    pub fn next(
+        &self,
+        last_started_ms: u64,
+        last_completed_ms: u64,
+        now_ms: u64,
+        tz_min: i32,
+    ) -> u64 {
+        if self.due(last_started_ms, last_completed_ms, now_ms, tz_min) {
+            return now_ms;
+        }
+        let mut start = latest_start(now_ms, self.at_min, tz_min) + DAY_MS;
+        // The wait is at most `every_days` past the later of the two runs.
+        for _ in 0..800 {
+            let at = start.max(0) as u64;
+            if self.due(last_started_ms, last_completed_ms, at, tz_min) {
+                return at;
+            }
+            start += DAY_MS;
+        }
+        start.max(0) as u64
+    }
+}
+
 // ---- the path rule ---------------------------------------------------------------------------
 
 /// `on.pull_request.paths` of a workflow file: the one list of what the workflow covers. A small
@@ -633,6 +700,47 @@ mod tests {
         // at -05:00, 23:00 local is 04:00 UTC the next day
         assert!(!due_at(10 * day + 5 * h, 11 * day + 3 * h, at, -300));
         assert!(due_at(10 * day + 3 * h, 11 * day + 4 * h, at, -300));
+    }
+
+    #[test]
+    fn a_nightly_job_is_due_at_the_next_local_midnight_and_once_after_a_gap() {
+        let h = 3_600_000u64;
+        let day = 24 * h;
+        let nightly = Daily {
+            at_min: 0,
+            every_days: 1,
+        };
+        for tz in [0i32, 120, -480] {
+            let off = i64::from(tz) * 60_000;
+            // A local time as UTC milliseconds.
+            let local = |d: u64, ms: u64| ((d * day + ms) as i64 - off) as u64;
+            let ran = local(10, 60_000);
+            assert!(
+                !nightly.due(ran, ran, local(10, 23 * h + 59 * 60_000), tz),
+                "{tz}"
+            );
+            assert!(nightly.due(ran, ran, local(11, 0), tz), "{tz}");
+            assert_eq!(nightly.next(ran, ran, local(10, 5 * h), tz), local(11, 0));
+            // Down for days: due at once, and not again once it has started.
+            let back = local(15, 9 * h);
+            assert!(nightly.due(ran, ran, back, tz));
+            assert_eq!(nightly.next(ran, ran, back, tz), back);
+            assert!(!nightly.due(back, back, back + 60_000, tz));
+            assert!(nightly.due(back, back, local(16, 0), tz));
+            // A run that did not complete is tried again at the next start time only.
+            assert!(!nightly.due(local(11, 0), ran, local(11, 12 * h), tz));
+            assert!(nightly.due(local(11, 0), ran, local(12, 0), tz));
+            // Weekly waits a week.
+            let weekly = Daily {
+                at_min: 0,
+                every_days: 7,
+            };
+            for d in 11..17 {
+                assert!(!weekly.due(ran, ran, local(d, 23 * h), tz), "{tz} day {d}");
+            }
+            assert!(weekly.due(ran, ran, local(17, 0), tz));
+            assert_eq!(weekly.next(ran, ran, local(12, h), tz), local(17, 0));
+        }
     }
 
     #[test]

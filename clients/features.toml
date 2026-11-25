@@ -732,3 +732,11 @@ compose = "done"
 ios = "done"
 android = "todo"
 android_reason = "Not in the first Android phone app (stage 469): the Android module has no Settings page yet"
+
+[feature.settings-review]
+description = "Settings starts with a Pipeline review section: an on/off switch, the time of day, every N days (with Daily and Weekly), each saved through POST /review; the last run with links to the proposals it filed and its summary, the next run, any problem with review.toml, and Run now through POST /review/run, off while a review is running (s1093)"
+swift = "done"
+compose = "done"
+ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no Settings page yet"

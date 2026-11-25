@@ -71,6 +71,7 @@ public final class MonitorModel {
     public var notifySettings: NotifySettings?
     public var settingsNotice: String?
     public var remoteSettings: RemoteSettings?
+    public var reviewSettings: ReviewSettings?
     /// Running work on other Macs: this Mac's own switch (a node), and the nodes (a coordinator).
     public var nodeSelf: NodeSelf?
     public var nodes: NodesSnapshot?
@@ -985,6 +986,17 @@ public final class MonitorModel {
         if !p.isEmpty { raw("GET", SettingsPayload.settingsPath(project: p), id: "settings") }
         raw("GET", "/notify/settings", id: "notify-settings")
         raw("GET", "/remote", id: "remote")
+        raw("GET", "/review", id: "review")
+    }
+    /// Change one setting of the pipeline review (a body from `SettingsPayload`).
+    public func changeReviewSetting(_ body: String) {
+        settingsNotice = nil
+        raw("POST", "/review", json: body, id: "review-save")
+    }
+    /// File a pipeline review now.
+    public func runReview() {
+        settingsNotice = nil
+        raw("POST", "/review/run", json: "{}", id: "review-run")
     }
     /// Change the global placement mode; the page reloads `/remote` on the answer.
     public func changeGlobalMode(_ mode: String) {
@@ -1433,6 +1445,16 @@ public final class MonitorModel {
         }
         if r.id == "notify-settings", r.ok { notifySettings = NotifySettings(json: r.json) }
         if r.id == "remote", r.ok { remoteSettings = RemoteSettings(json: r.json) }
+        if r.id == "review", r.ok { reviewSettings = ReviewSettings(json: r.json) }
+        if r.id == "review-save" {
+            settingsNotice = r.ok ? Self.settingsDone(r.id) : r.error
+            // The answer is the review as it stands now; a refusal puts the controls back.
+            if r.ok { reviewSettings = ReviewSettings(json: r.json) } else { raw("GET", "/review", id: "review") }
+        }
+        if r.id == "review-run" {
+            settingsNotice = r.ok ? Self.settingsDone(r.id) : r.error
+            if r.ok { raw("GET", "/review", id: "review") }
+        }
         if r.id == "node-self", r.ok { nodeSelf = NodeSelf(json: r.json) }
         if r.id == "nodes", r.ok { nodes = NodesSnapshot(json: r.json) }
         if r.id == "node-accept" || r.id == "nodes-use" {

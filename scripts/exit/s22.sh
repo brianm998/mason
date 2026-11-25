@@ -8,7 +8,7 @@
 #     The owner approves, a scripted fix lands on MASON's repository, history after it has no
 #     retries, and the digest says "this fix worked" with the before and after values.
 #  2. A second fix that changes nothing is reported as "this fix didn't help".
-#  3. The analyst's findings are checked like any proposal: one filed, two refused.
+#  3. The pipeline review's findings (s1093) are checked like any proposal: one filed, two refused.
 #  4. Triage (off by default) records what it would do and queues it for review; it answers nothing.
 #  5. The digest shows exploring skips by route and forced landings with their reasons.
 #  6. Base health files only failures that the baseline did not list.
@@ -101,8 +101,7 @@ cat > "$root/acmeshop/tests.sh" <<'SH'
 echo "1..2"; echo "ok 1 - checkout"; echo "not ok 2 - old_failure"
 SH
 push_first acmeshop
-# --- "watchshop": its agent plays the analyst; "askshop": its agent asks a question
-repo_of watchshop; echo w > "$root/watchshop/w.txt"; push_first watchshop
+# --- "askshop": its agent asks a question
 repo_of askshop; echo a > "$root/askshop/a.txt"; push_first askshop
 
 cat > "$root/mason.json" <<JSON
@@ -113,18 +112,19 @@ cat > "$root/acme.json" <<JSON
   {"sh": "echo done > done-\$(date +%s%N).txt; $commit work"}, {"call": {"tool": "submit_change", "args": {"summary": "work", "head": "\$HEAD"}}}
 ]]}}
 JSON
-# The analyst writes three findings: one good, one with no evidence, one naming a metric that does not exist.
+# The review writes three findings: one good, one with no evidence, one naming a metric that does not exist.
 cat > "$root/analyst-result.json" <<'JSON'
 {"findings": [
-  {"title": "Review steps queue behind develop steps", "body": "Review waits for a slot while develop holds them.", "evidence": "crates/daemon/src/sched.rs:1 ranks review below develop", "metric": "wait_share"},
-  {"title": "Something feels slow", "body": "It just feels slow.", "evidence": "it feels slow to me", "metric": "wait_share"},
-  {"title": "Morale is low in the logs", "body": "The logs look sad.", "evidence": "crates/daemon/src/jobs.rs:1 is gloomy", "metric": "happiness"}
+  {"category": "speed", "title": "Review steps queue behind develop steps", "body": "Review waits for a slot while develop holds them.", "evidence": "crates/daemon/src/sched.rs:1 ranks review below develop", "metric": "wait_share"},
+  {"category": "speed", "title": "Something feels slow", "body": "It just feels slow.", "evidence": "it feels slow to me", "metric": "wait_share"},
+  {"category": "stuck", "title": "Morale is low in the logs", "body": "The logs look sad.", "evidence": "crates/daemon/src/jobs.rs:1 is gloomy", "metric": "happiness"}
+],
+"nothing_found": [
+  {"category": "narrow", "because": "no test step ran more than it needed"},
+  {"category": "coverage", "because": "nothing was seen"},
+  {"category": "crash", "because": "nothing crashed"},
+  {"category": "automate", "because": "nothing was seen"}
 ]}
-JSON
-cat > "$root/watch.json" <<JSON
-{"steps": {"develop": [[
-  {"sh": "cp $root/analyst-result.json analyst-result.json"}, {"call": {"tool": "submit_change", "args": {"summary": "analysed", "head": "\$HEAD"}}}
-]]}}
 JSON
 cat > "$root/ask.json" <<JSON
 {"steps": {"develop": [[
@@ -162,7 +162,6 @@ every = "1h"
 command = "sh tests.sh"
 parser = "tap"
 '
-proj watchshop watch.json ''
 proj askshop ask.json '
 [triage]
 enabled = true
@@ -171,7 +170,7 @@ command = "sh '"$root"'/triage.sh"
 '
 start_daemon() {
   "$bin/masond" --data-dir "$root/d" --config-dir "$root/c" --heartbeat-ms 100 --sweep-ms 3600000 \
-    --introspect-ms 1500 --schedule-ms 300 --analyst-ms 36000000 --owner "$owner" 2>>"$root/masond.log" &
+    --introspect-ms 1500 --schedule-ms 300 --owner "$owner" 2>>"$root/masond.log" &
   daemon=$!
   until m status >/dev/null 2>&1; do kill -0 "$daemon" || { cat "$root/masond.log" >&2; exit 1; }; sleep 0.1; done
 }
@@ -264,10 +263,16 @@ m digest --days 1 | grep -q "this fix didn't help"
 [ "$(finding_field 1 "f['verdict']")" = worked ]    # the first verdict stands
 echo "   the digest reports both: one fix worked, one didn't help"
 
-echo "== 3. the analyst's findings are held to the same rules"
+echo "== 3. the review's findings are held to the same rules"
+# MASON's own agent plays the review from here: it writes the result and commits nothing.
+cat > "$root/mason.json" <<JSON
+{"steps": {"develop": [[
+  {"sh": "cp $root/analyst-result.json analyst-result.json"}, {"call": {"tool": "submit_change", "args": {"summary": "reviewed", "head": "\$HEAD"}}}
+]]}}
+JSON
 m resume >/dev/null
-m schedule run analyst:watchshop | sed 's/^/   /'
-wait_for 60 "the analyst's proposal" sh -c "$bin/mason --data-dir $root/d --config-dir $root/c proposals | grep -q 'Review steps queue behind develop'"
+m review run | sed 's/^/   /'
+wait_for 60 "the review's proposal" sh -c "$bin/mason --data-dir $root/d --config-dir $root/c proposals | grep -q 'Review steps queue behind develop'"
 m pause --mode claims --for 2h >/dev/null
 refused=$(find "$root/d/t" -name analyst-refused.txt | head -1)
 [ -n "$refused" ]
@@ -275,8 +280,8 @@ sed 's/^/   refused: /' "$refused"
 grep -q "Something feels slow" "$refused"
 grep -q "unknown metric" "$refused"
 [ "$(m proposals --json | grep -c 'Something feels slow\|Morale is low')" = 0 ]
-m health --json | grep -q '"rule": "analyst"'
-echo "   one analyst finding became a proposal; the one without evidence and the one with an unknown metric filed nothing"
+m health --json | grep -q '"rule": "review"'
+echo "   one review finding became a proposal; the one without evidence and the one with an unknown metric filed nothing"
 
 echo "== 4. triage never answers: it records what it would do, for review"
 [ -z "$(m triage list | grep 'would')" ]    # off by default: nothing recorded yet

@@ -845,6 +845,7 @@ fn file(d: &Arc<Daemon>, sid: u64, pid: ProjectId, key: &str, x: &Value) -> Stri
         blocks_task: false,
         explored: false,
         estimate: None,
+        lookback: None,
     };
     match crate::proposals::file(d, &f) {
         Ok(filed) => {

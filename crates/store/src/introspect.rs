@@ -49,6 +49,17 @@ pub struct ScheduleRow {
     pub follow: String,
 }
 
+/// One successful step run, as `step_history` records it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StepHistoryRow {
+    pub task: u64,
+    pub project: String,
+    pub step: String,
+    /// What the run counted (the tests run, for a test step).
+    pub done: u64,
+    pub at: u64,
+}
+
 /// One full test (s782): a start on a base commit and, once it ends, its verdict.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FullTestRow {
@@ -258,6 +269,39 @@ impl Store {
                 ],
             )
             .map(|_| ())
+        })
+    }
+
+    /// Forget a recurring job's row (one that no longer exists).
+    pub fn delete_schedule(&self, name: &str) -> Result<(), StoreError> {
+        let n = name.to_string();
+        self.write(move |c| {
+            c.execute("DELETE FROM schedules WHERE name = ?1", params![n])
+                .map(|_| ())
+        })
+    }
+
+    /// The successful step runs that ended in `[from, to)`, oldest first.
+    pub fn step_history_between(
+        &self,
+        from: u64,
+        to: u64,
+    ) -> Result<Vec<StepHistoryRow>, StoreError> {
+        self.read(move |c| {
+            let mut st = c.prepare(
+                "SELECT task, project, step, done, at FROM step_history
+                 WHERE at >= ?1 AND at < ?2 ORDER BY at, run",
+            )?;
+            let rows = st.query_map(params![from as i64, to as i64], |r| {
+                Ok(StepHistoryRow {
+                    task: r.get::<_, i64>(0)? as u64,
+                    project: r.get(1)?,
+                    step: r.get(2)?,
+                    done: r.get::<_, i64>(3)? as u64,
+                    at: r.get::<_, i64>(4)? as u64,
+                })
+            })?;
+            rows.collect()
         })
     }
 
