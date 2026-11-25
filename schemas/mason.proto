@@ -1225,6 +1225,9 @@ message TaskDetailView {
   repeated CiLink ci_links = 23;
   // Where this task's runs go and who decided it (#834). Additive.
   Placement placement = 24;
+  // The reviewer's minor findings, one line each ("minor: issue (file)"), oldest first (#1132).
+  // Additive.
+  repeated string review_findings = 25;
 }
 
 // A page on the git host a client opens in the browser. `label` is exactly the text the
