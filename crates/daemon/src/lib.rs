@@ -56,6 +56,7 @@ pub mod knownred;
 pub mod lan;
 pub mod landing;
 pub mod launchview;
+pub mod logfmt;
 pub mod markers;
 pub mod monitor_inplace;
 pub mod newtests;
