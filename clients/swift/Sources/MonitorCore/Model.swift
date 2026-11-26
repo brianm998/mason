@@ -787,9 +787,14 @@ public final class MonitorModel {
     public func makeTestImmune(_ task: UInt64) {
         command { $0.skip = .with { $0.task = task; $0.allTests = true } }
     }
-    public func answer(task: UInt64, _ text: String, cardHash: String) {
-        command { $0.answer = .with { $0.task = task; $0.answer = text; $0.cardHash = cardHash } }
+    public func answer(task: UInt64, _ text: String, cardHash: String, context: String = "") {
+        command { $0.answer = .with { $0.task = task; $0.answer = text; $0.cardHash = cardHash; $0.context = context } }
     }
+    public func answer(task: UInt64, _ r: AnswerRequest, cardHash: String) {
+        answer(task: task, r.answer, cardHash: cardHash, context: r.context)
+    }
+    /// Ask for a diagnosis of a failed task (owner only).
+    public func diagnose(_ task: UInt64) { command { $0.diagnose = .with { $0.task = task } } }
     /// Approve a held self-change: the exact diff the owner was shown.
     public func approveHold(_ task: UInt64, diffHash: String) {
         command { $0.approveHold = .with { $0.task = task; $0.diffHash = diffHash } }

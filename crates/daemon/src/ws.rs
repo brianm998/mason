@@ -134,6 +134,15 @@ async fn send(d: &Daemon, sock: &mut WebSocket, m: ServerMessage, e: Encoding) -
     }
 }
 
+/// The body of `POST /tasks/{id}/answer` for an Answer command. An empty `context` is left out.
+fn answer_body(a: &Answer, actor: &str) -> Value {
+    let mut b = json!({"answer": a.answer, "hash": a.card_hash, "as": actor});
+    if !a.context.trim().is_empty() {
+        b["context"] = json!(a.context);
+    }
+    b
+}
+
 fn decode(msg: &Message) -> Option<(Encoding, Result<ClientMessage, String>)> {
     match msg {
         Message::Binary(b) => Some((Encoding::Protobuf, decode_client(b, Encoding::Protobuf))),
@@ -827,7 +836,7 @@ fn call_for(c: &Command) -> Result<Call, String> {
         ),
         Cmd::Answer(a) => post(
             format!("/tasks/{}/answer", a.task),
-            Some(json!({"answer": a.answer, "hash": a.card_hash, "as": c.actor})),
+            Some(answer_body(a, &c.actor)),
             Some((a.task, "answer")),
         ),
         Cmd::Skip(s) => {
@@ -897,6 +906,11 @@ fn call_for(c: &Command) -> Result<Call, String> {
             format!("/tasks/{}/revive", t.task),
             None,
             Some((t.task, "revive")),
+        ),
+        Cmd::Diagnose(t) => post(
+            format!("/tasks/{}/diagnose", t.task),
+            None,
+            Some((t.task, "diagnose")),
         ),
         Cmd::Pause(p) => post(
             "/pause".into(),
@@ -1149,6 +1163,19 @@ pub async fn run_command_as(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_answer_carries_its_context_only_when_there_is_some() {
+        let mut a = Answer {
+            task: 1,
+            answer: "2".into(),
+            card_hash: "h".into(),
+            context: String::new(),
+        };
+        assert!(answer_body(&a, "me").get("context").is_none());
+        a.context = "the flaky one".into();
+        assert_eq!(answer_body(&a, "me")["context"], "the flaky one");
+    }
+
     use super::*;
 
     fn cmd(id: &str, body: Cmd) -> Command {

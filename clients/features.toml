@@ -222,6 +222,21 @@ compose = "done"
 ios = "done"
 android = "done"
 
+[feature.decision-card-context]
+description = "Every decision card has an optional \"Add context\" field under the options; an option click, or Return on the selected one, sends the option with the field's text as `context`, Other sends free text with it, an empty field sends none; Tab reaches the field, Enter sends the selected option, Shift-Enter a new line; monitor tools take `answer --context TEXT`"
+swift = "done"
+compose = "done"
+ios = "done"
+android = "done"
+
+[feature.failed-task-diagnosis]
+description = "A failed task's page leads with the diagnosis card (its summary as the why, the failure line under it) and folds Retry, Cancel and Skip all testing into a collapsed \"Other actions\" row, Open session stays; while one runs it says \"Diagnosing on <model, effort>… started <time>\"; with none it shows the old buttons plus Diagnose when offered; failed rows say \"diagnosis ready\" or \"diagnosing\" next to the activity"
+swift = "done"
+compose = "done"
+ios = "done"
+android = "todo"
+android_reason = "The phone task page shows the card, the running line and Diagnose, but its list rows do not show the diagnosis badge yet"
+
 [feature.progress-cells]
 description = "Filled, part, hatched and empty cells; a running cell fills in proportion to a real total, lighter for a typical one, outline for none; a percentage only from a real total, the count and typical range for a history total, the count alone for none; a progress line per running step with a counting time; amber and never red when slow or quiet"
 swift = "done"

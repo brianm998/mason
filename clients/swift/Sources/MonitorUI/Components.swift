@@ -441,20 +441,29 @@ struct DecisionCardView: View {
     let task: UInt64
     let card: Mason_V1_DecisionCard
     @State private var other = ""
+    @State private var context = ""
     @State private var selection = OptionSelection(count: 0)
     @State private var multi = MultiSelection(count: 0)
     @FocusState private var cardFocused: Bool
     @FocusState private var otherFocused: Bool
+    @FocusState private var contextFocused: Bool
 
     private func sendOther() {
-        guard let text = otherAnswer(other) else { return }
-        model.answer(task: task, text, cardHash: card.hash)
+        guard let r = AnswerRequest.other(other, context: context) else { return }
+        model.answer(task: task, r, cardHash: card.hash)
         other = ""
+        context = ""
     }
 
     private func sendMulti() {
         guard let a = multi.answer else { return }
-        model.answer(task: task, a, cardHash: card.hash)
+        model.answer(task: task, .multi(a, context: context), cardHash: card.hash)
+        context = ""
+    }
+
+    private func sendOption(_ i: Int) {
+        model.answer(task: task, .option(i, context: context), cardHash: card.hash)
+        context = ""
     }
 
     private func resetSelection() {
@@ -488,7 +497,7 @@ struct DecisionCardView: View {
                         .buttonStyle(.plain)
                         .accessibilityIdentifier("card:\(task):option:\(i + 1)")
                     } else if model.canAct {
-                        Button { model.answer(task: task, String(i + 1), cardHash: card.hash) } label: {
+                        Button { sendOption(i) } label: {
                             optionLabel(i, o)
                                 .pill(prominent: o.recommended)
                                 .overlay(RoundedRectangle(cornerRadius: theme.radius)
@@ -506,6 +515,23 @@ struct DecisionCardView: View {
                         .accessibilityIdentifier("card:\(task):send-checked")
                 }
                 if model.canAct {
+                    // Optional words that go with whichever answer is sent. Tab reaches it from the
+                    // options; Enter sends the selected option, Shift-Enter starts a new line.
+                    TextField("Add context (optional)", text: $context, axis: .vertical)
+                        .textFieldStyle(.roundedBorder)
+                        .lineLimit(1...6)
+                        .focused($contextFocused)
+                        .onKeyPress(.return, phases: .down) { press in
+                            switch otherBoxKey(shift: press.modifiers.contains(.shift)) {
+                            case .newline: return .ignored
+                            case .send:
+                                if card.multiSelect { sendMulti(); return multi.answer == nil ? .ignored : .handled }
+                                guard let i = selection.index else { return .ignored }
+                                sendOption(i)
+                                return .handled
+                            }
+                        }
+                        .accessibilityIdentifier("card:\(task):context")
                     HStack(alignment: .top) {
                         ZStack(alignment: .topLeading) {
                             // Multi-line: Enter sends, Shift-Enter starts a new line.
@@ -583,8 +609,8 @@ struct DecisionCardView: View {
         .onKeyPress(.return) {
             guard model.canAct else { return .ignored }
             if card.multiSelect { sendMulti(); return multi.answer == nil ? .ignored : .handled }
-            guard let a = selection.answer else { return .ignored }
-            model.answer(task: task, a, cardHash: card.hash)
+            guard let i = selection.index else { return .ignored }
+            sendOption(i)
             return .handled
         }
         .onAppear { resetSelection() }
@@ -696,6 +722,9 @@ struct ActionButtons: View {
     let model: MonitorModel
     let row: TaskRow
     var hasApprovalView = false
+    /// Set on a failed task's page: which presentation it has, so the quiet actions fold away.
+    var failedPage: FailedPage? = nil
+    @State private var otherOpen = false
 
     /// The daemon's actions this platform may show: with agent sessions off there is no Open session.
     static func offered(_ actions: [String], features: PlatformFeatures) -> [String] {
@@ -720,11 +749,16 @@ struct ActionButtons: View {
     /// Approve and Reject have their own view (ApprovalView) wherever there is one; a
     /// non-owner sees no buttons at all for what only the owner may do.
     @ViewBuilder var buttons: some View {
-        ForEach(Self.offered(row.allowedActions, features: features).filter { shown($0) }, id: \.self) { a in
-            Button { run(a) } label: { PendingLabel(text: label(a), pending: model.pendingCommand(task: row.id, action: a), prominent: a == "approve") }
-                .buttonStyle(.plain).touchTarget()
-                .disabled(model.isBusy(task: row.id))
-                .accessibilityIdentifier("action:\(row.id):\(a)")
+        let all = Self.offered(row.allowedActions, features: features).filter { shown($0) }
+        let hidden = all.filter { failedPage?.hidesUnderOther($0) ?? false }
+        ForEach(all.filter { !hidden.contains($0) }, id: \.self) { a in button(a) }
+        if !hidden.isEmpty {
+            Button { otherOpen.toggle() } label: {
+                Text(otherOpen ? "Other actions ▾" : "Other actions ▸").font(theme.body()).foregroundStyle(theme.muted)
+            }
+            .buttonStyle(.plain).touchTarget()
+            .accessibilityIdentifier("action:\(row.id):other-actions")
+            if otherOpen { ForEach(hidden, id: \.self) { a in button(a) } }
         }
         if let why = model.actionError(task: row.id) {
             Text(why).font(theme.small()).foregroundStyle(theme.attention)
@@ -734,6 +768,13 @@ struct ActionButtons: View {
             Text(notice).font(theme.small()).foregroundStyle(theme.attention)
                 .accessibilityIdentifier("action:\(row.id):open_session:notice")
         }
+    }
+
+    func button(_ a: String) -> some View {
+        Button { run(a) } label: { PendingLabel(text: label(a), pending: model.pendingCommand(task: row.id, action: a), prominent: a == "approve") }
+            .buttonStyle(.plain).touchTarget()
+            .disabled(model.isBusy(task: row.id))
+            .accessibilityIdentifier("action:\(row.id):\(a)")
     }
 
     func shown(_ a: String) -> Bool {
@@ -770,6 +811,7 @@ struct ActionButtons: View {
         case "skip_test": model.skipTest(row.id, step: row.step)
         case "skip_all_tests": model.makeTestImmune(row.id)
         case "open_session": model.openSession(row.id)
+        case "diagnose": model.diagnose(row.id)
         default: break
         }
     }

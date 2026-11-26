@@ -55,6 +55,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import mason.v1.CellState
 import androidx.compose.foundation.focusable
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -383,6 +384,8 @@ fun CopyValueButton(target: CopyTarget, copy: (String) -> Unit) {
 fun DecisionCardView(model: MonitorModel, task: Long, card: DecisionCard) {
     val theme = LocalTheme.current
     var other by remember { mutableStateOf(TextFieldValue("")) }
+    var context by remember { mutableStateOf(TextFieldValue("")) }
+    var inOther by remember { mutableStateOf(false) }
     var selection by remember(card.hash) {
         mutableStateOf(OptionSelection.starting(card.options.size, card.options.indexOfFirst { it.recommended }.takeIf { it >= 0 }))
     }
@@ -391,10 +394,19 @@ fun DecisionCardView(model: MonitorModel, task: Long, card: DecisionCard) {
     }
     val shape = RoundedCornerShape(theme.radius)
     val focus = remember { FocusRequester() }
+    fun sent() { context = TextFieldValue("") }
     fun sendOther() {
-        val text = otherAnswer(other.text) ?: return
-        model.answer(task, text, card.hash)
+        val r = AnswerRequest.other(other.text, context.text) ?: return
+        model.answer(task, r, card.hash)
         other = TextFieldValue("")
+        sent()
+    }
+    /** Return (or a click) on the selected option, sent with the context field's text. */
+    fun sendSelected(): Boolean {
+        val a = (if (card.multi_select) multi.answer else selection.answer) ?: return false
+        model.answer(task, AnswerRequest.multi(a, context.text), card.hash)
+        sent()
+        return true
     }
     Column(
         verticalArrangement = Arrangement.spacedBy(theme.spacing),
@@ -411,10 +423,8 @@ fun DecisionCardView(model: MonitorModel, task: Long, card: DecisionCard) {
                     Key.DirectionDown -> { if (card.multi_select) multi = multi.down() else selection = selection.down(); true }
                     Key.DirectionUp -> { if (card.multi_select) multi = multi.up() else selection = selection.up(); true }
                     Key.Spacebar -> if (card.multi_select) { multi = multi.toggle(); true } else false
-                    Key.Enter, Key.NumPadEnter -> {
-                        val a = if (card.multi_select) multi.answer else selection.answer
-                        if (a != null) { model.answer(task, a, card.hash); true } else false
-                    }
+                    // Shift-Enter and Enter in the Other box belong to that box.
+                    Key.Enter, Key.NumPadEnter -> if (e.isShiftPressed || inOther) false else sendSelected()
                     else -> false
                 }
             }
@@ -447,15 +457,49 @@ fun DecisionCardView(model: MonitorModel, task: Long, card: DecisionCard) {
                         modifier = Modifier.fillMaxWidth()
                             .border(BorderStroke(if (selection.index == i) 2.dp else 0.dp, theme.text), shape)
                             .testTag("card:$task:option:${i + 1}"),
-                    ) { model.answer(task, (i + 1).toString(), card.hash) }
+                    ) { model.answer(task, AnswerRequest.option(i, context.text), card.hash); sent() }
                 } else {
                     Text(label, style = theme.body())
                 }
             }
             if (model.canAct && card.multi_select) {
                 Pill("Send the checked options", modifier = Modifier.testTag("card:$task:send-checked")) {
-                    multi.answer?.let { model.answer(task, it, card.hash) }
+                    sendSelected()
                 }
+            }
+            if (model.canAct) {
+                // Optional words that go with whichever answer is sent. Tab reaches it from the options;
+                // Enter sends the selected option (the card's key handler), Shift-Enter starts a new line.
+                androidx.compose.foundation.text.BasicTextField(
+                    value = context,
+                    onValueChange = { context = it },
+                    textStyle = theme.body(),
+                    singleLine = false,
+                    decorationBox = { inner ->
+                        Box(
+                            Modifier.fillMaxWidth().background(theme.background, RoundedCornerShape(theme.radius))
+                                .border(1.dp, theme.border, RoundedCornerShape(theme.radius)).padding(theme.spacing),
+                        ) {
+                            if (context.text.isEmpty()) Text("Add context (optional)", style = theme.body(color = theme.muted))
+                            inner()
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                        .onPreviewKeyEvent { e ->
+                            if (e.type == KeyEventType.KeyDown && (e.key == Key.Enter || e.key == Key.NumPadEnter)) {
+                                when (otherBoxKey(e.isShiftPressed)) {
+                                    OtherKey.SEND -> { sendSelected(); true }
+                                    OtherKey.NEWLINE -> {
+                                        val t = context
+                                        val text = t.text.replaceRange(t.selection.min, t.selection.max, "\n")
+                                        context = TextFieldValue(text, TextRange(t.selection.min + 1))
+                                        true
+                                    }
+                                }
+                            } else false
+                        }
+                        .testTag("card:$task:context"),
+                )
             }
             if (model.canAct) Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), verticalAlignment = Alignment.Top) {
                 // Multi-line: Enter sends, Shift-Enter starts a new line.
@@ -474,6 +518,7 @@ fun DecisionCardView(model: MonitorModel, task: Long, card: DecisionCard) {
                         }
                     },
                     modifier = Modifier.weight(1f)
+                        .onFocusChanged { inOther = it.isFocused }
                         .onPreviewKeyEvent { e ->
                             if (e.type == KeyEventType.KeyDown && (e.key == Key.Enter || e.key == Key.NumPadEnter)) {
                                 when (otherBoxKey(e.isShiftPressed)) {
@@ -576,8 +621,9 @@ fun ApprovalView(model: MonitorModel, task: Long, approval: Approval) {
 
 /** The actions a task offers now: exactly the daemon's `allowed_actions`. */
 @Composable
-fun ActionButtons(model: MonitorModel, row: TaskRow, hasApprovalView: Boolean = false) {
+fun ActionButtons(model: MonitorModel, row: TaskRow, hasApprovalView: Boolean = false, failedPage: FailedPage? = null) {
     val theme = LocalTheme.current
+    var otherOpen by remember { mutableStateOf(false) }
     Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing)) {
         // Approve and Reject have their own view wherever there is one; a non-owner sees no
         // buttons at all for what only the owner may do.
@@ -586,8 +632,20 @@ fun ActionButtons(model: MonitorModel, row: TaskRow, hasApprovalView: Boolean = 
             it != "answer" && it != "edit" && it != "block" && it != "unblock" &&
                 !(hasApprovalView && (it == "approve" || it == "reject")) &&
                 !(!model.canAct && (it == "approve" || it == "reject"))
-        }.forEach { a ->
-            PendingPill(model, row.id, a, label(a), prominent = a == "approve", modifier = Modifier.testTag("action:${row.id}:$a")) { run(model, row, a) }
+        }.partition { failedPage?.hidesUnderOther(it) == true }.let { (hidden, shown) ->
+            shown.forEach { a ->
+                PendingPill(model, row.id, a, label(a), prominent = a == "approve", modifier = Modifier.testTag("action:${row.id}:$a")) { run(model, row, a) }
+            }
+            // Retry, Cancel and Skip all testing fold away behind a diagnosis.
+            if (hidden.isNotEmpty()) {
+                Text(
+                    if (otherOpen) "Other actions ▾" else "Other actions ▸", style = theme.body(color = theme.muted),
+                    modifier = Modifier.clickable { otherOpen = !otherOpen }.testTag("action:${row.id}:other-actions"),
+                )
+                if (otherOpen) hidden.forEach { a ->
+                    PendingPill(model, row.id, a, label(a), modifier = Modifier.testTag("action:${row.id}:$a")) { run(model, row, a) }
+                }
+            }
         }
         model.actionError(row.id)?.let {
             Text(it, style = theme.small(color = theme.attention), modifier = Modifier.testTag("action:${row.id}:error"))
@@ -630,6 +688,7 @@ private fun run(model: MonitorModel, row: TaskRow, a: String) {
         "skip_test" -> model.skipTest(row.id, row.step)
         "skip_all_tests" -> model.makeTestImmune(row.id)
         "open_session" -> model.openSession(row.id)
+        "diagnose" -> model.diagnose(row.id)
     }
 }
 
