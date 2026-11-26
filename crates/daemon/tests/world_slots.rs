@@ -175,6 +175,34 @@ fn a_presence_file_nobody_holds_is_not_counted_and_is_swept() {
 }
 
 #[test]
+fn a_thread_holding_a_slot_never_waits_for_another() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    let (tx, rx) = std::sync::mpsc::channel();
+    // On a thread of its own, so a take that waited fails the test instead of hanging it.
+    std::thread::spawn(move || {
+        // Far longer than this test is prepared to wait for the report.
+        let patience = std::time::Duration::from_secs(3600);
+        let first = slots::take(&path, 2, patience);
+        let second = slots::take(&path, 2, patience);
+        let third = slots::take(&path, 2, patience);
+        let got = (first.is_some(), second.is_some(), third.is_some());
+        // Dropped on another thread, they no longer count as this one's.
+        std::thread::spawn(move || drop((first, second, third)))
+            .join()
+            .unwrap();
+        let again = slots::take(&path, 2, patience).is_some();
+        let _ = tx.send((got, again));
+    });
+    let (got, again) = rx
+        .recv_timeout(std::time::Duration::from_secs(120))
+        .expect("a take waited while its thread held a slot");
+    assert_eq!(got, (true, true, false), "free slots are taken, never more");
+    assert!(again);
+    assert_eq!(slots::held_count(dir.path(), 2), 0);
+}
+
+#[test]
 fn shares_round_up_so_no_slot_is_left_idle() {
     assert_eq!(slots::share(8, 1), 8);
     assert_eq!(slots::share(8, 3), 3);
