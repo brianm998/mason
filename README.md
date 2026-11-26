@@ -812,6 +812,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s1102**: The exit script s70 now accepts a suite "minimum" total after a task's green, because only runs at the base size a suite, so it no longer fails on a stale expectation.
 - **s1103**: The flaky protocol test for unchanged views is already fixed on develop by s1089, so this task adds only its record and an exit test that runs that test.
 - **s1104**: The Compose conformance settle keeps the signal-based wait and again prints a quiet-exit line when it returns with its views behind the daemon's seq, which its exit test checks along with the s1068 and s1026 exit tests.
+- **s1106**: submit_change, run_check and landing now refuse added lines that hold a secret or a word on the owner's banned list, which lives outside git.
 - **s1107**: Every Claude agent MASON starts is refused `git` commands that destroy uncommitted or shared work, and any recursive `rm` outside what it owns, with a reason it can act on.
 - **s1110**: Every GitHub Action in MASON's workflows is pinned to a full commit SHA, Dependabot proposes the moves weekly, and CI's lint job refuses an unpinned `uses:`.
 - **s1118**: On macOS the coordinator now execs masond from one signed bundle on the internal disk (`~/Applications/MASON Coordinator.app`) whose path never changes, so a Local Network rule can apply, and a rule macOS cannot apply is named as such.
