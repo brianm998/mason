@@ -499,11 +499,63 @@ pub fn parse_java_home(text: &str) -> Vec<String> {
 }
 
 /// `Xcode_16.4.app`, `Xcode-16.4.app` or `Xcode16.4.app`: `16.4`. A plain `Xcode.app` has no
-/// version in its name and is not listed.
+/// version in its name; [`xcode_app_version`] reads it from the app's Info.plist instead.
 pub fn xcode_from_app_name(name: &str) -> Option<String> {
     let rest = name.strip_prefix("Xcode")?.strip_suffix(".app")?;
     let v = rest.trim_start_matches(['_', '-', ' ']);
     (!v.is_empty() && v.chars().all(|c| c.is_ascii_digit() || c == '.')).then(|| v.to_string())
+}
+
+/// The version of the Xcode app at `app`: the one in its name when there is one, else the
+/// `CFBundleShortVersionString` in its `Contents/Info.plist` (a plain `Xcode.app`). Nothing when
+/// the name is not an Xcode app's, or the plist is missing or does not hold a version.
+pub fn xcode_app_version(app: &std::path::Path) -> Option<String> {
+    let name = app.file_name()?.to_string_lossy().into_owned();
+    if let Some(v) = xcode_from_app_name(&name) {
+        return Some(v);
+    }
+    if !(name.starts_with("Xcode") && name.ends_with(".app")) {
+        return None;
+    }
+    let plist = app.join("Contents/Info.plist");
+    if !plist.is_file() {
+        return None;
+    }
+    let out = probe(
+        "/usr/libexec/PlistBuddy",
+        &[
+            "-c",
+            "Print :CFBundleShortVersionString",
+            &plist.to_string_lossy(),
+        ],
+    )?;
+    let v = out.trim();
+    (!v.is_empty() && v.chars().all(|c| c.is_ascii_digit() || c == '.')).then(|| v.to_string())
+}
+
+/// The Xcode versions of the apps in `dir` (and of `selected`, the app `xcode-select -p` names,
+/// wherever it is), sorted and without duplicates.
+pub fn xcode_versions(dir: &std::path::Path, selected: Option<&std::path::Path>) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| xcode_app_version(&e.path()))
+        .collect();
+    if let Some(app) = selected {
+        v.extend(xcode_app_version(app));
+    }
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// The `.app` that `xcode-select -p` output (`/Applications/Xcode.app/Contents/Developer`) is in.
+fn selected_xcode_app(printed: &str) -> Option<std::path::PathBuf> {
+    let path = std::path::Path::new(printed.trim());
+    path.ancestors()
+        .find(|a| a.extension().is_some_and(|e| e == "app"))
+        .map(|a| a.to_path_buf())
 }
 
 /// The toolchains installed here, looked at at most every ten minutes.
@@ -525,12 +577,8 @@ pub fn toolchains() -> Value {
     let rust = probe("rustup", &["toolchain", "list"])
         .map(|t| parse_rustup(&t))
         .unwrap_or_default();
-    let xcode: Vec<String> = std::fs::read_dir("/Applications")
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|e| xcode_from_app_name(&e.file_name().to_string_lossy()))
-        .collect();
+    let selected = probe("/usr/bin/xcode-select", &["-p"]).and_then(|t| selected_xcode_app(&t));
+    let xcode = xcode_versions(std::path::Path::new("/Applications"), selected.as_deref());
     let java = probe("/usr/libexec/java_home", &["-V"])
         .map(|t| parse_java_home(&t))
         .unwrap_or_default();
@@ -1844,6 +1892,62 @@ mod tests {
         assert_eq!(xcode_from_app_name("Xcode.app"), None);
         assert_eq!(xcode_from_app_name("Xcode_beta.app"), None);
         assert_eq!(xcode_from_app_name("Safari.app"), None);
+    }
+
+    fn fake_xcode(dir: &std::path::Path, app: &str, plist_version: Option<&str>) {
+        let c = dir.join(app).join("Contents");
+        std::fs::create_dir_all(&c).unwrap();
+        if let Some(v) = plist_version {
+            std::fs::write(
+                c.join("Info.plist"),
+                format!(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict>\
+                     <key>CFBundleShortVersionString</key><string>{v}</string></dict></plist>\n"
+                ),
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn a_plain_xcode_app_is_listed_by_the_version_in_its_plist() {
+        let d = tempfile::tempdir().unwrap();
+        fake_xcode(d.path(), "Xcode.app", Some("27.0"));
+        assert_eq!(xcode_versions(d.path(), None), ["27.0"]);
+    }
+
+    #[test]
+    fn a_version_in_the_app_name_wins_and_versions_are_not_repeated() {
+        let d = tempfile::tempdir().unwrap();
+        fake_xcode(d.path(), "Xcode_16.4.app", Some("99.9"));
+        fake_xcode(d.path(), "Xcode.app", Some("16.4"));
+        fake_xcode(d.path(), "Safari.app", Some("18.0"));
+        let selected = d.path().join("Xcode.app");
+        assert_eq!(xcode_versions(d.path(), Some(&selected)), ["16.4"]);
+    }
+
+    #[test]
+    fn a_missing_or_broken_plist_gives_no_version() {
+        let d = tempfile::tempdir().unwrap();
+        fake_xcode(d.path(), "Xcode.app", None);
+        assert!(xcode_versions(d.path(), None).is_empty());
+        let c = d.path().join("Xcode_beta.app/Contents");
+        std::fs::create_dir_all(&c).unwrap();
+        std::fs::write(c.join("Info.plist"), "not a plist").unwrap();
+        assert!(xcode_versions(d.path(), None).is_empty());
+        assert!(xcode_versions(&d.path().join("absent"), None).is_empty());
+    }
+
+    #[test]
+    fn the_selected_xcode_app_is_found_in_the_xcode_select_path() {
+        assert_eq!(
+            selected_xcode_app("/Applications/Xcode.app/Contents/Developer\n"),
+            Some(std::path::PathBuf::from("/Applications/Xcode.app"))
+        );
+        assert_eq!(
+            selected_xcode_app("/Library/Developer/CommandLineTools\n"),
+            None
+        );
     }
 
     #[test]

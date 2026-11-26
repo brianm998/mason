@@ -70,9 +70,12 @@ need, as that user:
 ```bash
 sudo -u masonnode -H bash -lc 'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none'
 sudo -u masonnode -H bash -lc 'rustup toolchain install 1.96.0'
+sudo -u masonnode -H bash -lc 'rustup default 1.96.0'
 ```
 
 Install the Rust version each project pins in its `rust-toolchain.toml` (MASON's own is 1.96.0).
+The default matters: outside a project (which is where `mason node doctor` runs `cargo`), rustup
+has no version to choose without it.
 For Swift and iOS projects, Xcode is installed once for the whole Mac (from the App Store or as a
 versioned `/Applications/Xcode_16.4.app`); select it for the node user in
 `/Users/masonnode/.zprofile` with `export DEVELOPER_DIR=/Applications/Xcode_16.4.app/Contents/Developer`.
@@ -97,12 +100,17 @@ So the iMac builds the runtime for the Studio's architecture, signs it with the 
 
 ```bash
 # On the iMac (a cross build: it needs `rustup target add aarch64-apple-darwin`, which it does):
-mason run --needs compile -- mason node export-runtime --arch arm64 --out ~/node-export
+M="$HOME/Library/Application Support/mason"
+mason run --needs compile -- "$M/runtimes/$(cat "$M/runtimes/current")/mason" node export-runtime --arch arm64 --out ~/node-export
 ```
 
-That writes `~/node-export/runtimes/<sha>/` (the signed binaries) and
-`~/node-export/MASON Daemon.app` (the app that macOS can give permissions to). Copy the folder to
-the Studio, then, as an administrator there:
+`mason run` starts a program file, and `mason` in your shell may be a shell function
+(`scripts/install.sh` installs one), so the command after `--` is the runtime's own binary.
+
+That writes `~/node-export/runtimes/<sha>/` (the signed binaries),
+`~/node-export/MASON Daemon.app` (the app that macOS can give permissions to) and
+`~/node-export/mason` (the node user's `mason` command). Copy the folder to the Studio, then, as an
+administrator there:
 
 ```bash
 sudo cp -R "node-export/MASON Daemon.app" /Applications/
@@ -111,6 +119,21 @@ sudo cp -R node-export/runtimes/* "/Users/masonnode/Library/Application Support/
 sudo chown -R masonnode "/Users/masonnode/Library/Application Support/mason"
 # The runtime to start (the folder's name):
 echo -n <sha> | sudo -u masonnode tee "/Users/masonnode/Library/Application Support/mason/runtimes/current"
+# The node user's `mason` command, which the steps below use:
+sudo -u masonnode -H mkdir -p /Users/masonnode/.local/bin
+sudo install -o masonnode -m 755 node-export/mason /Users/masonnode/.local/bin/mason
+```
+
+`/Users/masonnode/.local/bin/mason` is a small script that sets the node's `PATH` and runs the
+current runtime's `mason`, so it follows every update:
+
+```sh
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Installed as ~/.local/bin/mason on a MASON node (docs/nodes.md).
+export PATH="$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+runtimes="$HOME/Library/Application Support/mason/runtimes"
+exec "$runtimes/$(cat "$runtimes/current")/mason" "$@"
 ```
 
 From then on **updates are automatic**: `mason update` (and the monitor's "Update masond") brings the
@@ -216,6 +239,8 @@ LaunchAgent. The program is **inside MASON Daemon.app**, so that the permissions
   <dict>
     <key>HOME</key>
     <string>/Users/masonnode</string>
+    <key>PATH</key>
+    <string>/Users/masonnode/.cargo/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>
@@ -297,7 +322,9 @@ is lost shows up before a job meets it:
 - **socket path:** the sockets of its jobs' step hosts fit under the data directory;
 - **listener and mDNS:** the node listener is bound, and mDNS is advertising (a node that is not
   advertised can still be added by address);
-- **toolchains:** `cargo`, `xcode-select` and `java` run as that user without a prompt.
+- **toolchains:** `cargo`, `xcode-select` and `java` run as that user without a prompt, found on
+  the `PATH` a job gets (`~/.cargo/bin` first, whatever the daemon's own `PATH` is) and run from the
+  user's home. A `cargo` with no default toolchain says to run `rustup default <version>`.
 
 A failure that stops the node doing a job makes it `not accepting`, with the reason as `mason node
 list` shows it on the iMac. A new tool that does not run as `masonnode` is almost always a missing
@@ -309,8 +336,8 @@ If the macOS application firewall is on, let the node daemon take incoming conne
 (otherwise the Mac shows a dialog the first time, which nobody answers):
 
 ```bash
-sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add /Users/masonnode/.local/bin/masond
-sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp /Users/masonnode/.local/bin/masond
+sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add "/Applications/MASON Daemon.app/Contents/MacOS/masond"
+sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp "/Applications/MASON Daemon.app/Contents/MacOS/masond"
 ```
 
 **Which network.** The node listens on every interface by default (`bind = ["0.0.0.0"]`). If
@@ -443,6 +470,10 @@ Pairing is done once. The code lasts **2 minutes** and works once; five wrong gu
    ```
 
    shows the Studio as `not accepting (the owner turned remote work off)`: the switch is off.
+
+`mason hosts`, on the coordinator, shows this Mac, each node and GitHub with what runs on each
+now (a node reads as accepting, full, off or absent), and `mason task show` says where a task is
+running.
 
 ## 3. Turning it on and off
 

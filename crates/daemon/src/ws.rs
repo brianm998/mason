@@ -349,9 +349,10 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket, peer: Option<crate::lan::P
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
     {
         let (d2, peer2) = (d.clone(), peer.clone());
+        let client = crate::http::client_marker(&hello.client);
         let run = move |c: Command| {
-            let (d3, peer3) = (d2.clone(), peer2.clone());
-            async move { run_command_as(&d3, c, peer3.as_ref()).await }
+            let (d3, peer3, client) = (d2.clone(), peer2.clone(), client.clone());
+            async move { run_command_as(&d3, c, peer3.as_ref(), &client).await }
         };
         let out = out_tx.clone();
         tokio::spawn(dispatch_commands(
@@ -1049,17 +1050,19 @@ async fn dispatch_commands<F, Fut>(
     }
 }
 
-/// Run a command through the same router the HTTP API uses.
+/// Run a command through the same router the HTTP API uses, as a monitor would send it.
 pub async fn run_command(d: &Arc<Daemon>, c: Command) -> CommandResult {
-    run_command_as(d, c, None).await
+    run_command_as(d, c, None, "monitor").await
 }
 
 /// As `run_command`, for a LAN device: the actor is the token's, never the one the client
-/// names, and a viewer's token changes nothing.
+/// names, and a viewer's token changes nothing. `client` is what the session's hello named
+/// (`http::client_marker`), recorded with an intervention.
 pub async fn run_command_as(
     d: &Arc<Daemon>,
     mut c: Command,
     peer: Option<&crate::lan::Peer>,
+    client: &str,
 ) -> CommandResult {
     let id = c.id.clone();
     let call = match call_for(&c) {
@@ -1113,6 +1116,7 @@ pub async fn run_command_as(
     if call.body.is_some() {
         req = req.header("content-type", "application/json");
     }
+    req = req.header("x-mason-client", client);
     if !c.actor.is_empty() {
         req = req.header("x-mason-as", c.actor.replace(['\r', '\n'], " "));
     }
