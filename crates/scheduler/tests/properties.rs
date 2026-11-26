@@ -4,7 +4,8 @@
 //! checked over random workloads by simulating the whole run.
 
 use mason_scheduler::{
-    explain, CpuGate, Kind, Ledger, Needs, PolicyGate, Rank, StallGate, ThermalGate, WaitCause,
+    explain, CpuGate, Kind, Ledger, Needs, PolicyGate, Rank, StallGate, ThermalGate, ThermalHold,
+    WaitCause,
 };
 use proptest::prelude::*;
 use std::collections::BTreeMap;
@@ -1264,6 +1265,7 @@ fn a_hot_cpu_holds_further_machine_work_but_not_the_first_or_an_agent() {
     l.set_thermal(Some(ThermalGate {
         speed_pct: 27,
         min_pct: 80,
+        hold: ThermalHold::Speed,
     }));
     let rank = |n: u64| Rank::new(false, 1, 2, n, n, false);
     let first = l.submit(rank(1), Needs::of(&[("test-suite", 1)]), "#1", 0);
@@ -1291,6 +1293,7 @@ fn a_hot_cpu_holds_further_machine_work_but_not_the_first_or_an_agent() {
     l.set_thermal(Some(ThermalGate {
         speed_pct: 90,
         min_pct: 80,
+        hold: ThermalHold::Speed,
     }));
     let p = l.schedule(2, None, None);
     assert!(
@@ -1303,6 +1306,7 @@ fn a_hot_cpu_holds_further_machine_work_but_not_the_first_or_an_agent() {
     l.set_thermal(Some(ThermalGate {
         speed_pct: 10,
         min_pct: 0,
+        hold: ThermalHold::Speed,
     }));
     assert_eq!(l.schedule(3, None, None).grants, vec![more]);
 }

@@ -160,9 +160,11 @@ pub fn gate_line(c: &WaitCause) -> Option<String> {
             *slow_ms as f64 / 1000.0,
             *max_ms as f64 / 1000.0
         ),
-        WaitCause::Thermal { speed_pct, min_pct } => {
-            format!("CPU held to {speed_pct}% for heat (work starts at {min_pct}%)")
-        }
+        WaitCause::Thermal {
+            speed_pct,
+            min_pct,
+            hold,
+        } => format!("too hot ({})", thermal_short(*speed_pct, *min_pct, *hold)),
         WaitCause::Policy { busy_pct, max_pct } => {
             format!("syspolicyd at {busy_pct}% (limit {max_pct}%)")
         }
