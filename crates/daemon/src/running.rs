@@ -511,17 +511,21 @@ fn node_status(on: bool, state: &crate::nodes::NodeState, status: Option<&Value>
     state.text()
 }
 
-/// GitHub in one line, from the broker's `gha` view (what `mason resources` prints) and the
-/// macOS pool's `(used, limit)`: whether MASON's checks can get a runner and, when they cannot,
-/// why, then the counts:
+/// GitHub in one line, from the broker's `gha` view (what `mason resources` prints), MASON's
+/// `gha` pool limit and the macOS pool's `(used, limit)`: whether MASON can start a GitHub run
+/// now and, when it cannot, why, then the counts:
 /// `accepting: 14 of 20 runners in use (MASON 6, other workflows 8 running, 20 queued: mason CI:
-/// full 7); macOS 5 of 5`. A request waits for a runner when the account is at its ceiling or,
-/// for a macOS one, when the macOS pool is full; any other wait is a pass away from being
-/// granted. Pure.
-pub fn github_words(g: &Value, macos: (u32, u32)) -> String {
+/// full 7); macOS 5 of 5`. The pool counts other workflows' running jobs too, so MASON starts a
+/// run only while the account's use is below its own limit, which may be under the account
+/// ceiling; then the line says so and gives both numbers:
+/// `not accepting: MASON's limit is 14 runners and 19 are in use (MASON 16, other workflows 3
+/// running); account 19 of 20; macOS 4 of 4`. A macOS request also waits while the macOS pool is
+/// full. Pure.
+pub fn github_words(g: &Value, limit: u32, macos: (u32, u32)) -> String {
     let n = |v: &Value| v.as_u64().unwrap_or(0);
     let (mason, other, queued) = (n(&g["mason"]), n(&g["other"]), n(&g["other_queued"]));
     let ceiling = n(&g["ceiling"]);
+    let limit = u64::from(limit);
     let used = mason + other;
     let waiting = |pool: &str| {
         g["waiters"]
@@ -531,8 +535,10 @@ pub fn github_words(g: &Value, macos: (u32, u32)) -> String {
             .filter(|w| w["uses"].get(pool).is_some_and(|u| n(u) > 0))
             .count()
     };
+    let account_full = used >= ceiling;
+    let limit_full = !account_full && used >= limit;
     let mut why: Vec<&str> = vec![];
-    if waiting(mason_scheduler::GHA) > 0 && used >= ceiling {
+    if account_full {
         why.push("the account is full");
     }
     if waiting(mason_scheduler::GHA_MACOS) > 0 && u64::from(macos.0) >= u64::from(macos.1) {
@@ -546,16 +552,44 @@ pub fn github_words(g: &Value, macos: (u32, u32)) -> String {
     if !label.is_empty() && other + queued > 0 {
         others += &format!(": {label}");
     }
-    let mut counts = format!("{used} of {ceiling} runners in use (MASON {mason}, {others})");
+    let breakdown = format!("(MASON {mason}, {others})");
+    // MASON's own limit is the one that counts; the account's is named when it differs.
+    let mut tail = String::new();
+    if limit < ceiling {
+        tail += &format!("; account {used} of {ceiling}");
+    }
     if macos.1 > 0 {
-        counts += &format!("; macOS {} of {}", macos.0, macos.1);
+        tail += &format!("; macOS {} of {}", macos.0, macos.1);
+        let mac_ceiling = n(&g["macos"]["ceiling"]);
+        if mac_ceiling > 0 && mac_ceiling != u64::from(macos.1) {
+            tail += &format!(" (account {mac_ceiling})");
+        }
     }
     let waits = g["waiters"].as_array().map_or(0, Vec::len);
     if waits > 0 {
-        counts += &format!("; {waits} of MASON's waiting for a runner");
+        tail += &format!("; {waits} of MASON's waiting for a runner");
     }
     if g["stale"].as_bool() == Some(true) {
-        counts += "; GitHub could not be read, the count is old";
+        tail += "; GitHub could not be read, the count is old";
+    }
+    if limit_full && why.is_empty() {
+        let runners = if limit == 1 { "runner" } else { "runners" };
+        let are = if used == 1 { "is" } else { "are" };
+        return format!(
+            "not accepting: MASON's limit is {limit} {runners} and {used} {are} in use \
+             {breakdown}{tail}"
+        );
+    }
+    let head = if limit < ceiling && used > limit {
+        format!("{used} runners in use (MASON's limit {limit})")
+    } else if limit < ceiling {
+        format!("{used} of {limit} runners in use")
+    } else {
+        format!("{used} of {ceiling} runners in use")
+    };
+    let counts = format!("{head} {breakdown}{tail}");
+    if limit_full {
+        why.insert(0, "MASON's limit is full");
     }
     if why.is_empty() {
         format!("accepting: {counts}")
@@ -590,11 +624,15 @@ pub fn lines(d: &Daemon) -> Vec<Line> {
     }
     if crate::remote::any_remote(d) {
         let mac = mason_scheduler::GHA_MACOS;
+        let gha = d.broker.snapshot()["gha"].clone();
         out.push(Line {
             kind: "github",
             name: "GitHub".into(),
             status: github_words(
-                &d.broker.snapshot()["gha"],
+                &gha,
+                d.broker
+                    .limit(mason_scheduler::GHA)
+                    .unwrap_or_else(|| gha["ceiling"].as_u64().unwrap_or(0) as u32),
                 (d.broker.used(mac), d.broker.limit(mac).unwrap_or(0)),
             ),
         });
@@ -808,7 +846,7 @@ mod tests {
             json!([]),
         );
         assert_eq!(
-            github_words(&g, (5, 5)),
+            github_words(&g, 20, (5, 5)),
             "accepting: 14 of 20 runners in use (MASON 6, other workflows 8 running, 20 queued: \
              mason CI: full 7, timelapse_render_daemon v3-gate 13); macOS 5 of 5"
         );
@@ -818,22 +856,54 @@ mod tests {
     fn github_says_why_a_waiting_check_gets_no_runner() {
         let waiting = |pool: &str| json!([{"position": 1, "uses": {pool: 1}}]);
         // The account is at its ceiling.
-        let full = github_words(&gha(6, 14, 0, "", waiting("gha")), (1, 5));
+        let full = github_words(&gha(6, 14, 0, "", waiting("gha")), 20, (1, 5));
         assert!(
             full.starts_with("not accepting: the account is full. 20 of 20 runners in use"),
             "{full}"
         );
         assert!(full.contains("1 of MASON's waiting"), "{full}");
         // Room on the account, none on macOS.
-        let mac = github_words(&gha(2, 3, 0, "", waiting("gha-macos")), (5, 5));
+        let mac = github_words(&gha(2, 3, 0, "", waiting("gha-macos")), 20, (5, 5));
         assert!(
             mac.starts_with("not accepting: macOS runners full. 5 of 20 runners in use"),
             "{mac}"
         );
         assert!(mac.contains("macOS 5 of 5"), "{mac}");
         // A wait with room is not a refusal.
-        let room = github_words(&gha(2, 3, 0, "", waiting("gha")), (1, 5));
+        let room = github_words(&gha(2, 3, 0, "", waiting("gha")), 20, (1, 5));
         assert!(room.starts_with("accepting: "), "{room}");
+    }
+
+    #[test]
+    fn github_judges_room_by_masons_limit_not_the_accounts() {
+        // Limit 14 under the account's 20, use in between: no new run starts.
+        let g = gha(16, 3, 1, "mason CI: full 1", json!([]));
+        assert_eq!(
+            github_words(&g, 14, (4, 4)),
+            "not accepting: MASON's limit is 14 runners and 19 are in use (MASON 16, other \
+             workflows 3 running, 1 queued: mason CI: full 1); account 19 of 20; macOS 4 of 4"
+        );
+        // Below the limit it accepts, and names both numbers.
+        let g = gha(8, 3, 0, "", json!([]));
+        assert_eq!(
+            github_words(&g, 14, (1, 4)),
+            "accepting: 11 of 14 runners in use (MASON 8, other workflows 3 running); \
+             account 11 of 20; macOS 1 of 4"
+        );
+        // The account itself full keeps its own reason.
+        let g = gha(6, 14, 0, "", json!([]));
+        let full = github_words(&g, 14, (1, 4));
+        assert!(
+            full.starts_with("not accepting: the account is full. 20 runners in use"),
+            "{full}"
+        );
+        // A macOS limit that differs from the account's macOS ceiling names the ceiling.
+        let mut g = gha(2, 0, 0, "", json!([]));
+        g["macos"] = json!({"ceiling": 5});
+        assert!(
+            github_words(&g, 20, (3, 4)).contains("macOS 3 of 4 (account 5)"),
+            "{g}"
+        );
     }
 
     #[test]
