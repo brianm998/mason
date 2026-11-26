@@ -4355,6 +4355,7 @@ impl Runner {
         let cover = crate::suites::BatchCover {
             owner: self.owner(def, watch)?.map(Arc::new),
             held: lease.as_ref().map(|_| needs),
+            pool: lease.as_ref().and_then(crate::suites::BatchPool::new),
         };
         Ok((lease, cover))
     }
