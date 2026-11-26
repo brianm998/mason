@@ -161,6 +161,13 @@ own work it tolerates, how much disk to keep free, the lease) are set **on the c
 and sent to the node (see section 3). A node that has heard nothing uses safe defaults
 (2 jobs, other work at most 50 % of the CPU, 50 GB free).
 
+**Keep the data directory's path short.** Each job's step host listens on a unix socket at
+`<data-dir>/node/hosts/<16 characters>/sock`, and macOS limits the length of such a path (MASON
+refuses one over 100 characters). So the data directory may be at most 67 characters; the one used
+on this page, `/Users/masonnode/Library/Application Support/mason`, is 51. `mason node doctor`
+checks it. A node running an older MASON put the job's whole id in the path, and could run no job
+under that directory: update it, or until then give it a short one (`/Users/masonnode/m`).
+
 **Keep the node's data on the Studio's internal disk** (the default: everything is under
 `/Users/masonnode`: mirrors, slots, `~/.cache/mason-target`, cargo). Then no volume permission is
 needed, there are no external-disk stalls, and it is the fastest. Do not put slots or target
@@ -275,6 +282,7 @@ is lost shows up before a job meets it:
   mirrors, slots, the build cache, cargo), within ten seconds each, so a stalled disk or a denial
   is reported and never hangs it; a denied volume says "give MASON Daemon.app Full Disk Access";
 - **volumes:** a volume it uses is mounted;
+- **socket path:** the sockets of its jobs' step hosts fit under the data directory;
 - **listener and mDNS:** the node listener is bound, and mDNS is advertising (a node that is not
   advertised can still be added by address);
 - **toolchains:** `cargo`, `xcode-select` and `java` run as that user without a prompt.
@@ -491,6 +499,43 @@ On the Studio: `mason node coordinators remove <name>` (as the node user). On th
 `mason node remove studio`. If the iMac's certificate is ever replaced (a new data directory),
 pair again.
 
+## Projects without GitHub Actions
+
+A project needs no `[remote_runs]`, token or repository on GitHub to use nodes. Give it a placement
+mode of its own:
+
+```bash
+mason node use on                              # once: runs may go to nodes
+mason remote mode remote --project P           # or the monitor's Settings, "Where runs go"
+mason remote status                            # P   remote (nodes only: no GitHub setup)
+```
+
+This writes to `~/.config/mason/projects/P.toml` (and re-reads it; edit it by hand and run `mason
+project reload --project P` for the same effect):
+
+```toml
+[placement]
+mode = "remote"      # or "favor-remote", "favor-local", "local"
+```
+
+| mode | a node has room | no node has room |
+| --- | --- | --- |
+| `remote` | the node | waits for one; never runs on the coordinator |
+| `favor-remote` | the node | runs on the coordinator, under its usual limits |
+| `favor-local` | the coordinator, a node while it is overloaded | the coordinator |
+| `local` | the coordinator | the coordinator |
+
+- A project with no mode always runs on the coordinator. Clearing the mode returns it to that.
+- A suite with `remote = false`, one whose environment leases a device or simulator, and one that
+  uses `exclusive` always run on the coordinator.
+- A node takes a suite only if it has its toolchain: Xcode for a suite named `swift*`, Java for
+  `compose*`, otherwise Rust; and the Xcode version the command names, if it names one.
+- A `remote` project waits while nodes are off or no node has the toolchain. The daemon log says
+  "waiting for a node".
+- Baseline runs, and landing's lint tier and build floor unless the definition sends them away,
+  still run on the coordinator.
+- A project with `[remote_runs]` keeps using `[remote_runs] mode`, which wins over `[placement]`.
+
 ## When something goes wrong
 
 - **You turn the switch off.** No new job starts. Jobs already running finish and the iMac collects
@@ -513,6 +558,10 @@ pair again.
   environment skips this check; its privacy grants will not survive an update.
 - **`macOS denied access to /Volumes/X: give MASON Daemon.app Full Disk Access`.** Add the app under
   Privacy & Security → Full Disk Access (section 1.6), or move the node's data to the internal disk.
+- **`step host exited before it was up (...)`.** The text after it is what the host said; all of it
+  is in `host.err` in the job's folder under `<data-dir>/node/hosts/`, where the file `name` says
+  which job and phase the folder is for.
+- **`socket path too long`.** The data directory's path is too long (section 1.4).
 - **`/Volumes/X is not mounted`.** The disk mounts only after a login unless
   `AutomountDisksWithoutUserLogin` is set (section 1.6).
 - **`a runtime from this coordinator cannot be checked`.** The iMac's `masond` is not signed by a

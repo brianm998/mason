@@ -809,6 +809,10 @@ fn main() {
                         p["mode"].as_str().unwrap_or("?"),
                         p["source"].as_str().unwrap_or("?")
                     ),
+                    None if p["nodes_only"].as_bool() == Some(true) => format!(
+                        "{} (nodes only: no GitHub setup)",
+                        p["mode"].as_str().unwrap_or("?")
+                    ),
                     None => "local (no [remote_runs]: always runs here)".to_string(),
                 }
             );
