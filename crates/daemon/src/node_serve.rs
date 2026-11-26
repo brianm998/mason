@@ -101,8 +101,12 @@ pub struct NodeState {
     pub doctor: Mutex<Option<crate::node_doctor::Report>>,
     /// What mDNS did when the listener started.
     pub mdns: Mutex<crate::node_doctor::Mdns>,
-    /// A runtime installed and waiting for the running jobs to end before this daemon takes over.
+    /// A runtime installed that this daemon is about to become. Running jobs do not hold it up:
+    /// their commands run under step hosts that the new daemon finds again, as after any restart.
     pub pending_runtime: Mutex<Option<String>>,
+    /// When the last takeover failed to start the new runtime (0: none did). The node serves
+    /// under the runtime it has meanwhile, and tries again a minute later.
+    pub takeover_failed_ms: std::sync::atomic::AtomicU64,
 }
 
 impl NodeState {
@@ -117,6 +121,7 @@ impl NodeState {
             doctor: Mutex::new(None),
             mdns: Mutex::new(crate::node_doctor::Mdns::Off),
             pending_runtime: Mutex::new(None),
+            takeover_failed_ms: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -367,7 +372,7 @@ pub struct Readings {
     pub compile_free: Option<u32>,
     pub disk_free_gb: Option<u64>,
     /// Why the node holds off, apart from its owner's wishes: `mason node doctor` found something
-    /// it cannot work with, or a runtime is installed and the node waits for its jobs to end.
+    /// it cannot work with, or a runtime is installed and the node is taking over (seconds; its jobs carry on).
     pub held: Option<String>,
 }
 
@@ -494,11 +499,63 @@ pub fn parse_java_home(text: &str) -> Vec<String> {
 }
 
 /// `Xcode_16.4.app`, `Xcode-16.4.app` or `Xcode16.4.app`: `16.4`. A plain `Xcode.app` has no
-/// version in its name and is not listed.
+/// version in its name; [`xcode_app_version`] reads it from the app's Info.plist instead.
 pub fn xcode_from_app_name(name: &str) -> Option<String> {
     let rest = name.strip_prefix("Xcode")?.strip_suffix(".app")?;
     let v = rest.trim_start_matches(['_', '-', ' ']);
     (!v.is_empty() && v.chars().all(|c| c.is_ascii_digit() || c == '.')).then(|| v.to_string())
+}
+
+/// The version of the Xcode app at `app`: the one in its name when there is one, else the
+/// `CFBundleShortVersionString` in its `Contents/Info.plist` (a plain `Xcode.app`). Nothing when
+/// the name is not an Xcode app's, or the plist is missing or does not hold a version.
+pub fn xcode_app_version(app: &std::path::Path) -> Option<String> {
+    let name = app.file_name()?.to_string_lossy().into_owned();
+    if let Some(v) = xcode_from_app_name(&name) {
+        return Some(v);
+    }
+    if !(name.starts_with("Xcode") && name.ends_with(".app")) {
+        return None;
+    }
+    let plist = app.join("Contents/Info.plist");
+    if !plist.is_file() {
+        return None;
+    }
+    let out = probe(
+        "/usr/libexec/PlistBuddy",
+        &[
+            "-c",
+            "Print :CFBundleShortVersionString",
+            &plist.to_string_lossy(),
+        ],
+    )?;
+    let v = out.trim();
+    (!v.is_empty() && v.chars().all(|c| c.is_ascii_digit() || c == '.')).then(|| v.to_string())
+}
+
+/// The Xcode versions of the apps in `dir` (and of `selected`, the app `xcode-select -p` names,
+/// wherever it is), sorted and without duplicates.
+pub fn xcode_versions(dir: &std::path::Path, selected: Option<&std::path::Path>) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| xcode_app_version(&e.path()))
+        .collect();
+    if let Some(app) = selected {
+        v.extend(xcode_app_version(app));
+    }
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// The `.app` that `xcode-select -p` output (`/Applications/Xcode.app/Contents/Developer`) is in.
+fn selected_xcode_app(printed: &str) -> Option<std::path::PathBuf> {
+    let path = std::path::Path::new(printed.trim());
+    path.ancestors()
+        .find(|a| a.extension().is_some_and(|e| e == "app"))
+        .map(|a| a.to_path_buf())
 }
 
 /// The toolchains installed here, looked at at most every ten minutes.
@@ -520,12 +577,8 @@ pub fn toolchains() -> Value {
     let rust = probe("rustup", &["toolchain", "list"])
         .map(|t| parse_rustup(&t))
         .unwrap_or_default();
-    let xcode: Vec<String> = std::fs::read_dir("/Applications")
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|e| xcode_from_app_name(&e.file_name().to_string_lossy()))
-        .collect();
+    let selected = probe("/usr/bin/xcode-select", &["-p"]).and_then(|t| selected_xcode_app(&t));
+    let xcode = xcode_versions(std::path::Path::new("/Applications"), selected.as_deref());
     let java = probe("/usr/libexec/java_home", &["-V"])
         .map(|t| parse_java_home(&t))
         .unwrap_or_default();
@@ -570,28 +623,49 @@ pub fn measures_machine(d: &Daemon) -> bool {
     d.cfg.cpu.is_none() && std::env::var_os("MASON_CPU_FILE").is_none()
 }
 
+/// How long after a takeover that did not start the new runtime the node tries again.
+const TAKEOVER_RETRY_MS: u64 = 60_000;
+
+/// What the takeover to `sha` is doing, in words. Running jobs are not waited for; only those
+/// still being set up are. Pure.
+pub fn takeover_note(sha: &str, jobs_running: u32, settling: u32) -> String {
+    let plural = |n: u32| if n == 1 { "" } else { "s" };
+    let what = if settling > 0 {
+        format!(
+            "after {settling} job{} finish{} starting",
+            plural(settling),
+            if settling == 1 { "es" } else { "" }
+        )
+    } else if jobs_running > 0 {
+        format!(
+            "taking over now; {jobs_running} running job{} carr{} on",
+            plural(jobs_running),
+            if jobs_running == 1 { "ies" } else { "y" }
+        )
+    } else {
+        "taking over now".to_string()
+    };
+    format!("updating to runtime {}: {what}", &sha[..sha.len().min(10)])
+}
+
 /// Why the node holds off apart from its owner's wishes: what `mason node doctor` found, or a
-/// runtime waiting for the jobs to end so that the daemon can take over.
+/// runtime that is about to take over. The hold lasts seconds (jobs keep running through the
+/// takeover), and not at all after a takeover that failed: the node then serves as it was.
 fn held_now(d: &Daemon, jobs_running: u32) -> Option<String> {
+    let failed = d
+        .node
+        .takeover_failed_ms
+        .load(std::sync::atomic::Ordering::SeqCst)
+        != 0;
     if let Some(sha) = d
         .node
         .pending_runtime
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone()
+        .filter(|_| !failed)
     {
-        return Some(format!(
-            "updating to runtime {}: {}",
-            &sha[..sha.len().min(10)],
-            if jobs_running == 0 {
-                "taking over now".to_string()
-            } else {
-                format!(
-                    "waiting for {jobs_running} job{} to end",
-                    if jobs_running == 1 { "" } else { "s" }
-                )
-            }
-        ));
+        return Some(takeover_note(&sha, jobs_running, d.node.jobs.settling()));
     }
     d.node
         .doctor
@@ -696,7 +770,7 @@ pub fn status_value(d: &Daemon, s: &NodeSettings, coord: Option<&str>) -> Value 
         "settings": s.to_json(),
         "runtime_sha": d.cfg.runtime_sha,
         "runtimes": installed_runtimes(&d.cfg.data_dir),
-        // A runtime that arrived and waits for the jobs to end (a display; not part of the contract).
+        // A runtime that arrived and is taking over (a display; not part of the contract).
         "pending_runtime": d.node.pending_runtime.lock().unwrap_or_else(|e| e.into_inner()).clone(),
         "doctor": d.node.doctor.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|r| r.to_json()),
     })
@@ -1369,7 +1443,7 @@ async fn runtime_put(
         .await
         .map_err(|_| fail(503, "the daemon is busy; try again"))?
         .map_err(|e| fail(422, e))?;
-    // Takes over after its jobs, when this daemon runs from a runtime (a development build has
+    // Takes over at once, its jobs carrying on under their step hosts, when this daemon runs from a runtime (a development build has
     // none to replace).
     let takes_over = d.cfg.runtime_sha.as_deref().is_some_and(|r| r != installed);
     if takes_over {
@@ -1414,7 +1488,10 @@ fn spawn_upkeep(d: &Arc<Daemon>) {
                 next_doctor = now_ms() + 600_000;
                 run_doctor(&d);
             }
-            // A runtime that arrived waits for the jobs to end, then this daemon becomes it.
+            // A runtime that arrived: this daemon becomes it at once. The running jobs do not
+            // wait and are not touched: their commands run under step hosts, and the new daemon
+            // takes the jobs up again (`Jobs::resume`). Only a job still being set up is waited
+            // for. A takeover that did not start is tried again after a minute.
             let pending = d
                 .node
                 .pending_runtime
@@ -1422,14 +1499,18 @@ fn spawn_upkeep(d: &Arc<Daemon>) {
                 .unwrap_or_else(|e| e.into_inner())
                 .clone();
             if let Some(sha) = pending {
-                if d.node.jobs.running() == 0 {
-                    *d.node
-                        .pending_runtime
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner()) = None;
-                    tracing::info!(runtime = %sha, "taking over the runtime a coordinator sent");
+                let failed = d
+                    .node
+                    .takeover_failed_ms
+                    .load(std::sync::atomic::Ordering::SeqCst);
+                let due = failed == 0 || now_ms().saturating_sub(failed) >= TAKEOVER_RETRY_MS;
+                if due && d.node.jobs.settling() == 0 {
+                    tracing::info!(runtime = %sha, jobs = d.node.jobs.running(), "taking over the runtime a coordinator sent");
                     // Returns only if it could not.
                     let _ = crate::update::take_over(&d, &sha);
+                    d.node
+                        .takeover_failed_ms
+                        .store(now_ms(), std::sync::atomic::Ordering::SeqCst);
                 }
             }
             d.node.jobs.tick(now_ms());
@@ -1551,6 +1632,30 @@ pub async fn jobs(State(d): State<Arc<Daemon>>) -> Res {
 
 #[cfg(test)]
 mod tests {
+    /// Running jobs are never a reason to wait; only a job still being set up is, and the note
+    /// says which it is.
+    #[test]
+    fn the_takeover_note_does_not_wait_for_running_jobs() {
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        assert_eq!(
+            takeover_note(sha, 0, 0),
+            "updating to runtime 0123456789: taking over now"
+        );
+        assert_eq!(
+            takeover_note(sha, 9, 0),
+            "updating to runtime 0123456789: taking over now; 9 running jobs carry on"
+        );
+        assert_eq!(
+            takeover_note(sha, 1, 0),
+            "updating to runtime 0123456789: taking over now; 1 running job carries on"
+        );
+        assert_eq!(
+            takeover_note(sha, 3, 1),
+            "updating to runtime 0123456789: after 1 job finishes starting"
+        );
+        assert!(!takeover_note(sha, 9, 2).contains("waiting for 9"));
+    }
+
     use super::*;
 
     fn ok() -> Readings {
@@ -1787,6 +1892,62 @@ mod tests {
         assert_eq!(xcode_from_app_name("Xcode.app"), None);
         assert_eq!(xcode_from_app_name("Xcode_beta.app"), None);
         assert_eq!(xcode_from_app_name("Safari.app"), None);
+    }
+
+    fn fake_xcode(dir: &std::path::Path, app: &str, plist_version: Option<&str>) {
+        let c = dir.join(app).join("Contents");
+        std::fs::create_dir_all(&c).unwrap();
+        if let Some(v) = plist_version {
+            std::fs::write(
+                c.join("Info.plist"),
+                format!(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict>\
+                     <key>CFBundleShortVersionString</key><string>{v}</string></dict></plist>\n"
+                ),
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn a_plain_xcode_app_is_listed_by_the_version_in_its_plist() {
+        let d = tempfile::tempdir().unwrap();
+        fake_xcode(d.path(), "Xcode.app", Some("27.0"));
+        assert_eq!(xcode_versions(d.path(), None), ["27.0"]);
+    }
+
+    #[test]
+    fn a_version_in_the_app_name_wins_and_versions_are_not_repeated() {
+        let d = tempfile::tempdir().unwrap();
+        fake_xcode(d.path(), "Xcode_16.4.app", Some("99.9"));
+        fake_xcode(d.path(), "Xcode.app", Some("16.4"));
+        fake_xcode(d.path(), "Safari.app", Some("18.0"));
+        let selected = d.path().join("Xcode.app");
+        assert_eq!(xcode_versions(d.path(), Some(&selected)), ["16.4"]);
+    }
+
+    #[test]
+    fn a_missing_or_broken_plist_gives_no_version() {
+        let d = tempfile::tempdir().unwrap();
+        fake_xcode(d.path(), "Xcode.app", None);
+        assert!(xcode_versions(d.path(), None).is_empty());
+        let c = d.path().join("Xcode_beta.app/Contents");
+        std::fs::create_dir_all(&c).unwrap();
+        std::fs::write(c.join("Info.plist"), "not a plist").unwrap();
+        assert!(xcode_versions(d.path(), None).is_empty());
+        assert!(xcode_versions(&d.path().join("absent"), None).is_empty());
+    }
+
+    #[test]
+    fn the_selected_xcode_app_is_found_in_the_xcode_select_path() {
+        assert_eq!(
+            selected_xcode_app("/Applications/Xcode.app/Contents/Developer\n"),
+            Some(std::path::PathBuf::from("/Applications/Xcode.app"))
+        );
+        assert_eq!(
+            selected_xcode_app("/Library/Developer/CommandLineTools\n"),
+            None
+        );
     }
 
     #[test]
