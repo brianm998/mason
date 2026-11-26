@@ -1554,6 +1554,7 @@ fn a_node_with_the_documented_length_of_data_dir_runs_jobs_with_long_ids() {
             env: vec![],
             limit_s: 120,
             lease_s: 300,
+            base: None,
         };
         jobs.start(&p.b, coord, req, &NodeSettings::default(), &|_| None)
             .unwrap();
@@ -2220,4 +2221,193 @@ fn a_test_step_for_a_suite_on_a_node_asks_for_the_nodes_unit_and_none_of_this_ma
     );
     mason_daemon::place::set_global(&p.a, mason_daemon::place::Mode::Local, "test").unwrap();
     assert!(suite_pool_needs(&p.a, "scratch", None, &needs, &suite, true).is_none());
+}
+
+/// A commit on a side branch, made without moving the worktree, and the worktree's own base
+/// tracking ref set to it: a base tip that is not an ancestor of what a job runs, and that a
+/// node has never seen.
+fn move_base_to_a_side_commit(p: &Pair, file: &str, parent: &str) -> String {
+    let b = sh(
+        &p.sa.repo,
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit-tree",
+            "-p",
+            parent,
+            "-m",
+            file,
+            &format!("{parent}^{{tree}}"),
+        ],
+    )
+    .trim()
+    .to_string();
+    sh(&p.sa.repo, &["update-ref", "refs/remotes/origin/main", &b]);
+    b
+}
+
+#[test]
+fn a_node_job_sees_origin_base_even_when_the_base_is_not_an_ancestor_of_the_snapshot() {
+    let p = working_pair(2);
+    let m0 = sh(&p.sa.repo, &["rev-parse", "HEAD"]).trim().to_string();
+    let b1 = move_base_to_a_side_commit(&p, "base one", &m0);
+    assert_ne!(b1, m0);
+    std::fs::write(
+        p.sa.repo.join("t.sh"),
+        "git merge-base HEAD origin/main && git rev-parse origin/main\n",
+    )
+    .unwrap();
+    let f = done(run_on_b(&p, &spec("run-b1", None, "sh t.sh"), &|| None));
+    assert_eq!((f.code, f.signal), (0, 0), "{}", f.output);
+    assert_eq!(f.output, format!("{m0}\n{b1}\n"), "{}", f.output);
+    // Another base tip, a descendant of the first and again unknown to the node: the job sees
+    // its own, not the one a job before it left.
+    let b2 = move_base_to_a_side_commit(&p, "base two", &b1);
+    let f = done(run_on_b(&p, &spec("run-b2", None, "sh t.sh"), &|| None));
+    assert_eq!((f.code, f.signal), (0, 0), "{}", f.output);
+    assert_eq!(f.output, format!("{m0}\n{b2}\n"), "{}", f.output);
+}
+
+#[test]
+fn a_job_body_without_a_base_runs_as_before_and_leaves_origin_alone() {
+    let p = working_pair(2);
+    let m0 = sh(&p.sa.repo, &["rev-parse", "HEAD"]).trim().to_string();
+    let b1 = move_base_to_a_side_commit(&p, "base one", &m0);
+    std::fs::write(p.sa.repo.join("t.sh"), "echo first\n").unwrap();
+    let f = done(run_on_b(&p, &spec("run-o1", None, "sh t.sh"), &|| None));
+    assert_eq!(f.output, "first\n");
+    // The node's mirror now holds the snapshot. A job of an older coordinator names no base.
+    let mirror =
+        p.sb.data_dir
+            .join("node/mirrors")
+            .read_dir()
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path()
+            .join("scratch.git");
+    let sha = sh(
+        &mirror,
+        &[
+            "for-each-ref",
+            "--format=%(objectname)",
+            "refs/mason/node/run-o1",
+        ],
+    )
+    .trim()
+    .to_string();
+    assert_eq!(sha.len(), 40, "the mirror holds the snapshot");
+    let (_, fp) = (
+        0,
+        lan::sha256_hex(&lan::load_or_create_identity(&p.sb.data_dir).unwrap().0),
+    );
+    let client = NodeClient::new(
+        lan::load_or_create_identity(&p.sa.data_dir).unwrap(),
+        "127.0.0.1",
+        p.port,
+        &fp,
+    )
+    .unwrap();
+    let r = run(
+        &p,
+        client.request(
+            "POST",
+            "/node/jobs",
+            Some(&json!({
+                "id": "run-o2", "project": "scratch", "sha": sha,
+                "run": {"command": "git rev-parse --verify -q origin/main || echo none"},
+                "limit_s": 60, "lease_s": 60,
+            })),
+        ),
+    )
+    .unwrap();
+    assert!(r.status == 200 || r.status == 201, "{}", r.error_text());
+    support::wait_for("the job to end", 60, || {
+        run(&p, client.request("GET", "/node/jobs/run-o2", None))
+            .ok()
+            .is_some_and(|r| r.json()["job"]["state"] == "done")
+    });
+    let r = run(
+        &p,
+        client.request("GET", "/node/jobs/run-o2/log?from=0", None),
+    )
+    .unwrap();
+    // The ref the first job set is the shared mirror's; this one neither set nor moved it.
+    assert_eq!(
+        String::from_utf8_lossy(&r.body).trim(),
+        b1,
+        "an older coordinator's job sees whatever the mirror has, and changes nothing"
+    );
+    assert_eq!(
+        sh(&mirror, &["rev-parse", "refs/remotes/origin/main"]).trim(),
+        b1
+    );
+}
+
+#[test]
+fn origin_base_is_set_exactly_for_a_lone_job_and_only_forward_beside_others() {
+    use mason_daemon::node_run::set_origin_base;
+    let t = tempfile::tempdir().unwrap();
+    let m = t.path().join("m.git");
+    sh(t.path(), &["init", "-q", "--bare", m.to_str().unwrap()]);
+    let commit = |parents: &[&str], msg: &str| {
+        let empty = sh(&m, &["hash-object", "-t", "tree", "-w", "--stdin"]);
+        let mut a = vec!["-c", "user.name=t", "-c", "user.email=t@t", "commit-tree"];
+        for p in parents {
+            a.push("-p");
+            a.push(p);
+        }
+        a.extend(["-m", msg, empty.trim()]);
+        sh(&m, &a).trim().to_string()
+    };
+    let (a, b) = {
+        let a = commit(&[], "a");
+        (a.clone(), commit(&[&a], "b"))
+    };
+    let side = commit(&[&a], "side");
+    let at = || {
+        sh(&m, &["rev-parse", "refs/remotes/origin/feature/x"])
+            .trim()
+            .to_string()
+    };
+    // Nothing there yet: set, whether alone or not.
+    set_origin_base(&m, "feature/x", &a, false).unwrap();
+    assert_eq!(at(), a);
+    // Beside others: forward only. A descendant moves it; an older or an unrelated commit does not.
+    set_origin_base(&m, "feature/x", &b, false).unwrap();
+    assert_eq!(at(), b);
+    set_origin_base(&m, "feature/x", &a, false).unwrap();
+    assert_eq!(at(), b);
+    set_origin_base(&m, "feature/x", &side, false).unwrap();
+    assert_eq!(at(), b);
+    // Alone: exactly the job's own, a force-pushed base included.
+    set_origin_base(&m, "feature/x", &side, true).unwrap();
+    assert_eq!(at(), side);
+    // A commit the mirror lacks, and a name that is no branch, change nothing and say why.
+    assert!(set_origin_base(&m, "feature/x", &"1".repeat(40), true).is_err());
+    assert!(set_origin_base(&m, "a..b", &a, true).is_err());
+    assert_eq!(at(), side);
+}
+
+#[test]
+fn a_node_jobs_path_has_a_mason_that_runs_and_finds_no_daemon() {
+    let mason = support::bin("mason-pipeline", "mason");
+    std::env::set_var("MASON_NODE_CLI", &mason);
+    let p = working_pair(2);
+    std::fs::write(
+        p.sa.repo.join("t.sh"),
+        "command -v mason\nmason --help | head -1\nmason task list 2>&1 | head -2\nfile=$(mktemp -d)/m.toml; mason definition check \"$file\" 2>&1 | head -1\nexit 0\n",
+    )
+    .unwrap();
+    let f = done(run_on_b(&p, &spec("run-cli", None, "sh t.sh"), &|| None));
+    std::env::remove_var("MASON_NODE_CLI");
+    assert_eq!((f.code, f.signal), (0, 0), "{}", f.output);
+    let lines: Vec<&str> = f.output.lines().collect();
+    assert!(lines[0].ends_with("/shims/mason"), "{}", f.output);
+    assert!(lines[1].to_lowercase().contains("mason"), "{}", f.output);
+    // The node's own daemon is out of reach of a job's `mason`.
+    assert!(f.output.contains("not running"), "{}", f.output);
 }
