@@ -822,4 +822,5 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s1127**: Exit script s724 now expects the workflow line `mason doctor` prints today, and the causes of the s723 and s727 failures are recorded as races in those scripts.
 - **s1138**: Exit scripts s723 and s727 no longer race the daemon: s723 waits for the run lookup, and s727 sets its held task to local while the task ahead of it cannot land.
 - **s1149**: `pages/deploy` fails because GitHub Pages is not enabled for the repository with GitHub Actions as its source, which is an owner setting, so no code changed and the check stays red until the owner enables it.
+- **s1154**: the adapter's command-guard test now builds its expected hook path per platform, so it passes on Windows.
 <!-- status:end -->
