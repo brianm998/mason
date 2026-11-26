@@ -103,7 +103,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s00**: Stage 0: Repository and ground rules
 - **s01**: Stage 1: Spikes
 - **s02**: Stage 2: Core domain and reducer
-- **s03**: Stage 3: Event store
+- **s03**: Stage 3: Event store. Later (#1194): the analyst task can submit its uncommitted result with no commit, so its findings are filed again.
 - **s04**: Stage 4: Step host
 - **s05**: Stage 5: Agent runner and step contract
 - **s06**: Stage 6: Walking skeleton
@@ -823,4 +823,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s1138**: Exit scripts s723 and s727 no longer race the daemon: s723 waits for the run lookup, and s727 sets its held task to local while the task ahead of it cannot land.
 - **s1149**: `pages/deploy` fails because GitHub Pages is not enabled for the repository with GitHub Actions as its source, which is an owner setting, so no code changed and the check stays red until the owner enables it.
 - **s1154**: the adapter's command-guard test now builds its expected hook path per platform, so it passes on Windows.
+- **s1156**: A red exit-script run now names the failing line as the cause, not a `== ` heading or prose that contains the word "error".
+- **s1161**: the step-host launch-listing tests now stop waiting when the launch ends and show its error, and they retry the ETXTBSY spawn race that most likely turned s594 red on ubuntu.
+- **s1163**: the file hold no longer reads the standard "How to work in this repository" footer or the Trust section of a task body as files the task changes, so unrelated tasks no longer wait on each other for them.
 <!-- status:end -->

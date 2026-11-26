@@ -739,15 +739,42 @@ fn slow_host(dir: &Path, secs: u32) -> PathBuf {
     p
 }
 
+type Launch = std::thread::JoinHandle<std::io::Result<()>>;
+
+/// [`launch`] on its own thread.
+fn launch_on_a_thread(o: SpawnOptions, limit: Duration) -> Launch {
+    std::thread::spawn(move || launch(&o, limit).map(|_| ()))
+}
+
+/// Wait until `listed` is true or the launch `h` has ended. A launch that ended without
+/// being seen listed never will be, so say how it ended instead of waiting out the time.
+fn wait_listed(what: &str, h: Launch, mut listed: impl FnMut() -> bool) -> Result<Launch, String> {
+    let mut seen = false;
+    wait_until(what, || {
+        // Read before looking at the list, so a launch cannot end between the two unseen.
+        let ended = h.is_finished();
+        seen = listed();
+        seen || ended
+    });
+    if seen {
+        return Ok(h);
+    }
+    Err(match h.join().unwrap() {
+        Err(e) => format!("the launch failed while waiting for {what}: {e}"),
+        Ok(()) => format!("the launch succeeded while waiting for {what}, never seen listed"),
+    })
+}
+
 #[test]
 fn a_launch_is_listed_while_it_waits_and_gone_after_success() {
     let (d, r) = root();
     let mut o = opts(&r, "t7r1-listed", "sleep 5");
     o.host_bin = slow_host(d.path(), 1);
-    let h = std::thread::spawn(move || spawn_host(&o).map(|_| ()));
-    wait_until("the launch is listed", || {
+    let h = launch_on_a_thread(o, START_LIMIT);
+    let h = wait_listed("the launch is listed", h, || {
         launching().iter().any(|l| l.id == "t7r1-listed")
-    });
+    })
+    .unwrap();
     h.join().unwrap().unwrap();
     assert!(launching().iter().all(|l| l.id != "t7r1-listed"));
 }
@@ -757,11 +784,13 @@ fn a_launch_is_gone_after_a_timeout() {
     let (d, r) = root();
     let mut o = opts(&r, "t7r1-timeout", "sleep 5");
     o.host_bin = slow_host(d.path(), 30);
-    let h = std::thread::spawn(move || spawn_host_within(&o, Duration::from_millis(600)));
-    wait_until("the launch is listed", || {
+    let h = launch_on_a_thread(o, Duration::from_millis(600));
+    let h = wait_listed("the launch is listed", h, || {
         launching().iter().any(|l| l.id == "t7r1-timeout")
-    });
-    assert!(h.join().unwrap().is_err());
+    })
+    .unwrap();
+    let e = h.join().unwrap().unwrap_err();
+    assert_eq!(e.kind(), std::io::ErrorKind::TimedOut, "{e}");
     assert!(launching().iter().all(|l| l.id != "t7r1-timeout"));
 }
 
@@ -797,10 +826,11 @@ fn a_launch_is_listed_only_under_the_root_it_started_in() {
     let (_d2, r2) = root();
     let mut o = opts(&r, "t578-scoped", "sleep 5");
     o.host_bin = slow_host(d.path(), 1);
-    let h = std::thread::spawn(move || spawn_host(&o).map(|_| ()));
-    wait_until("the launch is listed under its root", || {
+    let h = launch_on_a_thread(o, START_LIMIT);
+    let h = wait_listed("the launch is listed under its root", h, || {
         launching_under(&r).iter().any(|l| l.id == "t578-scoped")
-    });
+    })
+    .unwrap();
     assert!(launching_under(&r2).iter().all(|l| l.id != "t578-scoped"));
     h.join().unwrap().unwrap();
     assert!(launching_under(&r).is_empty());
@@ -821,12 +851,28 @@ fn a_host_that_exits_before_it_is_up_says_why() {
     assert!(kept.contains("step-host: cannot open stdin"), "{kept}");
 }
 
+/// A hosts root under `d` that puts the socket of host `a` one byte over the limit.
+fn root_over_the_limit(d: &Path) -> PathBuf {
+    // `<root>/a/sock` is the root and 7 more characters.
+    let used = d.as_os_str().len() + 1;
+    d.join("r".repeat(MAX_SOCK_PATH + 1 - 7 - used))
+}
+
+#[test]
+fn a_launch_refused_before_it_is_listed_reports_why() {
+    let (d, _) = root();
+    let o = opts(&root_over_the_limit(d.path()), "a", "echo never");
+    let h = launch_on_a_thread(o, START_LIMIT);
+    // A timeout would panic inside; the refusal comes back as the launch's own error.
+    let why = wait_listed("the launch is listed", h, || false).unwrap_err();
+    assert!(why.contains("the launch failed"), "{why}");
+    assert!(why.contains("101 characters"), "{why}");
+}
+
 #[test]
 fn a_socket_path_over_the_limit_is_refused_before_a_host_is_started() {
     let (d, _) = root();
-    // `<root>/a/sock` is the root and 7 more characters.
-    let used = d.path().as_os_str().len() + 1;
-    let r = d.path().join("r".repeat(MAX_SOCK_PATH + 1 - 7 - used));
+    let r = root_over_the_limit(d.path());
     let sock = r.join("a").join("sock");
     assert_eq!(sock.as_os_str().len(), MAX_SOCK_PATH + 1);
     let marker = d.path().join("reached");
