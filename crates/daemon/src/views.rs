@@ -1353,6 +1353,7 @@ impl<'a> Ctx<'a> {
             plan,
             plan_view,
             card: self.card(t),
+            review_findings: crate::reviewfindings::lines(&self.d.cfg.task_dir(id)),
             closing: self
                 .d
                 .store
