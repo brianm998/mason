@@ -684,9 +684,11 @@ async fn send_views(
         if shown.seq.get(&kind).is_some_and(|s| *s > seq) {
             continue;
         }
+        let newer = shown.seq.get(&kind).is_none_or(|s| *s < seq);
         shown.seq.insert(kind, seq);
         let (h, v) = view_hash(v);
-        if shown.hash.insert(kind, h) == Some(h) {
+        // A demo client waits for the step's seq, so it gets every view at every new seq.
+        if shown.hash.insert(kind, h) == Some(h) && !(d.demo && newer) {
             continue;
         }
         if !send(
