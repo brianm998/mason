@@ -152,6 +152,38 @@ fn base_candidates(cwd: &Path, sha: &str, base_ref: &str) -> Vec<String> {
     v
 }
 
+/// The base branch as a job's checkout should see it: `(name, tip)`, `("develop", sha)` for
+/// `origin/develop`. A base that is a local branch (the project has no remote) is that name. `None`
+/// when the base does not resolve, and the job then runs as it did before this was sent.
+fn base_info(cwd: &Path, base_ref: &str) -> Option<(String, String)> {
+    let tip = git_text(
+        cwd,
+        &[
+            "rev-parse",
+            "--verify",
+            "-q",
+            &format!("{base_ref}^{{commit}}"),
+        ],
+    )
+    .filter(|s| valid_sha(s))?;
+    let remote_tracking = git(
+        cwd,
+        &[
+            "show-ref",
+            "--verify",
+            "-q",
+            &format!("refs/remotes/{base_ref}"),
+        ],
+    )
+    .is_ok();
+    let name = if remote_tracking {
+        base_ref.split_once('/')?.1
+    } else {
+        base_ref.strip_prefix("refs/heads/").unwrap_or(base_ref)
+    };
+    (!name.is_empty() && name.len() <= 200).then(|| (name.to_string(), tip))
+}
+
 /// What the node answered to a start: it has the job, no room, or lacks the commit.
 enum Started {
     Yes,
@@ -197,6 +229,7 @@ fn answered(r: Result<Response, ClientError>) -> Result<Response, String> {
 }
 
 /// Send the node what it lacks of the snapshot, as a bundle of the commits it has none of.
+#[allow(clippy::too_many_arguments)]
 fn send_snapshot(
     c: &Candidate,
     cwd: &Path,
@@ -204,6 +237,7 @@ fn send_snapshot(
     id: &str,
     sha: &str,
     base_ref: &str,
+    base: Option<&(String, String)>,
     full: bool,
 ) -> Result<(), String> {
     let mut have: Vec<String> = vec![];
@@ -229,8 +263,20 @@ fn send_snapshot(
         }
     }
     let tag = TempRef::new(cwd, id, sha)?;
+    // The base tip goes as a ref of its own when the node lacks it: it need not be an ancestor of
+    // the snapshot (a branch that is behind, or a base that moved on), so the snapshot's ref does
+    // not carry it. One the node has is excluded, and git would drop its ref with a warning.
+    let base_tag = match base {
+        Some((_, tip)) if !have.contains(tip) && tip != sha => {
+            Some(TempRef::new(cwd, &format!("{id}-base"), tip)?)
+        }
+        _ => None,
+    };
     let excludes: Vec<String> = have.iter().map(|h| format!("^{h}")).collect();
     let mut args: Vec<&str> = vec!["bundle", "create", "-", &tag.name];
+    if let Some(b) = &base_tag {
+        args.push(&b.name);
+    }
     args.extend(excludes.iter().map(String::as_str));
     let bundle = git(cwd, &args)?;
     let r = answered(block_on(c.client.send(
@@ -290,6 +336,7 @@ pub fn start(
     )
     .map_err(|e| Fail::Error(format!("cannot snapshot the worktree: {e}")))?;
     let run: Value = serde_json::from_str(&crate::remote::run_json(spec)).unwrap_or(Value::Null);
+    let base = base_info(cwd, base_ref);
     let mut why: Vec<String> = vec![];
     'nodes: for c in &cands {
         // The record first: a daemon that dies from here on finds the run.
@@ -301,13 +348,26 @@ pub fn start(
             sent_ms: now_ms(),
         };
         save(&rec_path, &rec);
-        let body = json!({
+        let mut body = json!({
             "id": spec.id, "project": spec.project, "sha": sha, "run": run,
             "limit_s": spec.limit.as_secs(), "lease_s": c.lease_s,
         });
+        // Additive: a node that does not know `base` ignores it.
+        if let Some((name, tip)) = &base {
+            body["base"] = json!({"name": name, "sha": tip});
+        }
         let mut full = false;
         for attempt in 0..2 {
-            if let Err(e) = send_snapshot(c, cwd, &spec.project, &spec.id, &sha, base_ref, full) {
+            if let Err(e) = send_snapshot(
+                c,
+                cwd,
+                &spec.project,
+                &spec.id,
+                &sha,
+                base_ref,
+                base.as_ref(),
+                full,
+            ) {
                 why.push(e);
                 continue 'nodes;
             }
