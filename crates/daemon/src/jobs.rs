@@ -4036,6 +4036,8 @@ fn agent_job(c: &Ctx) {
     let mut feedback = std::fs::read_to_string(dir.join("feedback.txt")).ok();
     let one_shot = take_retry_note(&dir);
     let note_shown = one_shot.is_some();
+    // The default explore prompt has no place for feedback, so it takes the note by itself.
+    let explore_note = with_retry_note(None, one_shot.clone());
     feedback = with_retry_note(feedback, one_shot);
     if let Some(files) = &conflicts {
         if kind == StepKind::Develop {
@@ -4140,7 +4142,13 @@ fn agent_job(c: &Ctx) {
                 plan.as_ref(),
             ),
             StepKind::Explore => {
-                crate::prompts::explore_prompt(c.task.0, &c.title, &c.body, c.trust, &c.project)
+                let p = crate::prompts::explore_prompt(
+                    c.task.0, &c.title, &c.body, c.trust, &c.project,
+                );
+                match &explore_note {
+                    Some(n) => format!("{p}\n\n{n}"),
+                    None => p,
+                }
             }
             StepKind::Diagnose | StepKind::Chat | StepKind::Health => String::new(),
         }
@@ -4156,14 +4164,24 @@ fn agent_job(c: &Ctx) {
     };
 
     // The numbers MASON reserved for this task (a task claimed before numbers existed gets
-    // them now), stated as facts in every explore and develop prompt.
+    // them now), stated as facts in every explore and develop prompt. A review is told the
+    // ones already stored, so it does not take those files for unrequested ones; it
+    // reserves nothing.
     let prompt = if kind == StepKind::Review {
         let prompt = format!(
             "{prompt}\n\n{}",
             review_diff_block(&c.wt, &c.project.base_ref())
         );
         // Base lines the merge replaced in place are the reviewer's to settle (s395).
-        match crate::landing::replaced_for_review(c) {
+        let prompt = match crate::landing::replaced_for_review(c) {
+            Some(block) => format!("{prompt}\n\n{block}"),
+            None => prompt,
+        };
+        let numbers = c.d.world().ok().and_then(|w| {
+            let t = w.tasks.get(&c.task)?;
+            Some(crate::numbers::review_block(&c.d.numbers_of(t)))
+        });
+        match numbers.filter(|b| !b.is_empty()) {
             Some(block) => format!("{prompt}\n\n{block}"),
             None => prompt,
         }

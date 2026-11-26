@@ -179,12 +179,98 @@ impl Daemon {
     }
 }
 
+/// A span of seconds as "2 h", "1 h 12 min", "35 min" or "under a minute".
+fn span_text(secs: u64) -> String {
+    let (h, m) = (secs / 3600, secs % 3600 / 60);
+    match (h, m) {
+        (0, 0) => "under a minute".into(),
+        (0, m) => format!("{m} min"),
+        (h, 0) => format!("{h} h"),
+        (h, m) => format!("{h} h {m} min"),
+    }
+}
+
+/// The sentence for the check-queue hold (s256).
+pub fn check_hold_sentence(n: usize, limit: u32) -> String {
+    format!("Held: {n} checks are waiting (limit {limit})")
+}
+
+/// The sentence for a file hold: who, which file, and when it lapses by itself.
+pub fn file_hold_sentence(
+    other: TaskId,
+    file: &str,
+    limit_secs: u64,
+    left: Option<Duration>,
+) -> String {
+    let lapse = match left {
+        Some(l) => format!(
+            "held up to {}, ends by itself in {}",
+            span_text(limit_secs),
+            span_text(l.as_secs())
+        ),
+        None => format!("held up to {}", span_text(limit_secs)),
+    };
+    format!("Waits for #{}: both change {file} ({lapse})", other.0)
+}
+
+impl Daemon {
+    /// Why a queued task that waits for a slot is not starting, when it is one of the holds
+    /// (the check-queue hold, s256, or the file hold, s398). One sentence for the CLI and every
+    /// monitor; `None` when no hold applies, so the task really waits for an LLM session.
+    pub fn queued_wait_text(&self, w: &World, t: &Task) -> Option<String> {
+        use mason_core::{Activity, WaitReason};
+        if t.state != State::Queued || !matches!(t.activity, Activity::Waiting(WaitReason::Slot)) {
+            return None;
+        }
+        if let Some((n, limit)) = self.check_hold(w, t) {
+            return Some(check_hold_sentence(n, limit));
+        }
+        let (other, file) = self.file_hold(w, t)?;
+        let limit = self.project(t.project).map_or(0, |p| p.hold_back_secs);
+        let left = self
+            .file_held
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&t.id)
+            .map(|s| Duration::from_secs(limit).saturating_sub(s.elapsed()));
+        Some(file_hold_sentence(other, &file, limit, left))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn the_file_hold_sentence_names_task_file_and_lapse() {
+        let t = file_hold_sentence(
+            TaskId(1045),
+            "crates/daemon/src/jobs.rs",
+            7200,
+            Some(Duration::from_secs(4320)),
+        );
+        assert_eq!(
+            t,
+            "Waits for #1045: both change crates/daemon/src/jobs.rs (held up to 2 h, ends by itself in 1 h 12 min)"
+        );
+        assert!(!t.contains("LLM"));
+    }
+
+    #[test]
+    fn the_check_hold_sentence_gives_count_and_limit() {
+        let t = check_hold_sentence(7, 4);
+        assert_eq!(t, "Held: 7 checks are waiting (limit 4)");
+        assert!(!t.contains("LLM"));
+    }
+
+    #[test]
+    fn a_file_hold_sentence_without_a_start_still_gives_the_limit() {
+        let t = file_hold_sentence(TaskId(3), "a/b.rs", 1800, None);
+        assert_eq!(t, "Waits for #3: both change a/b.rs (held up to 30 min)");
     }
 
     #[test]

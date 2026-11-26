@@ -13,6 +13,7 @@ pub struct Client {
     enc: Encoding,
     next_id: u64,
     actor: String,
+    name: String,
 }
 
 fn io(e: impl std::fmt::Display) -> String {
@@ -31,12 +32,19 @@ impl Client {
             enc,
             next_id: 1,
             actor: String::new(),
+            name: "mason-client".into(),
         })
     }
 
     /// Say who this connection acts as in the hello; the welcome says if that is the owner.
     pub fn acting_as(&mut self, actor: &str) {
         self.actor = actor.to_string();
+    }
+
+    /// Name this client in the hello (`cli`, `agent:7`); the daemon records it with what
+    /// the connection changes.
+    pub fn named(&mut self, name: &str) {
+        self.name = name.to_string();
     }
 
     fn timeout(&mut self, d: Option<Duration>) {
@@ -92,7 +100,7 @@ impl Client {
             body: Some(client_message::Body::Hello(Hello {
                 protocol,
                 last_seq,
-                client: "mason-client".into(),
+                client: self.name.clone(),
                 token: String::new(),
                 commands_only,
                 client_version: "dev".into(),
