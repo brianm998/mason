@@ -1,4 +1,4 @@
-# 1147: the analyst's submission is not validated as a change
+# 1147: name the failing sub-script in s914 and s1035
 
 ## Context
 
@@ -6,7 +6,9 @@
 
 ## Decision
 
-The develop step of the task recorded as the analyst's (`is_analyst_task`, the schedule row, not the title) has no change validator. Its branch is never merged (decision 0870), and `finish_agent` still sends it back to develop when the result file is missing or unreadable. Every other task is validated as before.
+Develop landed its own fix for the analyst's submission (its validator skips the analyst's task, found by the schedule row, not the title). This task adds the reporting: s914 and s1035 print the failing sub-script, exit code and last 12 lines.
+
+Background: the develop step of the task recorded as the analyst's (`is_analyst_task`, the schedule row, not the title) has no change validator. Its branch is never merged (decision 0870), and `finish_agent` still sends it back to develop when the result file is missing or unreadable. Every other task is validated as before.
 
 ## Alternatives
 
