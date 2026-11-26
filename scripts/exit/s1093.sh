@@ -15,6 +15,8 @@ cd "$(git rev-parse --show-toplevel)"
 run() {
   local what=$1; shift
   echo "== $what"
+  # Where `cargo test --workspace` has just run, it ran every one of these.
+  [ -z "${MASON_TESTS_ALREADY_RAN:-}" ] || return 0
   out=$(cargo test -q "$@" 2>&1) || { echo "$out" >&2; echo "FAILED: $what" >&2; exit 1; }
   echo "$out" | grep -E '^test result' | tail -3
   echo "$out" | grep -qE 'test result: ok\. [1-9]' || { echo "FAILED: $what ran no test" >&2; exit 1; }
@@ -107,7 +109,7 @@ max_open = 20
 per_week = 50
 max_steps = 500
 TOML
-"$bin/masond" --data-dir "$root/d" --config-dir "$root/c" --heartbeat-ms 100 --sweep-ms 3600000 \
+"$bin/masond" --port 0 --data-dir "$root/d" --config-dir "$root/c" --heartbeat-ms 100 --sweep-ms 3600000 \
   --schedule-ms 300 --owner "$owner" 2>>"$root/masond.log" &
 daemon=$!
 until m status >/dev/null 2>&1; do kill -0 "$daemon" || { cat "$root/masond.log" >&2; exit 1; }; sleep 0.1; done
