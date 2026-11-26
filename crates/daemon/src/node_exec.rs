@@ -692,6 +692,25 @@ pub fn follow(
     // Shown in the monitor's "Remote runs" until it ends, however it ends.
     let hosts = d.cfg.hosts_dir();
     crate::remote_runs::node_started(&hosts, &id, &spec.suite, &name, &rec_path);
+    // On the node's list of runs until this returns, so a job it gives back leaves it (#1155).
+    let (kind, task) = crate::running::classify(&id);
+    let _running = crate::running::start(
+        &hosts,
+        crate::running::Run {
+            id: id.clone(),
+            project: spec.project.clone(),
+            task,
+            kind,
+            name: if spec.suite.is_empty() {
+                id.clone()
+            } else {
+                spec.suite.clone()
+            },
+            host: crate::running::Host::Node(name.clone()),
+            since_ms: rec.sent_ms,
+            url: String::new(),
+        },
+    );
     let _ended = Ended {
         scope: hosts,
         id: id.clone(),

@@ -349,6 +349,9 @@ impl GitHostAdapter for FakeHost {
 pub struct CommandCi {
     pub trigger: String,
     pub status: String,
+    /// Cancels the runs of `MASON_RUN` (may be empty) on `MASON_REF`, and may print how
+    /// many it cancelled (no number: one). Without it nothing is cancelled.
+    pub cancel: Option<String>,
     pub cwd: PathBuf,
 }
 
@@ -490,6 +493,17 @@ impl BuildSystemAdapter for CommandCi {
             }]
         };
         Ok((state, detail))
+    }
+
+    fn cancel(&self, run: &str, git_ref: &str) -> Result<usize, ApiError> {
+        let Some(cmd) = &self.cancel else {
+            return Ok(0);
+        };
+        let out = self.run(cmd, &[("MASON_RUN", run), ("MASON_REF", git_ref)])?;
+        Ok(out
+            .lines()
+            .next()
+            .map_or(1, |l| l.trim().parse().unwrap_or(1)))
     }
 
     fn doctor(&self, _repo: &Path) -> Vec<Problem> {

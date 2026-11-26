@@ -627,7 +627,7 @@ fn a_lint_red_in_a_file_no_task_touches_is_not_blamed_by_file() {
 
 // ---- Land now on a running batch (#615) ---------------------------------------------------
 
-fn post_api(d: &Arc<mason_daemon::Daemon>, path: String) -> (u16, serde_json::Value) {
+pub(crate) fn post_api(d: &Arc<mason_daemon::Daemon>, path: String) -> (u16, serde_json::Value) {
     let d = d.clone();
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
