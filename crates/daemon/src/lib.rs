@@ -113,6 +113,7 @@ pub mod thermal;
 pub mod tiermap;
 pub mod tracker;
 pub mod update;
+pub mod update_plan;
 pub mod usage;
 pub mod usersession;
 pub mod version;
