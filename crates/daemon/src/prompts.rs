@@ -83,6 +83,23 @@ pub fn tried_block(rounds: &[Round]) -> Option<String> {
     ))
 }
 
+/// What the default review prompt says is worth sending a task back for, and what is not.
+const REVIEW_SEVERITY: &str = "\
+Give every finding a severity, \"blocking\" or \"minor\". Only a blocking finding sends the task back; \
+a minor one is kept as advice and never causes a round by itself.\n\
+A finding is blocking when:\n\
+- the change won't build;\n\
+- it is wrong for every input;\n\
+- a new or changed test passes on the base code too, so it cannot catch the regression;\n\
+- an error is swallowed, or a fallback hides a failure;\n\
+- the change breaks a CLAUDE.md or prompt-pack rule, and the finding quotes the rule.\n\
+These are not findings; leave them out:\n\
+- problems already on the base branch;\n\
+- anything a linter or the test step catches;\n\
+- wording, style and naming;\n\
+- nits a senior engineer would not raise.\n\
+A wording error in docs is at most minor, unless the task is about that doc.";
+
 /// One optional line in every default prompt: real counts, never guesses.
 pub const PROGRESS_LINE: &str = "Optionally call report_progress with real counts when you have them (\"3 of 7 files\", \"all 5 criteria\"); never guess a count.";
 
@@ -171,8 +188,11 @@ pub fn review_prompt(
         "You are reviewing the change for task #{task} in project {proj}. It is committed on the branch you are \
          on; look at what it changes against the base branch (git diff {base}...HEAD) and read the code around \
          it. Do not change any files.\n\n{task_text}\n\nThe plan:\n{plan_text}\n\n\
-         Check that it does what the task asks, that the acceptance criteria hold, and that it breaks nothing. \
-         Call submit_review with verdict \"approve\", or \"changes\" with at least one concrete finding. {progress}",
+         Check that it does what the task asks, that the acceptance criteria hold, and that it breaks nothing.\n\n\
+         {severity}\n\n\
+         Call submit_review with verdict \"approve\" (with any minor findings), or \"changes\" with at least \
+         one concrete blocking finding. {progress}",
+        severity = REVIEW_SEVERITY,
         progress = PROGRESS_LINE,
         proj = p.id,
         base = p.base_ref(),
@@ -344,6 +364,31 @@ mod tests {
             "the text sits inside the fence"
         );
         assert!(!p[..fence_start].contains("push --force"));
+    }
+
+    #[test]
+    fn the_review_prompt_says_what_is_blocking_and_what_is_not_a_finding() {
+        let p = review_prompt(3, "T", "B", TrustSource::Owner, &proj(), None);
+        let (_, rule) = p.split_once("A finding is blocking when:").unwrap();
+        let (blocking, not) = rule.split_once("These are not findings").unwrap();
+        for want in [
+            "won't build",
+            "wrong for every input",
+            "passes on the base code too",
+            "an error is swallowed",
+            "CLAUDE.md or prompt-pack rule",
+        ] {
+            assert!(blocking.contains(want), "missing {want:?} in:\n{blocking}");
+        }
+        for want in [
+            "already on the base branch",
+            "a linter or the test step catches",
+            "wording, style and naming",
+            "senior engineer",
+            "wording error in docs is at most minor",
+        ] {
+            assert!(not.contains(want), "missing {want:?} in:\n{not}");
+        }
     }
 
     #[test]
