@@ -148,7 +148,12 @@ sys.exit(0 if any("gha" in h["uses"] for h in v["holders"]) else 1)'; do
   [ $SECONDS -lt $end ] || fail "no holder of the gha pool appeared while the run was out"
   sleep 0.3
 done
-grep -q 'head_sha=' "$root/gh/requests.log" || fail "the run was not pushed and looked up"
+# The pool is leased before the run is dispatched and looked up, so wait for the lookup.
+end=$((SECONDS + 120))
+until grep -q 'head_sha=' "$root/gh/requests.log" 2>/dev/null; do
+  [ $SECONDS -lt $end ] || fail "the run was not pushed and looked up"
+  sleep 0.3
+done
 
 echo "== 1. the run holds the runner pools and none of this Mac's slots"
 res > "$root/res.json"
