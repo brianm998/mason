@@ -2984,7 +2984,13 @@ impl Grant {
             .filter(|(k, _)| mason_scheduler::is_gha_pool(k))
             .collect();
         self.give(&runners);
-        !runners.is_empty()
+        if runners.is_empty() {
+            return false;
+        }
+        // The lease may still hold something else (a local slot), so it does not read as given
+        // back: say so, or the next run through GitHub would push holding no runner unit.
+        self.lock().given_up = true;
+        true
     }
     /// Say where the run's hold is recorded, so units given back are written there.
     pub fn note_hold(&self, dir: &Path, id: &str) {
@@ -6970,6 +6976,34 @@ mod tests {
         assert!(is_held(&b, waiting), "the waiting check got the unit");
         assert_eq!(b.used("gha"), 1, "only the other check holds it");
         assert!(!grant.give_runners(), "nothing more to give");
+    }
+
+    /// A node hands a check back after its runner units were given back: the check goes on to
+    /// GitHub, and its lease (which still holds a local unit) asks for them again first.
+    #[test]
+    fn a_check_a_node_hands_back_asks_for_its_runner_units_again_though_its_lease_holds_a_local_unit(
+    ) {
+        let bdir = tempfile::tempdir().unwrap();
+        let b = crate::sched::tests::runner_broker(bdir.path(), 2, 1, 0);
+        let lease = b
+            .acquire(
+                mason_core::TaskId(1),
+                "#1 check",
+                mason_scheduler::Rank::new(false, 3, 0, 1, 1, false),
+                mason_scheduler::Needs::of(&[("compile", 1), ("gha", 1)]),
+                &|| true,
+                &mut |_| {},
+            )
+            .unwrap();
+        let grant = Grant::of(lease);
+        assert!(grant.give_runners());
+        assert_eq!((b.used("gha"), b.used("compile")), (0, 1));
+        assert!(grant.regain(units_of(1), &|| None));
+        assert_eq!(grant.units(), units_of(1));
+        assert_eq!(b.used("gha"), 1, "it holds a runner unit again");
+        // The grant owns the lease, and the new lease replaces it: a run that goes to GitHub
+        // needs no slot of this machine.
+        assert_eq!(b.used("compile"), 0);
     }
 
     /// A batch's lease goes on holding this machine's slots when its runner units are given back;
