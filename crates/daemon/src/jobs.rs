@@ -31,9 +31,8 @@ use mason_definition::layers::{resolve, Resolved, RuntimeOverride};
 use mason_definition::validate::contract_kind;
 use mason_definition::{Definition, Step, StepType};
 use mason_landing::git::{self, CatchUp};
-use mason_step_host::client::{collect_to_file_observed, ClientError, HostClient};
+use mason_step_host::client::{collect_to_file_observed, ClientError};
 use mason_step_host::launcher::{spawn_host, SpawnOptions};
-use mason_step_host::protocol::{CURRENT, PREVIOUS};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -5679,7 +5678,7 @@ fn run_command_on(
     // Stop the run if it takes too long.
     let done = Arc::new(AtomicBool::new(false));
     {
-        let (done, sock, hdir) = (done.clone(), dir.join("sock"), dir.clone());
+        let (done, hdir) = (done.clone(), dir.clone());
         std::thread::spawn(move || {
             let end = Instant::now() + mason_step_host::registry::remaining_limit(limit, &hdir);
             while Instant::now() < end {
@@ -5688,9 +5687,7 @@ fn run_command_on(
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
-            if let Ok(mut h) = HostClient::connect(&sock, PREVIOUS, CURRENT, "daemon") {
-                let _ = h.stop(1000);
-            }
+            mason_step_host::client::stop_or_reap(&hdir, 1000, "daemon");
         });
     }
     let name = format!("{suffix}-r{}{}{hsuf}", c.run.0, again(k));
