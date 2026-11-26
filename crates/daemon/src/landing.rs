@@ -386,6 +386,9 @@ pub fn submit_and_wait(c: &Ctx) -> Option<Verdict> {
     if let Some(v) = check_markers(c) {
         return Some(v);
     }
+    if let Some(v) = check_content(c) {
+        return Some(v);
+    }
     if let Some(v) = check_dropped(c) {
         return Some(v);
     }
@@ -531,6 +534,41 @@ fn check_markers(c: &Ctx) -> Option<Verdict> {
                 crate::markers::places(&found)
             ),
             feedback: crate::markers::refusal(&found),
+        }),
+    }
+}
+
+/// A task whose branch adds a secret or an owner-banned word goes back before it joins the
+/// queue. A list the owner wrote that cannot be read stops the landing: it is not skipped.
+fn check_content(c: &Ctx) -> Option<Verdict> {
+    let rules = crate::contentscan::Source::new(&c.d.cfg.config_dir, &c.project.id).rules();
+    if !rules.problems.is_empty() {
+        return Some(Verdict::Failed(format!(
+            "the banned-word list cannot be applied: {}",
+            rules.problems.join("; ")
+        )));
+    }
+    let read = crate::jobs::wait_out_environment(
+        c,
+        "scanning the task's change for secrets and banned words",
+        || {
+            crate::contentscan::added_since(
+                &rules,
+                &c.project.path,
+                &c.project.base_ref(),
+                &c.branch,
+            )
+        },
+    );
+    match read {
+        Err(why) => Some(Verdict::Failed(why)),
+        Ok(scan) if scan.hits.is_empty() => None,
+        Ok(scan) => Some(Verdict::SentBack {
+            reason: format!(
+                "adds a secret or a banned word: {}",
+                crate::contentscan::places(&scan.hits)
+            ),
+            feedback: crate::contentscan::refusal(&scan.hits),
         }),
     }
 }
@@ -1582,6 +1620,13 @@ impl Runner {
             .join("batches")
             .join(batch_id.to_string());
         let point = |s: &str| self.point(s);
+        crate::contentscan::note_allowed(
+            &crate::contentscan::Source::new(&d.cfg.config_dir, &p.id).rules(),
+            &p.path,
+            &p.base_ref(),
+            tasks.iter().map(|(t, b)| (t.0, b.as_str())),
+            &log_dir,
+        );
 
         let mut active: Vec<BatchTask> = tasks
             .iter()

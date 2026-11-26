@@ -2847,6 +2847,18 @@ impl TestChecks {
         })
     }
 
+    /// Secrets and banned words the agent's work adds, as a failed check; like the markers,
+    /// read from the text.
+    fn content_refusal(&self) -> Option<CheckRun> {
+        let (_, base) = self.base_fold.as_ref()?;
+        let source = crate::contentscan::Source::new(&self.slots.d.cfg.config_dir, &self.project);
+        let found = crate::contentscan::added_in_worktree(&source.rules(), &self.wt, base).ok()?;
+        (!found.hits.is_empty()).then(|| CheckRun::Done {
+            passed: false,
+            summary: crate::contentscan::refusal(&found.hits),
+        })
+    }
+
     fn check(&self, name: &str, scope: &CheckScope) -> CheckRun {
         // On 2026-11-13 the owner skipped testing for every active task to drain the queue,
         // but their agents kept queueing `run_check` for compile slots. A skip before the
@@ -2854,7 +2866,7 @@ impl TestChecks {
         // with what happened, not run. Conflict markers are answered first: with testing
         // skipped, a merge the agent resolved badly is not built or read by anything else.
         if name == "tests" {
-            if let Some(refusal) = self.markers_refusal() {
+            if let Some(refusal) = self.markers_refusal().or_else(|| self.content_refusal()) {
                 return refusal;
             }
         }
@@ -3713,6 +3725,7 @@ type IsAnalyst = Box<dyn Fn() -> bool + Send + Sync>;
 /// The analyst's task is told to commit nothing and to leave its findings in
 /// [`crate::introspect::ANALYST_FILE`], and its branch is never merged: for it alone, that
 /// untracked file does not make the tree dirty and a branch with no commits is accepted.
+#[allow(clippy::too_many_arguments)]
 fn change_validator(
     wt: PathBuf,
     base_ref: String,
@@ -3720,6 +3733,7 @@ fn change_validator(
     caps: mason_definition::Capabilities,
     weakening: Option<WeakeningCheck>,
     planned: Option<PlannedChange>,
+    content: crate::contentscan::Source,
     is_analyst: IsAnalyst,
 ) -> Validator {
     let warned = std::sync::atomic::AtomicBool::new(false);
@@ -3785,6 +3799,13 @@ fn change_validator(
         if let Ok(found) = crate::markers::added_since(&wt, &base_ref, "HEAD") {
             if !found.is_empty() {
                 problems.push(crate::markers::refusal(&found));
+            }
+        }
+        // Nor is a secret or an owner-banned word.
+        if let Ok(found) = crate::contentscan::added_since(&content.rules(), &wt, &base_ref, "HEAD")
+        {
+            if !found.hits.is_empty() {
+                problems.push(crate::contentscan::refusal(&found.hits));
             }
         }
         // The scan landing runs, now, before the test step. Where the project sends a
@@ -4246,6 +4267,7 @@ fn agent_job(c: &Ctx) {
                     .task_dir()
                     .join(format!("source-free-note-r{}.txt", c.run.0)),
             }),
+            crate::contentscan::Source::new(&c.d.cfg.config_dir, &c.project.id),
             Box::new(move || crate::introspect::is_analyst_task(&d, task, &project)),
         )
     });
@@ -6317,6 +6339,7 @@ mod tests {
                 note_file: note.clone(),
             }),
             None,
+            Default::default(),
             Box::new(|| false),
         );
         (v("submit_change", &serde_json::json!({"head": head})), note)
@@ -6340,6 +6363,7 @@ mod tests {
                 mason_definition::Capabilities::now(),
                 None,
                 None,
+                Default::default(),
                 Box::new(move || analyst),
             )("submit_change", &serde_json::json!({"head": head}))
         };
@@ -6383,6 +6407,7 @@ mod tests {
                 plan: "Problem.\n\n**Change**\n1. Edit `crates/x/src/a.rs`.\n".into(),
                 note_file: note.clone(),
             }),
+            Default::default(),
             Box::new(|| false),
         );
         let first = v("submit_change", &serde_json::json!({"head": head}));
@@ -6400,6 +6425,23 @@ mod tests {
         assert!(kept.contains("the code already did this"), "{kept}");
         // Refused once only: a second bare submit goes through.
         assert!(v("submit_change", &serde_json::json!({"head": head})).is_ok());
+    }
+
+    #[test]
+    fn submit_refuses_a_branch_that_adds_a_token_and_says_where() {
+        // Put together here, so this file holds no token.
+        let token = format!("ghp_{}", "c3".repeat(18));
+        let (r, _) = submit_with(&format!("export GH={token}"), None);
+        let problems = r.unwrap_err();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("scripts/run.sh:2") && p.contains("GitHub token")),
+            "{problems:?}"
+        );
+        assert!(!problems.join(" ").contains(&token), "{problems:?}");
+        let (r, _) = submit_with(&format!("export GH={token} # mason:allow-secret"), None);
+        assert!(r.is_ok(), "{r:?}");
     }
 
     #[test]
