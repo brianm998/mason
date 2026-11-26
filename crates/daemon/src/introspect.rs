@@ -1195,6 +1195,12 @@ pub fn ingest_analyst(
     }
     let file = wt.join(ANALYST_FILE);
     let Ok(text) = std::fs::read_to_string(&file) else {
+        tracing::warn!(
+            task = task.0,
+            project,
+            worktree = %wt.display(),
+            "the analyst task has no result file; nothing was filed"
+        );
         return Ingest::Missing;
     };
     let result = match parse_result(&text) {

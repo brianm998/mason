@@ -103,35 +103,44 @@ pub fn budget(rows: &[DiagnosisRow], failed_at: u64) -> Result<(), String> {
     Ok(())
 }
 
-/// Diagnoses that are running now: task -> (started ms, model and effort).
-static RUNNING: std::sync::Mutex<Vec<(u64, u64, String)>> = std::sync::Mutex::new(Vec::new());
+/// Diagnoses that are running now: (daemon, task, started ms, model and effort). The daemon is
+/// part of the key because task numbers repeat between daemons: one process can hold several
+/// (the tests start many), and each numbers its tasks from 0.
+static RUNNING: std::sync::Mutex<Vec<(String, u64, u64, String)>> =
+    std::sync::Mutex::new(Vec::new());
 
-/// A diagnosis running for `task`: when it started and on what model and effort.
-pub fn running(task: u64) -> Option<(u64, String)> {
+/// The key of the daemon `d` in [`RUNNING`]: its data directory, which no two daemons share.
+fn scope(d: &Daemon) -> String {
+    d.cfg.data_dir.display().to_string()
+}
+
+/// A diagnosis running for `task` of daemon `d`: when it started and on what model and effort.
+pub fn running(d: &Daemon, task: u64) -> Option<(u64, String)> {
+    let scope = scope(d);
     RUNNING
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .iter()
-        .find(|r| r.0 == task)
-        .map(|r| (r.1, r.2.clone()))
+        .find(|r| r.0 == scope && r.1 == task)
+        .map(|r| (r.2, r.3.clone()))
 }
 
 /// Takes a task's running mark, and gives it back when dropped.
-struct RunMark(u64);
+struct RunMark(String, u64);
 
 impl RunMark {
-    fn take(task: u64) -> Option<RunMark> {
+    fn take(scope: &str, task: u64) -> Option<RunMark> {
         let mut v = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
-        if v.iter().any(|r| r.0 == task) {
+        if v.iter().any(|r| r.0 == scope && r.1 == task) {
             return None;
         }
-        v.push((task, now_ms(), String::new()));
-        Some(RunMark(task))
+        v.push((scope.to_string(), task, now_ms(), String::new()));
+        Some(RunMark(scope.to_string(), task))
     }
     fn ran_on(&self, text: &str) {
         let mut v = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(r) = v.iter_mut().find(|r| r.0 == self.0) {
-            r.2 = text.to_string();
+        if let Some(r) = v.iter_mut().find(|r| r.0 == self.0 && r.1 == self.1) {
+            r.3 = text.to_string();
         }
     }
 }
@@ -141,7 +150,7 @@ impl Drop for RunMark {
         RUNNING
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .retain(|r| r.0 != self.0);
+            .retain(|r| !(r.0 == self.0 && r.1 == self.1));
     }
 }
 
@@ -432,7 +441,7 @@ pub fn start(d: &Arc<Daemon>, task: TaskId, run: StepRunId, manual: bool) -> Res
     // two sessions.
     let rows = d.store.diagnoses(Some(task.0)).map_err(|e| e.to_string())?;
     budget(&rows, failed_at)?;
-    let mark = RunMark::take(task.0).ok_or("a diagnosis is already running")?;
+    let mark = RunMark::take(&scope(d), task.0).ok_or("a diagnosis is already running")?;
     let d = d.clone();
     std::thread::Builder::new()
         .name(format!("diagnose-{}", task.0))
@@ -900,16 +909,26 @@ mod tests {
 
     #[test]
     fn a_running_mark_is_taken_once_and_given_back() {
-        let m = RunMark::take(990_001).expect("first");
+        let m = RunMark::take("d1", 990_001).expect("first");
         m.ran_on("model x on high");
         assert_eq!(
-            running(990_001).map(|r| r.1),
+            RUNNING
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|r| r.0 == "d1" && r.1 == 990_001)
+                .map(|r| r.3.clone()),
             Some("model x on high".into())
         );
-        assert!(RunMark::take(990_001).is_none(), "refused while running");
+        assert!(
+            RunMark::take("d1", 990_001).is_none(),
+            "refused while running"
+        );
+        // Another daemon's task with the same number is another task.
+        let other = RunMark::take("d2", 990_001).expect("another daemon");
         drop(m);
-        assert!(running(990_001).is_none());
-        assert!(RunMark::take(990_001).is_some());
+        assert!(RunMark::take("d1", 990_001).is_some());
+        drop(other);
     }
 
     fn submission(rec: &str) -> Value {
