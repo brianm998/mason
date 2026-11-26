@@ -433,6 +433,14 @@ pub fn valid_branch(name: &str) -> bool {
 mod deadline_tests {
     use super::*;
 
+    /// True once the pid file holds a parsable non-zero pid (it may exist but still be empty).
+    fn pid_recorded(dir: &std::path::Path) -> bool {
+        std::fs::read_to_string(dir.join("pid"))
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .is_some_and(|p| p != 0)
+    }
+
     #[test]
     fn a_hung_git_is_killed_at_its_deadline() {
         let dir = tempfile::tempdir().unwrap();
@@ -450,20 +458,30 @@ mod deadline_tests {
             .unwrap_err();
             assert!(e.timed_out, "{e}");
             assert!(e.to_string().contains("timed out"));
-            if dir.path().join("pid").exists() || deadline >= Duration::from_secs(20) {
+            if pid_recorded(dir.path()) || deadline >= Duration::from_secs(20) {
                 break;
             }
             deadline *= 4;
         }
         // The sleep (a grandchild) died with the group.
+        assert!(
+            pid_recorded(dir.path()),
+            "the helper never recorded its pid after a 20 s deadline"
+        );
         let pid = std::fs::read_to_string(dir.path().join("pid")).unwrap();
-        assert!(!pid.trim().is_empty(), "the helper never recorded its pid");
-        std::thread::sleep(Duration::from_millis(300));
-        let alive = Command::new("kill")
-            .args(["-0", pid.trim()])
-            .status()
-            .unwrap()
-            .success();
+        // Bounded poll: a late reap is not a failure, only a helper still alive after 5 s is.
+        let mut alive = true;
+        for _ in 0..100 {
+            alive = Command::new("kill")
+                .args(["-0", pid.trim()])
+                .status()
+                .unwrap()
+                .success();
+            if !alive {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
         assert!(!alive, "the helper outlived the deadline");
     }
 
