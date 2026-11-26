@@ -817,6 +817,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s1106**: submit_change, run_check and landing now refuse added lines that hold a secret or a word on the owner's banned list, which lives outside git.
 - **s1107**: Every Claude agent MASON starts is refused `git` commands that destroy uncommitted or shared work, and any recursive `rm` outside what it owns, with a reason it can act on.
 - **s1110**: Every GitHub Action in MASON's workflows is pinned to a full commit SHA, Dependabot proposes the moves weekly, and CI's lint job refuses an unpinned `uses:`.
+- **s1115**: `mason node doctor` looks for tools on the `PATH` a job gets (so rustup's `~/.cargo/bin` counts) and names `rustup default` when no toolchain is chosen, and docs/nodes.md gains the missing default toolchain, plist `PATH`, `mason` wrapper (now written by `export-runtime`), firewall path and export command.
 - **s1117**: Every recorded override names the client that made it, a pause or resume also names the pause rows it made or lifted, a lift is shown for ten minutes, and `mason pause list` no longer drops the partial hour.
 - **s1118**: On macOS the coordinator now execs masond from one signed bundle on the internal disk (`~/Applications/MASON Coordinator.app`) whose path never changes, so a Local Network rule can apply, and a rule macOS cannot apply is named as such.
 - **s1119**: A node names each step host's folder by a 16-character key, so job ids no longer lengthen the socket path; a socket path over 100 characters is refused before a host is started, with its length; the host's own errors go to `host.err` and come back in "step host exited before it was up"; and `mason node doctor` and `mason doctor` check the socket length.
@@ -837,4 +838,6 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s1160**: A node now reports whether it set a job's `origin/<base>`, a failed or missing base is a node failure rather than a red for the task, and `mason node sync` and `mason node show` repair and show node mirrors from the coordinator.
 - **s1161**: the step-host launch-listing tests now stop waiting when the launch ends and show its error, and they retry the ETXTBSY spawn race that most likely turned s594 red on ubuntu.
 - **s1163**: the file hold no longer reads the standard "How to work in this repository" footer or the Trust section of a task body as files the task changes, so unrelated tasks no longer wait on each other for them.
+- **s1170**: push_candidate waits and retries (up to the outage limit) when git cannot reach the remote (DNS, route, timeout), instead of failing the landing step.
+- **s1173**: A queued task kept back by the file hold or the check-queue hold now says so in the monitor's `why_waiting` and `activity` (same text as `mason task show`), instead of "Waiting for an LLM session to be free".
 <!-- status:end -->
