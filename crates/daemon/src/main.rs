@@ -274,6 +274,7 @@ fn main() {
             !mason_platform::process::is_alive(pid)
         });
     }
+    mason_daemon::stable_app::check_at_start(&cfg);
     if let Some(sha) = &cfg.runtime_sha {
         use mason_daemon::update::{Boots, Runtimes};
         let boots = Boots::new(&Runtimes::new(&cfg.data_dir));
@@ -458,7 +459,10 @@ fn managed_once(cfg: &DaemonConfig) -> Started {
     boots.record(now, &chosen, "start");
     let mut a = cfg.exec_args.clone();
     a.extend(["--runtime-sha".into(), chosen.clone()]);
-    let mut cmd = std::process::Command::new(rt.masond(&chosen));
+    // On macOS the coordinator runs from one bundle whose path never changes (`stable_app.rs`).
+    let staged = mason_daemon::stable_app::stage(cfg, &rt, &chosen);
+    let exe = mason_daemon::stable_app::executable(staged.as_ref(), &rt, &chosen);
+    let mut cmd = std::process::Command::new(exe);
     cmd.args(&a);
     #[cfg(unix)]
     {

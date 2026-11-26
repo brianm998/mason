@@ -343,8 +343,88 @@ pub fn start(
 /// Run `spec` on a node and give back its result: [`start`] it (or, after a restart, attach to
 /// the job its record names), then [`follow`] it. `live` is told each piece of output as it
 /// arrives.
+///
+/// `want` marked by [`crate::place::wait_nid`] is a run that must not come back to this machine
+/// (a nodes-only project in `remote` mode, #1150): no node having room, or the node giving it up,
+/// is waited out and tried again, for as long as `stop` does not end it. Such a call never
+/// returns [`Fail::Environmental`].
 #[allow(clippy::too_many_arguments)]
 pub fn execute(
+    d: &Arc<Daemon>,
+    want: Option<&str>,
+    spec: &RunSpec,
+    cwd: &Path,
+    base_ref: &str,
+    dir: &Path,
+    stop: &dyn Fn() -> Option<StopWhy>,
+    live: &mut dyn FnMut(u64, &[u8]),
+) -> Result<Outcome, Fail> {
+    let Some(chosen) = want.and_then(crate::place::wait_for) else {
+        return attempt(d, want, spec, cwd, base_ref, dir, stop, live);
+    };
+    let step = poll_interval();
+    let mut chosen = Some(chosen);
+    let mut failed = 0u32;
+    let mut said = false;
+    // How long to leave the nodes alone after an attempt that gave nothing.
+    let mut rest = Duration::ZERO;
+    let mut since = std::time::Instant::now();
+    loop {
+        if let Some(why) = stop() {
+            return Ok(Outcome::Stopped(why));
+        }
+        if d.is_shutting_down() {
+            return Ok(Outcome::Stopped(StopWhy::Gone));
+        }
+        // A job already sent is attached to whatever room the nodes say they have: it is the
+        // one taking it up.
+        let sent = load(&record_path(dir, &spec.id)).is_some();
+        if sent || (since.elapsed() >= rest && has_room(d, spec)) {
+            match attempt(d, chosen.take(), spec, cwd, base_ref, dir, stop, live) {
+                Err(Fail::Environmental(why)) => {
+                    tracing::warn!(run = %spec.id, "{why}; waiting for a node (this project has no GitHub setup)");
+                    // Doubling, up to 64 polls.
+                    rest = step * (1u32 << failed.min(6));
+                    failed += 1;
+                    since = std::time::Instant::now();
+                }
+                other => return other,
+            }
+        } else if !said {
+            said = true;
+            tracing::info!(run = %spec.id, project = %spec.project, "waiting for a node with room (this project has no GitHub setup)");
+        }
+        std::thread::sleep(step);
+    }
+}
+
+/// Is there a node that says it has room for `spec` now: nodes on and open to the project, the
+/// node accepting, with the toolchains the run needs and a job free?
+fn has_room(d: &Arc<Daemon>, spec: &RunSpec) -> bool {
+    let (rooms, _) = crate::nodes::rooms_for(d, &spec.project, None);
+    let cfg = d.nodes.cfg(&d.cfg.config_dir);
+    d.nodes
+        .usable(&cfg, &spec.suite, &spec.command)
+        .iter()
+        .any(|(row, _, _, status)| {
+            let max = status["jobs"]["max"].as_u64().unwrap_or(0);
+            let running = status["jobs"]["running"].as_u64().unwrap_or(0);
+            running < max && rooms.iter().any(|r| r.nid == row.nid)
+        })
+}
+
+fn poll_interval() -> Duration {
+    Duration::from_millis(
+        std::env::var("MASON_NODE_POLL_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1000),
+    )
+}
+
+/// One try of [`execute`].
+#[allow(clippy::too_many_arguments)]
+fn attempt(
     d: &Arc<Daemon>,
     want: Option<&str>,
     spec: &RunSpec,
@@ -393,12 +473,7 @@ pub fn follow(
 ) -> Result<Outcome, Fail> {
     let rec_path = record_path(dir, &spec.id);
     let log = dir.join(format!("{}.log", spec.id));
-    let poll = Duration::from_millis(
-        std::env::var("MASON_NODE_POLL_MS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(1000),
-    );
+    let poll = poll_interval();
     let cfg = d.nodes.cfg(&d.cfg.config_dir);
     let Some((row, client, arch)) = d.nodes.client_for(d, &rec.nid) else {
         let _ = std::fs::remove_file(&rec_path);
