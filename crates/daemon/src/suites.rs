@@ -2931,7 +2931,9 @@ fn requeue_units(
             }
             units
         }
-        rm::RunPlace::Local => Default::default(),
+        // No runner units: a node's own unit is not given back by a run, and a run placed
+        // here takes its slots when it starts.
+        rm::RunPlace::Node { .. } | rm::RunPlace::Local => Default::default(),
     }
 }
 

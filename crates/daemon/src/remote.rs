@@ -3470,7 +3470,8 @@ pub fn wait_again(
             clock.sleep(left.min(500));
         }
     }
-    grant.ask_again(units, stop)
+    // Nothing to ask for: the run is no longer placed on GitHub.
+    units.is_empty() || grant.ask_again(units, stop)
 }
 
 /// What a remote run holds, written when it starts and removed when it ends, so a daemon that
