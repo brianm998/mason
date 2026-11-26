@@ -95,7 +95,8 @@ fn profile(
             let ran = run_build(&who, suite, b, n, &wt);
             c.release_lease();
             match ran {
-                Built::Gone => return None,
+                // No network: the base says nothing either way.
+                Built::Gone | Built::Network { .. } => return None,
                 Built::Red(fb) => {
                     return Some(BaseProfile {
                         build_error: Some(basered::first_error(output_of(&fb))),

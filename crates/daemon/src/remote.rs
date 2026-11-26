@@ -2180,39 +2180,10 @@ fn dispatch(site: &Site, spec: &RunSpec, st: &mut State, rec: &Path) -> Result<(
 /// Waits before the second, third and fourth tries of a push (ms).
 const PUSH_BACKOFF_MS: [u64; 3] = [10_000, 30_000, 90_000];
 
-/// Whether a push error is the credential being refused: waiting will not change that.
-fn push_refused(e: &str) -> bool {
-    let l = e.to_ascii_lowercase();
-    [
-        "authentication failed",
-        "permission denied",
-        "could not read username",
-        "invalid username or password",
-        "bad credentials",
-        "error: 401",
-        "error: 403",
-        "protected branch",
-    ]
-    .iter()
-    .any(|m| l.contains(m))
-}
-
-/// Whether a push error came from GitHub's side (a rejection, a 5xx, a dropped connection):
-/// the next try may well work (#772).
+/// Whether a push error came from GitHub's side or the network (a rejection, a 5xx, a dropped
+/// connection, no name resolution): the next try may well work (#772, #1185).
 fn push_transient(e: &str) -> bool {
-    if push_refused(e) {
-        return false;
-    }
-    let l = e.to_ascii_lowercase();
-    l.contains("remote rejected")
-        || l.contains("connection reset")
-        || l.contains("rpc failed")
-        || l.contains("early eof")
-        || l.contains("the remote end hung up")
-        || l.contains("timed out")
-        || ["500", "502", "503", "504"]
-            .iter()
-            .any(|c| l.contains(&format!("error: {c}")))
+    crate::net::is_transient(e)
 }
 
 fn push_once(site: &Site, st: &State) -> Result<(), String> {
@@ -4976,7 +4947,7 @@ mod tests {
     #[test]
     fn a_refused_credential_is_not_retried() {
         let auth = "fatal: Authentication failed for 'https://github.com/o/r'";
-        assert!(push_refused(auth));
+        assert!(crate::net::refused(auth));
         assert!(!push_transient(auth));
         assert!(!push_transient(
             "! [remote rejected] x (protected branch hook declined)"

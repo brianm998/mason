@@ -102,6 +102,9 @@ struct State {
     /// Per project, the tasks the queue is collecting for: still moving toward landing while a
     /// batch waits out its window. Empty when nothing waits on anyone.
     collecting: HashMap<ProjectId, Vec<u64>>,
+    /// Projects whose last batch stopped for want of the network (#1185): when to look next
+    /// whether a fetch of the base works. No batch starts until one does.
+    offline: HashMap<ProjectId, Instant>,
 }
 
 impl State {
@@ -178,6 +181,11 @@ impl Landing {
 
     pub fn draining(&self) -> bool {
         self.lock().draining
+    }
+
+    /// Hold the project's batches back until, after `wait`, a fetch of the base works.
+    fn hold_network(&self, p: ProjectId, wait: Duration) {
+        self.lock().offline.insert(p, Instant::now() + wait);
     }
 
     /// The projects with a batch running now.
@@ -801,7 +809,7 @@ fn coordinate(weak: &Weak<Daemon>, pid: ProjectId, first: &mut bool, last: &mut 
                 .store
                 .prune_batch_runs(now_ms().saturating_sub(2 * 24 * 3600 * 1000));
             sweep_integration(&d, pid);
-            remove_refs(&d, pid, None);
+            remove_refs(&d, pid, None, &[]);
         }
     }
     d.crash.panic_point("coordinator");
@@ -919,6 +927,11 @@ fn form_and_start(
         // is not idleness.
         d.landing.lock().idle_ms.remove(&pid);
         return (waiting.len(), Some(Duration::from_secs(1)));
+    }
+    if let Some(wait) = network_held(d, pid) {
+        // A deliberate hold is not idleness.
+        d.landing.lock().idle_ms.remove(&pid);
+        return (waiting.len(), Some(wait));
     }
     let cfg = match read_config(d, pid) {
         Ok(c) => {
@@ -1054,6 +1067,30 @@ fn form_and_start(
     }
     let left = d.landing.lock().waiting.get(&pid).map_or(0, Vec::len);
     (left, next_wait)
+}
+
+/// How long the project is still held for the network, if it is: at the time to look, a fetch
+/// of the base is tried, and one that works ends the hold.
+fn network_held(d: &Arc<Daemon>, pid: ProjectId) -> Option<Duration> {
+    let due = *d.landing.lock().offline.get(&pid)?;
+    let left = due.saturating_duration_since(Instant::now());
+    if !left.is_zero() {
+        return Some(left);
+    }
+    match d.fetch_remote(pid) {
+        Ok(()) => {
+            d.landing.lock().offline.remove(&pid);
+            None
+        }
+        Err(e) => {
+            if crate::net::is_network(&e) {
+                d.net.note(now_ms(), 0);
+            }
+            tracing::warn!("landing waits for the network: {e}");
+            d.landing.hold_network(pid, d.cfg.network_probe);
+            Some(d.cfg.network_probe)
+        }
+    }
 }
 
 /// The project's tasks that are still on their way to landing: in a step that can lead there,
@@ -1226,6 +1263,7 @@ fn run_batch(
                     host,
                     pr: Mutex::new(None),
                     service_error: Mutex::new(None),
+                    offline: Mutex::new(None),
                     stopped: Default::default(),
                 }
                 .run(tasks),
@@ -1260,8 +1298,9 @@ enum PrEnd {
 }
 
 /// Close the pull requests and delete the candidate refs a batch (or, with
-/// `None`, every batch a dead daemon left) put on the remote.
-fn remove_refs(d: &Arc<Daemon>, pid: ProjectId, batch: Option<u64>) {
+/// `None`, every batch a dead daemon left) put on the remote. A ref the network keeps from
+/// being deleted stays recorded, to be deleted when a daemon next starts.
+fn remove_refs(d: &Arc<Daemon>, pid: ProjectId, batch: Option<u64>, backoff: &[Duration]) {
     let Some(p) = d.project(pid) else { return };
     let host = crate::services::host(p).ok().flatten();
     for r in d.store.open_refs(&p.id).unwrap_or_default() {
@@ -1272,18 +1311,29 @@ fn remove_refs(d: &Arc<Daemon>, pid: ProjectId, batch: Option<u64>) {
             let _ = h.close_pr(n);
         }
         if let Some(remote) = &p.remote {
-            let _ = git::run(
-                &p.path,
-                &[
-                    "push",
-                    remote,
-                    "--delete",
-                    &format!("refs/heads/{}", r.name),
-                ],
-            );
+            if !delete_ref(d, &p.path, remote, &r.name, backoff) {
+                continue;
+            }
         }
         let _ = d.store.remove_ref(r.id);
     }
+}
+
+/// Delete a branch on the remote, trying again after each wait while the network fails.
+/// `false`: the network kept it from being deleted, so it is still there to delete.
+fn delete_ref(d: &Daemon, repo: &Path, remote: &str, name: &str, backoff: &[Duration]) -> bool {
+    let r = crate::net::retry(
+        backoff,
+        std::thread::sleep,
+        |_| d.net.note(now_ms(), 0),
+        || {
+            git::run(
+                repo,
+                &["push", remote, "--delete", &format!("refs/heads/{name}")],
+            )
+        },
+    );
+    !r.is_err_and(|e| crate::net::is_network(&e.to_string()))
 }
 
 // ---- one batch ----------------------------------------------------------------------
@@ -1331,6 +1381,9 @@ struct Runner {
     pr: Mutex<Option<OpenPr>>,
     /// Set when a service could not answer: the batch ends with this reason.
     service_error: Mutex<Option<String>>,
+    /// Set when the network stopped the batch (#1185): why, and how long to hold the next one.
+    /// The batch then waits with its tasks instead of failing them.
+    offline: Mutex<Option<(String, Duration)>>,
     /// What Land now stopped in this batch's verification (`suite:NAME`, `ci:NAME`): the
     /// members owe it as deferred debts once they land.
     stopped: Arc<Mutex<BTreeSet<String>>>,
@@ -1663,6 +1716,10 @@ impl Runner {
             if rounds > 1 && self.yield_now() {
                 yield_batch!('outer);
             }
+            // The network stopped a re-verification: there is no point in going round again.
+            if let Some(why) = self.offline_why() {
+                break Err(why);
+            }
             // -- assemble
             let asm = {
                 let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -1680,6 +1737,9 @@ impl Runner {
                         fetch_wait.as_secs()
                     );
                     rounds -= 1;
+                    if crate::net::is_network(&e.to_string()) {
+                        d.net.note(now_ms(), 0);
+                    }
                     std::thread::sleep(fetch_wait);
                     fetch_wait = (fetch_wait * 2).min(Duration::from_secs(30));
                     continue 'outer;
@@ -2604,12 +2664,14 @@ impl Runner {
             }
             // The repository lock is held only around git (the fold and the promote);
             // the re-verification between them runs with it released.
-            let fin = batch.finish_with(
-                &asm,
-                &|| Box::new(lock.lock().unwrap_or_else(|e| e.into_inner())),
-                &mut reverify,
-                &point,
-            );
+            let fin = self.over_network(|| {
+                batch.finish_with(
+                    &asm,
+                    &|| Box::new(lock.lock().unwrap_or_else(|e| e.into_inner())),
+                    &mut reverify,
+                    &point,
+                )
+            });
             match fin {
                 Err(e) => break Err(format!("landing failed: {e}")),
                 Ok(Err(_red)) => continue 'outer, // red after folding: assemble on the new base, blame properly
@@ -2644,6 +2706,35 @@ impl Runner {
             }
         };
 
+        // Neither is a network that is not there (#1185): the batch's tasks wait in the queue,
+        // what it ran is kept, and no batch starts until a fetch of the base works.
+        let offline = self
+            .offline
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        let mut outcome = outcome;
+        let mut held = false;
+        if let (true, Some((why, wait))) = (outcome.is_err(), offline) {
+            held = true;
+            for t in &active {
+                if !deferred.contains(&t.id)
+                    && !landed.contains(&t.id)
+                    && !parked.iter().any(|p| p.task == t.id)
+                {
+                    deferred.push(t.id);
+                }
+            }
+            note = format!(
+                "waiting for the network: {why}; its run results are kept for the next batch over the same base and task heads"
+            );
+            self.say(&format!(
+                "waiting for the network (batch #{batch_id} is held; its results are kept)"
+            ));
+            d.landing.hold_network(self.pid, wait);
+            outcome = Ok(());
+        }
+
         // A refused push is not the change's fault: hold landing, charge no failure.
         let refused = match &outcome {
             Err(why) => crate::ssh_keys::hold_if_refused(d, &p.id, why),
@@ -2651,7 +2742,7 @@ impl Runner {
         };
         let yielded = self.yielded.load(std::sync::atomic::Ordering::SeqCst);
         let phase = match (&outcome, landed.is_empty(), parked.is_empty()) {
-            _ if yielded && landed.is_empty() && parked.is_empty() => "yielded",
+            _ if (yielded || held) && landed.is_empty() && parked.is_empty() => "yielded",
             (Ok(()), _, true) => "landed",
             (Ok(()), false, false) => "landed",
             (Ok(()), true, false) => "parked",
@@ -2908,6 +2999,7 @@ impl Runner {
                 r
             });
             r.notes.splice(0..0, notes);
+            self.heed_network(&r);
             r
         }
     }
@@ -3043,6 +3135,7 @@ impl Runner {
                 &cover,
             );
             stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            self.heed_network(&r);
             r
         })
     }
@@ -4365,6 +4458,8 @@ impl Runner {
                 .map(|(k, x)| (k.clone(), strs(x)))
                 .collect(),
             unfinished: Default::default(),
+            // A run the network stopped is never kept (it is a service error).
+            network: None,
         };
         self.floor_red.store(
             v["floor"].as_bool().unwrap_or(false),
@@ -4462,15 +4557,17 @@ impl Runner {
             .store
             .add_ref(batch, &self.project().id, kind, name, None, now_ms())
             .map_err(|e| e.to_string())?;
-        git::run(
-            wt,
-            &[
-                "push",
-                "--porcelain",
-                &remote,
-                &format!("{sha}:refs/heads/{name}"),
-            ],
-        )
+        self.over_network(|| {
+            git::run(
+                wt,
+                &[
+                    "push",
+                    "--porcelain",
+                    &remote,
+                    &format!("{sha}:refs/heads/{name}"),
+                ],
+            )
+        })
         .map_err(|e| format!("could not push {name}: {e}"))?;
         self.point(&format!("{kind}_pushed"));
         Ok((sha, id))
@@ -4478,12 +4575,73 @@ impl Runner {
 
     fn drop_candidate(&self, name: &str, ref_id: u64) {
         if let Ok(remote) = self.remote() {
-            let _ = git::run(
-                &self.project().path,
-                &["push", &remote, "--delete", &format!("refs/heads/{name}")],
-            );
+            let repo = &self.project().path;
+            if !delete_ref(&self.d, repo, &remote, name, self.backoff()) {
+                return;
+            }
         }
         let _ = self.d.store.remove_ref(ref_id);
+    }
+
+    // ---- the network (#1185) ------------------------------------------------------------
+
+    fn offline_why(&self) -> Option<String> {
+        let g = self.offline.lock().unwrap_or_else(|e| e.into_inner());
+        g.as_ref().map(|(why, _)| why.clone())
+    }
+
+    /// The batch cannot go on without the network: it is held when it ends, for `wait`.
+    fn go_offline(&self, why: String, wait: Duration) {
+        self.offline
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_or_insert((why, wait));
+    }
+
+    /// The waits between tries: none once the batch is already stopping for the network.
+    fn backoff(&self) -> &[Duration] {
+        if self.offline_why().is_some() {
+            &[]
+        } else {
+            &self.d.cfg.network_backoff
+        }
+    }
+
+    /// A git call to the remote, tried again after each wait while the network fails.
+    fn retried<T>(&self, op: impl FnMut() -> Result<T, git::GitError>) -> Result<T, git::GitError> {
+        crate::net::retry(
+            self.backoff(),
+            std::thread::sleep,
+            |e| {
+                self.d.net.note(now_ms(), 0);
+                self.say(&format!("waiting for the network: {e}"));
+            },
+            op,
+        )
+    }
+
+    /// [`Runner::retried`], for a call the batch cannot go on without: when the waits are used
+    /// up and it is still the network, the batch is held.
+    fn over_network<T>(
+        &self,
+        op: impl FnMut() -> Result<T, git::GitError>,
+    ) -> Result<T, git::GitError> {
+        let r = self.retried(op);
+        if let Err(e) = &r {
+            let text = e.to_string();
+            if crate::net::is_network(&text) {
+                self.go_offline(text, self.d.cfg.network_probe);
+            }
+        }
+        r
+    }
+
+    /// A run whose suite could not reach the network proves nothing: the batch is held.
+    fn heed_network(&self, r: &crate::suites::OverRun) {
+        if let Some(why) = &r.network {
+            self.go_offline(why.clone(), self.d.cfg.network_suite_hold);
+            self.fail_service(why.clone());
+        }
     }
 
     fn next_n(&self) -> u64 {
@@ -4969,7 +5127,9 @@ impl Runner {
             match st.state {
                 PrState::Merged => {
                     self.d.landing.clear(self.pid, &waiting);
-                    let _ = git::run(&self.project().path, &["fetch", "--prune", &self.remote()?]);
+                    let remote = self.remote()?;
+                    let _ = self
+                        .retried(|| git::run(&self.project().path, &["fetch", "--prune", &remote]));
                     let commit = git::rev_parse(&self.project().path, &base_ref)
                         .map_err(|e| e.to_string())?;
                     self.point("batch_after_promote");
@@ -5028,7 +5188,8 @@ impl Runner {
                 Err(e) if e.permanent() => {
                     // Refused. Did the base move under us? Then fold it in and let checks run again.
                     let remote = self.remote()?;
-                    let _ = git::run(&self.project().path, &["fetch", "--prune", &remote]);
+                    let _ = self
+                        .retried(|| git::run(&self.project().path, &["fetch", "--prune", &remote]));
                     let tip = git::rev_parse(&self.project().path, &base_ref)
                         .map_err(|e| e.to_string())?;
                     if git::is_ancestor(int_wt, &tip, "HEAD") {
@@ -5048,15 +5209,17 @@ impl Runner {
                     }
                     let head = git::rev_parse(int_wt, "HEAD").map_err(|e| e.to_string())?;
                     if head != last_head {
-                        git::run(
-                            int_wt,
-                            &[
-                                "push",
-                                "--porcelain",
-                                &remote,
-                                &format!("{head}:refs/heads/{}", open.branch),
-                            ],
-                        )
+                        self.over_network(|| {
+                            git::run(
+                                int_wt,
+                                &[
+                                    "push",
+                                    "--porcelain",
+                                    &remote,
+                                    &format!("{head}:refs/heads/{}", open.branch),
+                                ],
+                            )
+                        })
                         .map_err(|e| format!("could not update {}: {e}", open.branch))?;
                         last_head = head;
                     }
@@ -5079,7 +5242,7 @@ impl Runner {
     /// Take down whatever the batch put on the outside: close its PR, delete its refs.
     fn clean_outside(&self) {
         let batch = self.batch_id.load(std::sync::atomic::Ordering::SeqCst);
-        remove_refs(&self.d, self.pid, Some(batch));
+        remove_refs(&self.d, self.pid, Some(batch), self.backoff());
         self.d.landing.clear(self.pid, &self.alert_key("review"));
         self.d.landing.clear(self.pid, &self.alert_key("service"));
     }
@@ -5551,7 +5714,10 @@ impl Runner {
             .freezes()
             .ok()
             .and_then(|v| v.into_iter().find(|f| f.project == p.id));
-        if r.green {
+        if let Some(why) = &r.network {
+            // Nothing was proven about the base either way: the freeze stays as it is.
+            tracing::warn!(batch = batch_id, "post-land suites gave no result: {why}");
+        } else if r.green {
             if frozen.is_some() {
                 let _ = d.store.clear_freeze(&p.id);
             }

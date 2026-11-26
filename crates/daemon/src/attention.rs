@@ -747,6 +747,7 @@ fn freeze_alerts(d: &Daemon, w: &mason_engine::World) -> Vec<(String, String, St
 pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
     let mut out = vec![];
     let Ok(w) = d.world() else { return out };
+    let (bursts, in_outage) = crate::autoretry::burst_alerts(d, &w);
     for t in w.tasks.values() {
         match t.state {
             State::NeedsAttention => {
@@ -767,6 +768,8 @@ pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
             // A failure outside the code that the daemon is about to retry is not news yet; a
             // third one in the window (no retry left) is, and raises this as usual (s247).
             State::Failed if crate::autoretry::pending(d, t) => {}
+            // During a network outage the one outage entry names it (#1185).
+            State::Failed if in_outage.contains(&t.id.0) => {}
             State::Failed => out.push((
                 format!("failed:{}", t.id.0),
                 "failed".into(),
@@ -814,21 +817,7 @@ pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
     out.extend(crate::diagnose::alerts(d));
     out.extend(crate::redwatch::alerts(d));
     out.extend(silent_alerts(d));
-    for b in crate::autoretry::current_bursts(d, &w) {
-        let key: u64 = b.reason.bytes().fold(0xcbf2_9ce4_8422_2325, |h, c| {
-            (h ^ u64::from(c)).wrapping_mul(0x0100_0000_01b3)
-        });
-        out.push((
-            format!("outside-burst:{key:016x}"),
-            "environment".into(),
-            format!(
-                "{} tasks failed outside the code with the same reason within {} minutes: {}",
-                b.tasks.len(),
-                d.cfg.burst_window.as_secs() / 60,
-                b.reason
-            ),
-        ));
-    }
+    out.extend(bursts);
     out.extend(d.landing().attention());
     out.extend(freeze_alerts(d, &w));
     out.extend(wait_alerts(d));

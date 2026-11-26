@@ -433,7 +433,16 @@ impl Ctx {
                 // Hand the resources back before the task shows as failed, so nobody
                 // can see a failed task still holding its device.
                 self.release_lease();
-                let class = Some(FailClass::classify(self.state, &reason));
+                // A suite that could not reach the network says nothing about the code
+                // (#1185): only `fail` carries that reason, never a red.
+                let network = outcome == Outcome::Fail
+                    && reason.starts_with("suite `")
+                    && reason.contains(crate::net::SUITE_REASON);
+                let class = Some(if network {
+                    FailClass::Outside
+                } else {
+                    FailClass::classify(self.state, &reason)
+                });
                 self.emit(EventKind::StepFailed {
                     task: self.task,
                     reason,
