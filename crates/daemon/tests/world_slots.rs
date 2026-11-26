@@ -209,3 +209,12 @@ fn shares_round_up_so_no_slot_is_left_idle() {
     assert_eq!(slots::share(2, 5), 1);
     assert_eq!(slots::share(4, 0), 4);
 }
+
+/// A test that cannot get a world slot goes ahead without one, so its patience only delays it.
+/// At ten minutes the recorded times of one-second tests were 284 to 602 s; keep it to minutes.
+#[test]
+fn the_wait_for_a_world_slot_is_minutes_not_ten() {
+    let p = support::WORLD_PATIENCE;
+    assert!(p >= std::time::Duration::from_secs(30), "{p:?}");
+    assert!(p <= std::time::Duration::from_secs(180), "{p:?}");
+}
