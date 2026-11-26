@@ -951,6 +951,7 @@ fn node_check(
     id: &str,
     progress: Option<&CheckProgress>,
     spill: Option<String>,
+    grant: &crate::remote::Grant,
 ) -> Option<Shared> {
     use crate::remote as rm;
     let nid = match spill {
@@ -982,6 +983,12 @@ fn node_check(
         Some(p) => Box::new(p.feeder(d)),
         None => Box::new(|_| {}),
     };
+    // The check was queued for GitHub (or its units were taken before placement changed): on a
+    // node it uses no runner, so its `gha` units go back now and not when the node is done. If
+    // the node gives it back, the run through GitHub asks for them again.
+    if grant.give_runners() {
+        tracing::info!(check = %id, node = %nid, "the check runs on a node: its GitHub runner units go back");
+    }
     Some(
         match crate::node_exec::execute(
             d,
@@ -1040,7 +1047,7 @@ fn collect(
     grant: &crate::remote::Grant,
 ) -> Shared {
     let bound_remote = goes_remote(d, spec);
-    if let Some(r) = node_check(d, spec, id, progress, None) {
+    if let Some(r) = node_check(d, spec, id, progress, None, grant) {
         return r;
     }
     if let Some(r) = remote_check(d, spec, id, progress, grant) {
@@ -1052,7 +1059,7 @@ fn collect(
         let project = crate::remote::project_of(d, &spec.cwd);
         let suite = spec.place.as_ref().map(|(_, s)| &**s);
         if let Some(room) = project.and_then(|p| crate::nodes::best_room(d, &p, suite)) {
-            if let Some(r) = node_check(d, spec, id, progress, Some(room.nid)) {
+            if let Some(r) = node_check(d, spec, id, progress, Some(room.nid), grant) {
                 return r;
             }
         }
