@@ -3,6 +3,10 @@
 /// The band of a debt payment: after every other pipeline band (2, or 2 + priority).
 const DEBT_BAND: u8 = u8::MAX;
 
+/// The band of a request that blocks a slot its own caller holds (#1149): after a landing,
+/// ahead of all other pipeline work.
+const HOLDING_BAND: u8 = 1;
+
 /// The ordering rule, as a tuple:
 ///
 /// ```text
@@ -11,7 +15,8 @@ const DEBT_BAND: u8 = u8::MAX;
 /// ```
 ///
 /// The band is 0 for a landing (a batch's verification unblocks every task in
-/// it, so it goes ahead of all other pipeline work) and 2 for everything else,
+/// it, so it goes ahead of all other pipeline work), 1 for a request whose caller holds a slot
+/// while it waits ([`Rank::holding`]) and 2 for everything else,
 /// unless the machine orders by priority first ([`Rank::priority_first`]):
 /// then it is 2 + the tracker priority, so urgent work goes ahead of work
 /// nearer landing. A request that has waited past `order.max_wait_s` (see
@@ -33,7 +38,8 @@ const DEBT_BAND: u8 = u8::MAX;
 pub struct Rank {
     /// `false` sorts first: an interactive caller goes ahead of pipeline work.
     not_interactive: bool,
-    /// 0 for a landing, else 2 (or 2 + priority when ordering by priority first, 2 when aged).
+    /// 0 for a landing, 1 for a request that holds a slot while it waits, else 2 (or 2 +
+    /// priority when ordering by priority first, 2 when aged).
     band: u8,
     /// Thousandths of the definition's shortest path still to run.
     remaining: u32,
@@ -50,6 +56,7 @@ pub struct Rank {
     jump: bool,
     landing: bool,
     debt: bool,
+    holding: bool,
     check: bool,
     /// Set by [`Rank::for_runners`]: the order of requests that hold only runner units.
     runners: bool,
@@ -94,6 +101,7 @@ impl Rank {
             jump,
             landing: false,
             debt: false,
+            holding: false,
             check: false,
             runners: false,
             by_priority: false,
@@ -129,6 +137,8 @@ impl Rank {
             self.runner_kind() as u8
         } else if self.landing {
             0
+        } else if self.holding {
+            HOLDING_BAND
         } else if self.debt {
             // Owed work on landed code goes after all task work, oldest first, then by id;
             // neither progress, priority nor waiting moves it up.
@@ -219,7 +229,18 @@ impl Rank {
 
     /// Is this a debt payment's rank?
     pub fn is_debt(&self) -> bool {
-        !self.interactive() && self.debt && !self.landing
+        !self.interactive() && self.debt && !self.landing && !self.holding
+    }
+
+    /// The same rank for a request made while its caller holds a slot that cannot come free
+    /// until the request is done (#1149, a check that came back from a node): it goes ahead of
+    /// all other pipeline work, so it cannot wait behind other tasks' step starts. A landing
+    /// and an interactive caller keep their place. It is not exempt from any gate.
+    pub fn holding(mut self) -> Rank {
+        if !self.interactive() {
+            self.holding = true;
+        }
+        self.recompute()
     }
 
     /// Is this a landing's work?
@@ -248,7 +269,7 @@ impl Rank {
 
     /// Is this rank aged?
     pub fn is_aged(&self) -> bool {
-        !self.interactive() && !self.landing && !self.debt && self.aged
+        !self.interactive() && !self.landing && !self.holding && !self.debt && self.aged
     }
 
     /// The same rank for another tracker priority, keeping everything else
@@ -279,6 +300,19 @@ mod tests {
 
     fn r(i: bool, s: u32, p: u8, e: u64, id: u64) -> Rank {
         Rank::new(i, s, p, e, id, false)
+    }
+
+    #[test]
+    fn a_request_that_holds_a_slot_goes_after_a_landing_and_ahead_of_other_pipeline_work() {
+        let held = Rank::new(false, 40, 9, 999, 99, false).holding();
+        let near_aged = Rank::new(false, 0, 0, 1, 1, false).aged(1);
+        let urgent = Rank::new(false, 0, 0, 1, 2, false).priority_first();
+        assert!(held < near_aged && held < urgent);
+        assert!(!held.aged(0).is_aged() && held.aged(0) < near_aged);
+        assert!(held.priority_first().with_priority(5) < urgent);
+        assert!(Rank::new(false, 9, 9, 9, 9, false).landing() < held);
+        assert!(Rank::new(true, 9, 9, 9, 9, false) < held);
+        assert!(held.debt() < near_aged && !held.debt().is_debt());
     }
 
     #[test]
