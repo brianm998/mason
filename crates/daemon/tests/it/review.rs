@@ -9,7 +9,7 @@ use mason_core::introspect::CATEGORIES;
 use mason_core::*;
 use mason_daemon::daemon::now_ms;
 use mason_daemon::{attention, holds, introspect, proposals, review, Daemon};
-use mason_store::ProposalRow;
+use mason_store::{ProposalRow, Store};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use support::lw::*;
@@ -289,12 +289,19 @@ fn one_review_covers_every_included_project_and_asks_the_six_questions_on_opus()
     );
 }
 
-/// A task of `scratch` as it was 30 days ago: the owner filed it, and it landed or was canceled.
-fn old_task(d: &Arc<Daemon>, title: &str, landed: bool) -> TaskId {
-    let at = Timestamp(now_ms() - 30 * DAY);
-    let append = |kind: EventKind| d.store.append(Event { at, kind }).unwrap();
+/// A task of `project` that the owner filed and that landed or was canceled, at `at`. The
+/// event clock only moves forward, so a past `at` needs a store with nothing newer in it.
+fn finished_task(store: &Store, project: ProjectId, title: &str, landed: bool, at: u64) -> TaskId {
+    let append = |kind: EventKind| {
+        store
+            .append(Event {
+                at: Timestamp(at),
+                kind,
+            })
+            .unwrap()
+    };
     let task = append(EventKind::TaskFiled {
-        project: pid(d),
+        project,
         title: title.into(),
         body: format!("{title}. Cause and change."),
         priority: Priority::Normal,
@@ -311,20 +318,21 @@ fn old_task(d: &Arc<Daemon>, title: &str, landed: bool) -> TaskId {
         _ => None,
     })
     .unwrap();
-    if landed {
+    let want = if landed {
         append(EventKind::Admitted { task, entry: None });
         append(EventKind::ClosedNoChange {
             task,
             reason: "done".into(),
         });
-        assert_eq!(state(d, task), State::Landed);
+        State::Landed
     } else {
         append(EventKind::Canceled {
             task,
             delete_branch: true,
         });
-        assert_eq!(state(d, task), State::Canceled);
-    }
+        State::Canceled
+    };
+    assert_eq!(store.world().unwrap().tasks[&task].state, want);
     task
 }
 
@@ -347,10 +355,37 @@ fn filing(d: &Arc<Daemon>, title: &str, all: bool) -> Result<proposals::Filed, S
 
 #[test]
 fn the_wide_search_compares_with_every_task_and_the_usual_one_is_unchanged() {
-    let w = world();
-    let d = &w.d;
-    let landed = old_task(d, "Landing queue idles between batches", true);
-    let canceled = old_task(d, "Monitor redraws while hidden", false);
+    // A daemon's history from 30 days ago, in the store before this one starts.
+    let scratch = Scratch::new("true", json!({"steps": {}}));
+    scratch.write_project("scratch", "true", OWN);
+    std::fs::create_dir_all(&scratch.data_dir).unwrap();
+    let then = now_ms() - 30 * DAY;
+    let (landed, canceled) = {
+        let store = Store::open(scratch.data_dir.join("store.db")).unwrap();
+        let project = ProjectId(1);
+        store
+            .append(Event {
+                at: Timestamp(then),
+                kind: EventKind::ProjectRegistered {
+                    project,
+                    name: "scratch".into(),
+                },
+            })
+            .unwrap();
+        (
+            finished_task(
+                &store,
+                project,
+                "Landing queue idles between batches",
+                true,
+                then,
+            ),
+            finished_task(&store, project, "Monitor redraws while hidden", false, then),
+        )
+    };
+    let d = &scratch.start();
+    attention::pause(d, "", "claims", "test", 3600).unwrap();
+    assert_eq!(d.world().unwrap().tasks[&landed].state_entered_at.0, then);
     // The landed one was a proposal too, long ago.
     d.store
         .put_proposal(&ProposalRow {
@@ -398,7 +433,13 @@ fn the_wide_search_compares_with_every_task_and_the_usual_one_is_unchanged() {
 fn findings_are_proposed_capped_at_ten_and_the_run_is_summed_up() {
     let w = world();
     let d = &w.d;
-    let landed = old_task(d, "Landing queue idles between batches", true);
+    let landed = finished_task(
+        &d.store,
+        pid(d),
+        "Landing queue idles between batches",
+        true,
+        now_ms(),
+    );
     let task = review::file(d, now_ms()).unwrap();
     let titles = [
         "Alpha takeover drops checks",
@@ -476,7 +517,13 @@ fn findings_are_proposed_capped_at_ten_and_the_run_is_summed_up() {
 fn the_facts_are_written_into_the_worktree_and_the_submission_needs_the_result() {
     let w = world();
     let d = &w.d;
-    let old = old_task(d, "Monitor redraws while hidden", false);
+    let old = finished_task(
+        &d.store,
+        pid(d),
+        "Monitor redraws while hidden",
+        false,
+        now_ms(),
+    );
     let task = review::file(d, now_ms()).unwrap();
     let wt = tempfile::tempdir().unwrap();
     sh(wt.path(), &["init", "-q", "-b", "main"]);

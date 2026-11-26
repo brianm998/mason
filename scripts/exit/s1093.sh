@@ -120,7 +120,7 @@ out=$(m review status); echo "$out" | sed 's/^/   /'
 grep -q "enabled at 03:30 every 7 days" <<<"$out"
 grep -q '^at = "03:30"' "$root/c/review.toml"
 grep -q '^changed_by = ' "$root/c/review.toml"
-! m review set --every-days 31 2>/dev/null
+if m review set --every-days 31 2>/dev/null; then echo "31 days was accepted" >&2; exit 1; fi
 
 echo "== a task lands, the one a later finding repeats"
 m task add "Landing queue idles between batches" --project mason --explored --body "The landing queue idles between batches." >/dev/null
@@ -152,7 +152,7 @@ said=$(m review run); echo "   $said"
 review=$(sed -n 's/^review task #\([0-9]*\) filed$/\1/p' <<<"$said")
 [ -n "$review" ]
 wait_state "$review" landed 120
-shown=$(m task show "$review")
+shown=$(m task show "$review" --json)
 [ "$(m task list | grep -c 'Analyse recent pipeline behaviour')" = 1 ]
 m task show "$review" --json | grep -q '"project": "mason"'
 m task show "$review" --json | grep -q '"priority": "low"'
@@ -184,7 +184,8 @@ assert len(r['nothing_found']) == 3, r
 out=$(m review status); echo "$out" | sed 's/^/   /'
 grep -q "2 filed" <<<"$out"
 grep -qF "\"Landing queue idles between batches\" is #$landed" <<<"$out"
-out=$(m schedule list); grep -q '^review ' <<<"$out"; ! grep -q 'analyst:' <<<"$out"
+out=$(m schedule list); grep -q '^review ' <<<"$out"
+if grep -q 'analyst:' <<<"$out"; then echo "an analyst row is still listed" >&2; exit 1; fi
 echo "   two proposals wait for the owner; the third was dropped as a duplicate of #$landed"
 
 trap - EXIT; cleanup
