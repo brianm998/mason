@@ -210,7 +210,10 @@ fn an_outside_failure_with_no_retry_coming_is_diagnosed_by_itself() {
     reject_pushes(&s);
     let d = s.start();
     let t = file_task(&d, "Push is rejected");
-    wait_for("the diagnosis", 180, || {
-        !d.store.diagnoses(Some(t.0)).unwrap().is_empty()
-    });
+    wait_for_reporting(
+        "the diagnosis",
+        180,
+        || !d.store.diagnoses(Some(t.0)).unwrap().is_empty(),
+        || describe_task(&d, t),
+    );
 }
