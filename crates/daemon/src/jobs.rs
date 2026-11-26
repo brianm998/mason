@@ -3343,6 +3343,8 @@ impl CheckSlots {
         as_step: &str,
         end_on_skip: bool,
         expected_ms: Option<u64>,
+        leave: Option<&dyn Fn() -> bool>,
+        once: bool,
     ) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
         let d = &self.d;
         let t = d
@@ -3359,7 +3361,7 @@ impl CheckSlots {
             .clone()
             .filter(|_| end_on_skip && !self.light.load(std::sync::atomic::Ordering::SeqCst));
         // A skip of the task's test step ends a check's wait too: the check then says so.
-        let alive = move || {
+        let wanted = move || {
             d2.world()
                 .map(|w| w.open_run(task) == Some(run))
                 .unwrap_or(true)
@@ -3367,6 +3369,9 @@ impl CheckSlots {
                     .as_deref()
                     .is_none_or(|s| crate::suites::skip_for(&d2, task, "", s).is_none())
         };
+        // `leave` ends the wait without the run being over: the caller has a better place to
+        // wait. Asked only while the run is still wanted, so a skip is never read as a move.
+        let alive = || wanted() && !leave.is_some_and(|f| f());
         // The wait shows on the task, as a step's does: a check that queued
         // used to leave the task reading "running" for hours.
         let asked = needs.clone();
@@ -3383,6 +3388,11 @@ impl CheckSlots {
         } else {
             format!("#{}", self.task)
         };
+        if once {
+            return d
+                .broker
+                .try_acquire_expecting(self.task, &label, rank, needs, expected_ms);
+        }
         let lease = d.broker.acquire_expecting(
             self.task,
             &label,
@@ -3430,11 +3440,12 @@ impl CheckSlots {
         uses: &std::collections::BTreeMap<String, u32>,
         expected_ms: Option<u64>,
     ) -> Result<Option<crate::sched::Lease>, crate::sched::Cancelled> {
-        let (queue, pool, node) = match want {
-            Want::Nothing => (false, None, None),
-            Want::Slots => (true, None, None),
-            Want::Pool(u) => (true, Some(u), None),
-            Want::Node(u) => (true, None, Some(u)),
+        let (queue, pool, node, hop) = match want {
+            Want::Nothing => (false, None, None, None),
+            Want::Slots => (true, None, None, None),
+            Want::Pool(u) => (true, Some(u), None, None),
+            Want::PoolOrNode(u, h) => (true, Some(u), None, Some(h)),
+            Want::Node(u) => (true, None, Some(u), None),
         };
         let held = self.lease.lock().unwrap_or_else(|e| e.into_inner()).take();
         if held.is_some() {
@@ -3480,11 +3491,42 @@ impl CheckSlots {
         // slot ahead of four tasks already in test.
         let needs = crate::sched::needs_of(uses, None);
         let needs = if flexible { needs.flexible() } else { needs };
-        self.acquire(
-            needs,
-            check_rank_step(&self.step, self.test_step.as_deref()),
-            true,
-            expected_ms,
+        let rank_step = check_rank_step(&self.step, self.test_step.as_deref());
+        let Some(hop) = hop else {
+            return self
+                .acquire(needs, rank_step, true, expected_ms, None, false)
+                .map(Some);
+        };
+        // Placed on GitHub, but a node may have had no room when it queued: while it waits for
+        // runner units it takes a node's free unit instead, and holds that.
+        pool_or_node(
+            &*hop,
+            HOP_EVERY,
+            |leave| {
+                self.acquire(
+                    needs.clone(),
+                    rank_step,
+                    true,
+                    expected_ms,
+                    Some(leave),
+                    false,
+                )
+            },
+            |units| {
+                for name in units.keys() {
+                    self.d
+                        .broker
+                        .declare(name, self.def.resources.get(name).copied().unwrap_or(1));
+                }
+                self.acquire(
+                    crate::sched::needs_of(&units, None),
+                    rank_step,
+                    true,
+                    expected_ms,
+                    None,
+                    true,
+                )
+            },
         )
         .map(Some)
     }
@@ -3496,7 +3538,7 @@ impl CheckSlots {
         self.d.set_parked(self.task, false);
         self.d.admit();
         let needs = crate::sched::needs_of(&self.agent_uses, Some(&self.account));
-        if let Ok(l) = self.acquire(needs, &self.step, false, None) {
+        if let Ok(l) = self.acquire(needs, &self.step, false, None, None, false) {
             *self.lease.lock().unwrap_or_else(|e| e.into_inner()) = Some(l);
         }
     }
@@ -3510,6 +3552,13 @@ pub enum Want {
     Slots,
     /// Goes to GitHub: these runner units, and no slot of this machine.
     Pool(std::collections::BTreeMap<String, u32>),
+    /// Goes to GitHub, but a node may take it while it waits for those units: if one has room
+    /// for it (the suite and project may use nodes) it holds that node's unit instead, and no
+    /// runner unit.
+    PoolOrNode(
+        std::collections::BTreeMap<String, u32>,
+        crate::hostedcheck::NodeHop,
+    ),
     /// Goes to a node: that node's unit, and no slot of this machine. Nothing here waits on the
     /// `test-suite` limit or the CPU and heat holds; a run the node gives back asks for its local
     /// slots then (`remote::fallback_lease_under`).
@@ -3527,7 +3576,7 @@ impl Want {
         match self {
             Want::Nothing => Default::default(),
             Want::Slots => uses.clone(),
-            Want::Pool(u) | Want::Node(u) => u.clone(),
+            Want::Pool(u) | Want::PoolOrNode(u, _) | Want::Node(u) => u.clone(),
         }
     }
 }
@@ -3538,11 +3587,61 @@ pub fn want_of(d: &Arc<Daemon>, spec: &crate::hostedcheck::CheckSpec) -> Want {
     if crate::hostedcheck::pending(d, spec) {
         Want::Nothing
     } else if let Some(u) = crate::hostedcheck::pool_units(d, spec) {
-        Want::Pool(u)
+        match crate::hostedcheck::node_hop(d, spec) {
+            Some(h) => Want::PoolOrNode(u, h),
+            None => Want::Pool(u),
+        }
     } else if let Some(u) = crate::hostedcheck::node_units(d, spec) {
         Want::Node(u)
     } else {
         Want::Slots
+    }
+}
+
+/// How often a check waiting for runner units looks for a node with room.
+const HOP_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// A check queued for GitHub waits for runner units, and moves to a node when one has room.
+/// `wait_pool` waits for the runner units; it is handed a `leave` function that ends the wait
+/// (as a cancelled one) once `hop` names a node unit, looked at most every `every`. `try_node`
+/// takes that unit if it is still free. A unit that someone else took first sends the check back
+/// to waiting for runners. Any other end of the wait is the caller's to hear: the run is over.
+pub fn pool_or_node<L>(
+    hop: &dyn Fn() -> Option<std::collections::BTreeMap<String, u32>>,
+    every: std::time::Duration,
+    mut wait_pool: impl FnMut(&dyn Fn() -> bool) -> Result<L, crate::sched::Cancelled>,
+    mut try_node: impl FnMut(
+        std::collections::BTreeMap<String, u32>,
+    ) -> Result<L, crate::sched::Cancelled>,
+) -> Result<L, crate::sched::Cancelled> {
+    loop {
+        let found: std::cell::RefCell<Option<std::collections::BTreeMap<String, u32>>> =
+            Default::default();
+        let looked: std::cell::Cell<Option<std::time::Instant>> = Default::default();
+        let leave = || {
+            if found.borrow().is_some() {
+                return true;
+            }
+            if looked.get().is_some_and(|t| t.elapsed() < every) {
+                return false;
+            }
+            looked.set(Some(std::time::Instant::now()));
+            let units = hop();
+            let some = units.is_some();
+            *found.borrow_mut() = units;
+            some
+        };
+        match wait_pool(&leave) {
+            Ok(l) => return Ok(l),
+            Err(e) => match found.take() {
+                None => return Err(e),
+                Some(units) => {
+                    if let Ok(l) = try_node(units) {
+                        return Ok(l);
+                    }
+                }
+            },
+        }
     }
 }
 
@@ -6602,5 +6701,101 @@ pub fn end_run_leases(d: &Arc<Daemon>, task: TaskId) {
             });
             d.broker.lease_close(l.id);
         });
+    }
+}
+
+#[cfg(test)]
+mod pool_or_node_tests {
+    use super::pool_or_node;
+    use crate::sched::Cancelled;
+    use std::cell::Cell;
+    use std::collections::BTreeMap;
+    use std::time::Duration;
+
+    fn node_unit() -> BTreeMap<String, u32> {
+        BTreeMap::from([("node:n1".to_string(), 1)])
+    }
+
+    /// A wait for runner units that ends only when told to leave.
+    fn waits_until_told(leave: &dyn Fn() -> bool) -> Result<&'static str, Cancelled> {
+        while !leave() {
+            std::thread::yield_now();
+        }
+        Err(Cancelled)
+    }
+
+    #[test]
+    fn a_check_that_finds_a_node_with_room_while_it_waits_takes_the_nodes_unit() {
+        let room = Cell::new(false);
+        let waits = Cell::new(0);
+        let got = pool_or_node(
+            &|| room.get().then(node_unit),
+            Duration::ZERO,
+            |leave| {
+                waits.set(waits.get() + 1);
+                // The node frees up while the check waits for a runner.
+                let seen = Cell::new(0);
+                let wrapped = || {
+                    seen.set(seen.get() + 1);
+                    if seen.get() == 3 {
+                        room.set(true);
+                    }
+                    leave()
+                };
+                waits_until_told(&wrapped)
+            },
+            |units| {
+                assert_eq!(units, node_unit());
+                Ok("node")
+            },
+        );
+        assert_eq!(got, Ok("node"));
+        assert_eq!(waits.get(), 1);
+    }
+
+    #[test]
+    fn a_runner_grant_is_kept_and_the_node_is_never_asked_for() {
+        let got = pool_or_node(
+            &|| panic!("a granted check looks at no node"),
+            Duration::ZERO,
+            |_| Ok("runner"),
+            |_| panic!("no node unit is taken"),
+        );
+        assert_eq!(got, Ok("runner"));
+    }
+
+    #[test]
+    fn a_node_unit_someone_else_took_first_sends_the_check_back_to_wait_for_a_runner() {
+        let waits = Cell::new(0);
+        let tries = Cell::new(0);
+        let got = pool_or_node(
+            &|| Some(node_unit()),
+            Duration::ZERO,
+            |leave| {
+                waits.set(waits.get() + 1);
+                if waits.get() == 1 {
+                    waits_until_told(leave)
+                } else {
+                    Ok("runner")
+                }
+            },
+            |_| {
+                tries.set(tries.get() + 1);
+                Err(Cancelled)
+            },
+        );
+        assert_eq!(got, Ok("runner"));
+        assert_eq!((waits.get(), tries.get()), (2, 1));
+    }
+
+    #[test]
+    fn a_wait_that_ends_for_another_reason_is_the_runs_end_not_a_move() {
+        let got: Result<&str, Cancelled> = pool_or_node(
+            &|| None,
+            Duration::ZERO,
+            |_| Err(Cancelled),
+            |_| panic!("no node had room"),
+        );
+        assert_eq!(got, Err(Cancelled));
     }
 }
