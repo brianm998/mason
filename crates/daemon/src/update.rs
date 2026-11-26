@@ -101,6 +101,8 @@ pub struct UpdateCfg {
     pub release_api: String,
     /// The page that offers the installers; what a packaged monitor's button opens.
     pub download_page: String,
+    /// `[auto]`: MASON's own updates (#1082).
+    pub auto: crate::update_plan::AutoCfg,
 }
 
 /// Half an hour (s868).
@@ -169,6 +171,7 @@ impl UpdateCfg {
             release_api: s("release_api").unwrap_or_else(|| crate::release::DEFAULT_API.into()),
             download_page: s("download_page")
                 .unwrap_or_else(|| crate::release::DEFAULT_PAGE.into()),
+            auto: crate::update_plan::AutoCfg::from_doc(&doc),
         })
     }
 
@@ -1020,6 +1023,11 @@ pub struct Request {
     pub now: bool,
     /// Asked by a follower, not the owner: the gap between updates applies (s473).
     pub auto: bool,
+    /// Started by the daemon's own planner (#1082), which has decided the moment: the gap
+    /// between updates does not apply.
+    pub planned: bool,
+    /// A planned update of urgent priority: its build is not held behind task work.
+    pub urgent: bool,
 }
 
 fn say(d: &Daemon, phase: &str, line: &str) {
@@ -1098,7 +1106,7 @@ pub fn run(d: &Arc<Daemon>, req: &Request) -> Result<String, String> {
             if mv == Move::Same && !req.rollback {
                 return Err(format!("already running {target}"));
             }
-            if req.auto && !req.check_only && !req.rollback {
+            if req.auto && !req.planned && !req.check_only && !req.rollback {
                 let urgent = is_urgent(&rt.mirror(), running.as_deref(), &target);
                 match gap_decision(&gap_input(d, &cfg, urgent)) {
                     Gap::Take(why) => {
@@ -1120,10 +1128,12 @@ pub fn run(d: &Arc<Daemon>, req: &Request) -> Result<String, String> {
                 "building",
                 &format!("building {target} into runtimes/{target}/"),
             );
+            // An urgent planned update goes ahead of task work, as the owner's does (#1082).
+            let promoted = !req.auto || req.urgent;
             if !req.check_only && !req.rollback {
-                fleet = Some(crate::node_fleet::begin(d, &cfg, &target, !req.auto));
+                fleet = Some(crate::node_fleet::begin(d, &cfg, &target, promoted));
             }
-            build_leased(d, &cfg, &rt, &target, !req.auto)?;
+            build_leased(d, &cfg, &rt, &target, promoted)?;
             (target, running)
         };
         // Prove it on a copy of the real database, in a sandbox, before it is allowed near the real one.
@@ -1488,7 +1498,14 @@ pub fn check_once(d: &Arc<Daemon>) -> std::time::Duration {
             }
         }
     };
+    // Ahead of the running build by any commit, not only by one the banner counts: a range that
+    // changed nothing the daemon runs is still filed, as priority none, so the status says so
+    // (#1082). `behind` is set only for a forward move.
+    let newer = (next.behind > 0 && cfg.channel != Channel::Release).then(|| next.latest.clone());
     set_check(d, next);
+    if let Some(target) = newer {
+        crate::update_plan::found_newer(d, &cfg, &target);
+    }
     std::time::Duration::from_secs(cfg.check_interval_s)
 }
 
@@ -1518,6 +1535,7 @@ pub fn spawn_checker(d: &Arc<Daemon>) {
         std::thread::sleep(wait);
         true
     });
+    crate::update_plan::spawn_planner(d);
 }
 
 /// What the header says. Text is made here so that the two monitors say the same thing.
@@ -1535,8 +1553,18 @@ pub fn info(d: &Daemon) -> Option<mason_protocol::UpdateInfo> {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
-    let (daemon_text, daemon_can_update) =
+    let (mut daemon_text, daemon_can_update) =
         daemon_banner(&c, d.cfg.runtime_sha.as_deref().unwrap_or_default(), &s);
+    // What the daemon's own updater found: a waiting update with why and for what, or that
+    // the newest build needs no takeover (#1082).
+    let plan = crate::update_plan::status_lines(d, now_ms());
+    if !plan.is_empty() {
+        if !daemon_text.is_empty() {
+            daemon_text.push(' ');
+        }
+        daemon_text.push_str(&plan.join("; "));
+        daemon_text.push('.');
+    }
     let builds = d
         .monitor_builds
         .lock()
@@ -1968,7 +1996,7 @@ pub fn drain_within(d: &Arc<Daemon>, cap: Duration) {
             .wait = None;
     };
     loop {
-        if d.landing.busy_projects().is_empty() {
+        if d.landing.busy_projects().is_empty() || d.update_replace.load(Ordering::SeqCst) {
             done(d);
             return;
         }
