@@ -170,7 +170,7 @@ struct RemotePlacementBody: View {
             if let p = remote.problem { Text(p).font(theme.small()).foregroundStyle(theme.muted) }
             if let c = remote.changedText { Text(c).font(theme.small()).foregroundStyle(theme.muted) }
             if let p = remote.project(project) {
-                choice(project, "settings:remote:project", value: p.mode, enabled: p.canChange, pickProject)
+                choice(project, "settings:remote:project", value: p.mode, enabled: true, pickProject)
                 Text(p.sourceText).font(theme.small()).foregroundStyle(theme.muted)
                 if !p.runsOn.isEmpty { Text("GitHub runner: \(p.runsOn)").font(theme.small()).foregroundStyle(theme.muted) }
             }
