@@ -205,6 +205,18 @@ pub struct PauseRow {
     pub expires_at: u64,
 }
 
+/// A `pauses` row selected as id, project, mode, owner, created_at, expires_at.
+fn pause_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<PauseRow> {
+    Ok(PauseRow {
+        id: r.get::<_, i64>(0)? as u64,
+        project: r.get(1)?,
+        mode: r.get(2)?,
+        owner: r.get(3)?,
+        created_at: r.get::<_, i64>(4)? as u64,
+        expires_at: r.get::<_, i64>(5)? as u64,
+    })
+}
+
 /// An alert tied to a live condition.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AlertRow {
@@ -1206,12 +1218,23 @@ impl Store {
     /// Lift pauses: those of `project` (empty: the global ones) in `mode`
     /// (empty: any). Returns how many.
     pub fn remove_pauses(&self, project: &str, mode: &str) -> Result<usize, StoreError> {
+        Ok(self.take_pauses(project, mode)?.len())
+    }
+
+    /// As `remove_pauses`, but returns the rows it removed (oldest first), expired ones
+    /// included, so the caller can record what was lifted.
+    pub fn take_pauses(&self, project: &str, mode: &str) -> Result<Vec<PauseRow>, StoreError> {
         let (p, m) = (project.to_string(), mode.to_string());
         self.write(move |c| {
-            c.execute(
-                "DELETE FROM pauses WHERE project = ?1 AND (?2 = '' OR mode = ?2)",
-                params![p, m],
-            )
+            let mut st = c.prepare(
+                "DELETE FROM pauses WHERE project = ?1 AND (?2 = '' OR mode = ?2)
+                 RETURNING id, project, mode, owner, created_at, expires_at",
+            )?;
+            let rows = st.query_map(params![p, m], pause_row)?;
+            let mut rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+            // RETURNING promises no order.
+            rows.sort_by_key(|r| r.id);
+            Ok(rows)
         })
     }
 
@@ -1237,16 +1260,7 @@ impl Store {
             let mut st = c.prepare(
                 "SELECT id, project, mode, owner, created_at, expires_at FROM pauses WHERE expires_at > ?1 ORDER BY id",
             )?;
-            let rows = st.query_map(params![now_ms as i64], |r| {
-                Ok(PauseRow {
-                    id: r.get::<_, i64>(0)? as u64,
-                    project: r.get(1)?,
-                    mode: r.get(2)?,
-                    owner: r.get(3)?,
-                    created_at: r.get::<_, i64>(4)? as u64,
-                    expires_at: r.get::<_, i64>(5)? as u64,
-                })
-            })?;
+            let rows = st.query_map(params![now_ms as i64], pause_row)?;
             rows.collect()
         })
     }
