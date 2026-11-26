@@ -2752,6 +2752,15 @@ pub enum RunPlace {
         runs_on: String,
         units: std::collections::BTreeMap<String, u32>,
     },
+    /// On a node: it takes no slot of this machine either, and one unit of that node's resource
+    /// ([`crate::nodes::resource`]). It waits for nothing of this Mac, so neither the slot
+    /// limits nor the CPU and heat holds apply to it. When the node cannot take it, it runs
+    /// here and asks for this machine's slots then (the fallback lease).
+    Node {
+        nid: String,
+        name: String,
+        units: std::collections::BTreeMap<String, u32>,
+    },
 }
 
 /// The one function that says, for a run, where it goes and what it holds. Placement is the
@@ -2775,9 +2784,13 @@ pub fn run_place(
             RunPlace::GitHub { runs_on, units }
         }
         Executor::Local => RunPlace::Local,
-        // Nothing produces a node yet (the multi-machine plan's phase 2); until a node run has
-        // its own units, it is placed as a run here would be.
-        Executor::Node { .. } => RunPlace::Local,
+        // A run placed on a node holds one unit of that node and nothing of this machine. It
+        // was placed as a run here until now, so a check or step bound for a node queued for
+        // this Mac's `test-suite` slot (and its heat hold) before it ever went out.
+        Executor::Node { nid, name } => {
+            let units = std::collections::BTreeMap::from([(crate::nodes::resource(&nid), 1)]);
+            RunPlace::Node { nid, name, units }
+        }
     }
 }
 
@@ -2800,6 +2813,7 @@ pub fn suite_pool_needs(
             let n = with_units(needs, units);
             Some(if flexible { n.flexible() } else { n })
         }
+        RunPlace::Node { units, .. } => Some(with_units(needs, units)),
         RunPlace::Local => None,
     }
 }

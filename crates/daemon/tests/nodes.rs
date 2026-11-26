@@ -1877,3 +1877,176 @@ mod fleet {
         assert_eq!(s.phase, "taking over");
     }
 }
+
+/// A check as `run_check` makes one for a task with no suite: placed by the global switch.
+fn check_spec(p: &Pair, id: &str, cmd: &str, logs: &Path) -> mason_daemon::hostedcheck::CheckSpec {
+    mason_daemon::hostedcheck::CheckSpec {
+        id_prefix: id.into(),
+        log_dir: logs.to_path_buf(),
+        cmd: cmd.into(),
+        build: None,
+        cwd: p.sa.repo.clone(),
+        env: vec![],
+        limit: std::time::Duration::from_secs(120),
+        tree: format!("tree-{id}"),
+        stop: None,
+        holds: std::collections::BTreeMap::from([("test-suite".to_string(), 1)]),
+        label: "#7 check".into(),
+        place: None,
+        global: true,
+    }
+}
+
+/// A check placed on a node asked the broker for this Mac's `test-suite` slot before it went out
+/// (`run_place` read a node as a run here), so while the machine was held for heat it never
+/// started, though it would have used nothing of this Mac. It now asks for its unit of the node
+/// only, which no slot limit and no heat hold applies to; the same check placed here still waits.
+#[test]
+fn a_check_bound_for_a_node_takes_no_slot_here_and_no_heat_hold_applies_to_it() {
+    use mason_daemon::jobs::{want_of, Want};
+    use mason_daemon::sched::LeaseState;
+    let p = working_pair(2);
+    let logs = tempfile::tempdir().unwrap();
+    let uses = std::collections::BTreeMap::from([("test-suite".to_string(), 1)]);
+    let b = &p.a.broker;
+    // Room for two, one taken by other work: the heat hold, which only holds more work while
+    // some machine work runs, is then the only thing that can stop a second.
+    b.declare("test-suite", 2);
+    b.set_limit("test-suite", 2).unwrap();
+    let hot = mason_daemon::thermal::FakeThermal::new(100);
+    hot.set_die(70.0);
+    b.set_thermal(hot.clone(), 35);
+    let busy = b.lease_open_as("busy", &uses, None);
+    assert!(matches!(b.lease_poll(busy), LeaseState::Granted { .. }));
+    hot.set_die(98.0);
+
+    mason_daemon::place::set_global(&p.a, mason_daemon::place::Mode::Remote, "test").unwrap();
+    let spec = check_spec(&p, "t7r1-check", "true", logs.path());
+    let want = want_of(&p.a, &spec);
+    assert!(matches!(want, Want::Node(_)), "a node-bound check");
+    let asked = want.asks(&uses);
+    assert!(
+        !asked.is_empty() && asked.keys().all(|k| k.starts_with("node:")),
+        "only the node's unit: {asked:?}"
+    );
+    let on_node = b.lease_open_as("check on the node", &asked, None);
+    assert!(
+        matches!(b.lease_poll(on_node), LeaseState::Granted { .. }),
+        "the heat hold does not stop it"
+    );
+    assert_eq!(b.used("test-suite"), 1, "it holds none of this Mac's");
+
+    // Placed here, the same check asks for the slot and waits under the hold.
+    mason_daemon::place::set_global(&p.a, mason_daemon::place::Mode::Local, "test").unwrap();
+    let want = want_of(&p.a, &spec);
+    assert!(matches!(want, Want::Slots));
+    assert_eq!(want.asks(&uses), uses);
+    let here = b.lease_open_as("check here", &want.asks(&uses), None);
+    assert!(
+        matches!(b.lease_poll(here), LeaseState::Waiting { .. }),
+        "held for heat"
+    );
+    hot.set_die(70.0);
+    assert!(matches!(b.lease_poll(here), LeaseState::Granted { .. }));
+    b.lease_close(here);
+    b.lease_close(on_node);
+    b.lease_close(busy);
+}
+
+/// A node that has no room gives a check back; it then runs here, and asks for this Mac's slot at
+/// that point, so the heat hold applies to the local run (#1149's fallback lease, with no slot
+/// taken up front).
+#[test]
+fn a_check_the_node_gives_back_runs_here_only_after_getting_a_slot_and_waits_under_heat() {
+    use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+    let p = working_pair(1);
+    std::fs::write(p.sa.repo.join("slow.sh"), "sleep 300\n").unwrap();
+    mason_daemon::place::set_global(&p.a, mason_daemon::place::Mode::Remote, "test").unwrap();
+    let logs = tempfile::tempdir().unwrap();
+    let b = &p.a.broker;
+    b.declare("test-suite", 2);
+    b.set_limit("test-suite", 2).unwrap();
+    let hot = mason_daemon::thermal::FakeThermal::new(100);
+    hot.set_die(70.0);
+    b.set_thermal(hot.clone(), 35);
+    // Other work runs here, then the die heats: the hold applies to more work, not to that.
+    let busy = b.lease_open_as(
+        "busy",
+        &std::collections::BTreeMap::from([("test-suite".to_string(), 1)]),
+        None,
+    );
+    assert!(matches!(
+        b.lease_poll(busy),
+        mason_daemon::sched::LeaseState::Granted { .. }
+    ));
+    hot.set_die(98.0);
+    let release = AtomicBool::new(false);
+    let done = AtomicBool::new(false);
+    std::thread::scope(|sc| {
+        // The node's only job slot is taken.
+        let slow = sc.spawn(|| {
+            run_on_b(&p, &spec("run-one", None, "sh slow.sh"), &|| {
+                release.load(SeqCst).then_some(StopWhy::Skipped)
+            })
+        });
+        support::wait_for("the first job to run on the node", 60, || {
+            p.b.node.jobs.running() == 1
+        });
+        let check = sc.spawn(|| {
+            let r = mason_daemon::hostedcheck::run(
+                &p.a,
+                &check_spec(&p, "t7r1-back", "echo ran-here", logs.path()),
+                &mason_daemon::remote::Grant::attached(),
+            );
+            done.store(true, SeqCst);
+            r
+        });
+        support::wait_for("the check to ask for its slot here", 60, || {
+            b.snapshot().to_string().contains("run here")
+        });
+        assert!(!done.load(SeqCst), "held for heat: it has not run here");
+        assert_eq!(
+            b.used("test-suite"),
+            1,
+            "only the other work's: {}",
+            b.snapshot()
+        );
+        // Cooler: it gets the slot and runs.
+        hot.set_die(70.0);
+        let out = check.join().unwrap().unwrap();
+        assert!(out.passed && out.full.contains("ran-here"), "{}", out.full);
+        release.store(true, SeqCst);
+        assert!(matches!(slow.join().unwrap(), Ok(Outcome::Stopped(_))));
+    });
+    b.lease_close(busy);
+    assert_eq!(b.used("test-suite"), 0);
+}
+
+/// The test step's own request for a suite placed on a node: this Mac's slots are replaced by the
+/// node's unit (`run_place` read a node as a run here, so the step queued for `test-suite` and
+/// the heat hold first). A suite placed here keeps its slots.
+#[test]
+fn a_test_step_for_a_suite_on_a_node_asks_for_the_nodes_unit_and_none_of_this_macs() {
+    use mason_daemon::remote::{run_place, suite_pool_needs, Kind, RunPlace};
+    let p = working_pair(2);
+    let suite = mason_testing::Suite::new("alpha", "true", mason_testing::ParserKind::Tap);
+    let needs = mason_scheduler::Needs::of(&[("compile", 1), ("test-suite", 1)]);
+    mason_daemon::place::set_global(&p.a, mason_daemon::place::Mode::Remote, "test").unwrap();
+    let place = run_place(
+        &p.a,
+        "scratch",
+        None,
+        Some(&suite),
+        &suite.command,
+        Kind::Suite,
+    );
+    assert!(matches!(place, RunPlace::Node { .. }), "{place:?}");
+    let n = suite_pool_needs(&p.a, "scratch", None, &needs, &suite, true)
+        .expect("a suite off this machine asks for something else");
+    assert!(
+        !n.amounts.is_empty() && n.amounts.keys().all(|k| k.starts_with("node:")),
+        "{n:?}"
+    );
+    mason_daemon::place::set_global(&p.a, mason_daemon::place::Mode::Local, "test").unwrap();
+    assert!(suite_pool_needs(&p.a, "scratch", None, &needs, &suite, true).is_none());
+}

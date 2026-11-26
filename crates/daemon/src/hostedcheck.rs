@@ -725,6 +725,19 @@ pub fn pool_units(
     ))
 }
 
+/// What `spec` holds when it goes to a node: one unit of that node, and nothing of this machine.
+/// `None`: it does not go to a node (it runs here or on GitHub).
+pub fn node_units(
+    d: &Arc<Daemon>,
+    spec: &CheckSpec,
+) -> Option<std::collections::BTreeMap<String, u32>> {
+    let (nid, _) = node_for(d, spec)?;
+    Some(std::collections::BTreeMap::from([(
+        crate::nodes::resource(&nid),
+        1,
+    )]))
+}
+
 /// Does `spec` leave this machine, for GitHub or a node? Then it needs no local `compile` or
 /// `test-suite` slot and no CPU or heat gate: it uses nothing on this Mac (#759).
 pub fn goes_remote(d: &Arc<Daemon>, spec: &CheckSpec) -> bool {
