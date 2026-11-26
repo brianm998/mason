@@ -34,6 +34,11 @@ fn main() {
     if std::env::args().nth(1).as_deref() == Some("covmap-job") {
         std::process::exit(mason_daemon::covmap::job_main());
     }
+    // `masond contentscan`: the secret and banned-word scan, by hand.
+    if std::env::args().nth(1).as_deref() == Some("contentscan") {
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        std::process::exit(mason_daemon::contentscan::cli(&args));
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),

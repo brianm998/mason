@@ -219,14 +219,7 @@ impl Watch {
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
                             .record(&id, std::time::Instant::now());
-                        if let Ok(mut h) = mason_step_host::client::HostClient::connect(
-                            &dir.join("sock"),
-                            mason_step_host::protocol::PREVIOUS,
-                            mason_step_host::protocol::CURRENT,
-                            "daemon",
-                        ) {
-                            let _ = h.stop(1000);
-                        }
+                        mason_step_host::client::stop_or_reap(&dir, 1000, "daemon");
                         return;
                     }
                     Some(Action::Spared) => {

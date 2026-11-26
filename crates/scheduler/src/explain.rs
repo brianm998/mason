@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use crate::plan::Kind;
+use crate::plan::{Kind, ThermalHold};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WaitCause {
@@ -23,9 +23,13 @@ pub enum WaitCause {
     DiskStall { slow_ms: u64, max_ms: u64 },
     /// macOS's `syspolicyd` is busy checking new programs and a compile is already running.
     Policy { busy_pct: u32, max_pct: u32 },
-    /// The CPU is held below `min_pct` of its speed for heat or power and machine work is
-    /// already running.
-    Thermal { speed_pct: u32, min_pct: u32 },
+    /// The CPU is too hot (see `hold`; for `Speed`, held below `min_pct` of its speed) and
+    /// machine work is already running.
+    Thermal {
+        speed_pct: u32,
+        min_pct: u32,
+        hold: ThermalHold,
+    },
     /// Needs more of the resource than its limit, so it cannot run until the
     /// limit is raised.
     TooBig {
@@ -282,12 +286,49 @@ fn reason(cause: &WaitCause, now_ms: u64) -> Option<String> {
         WaitCause::Cpu { busy_pct, max_pct } => Some(format!("CPU {busy_pct}% > {max_pct}%")),
         WaitCause::DiskStall { .. } => Some("the build disk is slow".into()),
         WaitCause::Policy { .. } => Some("macOS is busy checking new programs".into()),
-        WaitCause::Thermal { speed_pct, .. } => {
-            Some(format!("the CPU is held to {speed_pct}% for heat"))
-        }
+        WaitCause::Thermal {
+            speed_pct,
+            min_pct,
+            hold,
+        } => Some(thermal_short(*speed_pct, *min_pct, *hold)),
         WaitCause::Disk { .. } => Some("disk is low".into()),
         WaitCause::Memory { .. } => Some("memory is low".into()),
         _ => None,
+    }
+}
+
+/// The sentence for a thermal hold: the condition that is failing and what releases it.
+/// `speed_pct` and `min_pct` are only named when the speed is that condition.
+pub fn thermal_sentence(speed_pct: u32, min_pct: u32, hold: ThermalHold) -> String {
+    match hold {
+        ThermalHold::Speed => format!(
+            "waiting: the CPU is held to {speed_pct}% of its speed for heat (work starts at {min_pct}% or more)"
+        ),
+        ThermalHold::Die { c, max_c } => format!(
+            "waiting: the CPU die is at {c} °C, at or over the {max_c} °C limit (work starts again below {max_c} °C)"
+        ),
+        ThermalHold::PowerLimited { ms } => format!(
+            "waiting: macOS has power-limited the CPU for {} s (work starts again once it is not limited)",
+            ms / 1000
+        ),
+        ThermalHold::Ceiling(h) => format!(
+            "waiting: the CPU die is at {} °C, over the {} °C ceiling (work starts again at {} °C or below)",
+            h.die_c, h.ceiling_c, h.ceiling_c
+        ),
+    }
+}
+
+/// [`thermal_sentence`] in a few words, for where it is named inside another line.
+pub fn thermal_short(speed_pct: u32, min_pct: u32, hold: ThermalHold) -> String {
+    match hold {
+        ThermalHold::Speed => format!("CPU speed {speed_pct}%, starts at {min_pct}% or more"),
+        ThermalHold::Die { c, max_c } => format!("die {c} °C, starts below {max_c} °C"),
+        ThermalHold::PowerLimited { ms } => {
+            format!("power limited {} s, starts when lifted", ms / 1000)
+        }
+        ThermalHold::Ceiling(h) => {
+            format!("die {} °C, ceiling {} °C", h.die_c, h.ceiling_c)
+        }
     }
 }
 
@@ -434,9 +475,11 @@ fn explain_cause(w: &Wait, now_ms: u64) -> String {
         WaitCause::Policy { busy_pct, max_pct } => format!(
             "compile waiting: syspolicyd is at {busy_pct}% CPU checking new programs (limit {max_pct}%)"
         ),
-        WaitCause::Thermal { speed_pct, min_pct } => format!(
-            "waiting: the CPU is held to {speed_pct}% of its speed for heat (work starts at {min_pct}% or more)"
-        ),
+        WaitCause::Thermal {
+            speed_pct,
+            min_pct,
+            hold,
+        } => thermal_sentence(*speed_pct, *min_pct, *hold),
         WaitCause::Settling { until } => format!(
             "compile waiting: letting the last compile show in CPU use ({} s)",
             until.saturating_sub(now_ms).div_ceil(1000)
@@ -458,6 +501,58 @@ fn explain_cause(w: &Wait, now_ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every `%` figure in `text`.
+    fn percentages(text: &str) -> Vec<u64> {
+        text.split('%')
+            .rev()
+            .skip(1)
+            .filter_map(|before| {
+                let digits =
+                    before.len() - before.trim_end_matches(|c: char| c.is_ascii_digit()).len();
+                before[before.len() - digits..].parse().ok()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_thermal_hold_names_its_condition_and_never_a_threshold_above_100_percent() {
+        let ceiling = crate::plan::HeatCeiling {
+            die_c: 101,
+            ceiling_c: 99,
+        };
+        // (speed, minimum, hold, what the sentence and the short form must both name)
+        let cases: [(u32, u32, ThermalHold, &[&str]); 4] = [
+            (27, 80, ThermalHold::Speed, &["27%", "80%"]),
+            (
+                100,
+                35,
+                ThermalHold::Die { c: 97, max_c: 90 },
+                &["97 °C", "below 90 °C"],
+            ),
+            (
+                100,
+                35,
+                ThermalHold::PowerLimited { ms: 45_000 },
+                &["power", "limited", "45 s"],
+            ),
+            (100, 35, ThermalHold::Ceiling(ceiling), &["101 °C", "99 °C"]),
+        ];
+        for (speed, min, hold, named) in cases {
+            for text in [
+                thermal_sentence(speed, min, hold),
+                thermal_short(speed, min, hold),
+            ] {
+                for n in named {
+                    assert!(text.contains(n), "{hold:?}: {text} lacks {n}");
+                }
+                let p = percentages(&text);
+                assert!(p.iter().all(|n| *n <= 100), "{text}");
+                assert_eq!(p.is_empty(), hold != ThermalHold::Speed, "{text}");
+            }
+        }
+        assert_eq!(percentages("at 101% or more, 7%"), [7, 101]);
+    }
 
     #[test]
     fn every_wait_cause_has_a_class() {

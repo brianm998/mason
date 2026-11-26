@@ -183,6 +183,29 @@ pub fn prompt_block(m: &Mine) -> String {
     )
 }
 
+/// The lines put in a review prompt (task 1114): the numbered files are required by the
+/// pipeline, so the reviewer must not take them for unrequested additions.
+pub fn review_block(m: &Mine) -> String {
+    let (Some(note), Some(script)) = (m.stage_note(), m.exit_script()) else {
+        return String::new();
+    };
+    let (dec, also) = match m.decision_record() {
+        Some(d) => (format!("decision record {d}, "), ""),
+        None => (
+            String::new(),
+            " A decision record under docs/decisions/ is expected too.",
+        ),
+    };
+    format!(
+        "MASON reserved these files for this task: stage note {note}, {dec}exit script {script} \
+         (and its -real/-manual variants).{also} Every task is required to add its stage note and decision \
+         record under exactly these numbers, which are MASON's counters and are not derived from the task \
+         number. Their presence is required, not scope creep, even when the task or plan lists only other \
+         files; do not ask for them to be removed or renumbered. Judge their content only (accurate, states \
+         what was not verified)."
+    )
+}
+
 /// A file a task added under a number that is not its own.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Violation {
@@ -689,5 +712,34 @@ mod tests {
         });
         assert!(b.contains("docs/stages/s40.md") && b.contains("docs/decisions/0018-<slug>.md"));
         assert!(b.contains("scripts/exit/s40.sh") && b.contains("do not take another number"));
+    }
+
+    #[test]
+    fn the_reviewer_is_told_the_numbered_files_are_required() {
+        let mine = Mine {
+            exit: Some(1084),
+            decision: Some(1073),
+            from_stage: false,
+        };
+        let b = review_block(&mine);
+        for want in [
+            "docs/stages/s1084.md",
+            "docs/decisions/1073-<slug>.md",
+            "scripts/exit/s1084.sh",
+            "required",
+            "not scope creep",
+        ] {
+            assert!(b.contains(want), "{want} missing from {b}");
+        }
+        assert_eq!(review_block(&Mine::default()), "");
+        let b = review_block(&Mine {
+            decision: None,
+            ..mine
+        });
+        assert!(b.contains("under docs/decisions/ is expected"), "{b}");
+        assert!(
+            !b.contains("docs/decisions/1") && !b.contains("NNNN"),
+            "{b}"
+        );
     }
 }
