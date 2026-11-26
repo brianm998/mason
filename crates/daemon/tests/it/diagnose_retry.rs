@@ -92,6 +92,7 @@ fn post(d: &Arc<mason_daemon::Daemon>, who: &str, path: String) -> (u16, Value) 
 fn card_turn() -> Value {
     json!([{"call": {"tool": "submit_diagnosis", "args": {
         "summary": "the push was refused by a hook; retrying will not help until it is lifted",
+        "quote": "Push is rejected",
         "evidence_lines": ["rejected by the hook"],
         "options": [
             {"label": "Cancel the task", "recommended": true, "action": "cancel"},
