@@ -1148,6 +1148,14 @@ fn a_node_that_goes_away_is_given_up_on_and_its_orphan_is_killed_when_its_lease_
     let b = p.b.clone();
     let r = std::thread::scope(|sc| {
         let h = sc.spawn(|| run_on_b(&p, &spec("run-lost", None, &cmd), &|| None));
+        // The node counts the job before the coordinator has its answer: wait for the
+        // coordinator to be following the run on b, or the listener goes while it is placing it.
+        support::wait_for("the coordinator to follow the job on the node", 60, || {
+            mason_daemon::remote_runs::view(&p.a, &|_| None, "")
+                .runs
+                .iter()
+                .any(|r| r.id == "run-lost" && r.runs_on == "node b" && r.state == "running")
+        });
         support::wait_for("the job to run on the node", 60, || {
             b.node.jobs.running() == 1
         });
