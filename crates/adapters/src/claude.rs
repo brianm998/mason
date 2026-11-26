@@ -154,7 +154,16 @@ impl ClaudeAdapter {
         resume: Option<(&str, &str)>,
     ) -> Result<AgentCommand, AdapterError> {
         let sock = spec.contract.as_ref().and_then(|c| c.sock());
-        let env = sanitized_env(spec, self.parent(), sock.as_deref());
+        let mut env = sanitized_env(spec, self.parent(), sock.as_deref());
+        // What the command guard lets a recursive `rm` reach (s1107). Set last, so a
+        // project's agent_env cannot widen it.
+        for (k, dir) in [
+            ("MASON_GUARD_WORKTREE", &spec.workdir),
+            ("MASON_GUARD_STATE", &self.state_dir),
+        ] {
+            env.retain(|(ek, _)| ek != k);
+            env.push((k.to_string(), dir.display().to_string()));
+        }
         let base_url = env
             .iter()
             .find(|(k, _)| k == "ANTHROPIC_BASE_URL")
@@ -187,6 +196,9 @@ impl ClaudeAdapter {
 
         let mcp_path = self.write_mcp_config(spec, sock.as_deref())?;
         args.extend(["--mcp-config".into(), mcp_path.display().to_string()]);
+        // Added to the project's and the owner's settings, not in place of them.
+        let settings = self.write_settings(&mcp_path)?;
+        args.extend(["--settings".into(), settings.display().to_string()]);
 
         // Built-in tools: read-only steps get no way to change the tree.
         let builtins: &[&str] = if spec.step.read_only() {
@@ -258,6 +270,28 @@ impl ClaudeAdapter {
             "command": self.mcp_bin.display().to_string(), "args": [], "env": env}}});
         let path = dir.join("mcp.json");
         std::fs::write(&path, cfg.to_string()).map_err(AdapterError::Spawn)?;
+        Ok(path)
+    }
+
+    /// The settings file beside `mcp.json` that puts the command guard (`mason hook
+    /// guard`, s1107) in front of every Bash call. `mason` is the binary installed next
+    /// to the MCP bridge. A guard that cannot run refuses the command (exit 2): any
+    /// other failure of a hook lets the command through.
+    fn write_settings(&self, mcp_path: &Path) -> Result<PathBuf, AdapterError> {
+        let mason = self
+            .mcp_bin
+            .with_file_name(format!("mason{}", std::env::consts::EXE_SUFFIX));
+        let command = format!(
+            "'{}' hook guard || {{ echo 'MASON: the command guard could not run, so Bash is \
+             refused' >&2; exit 2; }}",
+            mason.display().to_string().replace('\'', "'\\''")
+        );
+        let settings = json!({"hooks": {"PreToolUse": [{
+            "matcher": "Bash",
+            "hooks": [{"type": "command", "command": command}],
+        }]}});
+        let path = mcp_path.with_file_name("settings.json");
+        std::fs::write(&path, settings.to_string()).map_err(AdapterError::Spawn)?;
         Ok(path)
     }
 
@@ -1716,6 +1750,43 @@ mod tests {
                 && p.contains("submit_plan")
                 && p.contains("read-only step")
         );
+    }
+
+    #[test]
+    fn every_session_is_given_the_command_guard() {
+        let a = adapter(&[("ANTHROPIC_BASE_URL", "http://127.0.0.1:1")]);
+        let mut sp = spec(StepKind::Develop);
+        sp.env = vec![("MASON_GUARD_WORKTREE".into(), "/".into())];
+        for resume in [None, Some(("sess-1", "note"))] {
+            let c = a.build_command(&sp, resume).unwrap();
+            let after = |flag: &str| {
+                let at = c.args.iter().position(|x| x == flag).unwrap();
+                PathBuf::from(&c.args[at + 1])
+            };
+            let file = after("--settings");
+            assert_eq!(file.parent(), after("--mcp-config").parent());
+            let v: Value = serde_json::from_str(&std::fs::read_to_string(file).unwrap()).unwrap();
+            let hook = &v["hooks"]["PreToolUse"][0];
+            assert_eq!(hook["matcher"], "Bash");
+            let command = hook["hooks"][0]["command"].as_str().unwrap();
+            let guard = format!("'/bin/mason{}' hook guard ||", std::env::consts::EXE_SUFFIX);
+            assert!(command.starts_with(&guard), "{command}");
+            assert!(command.contains("exit 2"), "{command}");
+            let env = |k: &str| {
+                let all: Vec<&str> = c
+                    .env
+                    .iter()
+                    .filter(|(ek, _)| ek == k)
+                    .map(|(_, v)| v.as_str())
+                    .collect();
+                all
+            };
+            assert_eq!(env("MASON_GUARD_WORKTREE"), ["/work"]);
+            assert_eq!(
+                env("MASON_GUARD_STATE"),
+                [a.state_dir.display().to_string()]
+            );
+        }
     }
 
     #[test]
