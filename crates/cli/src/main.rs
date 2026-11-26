@@ -173,6 +173,7 @@ mason: command-line client for the MASON pipeline
   mason node pair-code | accept on|off | status | doctor | jobs | stop-jobs | coordinators [remove NAME]
                                       this Mac as a node, taking compile and test runs from a coordinator
   mason node list | add [NAME | --host H:PORT --fp F] [--code C] | remove NAME | use on|off
+  mason node update NAME | --all      send a node the runtime this coordinator runs, now (`mason update` does it for every node)
   mason node export-runtime --arch arm64|x86_64 --out DIR   the signed runtime and MASON Daemon.app for a node
                                       the coordinator's nodes: found, paired, whether each takes work
   mason lan status                    whether LAN access is on, its port and certificate fingerprint
@@ -806,6 +807,10 @@ fn main() {
                         "{} (from {}; GitHub runner {r})",
                         p["mode"].as_str().unwrap_or("?"),
                         p["source"].as_str().unwrap_or("?")
+                    ),
+                    None if p["nodes_only"].as_bool() == Some(true) => format!(
+                        "{} (nodes only: no GitHub setup)",
+                        p["mode"].as_str().unwrap_or("?")
                     ),
                     None => "local (no [remote_runs]: always runs here)".to_string(),
                 }
@@ -2250,6 +2255,13 @@ fn main() {
                             "held      update waiting since {} (next window {})",
                             local_clock(since),
                             local_clock(next)
+                        );
+                    }
+                    for n in r["nodes"].as_array().into_iter().flatten() {
+                        println!(
+                            "node      {:<16} {}",
+                            n["name"].as_str().unwrap_or("?"),
+                            n["text"].as_str().unwrap_or("?")
                         );
                     }
                     if let Some(w) = r["waiting"].as_str().filter(|w| !w.is_empty()) {

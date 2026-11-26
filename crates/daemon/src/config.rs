@@ -1415,6 +1415,9 @@ pub struct ServicesCfg {
     pub tracker: Option<TrackerCfg>,
     /// `[remote_runs]`: where a run may go instead of this machine (#697).
     pub remote: Option<RemoteCfg>,
+    /// `[placement] mode`: the placement mode of a project that need not have a
+    /// `[remote_runs]` (#1150). `[remote_runs] mode` wins over it.
+    pub placement: Option<String>,
 }
 
 /// `[remote_runs]` of the project file: runs of suites and checks on GitHub Actions.
@@ -1434,6 +1437,9 @@ pub struct RemoteCfg {
     /// `favor-local` (#832): a run whose wait for this machine's slots passes this many seconds
     /// may start on GitHub instead.
     pub spill_after_s: u64,
+    /// Debt payments hold at most this many `gha` units in all at once, and a debt of a sharded
+    /// suite runs as at most this many shards (`[remote_runs] debt_units`, default 4).
+    pub debt_units: u32,
     /// `favor-remote` (#833): GitHub is overloaded when the account has more than this many
     /// jobs queued.
     pub remote_queue_max: u32,
@@ -1790,6 +1796,7 @@ fn parse_services(id: &str, doc: &DocumentMut) -> Result<ServicesCfg, String> {
             runs_on: get(t, "runs_on").unwrap_or_else(|| "ubuntu-latest".into()),
             pickup_timeout_s: int(t, "pickup_timeout", 1200),
             spill_after_s: int(t, "spill_after", 120),
+            debt_units: int(t, "debt_units", 4).max(1) as u32,
             remote_queue_max: int(t, "remote_queue_max", 4) as u32,
             fallback_local,
             mode,
@@ -1814,6 +1821,20 @@ fn parse_services(id: &str, doc: &DocumentMut) -> Result<ServicesCfg, String> {
                 }
             },
         });
+    }
+    if let Some(t) = table("placement") {
+        out.placement = match (t.get("mode"), get(t, "mode").as_deref()) {
+            (None, _) => None,
+            (_, Some(m @ ("local" | "remote" | "favor-local" | "favor-remote"))) => {
+                Some(m.to_string())
+            }
+            (Some(v), _) => {
+                return Err(format!(
+                    "{id}: `[placement] mode` is `local`, `remote`, `favor-local` or `favor-remote`, not {}",
+                    v.to_string().trim()
+                ))
+            }
+        };
     }
     if let Some(t) = table("tracker") {
         let tracker_plugin = match need(t, "tracker", "kind")?.as_str() {
@@ -2396,6 +2417,19 @@ mod tests {
         let p = parse_project("p", f).unwrap();
         assert_eq!(p.remote.as_deref(), Some("origin"));
         assert_eq!(p.services.remote.unwrap().repo, "o/r");
+    }
+
+    #[test]
+    fn a_placement_mode_needs_no_remote_runs_and_is_one_of_the_four() {
+        let base = "path=\"/r\"\nbase=\"m\"\ntest=\"t\"\n";
+        let p = parse_project("p", &format!("{base}[placement]\nmode=\"favor-remote\"\n")).unwrap();
+        assert_eq!(p.services.placement.as_deref(), Some("favor-remote"));
+        assert!(p.services.remote.is_none());
+        assert_eq!(parse_project("p", base).unwrap().services.placement, None);
+        for bad in ["\"sometimes\"", "3"] {
+            let e = parse_project("p", &format!("{base}[placement]\nmode={bad}\n")).unwrap_err();
+            assert!(e.contains("`[placement] mode`"), "{e}");
+        }
     }
 
     #[test]

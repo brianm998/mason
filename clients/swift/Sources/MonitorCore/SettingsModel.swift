@@ -60,7 +60,8 @@ public struct SettingsSnapshot: Equatable, Sendable {
 }
 
 /// `GET /remote`: where runs go (#831). The global mode, and for each project whether it has
-/// `[remote_runs]`, where it runs, its effective mode and why (`source`).
+/// `[remote_runs]`, where it runs, its effective mode and why (`source`). Every project can be
+/// set: one with no `[remote_runs]` and a mode of its own sends its runs to nodes only (#1150).
 public struct RemoteSettings: Equatable, Sendable {
     public struct Project: Equatable, Sendable {
         public var project: String
@@ -70,16 +71,18 @@ public struct RemoteSettings: Equatable, Sendable {
         /// `project`, `global` or `no [remote_runs]`.
         public var source: String
 
+        /// No `[remote_runs]`, but a mode of its own (`[placement]`): nodes only.
+        public var nodesOnly: Bool = false
+
         /// The source in words, as the page shows it.
         public var sourceText: String {
+            if nodesOnly { return "\(mode) (nodes only: no GitHub setup)" }
             switch source {
             case "project": return "set for this project"
             case "global": return "follows the global mode"
-            default: return "always runs here: the project file has no [remote_runs]"
+            default: return "always runs here: the project file has no [remote_runs]; a mode chosen here sends its runs to nodes"
             }
         }
-        /// A project with no `[remote_runs]` cannot be changed.
-        public var canChange: Bool { remote && source != "no [remote_runs]" }
     }
 
     public static let modes = ["local", "remote", "favor-local", "favor-remote"]
@@ -104,7 +107,7 @@ public struct RemoteSettings: Equatable, Sendable {
         projects = (v["projects"] as? [[String: Any]] ?? []).map {
             Project(project: $0["project"] as? String ?? "?", remote: $0["remote"] as? Bool ?? false,
                     runsOn: $0["runs_on"] as? String ?? "", mode: $0["mode"] as? String ?? "local",
-                    source: $0["source"] as? String ?? "")
+                    source: $0["source"] as? String ?? "", nodesOnly: $0["nodes_only"] as? Bool ?? false)
         }
     }
 

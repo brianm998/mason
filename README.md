@@ -748,6 +748,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s998**: masons_own_impact_map_selects_suites_by_path now expects the eight unit-level suites bound to run_check and the test step, instead of six.
 - **s1000**: The diagnosis session runs on `diagnose_model`/`diagnose_effort` from the project registration, else the provider file's `[diagnose]` table, else Opus at medium (Codex: its CLI's model at medium), and each diagnosis and `mason task show` print what it ran on.
 - **s1001**: The daemon folds three or more waiting speech announcements into one summary line ("25 mason issues have failed; come have a look."), for both monitors and daemon speech, controlled by `[speech] summarize_from`.
+- **s1007**: `mason task skip --step` now refuses any step that is not the Test step, instead of recording a debt nothing reads.
 - **s1012**: a replayed run_check carries its call id, takes the suites that finished before a masond takeover instead of running them again, and no longer folds the base on the replay.
 - **s1014**: RemotePlacementTest now composes RemotePlacementBody inside a Column, as the settings page does, so the project row no longer covers the global row's buttons.
 - **s1015**: Unit-test narrowing no longer pushes a line into `Group.notes`, which is per directory target, so `the_note_says_how_the_modules_were_picked` passes again.
@@ -770,6 +771,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s1043**: a pending CI run whose job states do not change for `[ci] stuck_after` (default 30 minutes, 0 = off) raises a `landing` alert naming the batch, run and jobs, cleared when the run moves or ends.
 - **s1044**: The `retrying` test helper in remote.rs now sets the hook's executable bit only under `#[cfg(unix)]`, so the Windows CI build compiles again.
 - **s1045**: The exit-script runner repeats each failed script's first panic or failing line as a `cause` line before the closing `FAILED scripts:` line.
+- **s1048**: a diagnosis of any failed task ends in a decision card of 2 to 4 options with one recommended, stored on the diagnosis row, with one diagnosis per failure (six per task) and `POST /v1/tasks/{id}/diagnose` / `mason task diagnose` to ask for one.
 - **s1052**: The macOS monitor has File > Add Project… (⇧⌘N) and a + under the project picker that open a five-step wizard (Repository, Detected, Questions, Review, Apply) over the daemon's `/onboarding` endpoints; iOS shows neither.
 - **s1053**: The Compose desktop monitor gains File > Add Project… (Cmd/Ctrl+Shift+N) and a + under the project filter, opening a five-step wizard (Repository, Detected, Questions, Review, Apply) over the daemon's /onboarding endpoints; the Android app has neither.
 - **s1054**: `Executor::Node` and `Place::Node` exist and every match site handles them, and `decide` asks "may this run leave this machine" and "where off it" as two questions; nothing produces a node placement yet, so no decision changes.
@@ -784,6 +786,8 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s1066**: s43 now expects the daemon's real ceiling (9999) and s49 picks the highest-numbered checkpoint, fixing two of the exit scripts red on shard 6.
 - **s1067**: `mason project rename` now sets MASON_AS from USER, LOGNAME or "owner" like the daemon's default owner, so s965 passes where USER is unset or differs.
 - **s1068**: The Compose conformance settle now waits until the model's last applied view reaches the daemon's seq (as step() and the Rust capturer do), and both capturers print a stderr line when they leave on the quiet fallback.
+- **s1069**: a remote run now gives each `gha` (and `gha-macos`) unit back to the broker when its `run` job completes, rewrites its hold file with what is left, and asks again, at its own rank, for the shards it runs again.
+- **s1070**: GitHub runner units (`gha`, `gha-macos`) are granted landing first, then agents' checks, then test steps, then debt payments (urgent first, then the longest wait), and debt payments together hold at most `[remote_runs] debt_units` (default 4) units.
 - **s1072**: Windows clippy red on develop is fixed by compiling the unix-only CAFFEINATE and XCODEBUILD shim constants only under cfg(unix).
 - **s1073**: The Swift monitor-tool's settle now waits on `lastViewSeq` (moved only by views and snapshots) instead of `lastSeq`, which events also move, as Compose already does.
 - **s1074**: run-exit-scripts.sh runs each exit script in its own process group and ends the group when the script ends, so a leftover child or watcher `sleep` can no longer hold the output pipe and stall a shard.
@@ -800,4 +804,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s1098**: The red CI/monitor-compose run 45581279465 names no failing step in the supplied log tail, so no code changed and decision 1087 records how to classify it from the full log.
 - **s1099**: `s798` passes its scripted agent a `src` directory to write into, fixing its red on CI, and a red `s798` now puts the task state and the last log line on its first failure line.
 - **s1100**: The s1026 and s1068 exit scripts now check the signal-based Compose settle instead of the removed quiet-window text, so exit-scripts shard 6 no longer fails on it.
+- **s1102**: The exit script s70 now accepts a suite "minimum" total after a task's green, because only runs at the base size a suite, so it no longer fails on a stale expectation.
+- **s1118**: On macOS the coordinator now execs masond from one signed bundle on the internal disk (`~/Applications/MASON Coordinator.app`) whose path never changes, so a Local Network rule can apply, and a rule macOS cannot apply is named as such.
+- **s1122**: `mason update` now builds the nodes' runtimes beside the coordinator's own, sends each reachable node its runtime after the coordinator's self-test and before the takeover (also to a node on another protocol), shows each node's update state in `mason update status`, `mason node list`, the alerts and the monitor model, and `mason node update NAME|--all` sends now.
 <!-- status:end -->
