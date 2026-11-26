@@ -164,6 +164,7 @@ mason: command-line client for the MASON pipeline
   mason hook bash [--needs compile]   optional Claude Code PreToolUse hook: builds go through the queue, and in a
                                       MASON agent session destructive git and rm commands are refused
   mason hook guard                    that refusal alone; MASON registers it for every Claude agent it starts
+  mason hook skill --policy <file>    refuse a skill that is not the project's or the owner's; registered the same way
   mason definition check [FILE] [--project P]
                                       validate a definition (default .mason/mason.toml) and dry-run it;
                                       --project also knows P's approved plugin step types
@@ -500,12 +501,24 @@ fn main() {
     if cmd == "hook" {
         let sub = a.pos().unwrap_or_default();
         let needs = a.opt("--needs").unwrap_or_else(|| "compile".into());
+        let policy = a.opt("--policy");
         finish(&a);
-        if sub != "bash" && sub != "guard" {
-            die("the hooks are `mason hook bash` and `mason hook guard`");
+        if sub != "bash" && sub != "guard" && sub != "skill" {
+            die("the hooks are `mason hook bash`, `mason hook guard` and `mason hook skill`");
         }
         let mut input = String::new();
         let _ = std::io::stdin().read_to_string(&mut input);
+        if sub == "skill" {
+            // An error exits non-zero, and the hook's command then refuses the call.
+            let policy = policy.unwrap_or_else(|| die("`mason hook skill` needs --policy <file>"));
+            let env = |k: &str| std::env::var(k).ok();
+            match guard::hook_skill(&input, std::path::Path::new(&policy), &env) {
+                Ok(Some(out)) => println!("{out}"),
+                Ok(None) => {}
+                Err(e) => die(&e),
+            }
+            return;
+        }
         let env = |k: &str| std::env::var(k).ok();
         // `hook bash` is also in a repository's own settings, which a person's session
         // reads: it refuses only inside a session MASON started (s1107).
@@ -3285,6 +3298,15 @@ fn main() {
                                 l["kind"].as_str().unwrap_or(""),
                                 l["display"].as_str().unwrap_or("")
                             );
+                        }
+                        let skills: Vec<&str> = r["skills"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|s| s.as_str())
+                            .collect();
+                        if !skills.is_empty() {
+                            println!("  run {:<4} skills    {}", r["run"], skills.join(", "));
                         }
                     }
                     if let Some(l) = t["run_on"]["line"].as_str() {

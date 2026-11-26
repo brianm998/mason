@@ -31,9 +31,8 @@ use mason_definition::layers::{resolve, Resolved, RuntimeOverride};
 use mason_definition::validate::contract_kind;
 use mason_definition::{Definition, Step, StepType};
 use mason_landing::git::{self, CatchUp};
-use mason_step_host::client::{collect_to_file_observed, ClientError, HostClient};
+use mason_step_host::client::{collect_to_file_observed, ClientError};
 use mason_step_host::launcher::{spawn_host, SpawnOptions};
-use mason_step_host::protocol::{CURRENT, PREVIOUS};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -2412,7 +2411,10 @@ impl TestChecks {
                         self.phase(mason_core::checks::CheckPhase::Building);
                         self.phase(mason_core::checks::CheckPhase::Building);
                         let grant = grant_of(lease);
-                        let res = crate::hostedcheck::run(&self.slots.d, &bspec, &grant);
+                        // A run that waits again at its place (#822) waits inside this call.
+                        let res = self.remote_credited(&bspec, || {
+                            crate::hostedcheck::run(&self.slots.d, &bspec, &grant)
+                        });
                         drop(grant);
                         if matches!(&res, Ok(o) if o.stopped.is_some()) {
                             if let Some(r) = self.skipped_run(&name) {
@@ -2536,8 +2538,9 @@ impl TestChecks {
             }
             match res {
                 Ok(o) if o.passed => lines.push(format!(
-                    "{name}: passed ({})",
-                    crate::hostedcheck::where_ran(&self.slots.d, &rspec)
+                    "{name}: passed ({}){}",
+                    crate::hostedcheck::where_ran(&self.slots.d, &rspec),
+                    waited_again_note(&o.output)
                 )),
                 Ok(o) => {
                     failed = true;
@@ -2843,6 +2846,18 @@ impl TestChecks {
         })
     }
 
+    /// Secrets and banned words the agent's work adds, as a failed check; like the markers,
+    /// read from the text.
+    fn content_refusal(&self) -> Option<CheckRun> {
+        let (_, base) = self.base_fold.as_ref()?;
+        let source = crate::contentscan::Source::new(&self.slots.d.cfg.config_dir, &self.project);
+        let found = crate::contentscan::added_in_worktree(&source.rules(), &self.wt, base).ok()?;
+        (!found.hits.is_empty()).then(|| CheckRun::Done {
+            passed: false,
+            summary: crate::contentscan::refusal(&found.hits),
+        })
+    }
+
     fn check(&self, name: &str, scope: &CheckScope) -> CheckRun {
         // On 2026-11-13 the owner skipped testing for every active task to drain the queue,
         // but their agents kept queueing `run_check` for compile slots. A skip before the
@@ -2850,7 +2865,7 @@ impl TestChecks {
         // with what happened, not run. Conflict markers are answered first: with testing
         // skipped, a merge the agent resolved badly is not built or read by anything else.
         if name == "tests" {
-            if let Some(refusal) = self.markers_refusal() {
+            if let Some(refusal) = self.markers_refusal().or_else(|| self.content_refusal()) {
                 return refusal;
             }
         }
@@ -3029,7 +3044,10 @@ impl TestChecks {
                 };
                 self.phase(mason_core::checks::CheckPhase::Building);
                 let grant = grant_of(lease);
-                let res = crate::hostedcheck::run(&self.slots.d, &bspec, &grant);
+                // A run that waits again at its place (#822) waits inside this call.
+                let res = self.remote_credited(&bspec, || {
+                    crate::hostedcheck::run(&self.slots.d, &bspec, &grant)
+                });
                 drop(grant);
                 if let Some(t) = ctree.as_deref() {
                     let bk = crate::cmdreuse::build_key(build);
@@ -3255,6 +3273,23 @@ const FOLDED_STOP: &str = "stopped: develop was merged into your branch while th
 /// Was this run stopped because the red-develop watch folded develop in under it?
 fn stopped_by_fold(res: &Result<crate::hostedcheck::CheckOutcome, String>) -> bool {
     matches!(res, Ok(o) if o.stopped.as_deref() == Some(FOLDED_STOP))
+}
+
+/// What a passing check's line says of a run that waited again at its place in line (#822):
+/// the retry notes lead the output, and their number is how often it waited.
+fn waited_again_note(output: &str) -> String {
+    let n = output
+        .lines()
+        .take_while(|l| l.starts_with('('))
+        .filter(|l| l.contains("waiting again at its place in line"))
+        .count();
+    match n {
+        0 => String::new(),
+        1 => "; GitHub gave no result once, so the run waited again at its place in line".into(),
+        n => format!(
+            "; GitHub gave no result {n} times, so the run waited again at its place in line each time"
+        ),
+    }
 }
 
 /// The note a check's stop hook gives (#823): `Some` once the task's open run is no longer the
@@ -3689,6 +3724,7 @@ type IsAnalyst = Box<dyn Fn() -> bool + Send + Sync>;
 /// The analyst's task is told to commit nothing and to leave its findings in
 /// [`crate::introspect::ANALYST_FILE`], and its branch is never merged: for it alone, that
 /// untracked file does not make the tree dirty and a branch with no commits is accepted.
+#[allow(clippy::too_many_arguments)]
 fn change_validator(
     wt: PathBuf,
     base_ref: String,
@@ -3696,6 +3732,7 @@ fn change_validator(
     caps: mason_definition::Capabilities,
     weakening: Option<WeakeningCheck>,
     planned: Option<PlannedChange>,
+    content: crate::contentscan::Source,
     is_analyst: IsAnalyst,
 ) -> Validator {
     let warned = std::sync::atomic::AtomicBool::new(false);
@@ -3761,6 +3798,13 @@ fn change_validator(
         if let Ok(found) = crate::markers::added_since(&wt, &base_ref, "HEAD") {
             if !found.is_empty() {
                 problems.push(crate::markers::refusal(&found));
+            }
+        }
+        // Nor is a secret or an owner-banned word.
+        if let Ok(found) = crate::contentscan::added_since(&content.rules(), &wt, &base_ref, "HEAD")
+        {
+            if !found.hits.is_empty() {
+                problems.push(crate::contentscan::refusal(&found.hits));
             }
         }
         // The scan landing runs, now, before the test step. Where the project sends a
@@ -3911,6 +3955,11 @@ pub(crate) fn adapter_for(
                 .with_host(host);
             a.env_file = Some(d.cfg.config_dir.join("claude.env"));
             a.sandbox = sandbox;
+            // From the base commit, never the worktree (s1153).
+            a.skills = mason_adapters::skills::Skills {
+                project: crate::skills::load(project),
+                user: !agent.user_skills_off,
+            };
             Box::new(a)
         }
         Provider::Codex => {
@@ -4227,6 +4276,7 @@ fn agent_job(c: &Ctx) {
                     .task_dir()
                     .join(format!("source-free-note-r{}.txt", c.run.0)),
             }),
+            crate::contentscan::Source::new(&c.d.cfg.config_dir, &c.project.id),
             Box::new(move || crate::introspect::is_analyst_task(&d, task, &project)),
         )
     });
@@ -4457,8 +4507,12 @@ fn agent_job(c: &Ctx) {
         contract.set_on_progress(Arc::new(move |r| d.progress_agent_report(run, r)));
         let (d, run) = (c.d.clone(), c.run);
         let seen = seen.clone();
+        let task_dir = dir.clone();
         spec.on_agent_event = Some(Arc::new(move |ev| {
             seen.touch();
+            if let mason_adapter_api::AgentEvent::Skill { name } = ev {
+                crate::skills::record(&task_dir, run.0, name);
+            }
             d.progress_agent_event(run, ev)
         }));
     }
@@ -5658,7 +5712,7 @@ fn run_command_on(
     // Stop the run if it takes too long.
     let done = Arc::new(AtomicBool::new(false));
     {
-        let (done, sock, hdir) = (done.clone(), dir.join("sock"), dir.clone());
+        let (done, hdir) = (done.clone(), dir.clone());
         std::thread::spawn(move || {
             let end = Instant::now() + mason_step_host::registry::remaining_limit(limit, &hdir);
             while Instant::now() < end {
@@ -5667,9 +5721,7 @@ fn run_command_on(
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
-            if let Ok(mut h) = HostClient::connect(&sock, PREVIOUS, CURRENT, "daemon") {
-                let _ = h.stop(1000);
-            }
+            mason_step_host::client::stop_or_reap(&hdir, 1000, "daemon");
         });
     }
     let name = format!("{suffix}-r{}{}{hsuf}", c.run.0, again(k));
@@ -6294,6 +6346,7 @@ mod tests {
                 note_file: note.clone(),
             }),
             None,
+            Default::default(),
             Box::new(|| false),
         );
         (v("submit_change", &serde_json::json!({"head": head})), note)
@@ -6317,6 +6370,7 @@ mod tests {
                 mason_definition::Capabilities::now(),
                 None,
                 None,
+                Default::default(),
                 Box::new(move || analyst),
             )("submit_change", &serde_json::json!({"head": head}))
         };
@@ -6360,6 +6414,7 @@ mod tests {
                 plan: "Problem.\n\n**Change**\n1. Edit `crates/x/src/a.rs`.\n".into(),
                 note_file: note.clone(),
             }),
+            Default::default(),
             Box::new(|| false),
         );
         let first = v("submit_change", &serde_json::json!({"head": head}));
@@ -6377,6 +6432,23 @@ mod tests {
         assert!(kept.contains("the code already did this"), "{kept}");
         // Refused once only: a second bare submit goes through.
         assert!(v("submit_change", &serde_json::json!({"head": head})).is_ok());
+    }
+
+    #[test]
+    fn submit_refuses_a_branch_that_adds_a_token_and_says_where() {
+        // Put together here, so this file holds no token.
+        let token = format!("ghp_{}", "c3".repeat(18));
+        let (r, _) = submit_with(&format!("export GH={token}"), None);
+        let problems = r.unwrap_err();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("scripts/run.sh:2") && p.contains("GitHub token")),
+            "{problems:?}"
+        );
+        assert!(!problems.join(" ").contains(&token), "{problems:?}");
+        let (r, _) = submit_with(&format!("export GH={token} # mason:allow-secret"), None);
+        assert!(r.is_ok(), "{r:?}");
     }
 
     #[test]
@@ -6705,6 +6777,22 @@ pub fn end_run_leases(d: &Arc<Daemon>, task: TaskId) {
             });
             d.broker.lease_close(l.id);
         });
+    }
+}
+
+#[cfg(test)]
+mod waited_again_tests {
+    use super::waited_again_note;
+
+    #[test]
+    fn a_passing_check_says_how_often_its_run_waited_again() {
+        let note =
+            "(no result from run 1 on GitHub (x); waiting again at its place in line (time 1))\n";
+        let two = format!("{note}{note}(ran on GitHub)\ntest a ... ok\n");
+        assert!(waited_again_note(&two).contains("2 times"));
+        assert!(waited_again_note(&format!("{note}ok\n")).contains("once"));
+        // Only the lines MASON put first count, not what the tests printed.
+        assert_eq!(waited_again_note(&format!("ok\n{note}")), "");
     }
 }
 
