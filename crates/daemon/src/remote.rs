@@ -3001,8 +3001,8 @@ impl Grant {
             Err(_) => false,
         }
     }
-    /// Ask for `units` again if every runner unit of the lease has already been given back (its
-    /// jobs finished, or the run waited again at its place, and the run is made again). `false`: told to stop while it waited.
+    /// Ask for `units` again if the lease has given back runner units this run needs (jobs of an
+    /// earlier run finished, or a run waited again at its place). `false`: told to stop while it waited.
     pub fn regain(
         &self,
         units: std::collections::BTreeMap<String, u32>,
@@ -3012,7 +3012,7 @@ impl Grant {
             .lock()
             .giver
             .as_ref()
-            .is_some_and(|g| g.held().is_empty());
+            .is_some_and(|g| g.short_of(&units));
         !released || self.ask_again(units, stop)
     }
     /// How many runner units the lease was given when it asked for 1 to N, if it was flexible.

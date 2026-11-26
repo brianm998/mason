@@ -739,6 +739,8 @@ pub struct Giver {
     rank: Rank,
     asked_ms: u64,
     label: String,
+    /// The runner units the lease was granted.
+    granted: BTreeMap<String, u32>,
 }
 
 impl Giver {
@@ -761,6 +763,16 @@ impl Giver {
     /// Whether the lease still holds anything.
     pub fn is_held(&self) -> bool {
         self.b.lease_holds(self.id)
+    }
+
+    /// Has the lease given back runner units that a run of `units` needs? A run is not short
+    /// of units its lease was never granted.
+    pub fn short_of(&self, units: &BTreeMap<String, u32>) -> bool {
+        let held = self.held();
+        units.iter().any(|(k, n)| {
+            let granted = self.granted.get(k).copied().unwrap_or(0);
+            held.get(k).copied().unwrap_or(0) < (*n).min(granted)
+        })
     }
 
     /// The runner units the lease holds now.
@@ -804,6 +816,7 @@ impl Lease {
             rank: self.rank,
             asked_ms: self.asked_ms,
             label: self.label.clone(),
+            granted: self.units(),
         }
     }
 }
