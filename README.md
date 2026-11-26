@@ -804,11 +804,13 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s1083**: A step host queued for a lease is no longer reported as silent (stuck:host); the wait is left to overloaded:slots and stuck:wait.
 - **s1086**: s101 now starts its ad-hoc range at 9960 and expects the daemon's real ceiling (9999), so it raises the `numbers` alert again.
 - **s1089**: the protocol test an_unchanged_view_is_not_sent_again_and_a_changed_one_is no longer fails when the usage view's clock-based text changes while it runs; an identical resend still fails it.
+- **s1095**: A failing s40 now names the card checkpoint keys held by only one of the owner and stranger captures and shows both capture logs, in which `conformance expected` records how each checkpoint settled.
 - **s1096**: scripts/test-parallel.py no longer runs doc tests when the cargo command selects targets, and a `--doc` command runs only them, as scripts/test-shard.py does.
 - **s1098**: The red CI/monitor-compose run 45581279465 names no failing step in the supplied log tail, so no code changed and decision 1087 records how to classify it from the full log.
 - **s1099**: `s798` passes its scripted agent a `src` directory to write into, fixing its red on CI, and a red `s798` now puts the task state and the last log line on its first failure line.
 - **s1100**: The s1026 and s1068 exit scripts now check the signal-based Compose settle instead of the removed quiet-window text, so exit-scripts shard 6 no longer fails on it.
 - **s1102**: The exit script s70 now accepts a suite "minimum" total after a task's green, because only runs at the base size a suite, so it no longer fails on a stale expectation.
+- **s1103**: The flaky protocol test for unchanged views is already fixed on develop by s1089, so this task adds only its record and an exit test that runs that test.
 - **s1104**: The Compose conformance settle keeps the signal-based wait and again prints a quiet-exit line when it returns with its views behind the daemon's seq, which its exit test checks along with the s1068 and s1026 exit tests.
 - **s1107**: Every Claude agent MASON starts is refused `git` commands that destroy uncommitted or shared work, and any recursive `rm` outside what it owns, with a reason it can act on.
 - **s1110**: Every GitHub Action in MASON's workflows is pinned to a full commit SHA, Dependabot proposes the moves weekly, and CI's lint job refuses an unpinned `uses:`.
@@ -819,4 +821,5 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s1123**: a project with no `[remote_runs]` can be given a placement mode (`[placement] mode`, or `mason remote mode <m> --project P`) and then runs on nodes only; in `remote` mode its runs wait for a node and never run on the coordinator.
 - **s1127**: Exit script s724 now expects the workflow line `mason doctor` prints today, and the causes of the s723 and s727 failures are recorded as races in those scripts.
 - **s1138**: Exit scripts s723 and s727 no longer race the daemon: s723 waits for the run lookup, and s727 sets its held task to local while the task ahead of it cannot land.
+- **s1149**: `pages/deploy` fails because GitHub Pages is not enabled for the repository with GitHub Actions as its source, which is an owner setting, so no code changed and the check stays red until the owner enables it.
 <!-- status:end -->
