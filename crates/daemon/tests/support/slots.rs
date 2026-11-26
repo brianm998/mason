@@ -16,15 +16,12 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
-use std::thread::ThreadId;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 /// One held slot; dropping it releases the lock and this process's claim on it.
 pub struct Held {
     dir: PathBuf,
-    /// The thread that took it.
-    by: ThreadId,
     _lock: Flock<File>,
 }
 
@@ -32,9 +29,7 @@ impl Drop for Held {
     fn drop(&mut self) {
         let mut st = state();
         let s = entry(&mut st, &self.dir);
-        if let Some(i) = s.holders.iter().position(|t| *t == self.by) {
-            s.holders.swap_remove(i);
-        }
+        s.own = s.own.saturating_sub(1);
         drop(st);
         leave(&self.dir);
     }
@@ -43,8 +38,8 @@ impl Drop for Held {
 /// This process's standing in one slot directory.
 #[derive(Default)]
 struct DirState {
-    /// The slots this process holds: one entry each, the thread that took it.
-    holders: Vec<ThreadId>,
+    /// Slots this process holds.
+    own: usize,
     /// Held slots, waiting `take`s and `Presence` guards. The presence lock is held while
     /// this is above zero.
     users: usize,
@@ -181,19 +176,17 @@ pub fn try_take(dir: &Path, limit: usize) -> Option<Held> {
     let procs = present(dir);
     let mut st = state();
     let s = entry(&mut st, dir);
-    let lock = if s.holders.len() < share(limit, procs) {
+    let lock = if s.own < share(limit, procs) {
         lock_free_slot(dir, limit)
     } else {
         None
     };
     match lock {
         Some(lock) => {
-            let by = std::thread::current().id();
-            s.holders.push(by);
+            s.own += 1;
             // The `enter` above stays counted for as long as the slot is held.
             Some(Held {
                 dir: dir.to_path_buf(),
-                by,
                 _lock: lock,
             })
         }
@@ -224,16 +217,9 @@ fn lock_free_slot(dir: &Path, limit: usize) -> Option<Flock<File>> {
 }
 
 /// Wait up to `patience` for a slot, counted as present the whole time so the processes
-/// holding slots leave this one its share. `None` after that, and the caller goes ahead.
-///
-/// A thread that already holds a slot does not wait at all for another: a test that holds
-/// one world and makes another would wait on the tests doing the same, every one of them
-/// for the whole of `patience`, while all the tests behind them queued.
+/// holding slots leave this one its share. `None` after that: a test that holds one world
+/// and makes another could wait for ever if every slot were held that way, so it goes ahead.
 pub fn take(dir: &Path, limit: usize, patience: Duration) -> Option<Held> {
-    let me = std::thread::current().id();
-    if entry(&mut state(), dir).holders.contains(&me) {
-        return try_take(dir, limit);
-    }
     let _waiting = join(dir);
     let end = Instant::now() + patience;
     loop {
@@ -245,6 +231,31 @@ pub fn take(dir: &Path, limit: usize, patience: Duration) -> Option<Held> {
         }
         std::thread::sleep(Duration::from_millis(250));
     }
+}
+
+thread_local! {
+    /// Cloned into every [`Claim`] this thread makes, so its count says whether one lives.
+    static CLAIMING: Arc<()> = Arc::new(());
+}
+
+/// One scratch world's claim: a slot, or none when it went ahead without one.
+pub struct Claim {
+    pub held: Option<Held>,
+    _mark: Arc<()>,
+}
+
+/// [`take`] for a thread's first live claim. A thread (a test) that already has one takes a
+/// free slot or goes ahead at once: waiting could not end any other way if every slot were
+/// held by tests wanting another, and the machine ends up no more loaded than after the wait.
+pub fn claim(dir: &Path, limit: usize, patience: Duration) -> Claim {
+    let mark = CLAIMING.with(Arc::clone);
+    // The thread's own reference and `mark`; any more belong to live claims.
+    let held = if Arc::strong_count(&mark) > 2 {
+        try_take(dir, limit)
+    } else {
+        take(dir, limit, patience)
+    };
+    Claim { held, _mark: mark }
 }
 
 /// How many of the `limit` slots in `dir` are held right now, by anybody.
