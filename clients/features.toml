@@ -726,7 +726,7 @@ android = "todo"
 android_reason = "Not in the first Android phone app (stage 469): the Android module's home does not draw the Active models header yet"
 
 [feature.settings-placement]
-description = "Settings has a Where runs go section after Issue tracker: the global placement mode and the selected project's, each a choice of local, remote, favor-local and favor-remote that saves through POST /remote. It shows why the project runs where it does (set for this project, follows the global mode, or always runs here because the project file has no [remote_runs], where the choice is disabled), the runner it uses, any problem, who changed the global mode and when, and a line on what the four modes mean (#891)"
+description = "Settings has a Where runs go section after Issue tracker: the global placement mode and the selected project's, each a choice of local, remote, favor-local and favor-remote that saves through POST /remote. It shows why the project runs where it does (set for this project, follows the global mode, or always runs here because the project file has no [remote_runs]; such a project can still be given a mode, and then shows as nodes only with no GitHub setup, #1150), the runner it uses, any problem, who changed the global mode and when, and a line on what the four modes mean (#891)"
 swift = "done"
 compose = "done"
 ios = "done"

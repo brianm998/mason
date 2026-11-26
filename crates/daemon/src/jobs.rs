@@ -1131,13 +1131,20 @@ fn acquire_needs_as(
     let needs = match pooled {
         Some(n) => {
             d.broker.take_over_remote(&format!("task {}", c.task.0));
-            // On the monitor's GitHub section until a pool unit is granted (#767).
-            _waiting = Some(crate::remote_runs::waiting(
-                d,
-                c.task.0,
-                label.unwrap_or("test step"),
-                &format!("#{}", c.task.0),
-            ));
+            // On the monitor's GitHub section until a pool unit is granted (#767); a node's unit
+            // is not GitHub's.
+            _waiting = n
+                .amounts
+                .keys()
+                .any(|k| mason_scheduler::is_gha_pool(k))
+                .then(|| {
+                    crate::remote_runs::waiting(
+                        d,
+                        c.task.0,
+                        label.unwrap_or("test step"),
+                        &format!("#{}", c.task.0),
+                    )
+                });
             n
         }
         None => needs,
@@ -3441,10 +3448,11 @@ impl CheckSlots {
         uses: &std::collections::BTreeMap<String, u32>,
         expected_ms: Option<u64>,
     ) -> Result<Option<crate::sched::Lease>, crate::sched::Cancelled> {
-        let (queue, pool) = match want {
-            Want::Nothing => (false, None),
-            Want::Slots => (true, None),
-            Want::Pool(u) => (true, Some(u)),
+        let (queue, pool, node) = match want {
+            Want::Nothing => (false, None, None),
+            Want::Slots => (true, None, None),
+            Want::Pool(u) => (true, Some(u), None),
+            Want::Node(u) => (true, None, Some(u)),
         };
         let held = self.lease.lock().unwrap_or_else(|e| e.into_inner()).take();
         if held.is_some() {
@@ -3462,15 +3470,20 @@ impl CheckSlots {
         let pooled: std::collections::BTreeMap<String, u32>;
         // A check bound for GitHub asks for 1 to N runner units and splits into what it is given.
         let flexible = pool.is_some();
-        let uses = match pool {
-            Some(units) => {
+        let uses = match (pool, node) {
+            (Some(units), _) => {
                 pooled = units;
                 self.d
                     .broker
                     .take_over_remote_where(&|k| run_of_prefix(k, run_prefix));
                 &pooled
             }
-            None => uses,
+            // Bound for a node: its one unit there, none of this machine's slots.
+            (None, Some(units)) => {
+                pooled = units;
+                &pooled
+            }
+            (None, None) => uses,
         };
         for name in uses.keys() {
             self.d
@@ -3508,22 +3521,44 @@ impl CheckSlots {
 }
 
 /// What a check's phase asks the broker for before it runs (#818).
-pub(crate) enum Want {
+pub enum Want {
     /// Attaches to a run of the same tree already out: nothing.
     Nothing,
     /// Runs here: the slots it uses.
     Slots,
     /// Goes to GitHub: these runner units, and no slot of this machine.
     Pool(std::collections::BTreeMap<String, u32>),
+    /// Goes to a node: that node's unit, and no slot of this machine. Nothing here waits on the
+    /// `test-suite` limit or the CPU and heat holds; a run the node gives back asks for its local
+    /// slots then (`remote::fallback_lease_under`).
+    Node(std::collections::BTreeMap<String, u32>),
+}
+
+impl Want {
+    /// What the check asks the broker for when the slots it would use here are `uses`: those
+    /// slots for a run here, only runner or node units for a run that leaves this machine, and
+    /// nothing for one that attaches to a run already out.
+    pub fn asks(
+        &self,
+        uses: &std::collections::BTreeMap<String, u32>,
+    ) -> std::collections::BTreeMap<String, u32> {
+        match self {
+            Want::Nothing => Default::default(),
+            Want::Slots => uses.clone(),
+            Want::Pool(u) | Want::Node(u) => u.clone(),
+        }
+    }
 }
 
 /// What `spec` asks for: nothing if it attaches to a pending run, the runner units of its jobs
 /// if it goes to GitHub, else its local slots.
-fn want_of(d: &Arc<Daemon>, spec: &crate::hostedcheck::CheckSpec) -> Want {
+pub fn want_of(d: &Arc<Daemon>, spec: &crate::hostedcheck::CheckSpec) -> Want {
     if crate::hostedcheck::pending(d, spec) {
         Want::Nothing
     } else if let Some(u) = crate::hostedcheck::pool_units(d, spec) {
         Want::Pool(u)
+    } else if let Some(u) = crate::hostedcheck::node_units(d, spec) {
+        Want::Node(u)
     } else {
         Want::Slots
     }
