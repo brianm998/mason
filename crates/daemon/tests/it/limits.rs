@@ -478,7 +478,22 @@ fn a_hot_die_holds_further_machine_work_but_never_what_runs() {
     let (die, _, why) = b.thermal_smc();
     assert_eq!(die, Some(98.0));
     assert_eq!(why.as_deref(), Some("die 98 °C"));
-    assert_eq!(b.compilation().pending[0].reason, "thermal: die 98 °C");
+    assert_eq!(
+        b.compilation().pending[0].reason,
+        "thermal: die 98 °C, starts below 97 °C"
+    );
+    // The waiting line names the same condition, and the speed minimum is the configured one.
+    match b.lease_poll(third) {
+        LeaseState::Waiting { explain, .. } => assert!(
+            explain.starts_with(
+                "waiting: the CPU die is at 98 °C, at or over the 97 °C limit \
+                 (work starts again below 97 °C)"
+            ),
+            "{explain}"
+        ),
+        _ => panic!("it should be waiting"),
+    }
+    assert_eq!(b.snapshot()["cpu"]["thermal_min_pct"], cfg.thermal_min_pct);
     assert_eq!(b.snapshot()["cpu"]["thermal_die_c"], 98.0);
     // Cooler: it starts.
     t.set_die(80.0);
@@ -491,6 +506,10 @@ fn a_hot_die_holds_further_machine_work_but_never_what_runs() {
     let fourth = b.lease_open("cc4", &compile());
     assert!(matches!(b.lease_poll(fourth), LeaseState::Waiting { .. }));
     assert_eq!(b.thermal_smc().2.as_deref(), Some("power limited"));
+    assert_eq!(
+        b.compilation().pending[0].reason,
+        "thermal: power limited 30 s, starts when lifted"
+    );
     t.set_limited_ms(0);
     assert!(matches!(b.lease_poll(fourth), LeaseState::Granted { .. }));
     // The owner can turn the die check off while masond runs.

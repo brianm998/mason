@@ -14,8 +14,8 @@ use crate::stall::StallSource;
 use mason_core::TaskId;
 use mason_resources::{Held, Locks, Take, TakeError};
 use mason_scheduler::{
-    explain, since, CpuGate, DiskGate, Kind, Ledger, Needs, PolicyGate, Rank, StallGate, WaitCause,
-    COMPILE, GHA, GHA_MACOS,
+    explain, since, thermal_short, CpuGate, DiskGate, HeatCeiling, Kind, Ledger, Needs, PolicyGate,
+    Rank, StallGate, ThermalGate, ThermalHold, WaitCause, COMPILE, GHA, GHA_MACOS,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -1616,33 +1616,35 @@ impl Broker {
         st.thermal_die = readings.and_then(|r| r.1);
         st.thermal_limited_ms = readings.and_then(|r| r.2);
         // Hot when the speed limit is low, the die is at its maximum, or power limiting has gone
-        // on for 30 s. The scheduler's gate is a speed against a minimum, so a die or power-limit
-        // reading is carried as a minimum just above the speed; `thermal_why` has the real reason.
+        // on for 30 s. The gate carries which, so every wait names the condition that holds it.
         let hot =
             readings.and_then(|(sp, die, lim)| crate::thermal::hot(sp, die, lim, min_pct, max_c));
         let thermal = readings
             .and_then(|(sp, _, _)| sp.or(hot.map(|_| 100)))
             .filter(|_| min_pct > 0 || max_c > 0)
-            .map(|speed_pct| match hot {
-                Some(crate::thermal::Hot::Die(_) | crate::thermal::Hot::Limited(_)) => {
-                    mason_scheduler::ThermalGate {
-                        speed_pct,
-                        min_pct: speed_pct.saturating_add(1),
-                    }
-                }
-                _ => mason_scheduler::ThermalGate { speed_pct, min_pct },
+            .map(|speed_pct| ThermalGate {
+                speed_pct,
+                min_pct,
+                hold: match hot {
+                    Some(crate::thermal::Hot::Die(c)) => ThermalHold::Die { c, max_c },
+                    Some(crate::thermal::Hot::Limited(ms)) => ThermalHold::PowerLimited { ms },
+                    Some(crate::thermal::Hot::Speed(_)) | None => ThermalHold::Speed,
+                },
             });
         st.ledger.set_thermal(thermal);
         // The hard ceiling the owner's update build never ignores: 2 °C over the hold.
         let ceiling = readings
             .and_then(|r| r.1)
             .filter(|c| max_c > 0 && *c > (max_c + 2) as f32);
-        st.ledger.set_heat_ceiling(ceiling.is_some());
+        let ceiling = ceiling.map(|c| HeatCeiling {
+            die_c: c.round() as u32,
+            ceiling_c: max_c + 2,
+        });
+        st.ledger.set_heat_ceiling(ceiling);
         st.ceiling_why = ceiling.map(|c| {
             format!(
                 "update waits: die {} °C over the {} °C ceiling",
-                c.round() as u32,
-                max_c + 2
+                c.die_c, c.ceiling_c
             )
         });
         st.thermal_read = thermal.map(|t| (t.speed_pct, t.min_pct));
@@ -3554,7 +3556,7 @@ impl Broker {
             .enumerate()
             .map(|(i, r)| {
                 let (cause, reason) = match waits.waits.get(&r.id) {
-                    Some(w) => compile_reason(w, now, limit, st.thermal_why.as_deref()),
+                    Some(w) => compile_reason(w, now, limit),
                     None => ("", "starting".to_string()),
                 };
                 CompileWaiter {
@@ -3825,12 +3827,7 @@ fn abandoned_of(st: &State, snap: &mason_scheduler::Snapshot) -> HashMap<u64, &'
 }
 
 /// Why a compile waits, as a code and a short phrase for the home page.
-fn compile_reason(
-    w: &mason_scheduler::Wait,
-    now: u64,
-    limit: u32,
-    thermal_why: Option<&str>,
-) -> (&'static str, String) {
+fn compile_reason(w: &mason_scheduler::Wait, now: u64, limit: u32) -> (&'static str, String) {
     match &w.cause {
         WaitCause::Full { .. } => ("full", format!("every slot is held ({limit} of {limit})")),
         WaitCause::Behind { .. } => (
@@ -3870,14 +3867,13 @@ fn compile_reason(
                 *max_ms as f64 / 1000.0
             ),
         ),
-        WaitCause::Thermal { speed_pct, min_pct } => (
+        WaitCause::Thermal {
+            speed_pct,
+            min_pct,
+            hold,
+        } => (
             "thermal",
-            match thermal_why {
-                Some(why) if !why.starts_with("CPU held") => format!("thermal: {why}"),
-                _ => format!(
-                    "macOS holds the CPU to {speed_pct}% of its speed for heat (work starts at {min_pct}% or more)"
-                ),
-            },
+            format!("thermal: {}", thermal_short(*speed_pct, *min_pct, *hold)),
         ),
         WaitCause::Policy { busy_pct, max_pct } => (
             "syspolicyd",
