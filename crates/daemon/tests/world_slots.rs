@@ -175,31 +175,30 @@ fn a_presence_file_nobody_holds_is_not_counted_and_is_swept() {
 }
 
 #[test]
-fn a_thread_holding_a_slot_never_waits_for_another() {
+fn a_thread_holding_a_world_takes_its_next_one_without_waiting() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().to_path_buf();
+    // On a thread of its own, so a claim that waits fails the test instead of hanging it.
     let (tx, rx) = std::sync::mpsc::channel();
-    // On a thread of its own, so a take that waited fails the test instead of hanging it.
     std::thread::spawn(move || {
-        // Far longer than this test is prepared to wait for the report.
-        let patience = std::time::Duration::from_secs(3600);
-        let first = slots::take(&path, 2, patience);
-        let second = slots::take(&path, 2, patience);
-        let third = slots::take(&path, 2, patience);
-        let got = (first.is_some(), second.is_some(), third.is_some());
-        // Dropped on another thread, they no longer count as this one's.
-        std::thread::spawn(move || drop((first, second, third)))
-            .join()
-            .unwrap();
-        let again = slots::take(&path, 2, patience).is_some();
-        let _ = tx.send((got, again));
+        let patience = std::time::Duration::from_secs(24 * 3600);
+        let first = slots::claim(&path, 1, patience);
+        let second = slots::claim(&path, 1, patience);
+        let got = (first.held.is_some(), second.held.is_some());
+        // With the first gone but the second alive, the thread still holds a world.
+        drop(first);
+        let third = slots::claim(&path, 1, patience);
+        let fourth = slots::claim(&path, 1, patience);
+        let later = (third.held.is_some(), fourth.held.is_some());
+        drop((second, third, fourth));
+        let alone = slots::claim(&path, 1, patience).held.is_some();
+        let _ = tx.send((got, later, alone));
     });
-    let (got, again) = rx
+    let seen = rx
         .recv_timeout(std::time::Duration::from_secs(120))
-        .expect("a take waited while its thread held a slot");
-    assert_eq!(got, (true, true, false), "free slots are taken, never more");
-    assert!(again);
-    assert_eq!(slots::held_count(dir.path(), 2), 0);
+        .expect("a claim waited while its thread held a world");
+    // A free slot is still taken; with none free the claim goes ahead without one.
+    assert_eq!(seen, ((true, false), (true, false), true));
 }
 
 #[test]
