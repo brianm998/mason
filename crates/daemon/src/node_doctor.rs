@@ -14,6 +14,7 @@
 //! failures is a table test; `gather` is the part that touches the machine.
 
 use crate::node_run::job_path;
+use mason_step_host::host::{check_sock_path, MAX_SOCK_PATH};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -64,6 +65,8 @@ pub enum Mdns {
 pub struct Inputs {
     pub signature: Signature,
     pub paths: Vec<(PathBuf, PathState)>,
+    /// The socket of a job's step host under the data directory (all are as long).
+    pub host_socket: PathBuf,
     pub listener_bound: bool,
     pub mdns: Mdns,
     /// `(tool, Ok(what it printed) | Err(why it did not run))`, for `cargo`, `xcode-select` and
@@ -200,6 +203,18 @@ pub fn evaluate(i: &Inputs, at_ms: u64) -> Report {
         };
         add("path", ok, true, detail);
     }
+
+    let len = i.host_socket.as_os_str().len();
+    let fits = check_sock_path(&i.host_socket);
+    add(
+        "socket path",
+        fits.is_ok(),
+        true,
+        match fits {
+            Ok(()) => format!("step host sockets fit ({len} of {MAX_SOCK_PATH} characters)"),
+            Err(e) => format!("no job can start: {e}"),
+        },
+    );
 
     add(
         "listener",
@@ -444,6 +459,11 @@ pub fn paths_of(data_dir: &Path, home: &Path, cargo_home: Option<&str>) -> Vec<P
     v
 }
 
+/// The longest socket path a job's step host can need under `data_dir`.
+pub fn longest_host_socket(data_dir: &Path) -> PathBuf {
+    crate::node_run::host_socket(data_dir, &"0".repeat(crate::node_run::HOST_KEY_LEN))
+}
+
 /// Look at the machine.
 pub fn gather(
     exe: &Path,
@@ -489,6 +509,7 @@ pub fn gather_in(
             signature_of(exe)
         },
         paths,
+        host_socket: longest_host_socket(data_dir),
         listener_bound,
         mdns,
         tools,
@@ -503,6 +524,7 @@ mod tests {
         Inputs {
             signature: Signature::Team(Some("ABCDE12345".into())),
             paths: vec![(PathBuf::from("/Users/masonnode/data"), PathState::Ok)],
+            host_socket: PathBuf::from("/Users/masonnode/data/node/hosts/0123456789abcdef/sock"),
             listener_bound: true,
             mdns: Mdns::Advertising,
             tools: vec![
@@ -618,6 +640,17 @@ mod tests {
         let mut i = good();
         i.signature = Signature::Unchecked;
         assert_eq!(problem(&i), None);
+    }
+
+    #[test]
+    fn a_socket_path_of_101_characters_is_refused_with_its_length() {
+        let mut i = good();
+        i.host_socket = PathBuf::from(format!("/{}", "a".repeat(99)));
+        assert_eq!(problem(&i), None, "100 characters fit");
+        i.host_socket = PathBuf::from(format!("/{}", "a".repeat(100)));
+        let p = problem(&i).expect("101 characters do not fit");
+        assert!(p.contains("101 characters"), "{p}");
+        assert!(p.contains(&"a".repeat(100)), "{p}");
     }
 
     #[test]

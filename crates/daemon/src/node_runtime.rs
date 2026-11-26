@@ -294,18 +294,33 @@ pub fn runtime_for(
     let sha = rt
         .current()
         .ok_or("this daemon is not running from a runtime (`mason update` first): there is nothing to give a node")?;
+    runtime_of(cfg, rt, &sha, arch)
+}
+
+/// [`runtime_for`] for the commit `sha`, which an update that has not taken over yet is about to
+/// run: a node of this machine's architecture gets `sha`'s own build, which must be complete.
+pub fn runtime_of(
+    cfg: &UpdateCfg,
+    rt: &Runtimes,
+    sha: &str,
+    arch: &str,
+) -> Result<(String, PathBuf), String> {
     let triple = triple_for(arch)
         .ok_or_else(|| format!("{arch:?} is not an architecture: arm64 or x86_64"))?;
     if cfg.sign_identity.is_none() {
         return Err("update.toml has no `sign_identity`: a node takes only a runtime signed by a team, since an ad-hoc signature drops its privacy grants at every update".into());
     }
     if arch_matches_host(arch) {
-        return Ok((sha.clone(), rt.dir(&sha)));
+        if !rt.is_ready(sha) {
+            return Err(format!("this machine's own build of {sha} is not complete"));
+        }
+        return Ok((sha.to_string(), rt.dir(sha)));
     }
-    Ok((sha.clone(), cross_build(cfg, rt, &sha, triple)?))
+    Ok((sha.to_string(), cross_build(cfg, rt, sha, triple)?))
 }
 
-fn arch_matches_host(arch: &str) -> bool {
+/// Is `arch` the architecture this machine runs?
+pub fn arch_matches_host(arch: &str) -> bool {
     matches!(
         (arch, host_arch()),
         ("arm64" | "aarch64", "arm64") | ("x86_64" | "x86-64" | "amd64", "x86_64")
@@ -480,6 +495,17 @@ pub fn package_for(
     let (sha, dir) = runtime_for(cfg, rt, arch)?;
     let files = read_dir_files(&dir)?;
     Ok((sha.clone(), pack(&sha, &files)))
+}
+
+/// [`package_for`] the commit `sha`.
+pub fn package_of(
+    cfg: &UpdateCfg,
+    rt: &Runtimes,
+    sha: &str,
+    arch: &str,
+) -> Result<Vec<u8>, String> {
+    let (sha, dir) = runtime_of(cfg, rt, sha, arch)?;
+    Ok(pack(&sha, &read_dir_files(&dir)?))
 }
 
 #[cfg(test)]
