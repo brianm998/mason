@@ -1,0 +1,14 @@
+.mason/run.json
+crates/cli/src/node.rs
+crates/daemon/src/hostedcheck.rs
+crates/daemon/src/http.rs
+crates/daemon/src/node_exec.rs
+crates/daemon/src/node_run.rs
+crates/daemon/src/node_serve.rs
+crates/daemon/src/nodes.rs
+crates/daemon/src/remote.rs
+crates/daemon/tests/nodes.rs
+docs/decisions/1149-node-base-failures.md
+docs/nodes.md
+docs/stages/s1160.md
+scripts/exit/s1160.sh
