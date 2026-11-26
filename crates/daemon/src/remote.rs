@@ -2741,6 +2741,19 @@ pub fn jobs_of(suite: Option<&mason_testing::Suite>, cmd: &str) -> u32 {
         .map_or(1, |s| s.shards)
 }
 
+/// The units a run placed on node `nid` holds: one of that node's resource and nothing of this
+/// machine. A nodes-only run in `remote` mode carries a [`crate::place::wait_nid`] id; it holds
+/// the unit of the node chosen now, and nothing while none has room yet (it waits in the node
+/// executor, not for a slot here).
+pub fn node_units_of(nid: &str) -> std::collections::BTreeMap<String, u32> {
+    let real = crate::place::wait_for(nid).unwrap_or(nid);
+    if real.is_empty() {
+        Default::default()
+    } else {
+        std::collections::BTreeMap::from([(crate::nodes::resource(real), 1)])
+    }
+}
+
 /// Where a run goes and what it holds there (#818).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RunPlace {
@@ -2750,6 +2763,15 @@ pub enum RunPlace {
     /// many `gha-macos` when the runner is macOS).
     GitHub {
         runs_on: String,
+        units: std::collections::BTreeMap<String, u32>,
+    },
+    /// On a node: it takes no slot of this machine either, and one unit of that node's resource
+    /// ([`crate::nodes::resource`]). It waits for nothing of this Mac, so neither the slot
+    /// limits nor the CPU and heat holds apply to it. When the node cannot take it, it runs
+    /// here and asks for this machine's slots then (the fallback lease).
+    Node {
+        nid: String,
+        name: String,
         units: std::collections::BTreeMap<String, u32>,
     },
 }
@@ -2775,9 +2797,13 @@ pub fn run_place(
             RunPlace::GitHub { runs_on, units }
         }
         Executor::Local => RunPlace::Local,
-        // Nothing produces a node yet (the multi-machine plan's phase 2); until a node run has
-        // its own units, it is placed as a run here would be.
-        Executor::Node { .. } => RunPlace::Local,
+        // A run placed on a node holds one unit of that node and nothing of this machine. It
+        // was placed as a run here until now, so a check or step bound for a node queued for
+        // this Mac's `test-suite` slot (and its heat hold) before it ever went out.
+        Executor::Node { nid, name } => {
+            let units = node_units_of(&nid);
+            RunPlace::Node { nid, name, units }
+        }
     }
 }
 
@@ -2800,6 +2826,7 @@ pub fn suite_pool_needs(
             let n = with_units(needs, units);
             Some(if flexible { n.flexible() } else { n })
         }
+        RunPlace::Node { units, .. } => Some(with_units(needs, units)),
         RunPlace::Local => None,
     }
 }
@@ -3087,9 +3114,7 @@ pub fn pool_needs(
         Executor::GitHub { runs_on } => units_for(&runs_on, 1),
         // A step bound for a node holds one unit of that node's resource and nothing of this
         // machine, whichever node the run then finds room on.
-        Executor::Node { nid, .. } => {
-            std::collections::BTreeMap::from([(crate::nodes::resource(&nid), 1)])
-        }
+        Executor::Node { nid, .. } => node_units_of(&nid),
         Executor::Local => return None,
     };
     Some(with_units(needs, units))
