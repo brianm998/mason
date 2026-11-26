@@ -48,7 +48,9 @@ fn submit() -> Value {
     json!({"call": {"tool": "submit_change", "args": {"summary": "round", "head": "$HEAD"}}})
 }
 
-fn run(files: &[(&str, &str)]) -> (String, String, String) {
+/// The prompts of both develop rounds and of the review, and the task's reserved numbers
+/// as rows (kind, number) once it has landed.
+fn run(files: &[(&str, &str)]) -> (String, String, String, Vec<(String, u32)>) {
     let rec = tempfile::tempdir().unwrap();
     let r = rec.path();
     let s = Scratch::new(
@@ -73,12 +75,19 @@ fn run(files: &[(&str, &str)]) -> (String, String, String) {
     let t = file_task(&d, "Needs a security review");
     wait_state(&d, t, State::Landed, 600);
     let get = |n: &str| std::fs::read_to_string(r.join(format!("{n}.txt"))).unwrap_or_default();
-    (get("dev1"), get("dev2"), get("review"))
+    let numbers = d
+        .store
+        .reservations(t.0)
+        .unwrap()
+        .into_iter()
+        .map(|r| (r.kind, r.number))
+        .collect();
+    (get("dev1"), get("dev2"), get("review"), numbers)
 }
 
 #[test]
 fn a_custom_step_and_a_fix_round_get_their_own_prompt_files() {
-    let (dev1, dev2, review) = run(&[
+    let (dev1, dev2, review, numbers) = run(&[
         (
             ".mason/prompts/security-review.md",
             "SECURITY-PACK look for secrets. {task}",
@@ -98,11 +107,26 @@ fn a_custom_step_and_a_fix_round_get_their_own_prompt_files() {
         !dev2.contains("You are developing"),
         "built-in text replaced: {dev2}"
     );
+    // Task 1114: a pack's review prompt names the task's reserved files too, and the
+    // review reserved nothing beyond the one number of each kind.
+    let mut kinds: Vec<&str> = numbers.iter().map(|(k, _)| k.as_str()).collect();
+    kinds.sort_unstable();
+    assert_eq!(kinds, ["decision", "exit"], "{numbers:?}");
+    for (kind, n) in &numbers {
+        let path = if kind == "exit" {
+            format!("stage note docs/stages/s{n:02}.md")
+        } else {
+            format!("decision record docs/decisions/{n:04}-<slug>.md")
+        };
+        assert!(review.contains(&path), "{path} missing from {review}");
+    }
+    assert!(review.contains("not scope creep"), "{review}");
 }
 
 #[test]
 fn without_a_fix_pack_the_round_gets_the_built_in_develop_prompt() {
-    let (_, dev2, review) = run(&[(".mason/prompts/security-review.md", "SECURITY-PACK {task}")]);
+    let (_, dev2, review, _) =
+        run(&[(".mason/prompts/security-review.md", "SECURITY-PACK {task}")]);
     assert!(review.contains("SECURITY-PACK"), "{review}");
     assert!(!dev2.contains("FIX-PACK"), "{dev2}");
     assert!(dev2.contains("previous attempt failed"), "{dev2}");

@@ -387,6 +387,7 @@ fn the_fake_host_passes_the_host_kit() {
 fn the_command_ci_passes_the_build_kit() {
     let d = tempfile::tempdir().unwrap();
     let ci = CommandCi {
+        cancel: None,
         trigger: "echo run-$MASON_SHA".into(),
         status: "echo green".into(),
         cwd: d.path().into(),
@@ -394,6 +395,7 @@ fn the_command_ci_passes_the_build_kit() {
     assert!(build_kit(&ci, "mason/ci/x", "abc").is_empty());
     assert_eq!(ci.trigger("r", "abc").unwrap(), "run-abc");
     let red = CommandCi {
+        cancel: None,
         trigger: "true".into(),
         status: "printf 'red\\nunit, e2e\\n'".into(),
         cwd: d.path().into(),
@@ -408,6 +410,7 @@ fn the_command_ci_passes_the_build_kit() {
         }
     );
     let pend = CommandCi {
+        cancel: None,
         trigger: "true".into(),
         status: "echo".into(),
         cwd: d.path().into(),
@@ -1057,4 +1060,64 @@ fn a_refs_caches_are_listed_and_deleted_one_by_one() {
         "the script expected more: {:?}",
         g.http.unused()
     );
+}
+
+// ---- cancelling the runs MASON stops waiting on (task 1108) -----------------------------------
+
+#[test]
+fn cancel_takes_only_the_unfinished_runs_of_that_commit_on_that_ref() {
+    let g = inline_gh(
+        r#"[
+        {"method": "GET", "url": "/actions/runs?head_sha=abc&per_page=100", "response": {"status": 200,
+          "body": {"workflow_runs": [
+            {"id": 1, "status": "in_progress", "head_branch": "mason/ci/p-b1-0", "event": "push"},
+            {"id": 2, "status": "completed", "head_branch": "mason/ci/p-b1-0", "event": "push"},
+            {"id": 3, "status": "in_progress", "head_branch": "mason/ci/p-b2-0", "event": "push"},
+            {"id": 4, "status": "queued", "head_branch": "main", "event": "push"},
+            {"id": 5, "status": "queued", "head_branch": "mason/ci/p-b1-0", "event": "pull_request"},
+            {"id": 6, "status": "queued", "head_branch": "mason/ci/p-b1-0", "event": "workflow_dispatch"}]}}},
+        {"method": "POST", "url": "/actions/runs/1/cancel", "response": {"status": 202, "body": {}}},
+        {"method": "POST", "url": "/actions/runs/6/cancel", "response": {"status": 202, "body": {}}}
+    ]"#,
+    );
+    assert_eq!(g.gh.cancel("abc", "mason/ci/p-b1-0").unwrap(), 2);
+    assert!(g.http.unused().is_empty(), "{:?}", g.http.unused());
+    assert_eq!(g.http.requests().len(), 3);
+    // A ref that is not MASON's is not even looked at.
+    for r in ["main", "feature/x", "mason/run/p/x"] {
+        assert_eq!(g.gh.cancel("abc", r).unwrap(), 0);
+    }
+    assert_eq!(g.http.requests().len(), 3);
+}
+
+#[test]
+fn cancel_without_a_commit_finds_a_pull_requests_runs_by_its_branch() {
+    let g = inline_gh(
+        r#"[
+        {"method": "GET", "url": "/actions/runs?branch=mason/pr/p-b1-0&per_page=100", "response": {"status": 200,
+          "body": {"workflow_runs": [
+            {"id": 8, "status": "in_progress", "head_branch": "mason/pr/p-b1-0", "event": "pull_request"},
+            {"id": 9, "status": "completed", "head_branch": "mason/pr/p-b1-0", "event": "pull_request"}]}}},
+        {"method": "POST", "url": "/actions/runs/8/cancel", "response": {"status": 202, "body": {}}}
+    ]"#,
+    );
+    assert_eq!(g.gh.cancel("", "mason/pr/p-b1-0").unwrap(), 1);
+    assert!(g.http.unused().is_empty(), "{:?}", g.http.unused());
+}
+
+#[test]
+fn a_run_that_cannot_be_cancelled_is_reported_after_the_others_are() {
+    let g = inline_gh(
+        r#"[
+        {"method": "GET", "url": "/actions/runs?head_sha=abc&per_page=100", "response": {"status": 200,
+          "body": {"workflow_runs": [
+            {"id": 1, "status": "queued", "head_branch": "mason/ci/p-b1-0"},
+            {"id": 2, "status": "queued", "head_branch": "mason/ci/p-b1-0"}]}}},
+        {"method": "POST", "url": "/actions/runs/1/cancel", "response": {"status": 409, "body": {"message": "Cannot cancel"}}},
+        {"method": "POST", "url": "/actions/runs/2/cancel", "response": {"status": 202, "body": {}}}
+    ]"#,
+    );
+    let e = g.gh.cancel("abc", "mason/ci/p-b1-0").unwrap_err();
+    assert!(e.detail.starts_with("1 run(s) cancelled; run 1 "), "{e:?}");
+    assert!(g.http.unused().is_empty(), "{:?}", g.http.unused());
 }
