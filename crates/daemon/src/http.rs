@@ -1401,6 +1401,45 @@ async fn task_priority(
     Ok(Json(json!({"ok": true, "reranked": reranked})))
 }
 
+/// `mason task update-priority <id> urgent|normal` (owner only): whether a landing of the
+/// task makes the daemon's own update go at once (#1082).
+async fn task_update_priority(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<u64>,
+    Json(b): Json<Value>,
+) -> Res {
+    let who = who_of(&headers);
+    let urgent = match b["priority"].as_str().unwrap_or_default() {
+        "urgent" => true,
+        "normal" => false,
+        other => {
+            return Err(fail(
+                StatusCode::BAD_REQUEST,
+                format!("update priority is urgent or normal, not {other:?}"),
+            ))
+        }
+    };
+    let d2 = d.clone();
+    d.pool
+        .run(move || {
+            owner_only(&d2, &who, "change a task's update priority")?;
+            if !d2
+                .world()
+                .map_err(store_err)?
+                .tasks
+                .contains_key(&TaskId(id))
+            {
+                return Err(fail(StatusCode::NOT_FOUND, format!("no task #{id}")));
+            }
+            crate::update_plan::mark_task(&d2.cfg.data_dir, id, urgent)
+                .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        })
+        .await
+        .map_err(pool_err)??;
+    Ok(Json(json!({"ok": true, "urgent": urgent})))
+}
+
 /// `mason task edit` (owner only, task 989): the title and body of a task that has started or
 /// failed. The next step reads the new text; one already running keeps its prompt.
 async fn task_edit(
@@ -2136,6 +2175,8 @@ async fn update_status(Shared(d): Shared<Arc<Daemon>>) -> Res {
                 "alert": rt.alert(),
                 "channel": crate::update::UpdateCfg::load(&d2.cfg.config_dir).ok().map(|c| c.channel.name()),
                 "held_since_ms": held.map(|h| h.0), "next_window_ms": held.map(|h| h.1),
+                "plan": crate::update_plan::status_lines(&d2, now_ms()),
+                "cost_now": crate::update_plan::cost_line(&d2),
                 "phase": s.phase, "target": s.target, "error": s.error, "log": s.log,
                 // Where each paired node's update stands (`node_fleet`).
                 "nodes": crate::node_fleet::states_json(&d2),
@@ -2232,6 +2273,7 @@ async fn update_start(
         check_only: b["check"].as_bool().unwrap_or(false),
         now: b["now"].as_bool().unwrap_or(false),
         auto: b["auto"].as_bool().unwrap_or(false),
+        ..Default::default()
     };
     if matches!(
         d.update_status
@@ -4330,6 +4372,7 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/tasks/{id}/explore-anyway", post(explore_anyway))
         .route("/tasks/{id}/overrides", post(task_override))
         .route("/tasks/{id}/priority", post(task_priority))
+        .route("/tasks/{id}/update-priority", post(task_update_priority))
         .route("/tasks/{id}/edit", post(task_edit))
         .route("/tasks/{id}/run_on", post(task_run_on))
         .route("/projects/{name}/definition", get(project_definition))

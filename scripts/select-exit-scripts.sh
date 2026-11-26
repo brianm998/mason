@@ -5,7 +5,8 @@
 # A script is selected when it was added or edited, or its text names a changed path (or the changed
 # file's name when it is under scripts/), the `-p <package>` of a changed crate, or `--test <target>`
 # of a changed integration-test target, except that a changed file under crates/<c>/tests/ selects
-# only scripts naming its module stem as a whole word (s785). Docs-only changes select nothing.
+# only scripts naming its module as a test path, `<stem>::` (s785, narrowed s1089: a bare word in
+# prose selected scripts that never ran the module). Docs-only changes select nothing.
 # A changed crates/<c>/src/**/<x>.rs (or src/bin/<x>.rs) is scoped the same way (s669/s785): a
 # script must run the crate (`-p <name>`) AND name the module stem as a whole word. Crate roots
 # (lib.rs, main.rs, build.rs, Cargo.toml) select only scripts naming the path; the workspace suite
@@ -52,15 +53,16 @@ while IFS= read -r f; do
       c=${f#crates/}; c=${c%%/*}
       case "$f" in
         crates/$c/tests/*)
-          # A test file is matched by its module name only (s785): crate-wide and --test matches
-          # would select hundreds of scripts; the cargo-workspace suite covers compile breaks.
+          # A test file is matched by its module's test path only (s785, s1089): crate-wide and
+          # --test matches would select hundreds of scripts, and the bare module name also matches
+          # prose; the cargo-workspace suite covers compile breaks.
           stem=$(basename "$f" .rs)
           # A target's root (tests/<target>/main.rs) mostly gains `mod` lines for new test files,
           # which select by their own names; matching the target name (`it`, an English word) as a
           # word picked ~305 scripts. Only the path pick above applies, as for crate roots.
           case "$f" in crates/$c/tests/*/main.rs) continue ;; esac
           case "$stem" in mod) stem=$(basename "$(dirname "$f")") ;; esac
-          pick -E "(^|[^A-Za-z0-9_])$stem([^A-Za-z0-9_-]|$)"
+          pick -E "(^|[^A-Za-z0-9_])$stem::"
           continue ;;
       esac
       # Crate roots: only the path pick above applies.

@@ -18,7 +18,7 @@ without it. There is no CLA.
 
 `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
 `cargo test --workspace`, `cargo deny check`, `scripts/check-spdx.sh`,
-`scripts/check-dco.sh`, and the exit scripts in `scripts/exit/`. The full local
+`scripts/check-dco.sh`, `scripts/check-action-pins.sh`, and the exit scripts in `scripts/exit/`. The full local
 suite must stay under 10 minutes.
 
 ## Source headers
