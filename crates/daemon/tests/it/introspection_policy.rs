@@ -12,6 +12,7 @@ use mason_daemon::daemon::now_ms;
 use mason_daemon::{introspect, Daemon};
 use std::sync::Arc;
 use support::lw::*;
+use support::*;
 
 const SPLIT: &str = "[proposals.introspection]\nlow_small = \"queued\"\n";
 const LANDING: &str = "mode = \"direct\"\nwindow = \"0s\"\n";
@@ -216,4 +217,37 @@ fn the_digest_counts_only_the_projects_own_flaky_suites() {
     let text = dg.to_string();
     assert!(text.contains("own-suite::a"), "{text}");
     assert!(!text.contains("cargo-workspace::b"), "{text}");
+}
+
+/// The whole path of s22 stage 3: the analyst writes its findings, commits nothing as its task
+/// says, and submits. The findings are read and the task ends at develop.
+#[test]
+fn an_analyst_task_that_commits_nothing_files_its_good_finding_and_ends() {
+    let develop = serde_json::json!([
+        {"sh": format!(
+            "printf '%s' '{}' > {}",
+            result_json("Reviews wait for a slot"),
+            introspect::ANALYST_FILE
+        )},
+        {"call": {"tool": "submit_change", "args": {"summary": "analysed", "head": "$HEAD"}}}
+    ]);
+    let s = Scratch::new(
+        "true",
+        serde_json::json!({"steps": {"explore": [explore_turn()], "develop": [develop]}}),
+    );
+    let d = s.start();
+    let pid = d.project_id_by_name("scratch").unwrap();
+    let analyst = introspect::file_analyst_task(&d, pid).unwrap();
+    // Closed with no change counts as landed; a refused submission ends in failed instead.
+    wait_state(&d, analyst, State::Landed, 90);
+    assert_eq!(
+        d.world().unwrap().tasks[&analyst].landed,
+        Some(LandedOutcome::ClosedNoChange)
+    );
+    let rows = d.store.proposals().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        d.world().unwrap().tasks[&TaskId(rows[0].task)].title,
+        "Reviews wait for a slot"
+    );
 }
