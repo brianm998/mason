@@ -1,0 +1,15 @@
+.mason/run.json
+crates/core/src/full_test.rs
+crates/daemon/src/landing.rs
+crates/daemon/src/numbers.rs
+crates/daemon/tests/it/landing.rs
+crates/daemon/tests/support/lw.rs
+crates/landing/src/batch.rs
+docs/DESIGN.md
+docs/decisions/1102-no-readme-status-block.md
+docs/stages/s1113.md
+scripts/check-status.sh
+scripts/exit/s1113.sh
+scripts/exit/s127.sh
+scripts/exit/s43.sh
+scripts/gen-status.sh
