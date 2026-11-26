@@ -1,0 +1,10 @@
+.mason/run.json
+crates/daemon/src/jobs.rs
+crates/daemon/src/landing.rs
+crates/daemon/src/remote.rs
+crates/daemon/src/sched.rs
+crates/daemon/src/suites.rs
+docs/decisions/1110-remote-runs-wait-again-in-place.md
+docs/stages/s1121.md
+scripts/exit/s1121.sh
+scripts/exit/s759.sh
