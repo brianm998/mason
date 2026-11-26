@@ -1002,14 +1002,7 @@ impl Daemon {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .record(&s.info.id, Instant::now());
-                if let Ok(mut c) = mason_step_host::client::HostClient::connect(
-                    &s.info.sock,
-                    mason_step_host::protocol::PREVIOUS,
-                    mason_step_host::protocol::CURRENT,
-                    "daemon",
-                ) {
-                    let _ = c.stop(1000);
-                }
+                mason_step_host::client::stop_or_reap(&s.info.dir, 1000, "daemon");
             }
         }
     }

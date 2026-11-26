@@ -101,8 +101,12 @@ pub struct NodeState {
     pub doctor: Mutex<Option<crate::node_doctor::Report>>,
     /// What mDNS did when the listener started.
     pub mdns: Mutex<crate::node_doctor::Mdns>,
-    /// A runtime installed and waiting for the running jobs to end before this daemon takes over.
+    /// A runtime installed that this daemon is about to become. Running jobs do not hold it up:
+    /// their commands run under step hosts that the new daemon finds again, as after any restart.
     pub pending_runtime: Mutex<Option<String>>,
+    /// When the last takeover failed to start the new runtime (0: none did). The node serves
+    /// under the runtime it has meanwhile, and tries again a minute later.
+    pub takeover_failed_ms: std::sync::atomic::AtomicU64,
 }
 
 impl NodeState {
@@ -117,6 +121,7 @@ impl NodeState {
             doctor: Mutex::new(None),
             mdns: Mutex::new(crate::node_doctor::Mdns::Off),
             pending_runtime: Mutex::new(None),
+            takeover_failed_ms: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -367,7 +372,7 @@ pub struct Readings {
     pub compile_free: Option<u32>,
     pub disk_free_gb: Option<u64>,
     /// Why the node holds off, apart from its owner's wishes: `mason node doctor` found something
-    /// it cannot work with, or a runtime is installed and the node waits for its jobs to end.
+    /// it cannot work with, or a runtime is installed and the node is taking over (seconds; its jobs carry on).
     pub held: Option<String>,
 }
 
@@ -570,28 +575,49 @@ pub fn measures_machine(d: &Daemon) -> bool {
     d.cfg.cpu.is_none() && std::env::var_os("MASON_CPU_FILE").is_none()
 }
 
+/// How long after a takeover that did not start the new runtime the node tries again.
+const TAKEOVER_RETRY_MS: u64 = 60_000;
+
+/// What the takeover to `sha` is doing, in words. Running jobs are not waited for; only those
+/// still being set up are. Pure.
+pub fn takeover_note(sha: &str, jobs_running: u32, settling: u32) -> String {
+    let plural = |n: u32| if n == 1 { "" } else { "s" };
+    let what = if settling > 0 {
+        format!(
+            "after {settling} job{} finish{} starting",
+            plural(settling),
+            if settling == 1 { "es" } else { "" }
+        )
+    } else if jobs_running > 0 {
+        format!(
+            "taking over now; {jobs_running} running job{} carr{} on",
+            plural(jobs_running),
+            if jobs_running == 1 { "ies" } else { "y" }
+        )
+    } else {
+        "taking over now".to_string()
+    };
+    format!("updating to runtime {}: {what}", &sha[..sha.len().min(10)])
+}
+
 /// Why the node holds off apart from its owner's wishes: what `mason node doctor` found, or a
-/// runtime waiting for the jobs to end so that the daemon can take over.
+/// runtime that is about to take over. The hold lasts seconds (jobs keep running through the
+/// takeover), and not at all after a takeover that failed: the node then serves as it was.
 fn held_now(d: &Daemon, jobs_running: u32) -> Option<String> {
+    let failed = d
+        .node
+        .takeover_failed_ms
+        .load(std::sync::atomic::Ordering::SeqCst)
+        != 0;
     if let Some(sha) = d
         .node
         .pending_runtime
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone()
+        .filter(|_| !failed)
     {
-        return Some(format!(
-            "updating to runtime {}: {}",
-            &sha[..sha.len().min(10)],
-            if jobs_running == 0 {
-                "taking over now".to_string()
-            } else {
-                format!(
-                    "waiting for {jobs_running} job{} to end",
-                    if jobs_running == 1 { "" } else { "s" }
-                )
-            }
-        ));
+        return Some(takeover_note(&sha, jobs_running, d.node.jobs.settling()));
     }
     d.node
         .doctor
@@ -696,7 +722,7 @@ pub fn status_value(d: &Daemon, s: &NodeSettings, coord: Option<&str>) -> Value 
         "settings": s.to_json(),
         "runtime_sha": d.cfg.runtime_sha,
         "runtimes": installed_runtimes(&d.cfg.data_dir),
-        // A runtime that arrived and waits for the jobs to end (a display; not part of the contract).
+        // A runtime that arrived and is taking over (a display; not part of the contract).
         "pending_runtime": d.node.pending_runtime.lock().unwrap_or_else(|e| e.into_inner()).clone(),
         "doctor": d.node.doctor.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|r| r.to_json()),
     })
@@ -909,6 +935,8 @@ pub fn router(d: Arc<Daemon>) -> Router {
         .route("/node/status", post(remote_status))
         .route("/node/mirror/{project}/has", get(mirror_has))
         .route("/node/mirror/{project}", put(mirror_put))
+        .route("/node/mirror/{project}/base", post(mirror_base))
+        .route("/node/mirrors", get(mirror_list))
         .route("/node/jobs", post(job_start))
         .route("/node/jobs/{id}", get(job_get).delete(job_cancel))
         .route("/node/jobs/{id}/log", get(job_log))
@@ -1134,6 +1162,50 @@ async fn mirror_put(
     }
 }
 
+/// `POST /node/mirror/{project}/base {name, sha}`: set `origin/<name>` of the project's mirror
+/// (`mason node sync`, after the bundle that carries `sha`). The answer says where it is.
+async fn mirror_base(
+    State(d): State<Arc<Daemon>>,
+    Extension(PeerFp(fp)): Extension<PeerFp>,
+    UrlPath(project): UrlPath<String>,
+    Json(b): Json<Value>,
+) -> Res {
+    project_ok(&project)?;
+    let name = b["name"].as_str().unwrap_or_default().to_string();
+    let sha = b["sha"].as_str().unwrap_or_default().to_string();
+    if name.is_empty() || !crate::node_run::valid_sha(&sha) {
+        return Err(fail(400, "`name` and a full commit id `sha` are needed"));
+    }
+    let d2 = d.clone();
+    let r = d
+        .pool
+        .run(move || {
+            let coord = coord_of(&fp);
+            let jobs = &d2.node.jobs;
+            let at = jobs.sync_base(&coord, &project, &name, &sha)?;
+            Ok::<_, String>(json!({
+                "sha": at, "path": jobs.mirror_path(&coord, &project).to_string_lossy(),
+            }))
+        })
+        .await
+        .map_err(|_| fail(503, "the daemon is busy; try again"))?;
+    r.map(Json).map_err(|e| fail(409, e))
+}
+
+/// `GET /node/mirrors`: the mirrors this node keeps for the asking coordinator.
+async fn mirror_list(
+    State(d): State<Arc<Daemon>>,
+    Extension(PeerFp(fp)): Extension<PeerFp>,
+) -> Res {
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || d2.node.jobs.mirrors(&coord_of(&fp)))
+        .await
+        .map_err(|_| fail(503, "the daemon is busy; try again"))?;
+    Ok(Json(json!({"mirrors": v})))
+}
+
 /// `POST /node/jobs {id, project, sha, run, limit_s, lease_s}`: start a job, if there is room
 /// for it now. `409 {why}` if not; `412` if the commit is not in the mirror.
 async fn job_start(
@@ -1323,7 +1395,7 @@ async fn runtime_put(
         .await
         .map_err(|_| fail(503, "the daemon is busy; try again"))?
         .map_err(|e| fail(422, e))?;
-    // Takes over after its jobs, when this daemon runs from a runtime (a development build has
+    // Takes over at once, its jobs carrying on under their step hosts, when this daemon runs from a runtime (a development build has
     // none to replace).
     let takes_over = d.cfg.runtime_sha.as_deref().is_some_and(|r| r != installed);
     if takes_over {
@@ -1368,7 +1440,10 @@ fn spawn_upkeep(d: &Arc<Daemon>) {
                 next_doctor = now_ms() + 600_000;
                 run_doctor(&d);
             }
-            // A runtime that arrived waits for the jobs to end, then this daemon becomes it.
+            // A runtime that arrived: this daemon becomes it at once. The running jobs do not
+            // wait and are not touched: their commands run under step hosts, and the new daemon
+            // takes the jobs up again (`Jobs::resume`). Only a job still being set up is waited
+            // for. A takeover that did not start is tried again after a minute.
             let pending = d
                 .node
                 .pending_runtime
@@ -1376,14 +1451,18 @@ fn spawn_upkeep(d: &Arc<Daemon>) {
                 .unwrap_or_else(|e| e.into_inner())
                 .clone();
             if let Some(sha) = pending {
-                if d.node.jobs.running() == 0 {
-                    *d.node
-                        .pending_runtime
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner()) = None;
-                    tracing::info!(runtime = %sha, "taking over the runtime a coordinator sent");
+                let failed = d
+                    .node
+                    .takeover_failed_ms
+                    .load(std::sync::atomic::Ordering::SeqCst);
+                let due = failed == 0 || now_ms().saturating_sub(failed) >= TAKEOVER_RETRY_MS;
+                if due && d.node.jobs.settling() == 0 {
+                    tracing::info!(runtime = %sha, jobs = d.node.jobs.running(), "taking over the runtime a coordinator sent");
                     // Returns only if it could not.
                     let _ = crate::update::take_over(&d, &sha);
+                    d.node
+                        .takeover_failed_ms
+                        .store(now_ms(), std::sync::atomic::Ordering::SeqCst);
                 }
             }
             d.node.jobs.tick(now_ms());
@@ -1505,6 +1584,30 @@ pub async fn jobs(State(d): State<Arc<Daemon>>) -> Res {
 
 #[cfg(test)]
 mod tests {
+    /// Running jobs are never a reason to wait; only a job still being set up is, and the note
+    /// says which it is.
+    #[test]
+    fn the_takeover_note_does_not_wait_for_running_jobs() {
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        assert_eq!(
+            takeover_note(sha, 0, 0),
+            "updating to runtime 0123456789: taking over now"
+        );
+        assert_eq!(
+            takeover_note(sha, 9, 0),
+            "updating to runtime 0123456789: taking over now; 9 running jobs carry on"
+        );
+        assert_eq!(
+            takeover_note(sha, 1, 0),
+            "updating to runtime 0123456789: taking over now; 1 running job carries on"
+        );
+        assert_eq!(
+            takeover_note(sha, 3, 1),
+            "updating to runtime 0123456789: after 1 job finishes starting"
+        );
+        assert!(!takeover_note(sha, 9, 2).contains("waiting for 9"));
+    }
+
     use super::*;
 
     fn ok() -> Readings {

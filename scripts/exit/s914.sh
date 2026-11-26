@@ -12,12 +12,13 @@ for n in s09 s40 s422 s546 s669 s777; do
     echo "s914: $n ok"
   else
     rc=$?
-    bad="$bad $n"
+    bad="$bad $n (exit $rc)"
     report="$report
 == $n exit $rc, last 12 lines:
 $(tail -12 "$log" | cut -c1-200)"
   fi
   rm -f "$log"
 done
-if [ -n "$bad" ]; then echo "s914: failed:$bad$report" >&2; exit 1; fi
+# $bad carries each exit code; "FAILED" makes this line the cause run-exit-scripts.sh reports.
+if [ -n "$bad" ]; then echo "FAILED: s914:$bad$report" >&2; exit 1; fi
 echo "s914 OK"
