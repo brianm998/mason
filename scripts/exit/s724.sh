@@ -56,5 +56,5 @@ g show mason/setup-remote:.github/workflows/mason-run.yml | grep -q 'toolchain: 
 echo "== 3. doctor against the setup branch"
 out=$(m doctor 2>&1 || true)
 echo "$out" | grep "project scratchsetup:" | head -5
-echo "$out" | grep -q "project scratchsetup: mason-run.yml on mason/setup-remote runs on .mason/run/\*\*., and no other workflow does"
+echo "$out" | grep -qF 'project scratchsetup: mason-run.yml on mason/setup-remote accepts `workflow_dispatch` and does not run on pushes to `mason/run/**`, and no other workflow does'
 echo "s724: ok"
