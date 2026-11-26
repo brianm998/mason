@@ -218,3 +218,31 @@ fn the_wait_for_a_world_slot_is_minutes_not_ten() {
     assert!(p >= std::time::Duration::from_secs(30), "{p:?}");
     assert!(p <= std::time::Duration::from_secs(180), "{p:?}");
 }
+
+/// Run as a child of `a_passing_tests_world_wait_reaches_the_log`.
+#[test]
+fn world_wait_child() {
+    if std::env::var_os("MASON_WAIT_CHILD").is_none() {
+        return;
+    }
+    support::report_world_wait(1234, "some::test");
+}
+
+/// The wait line must be in the log of a test that passes, with libtest's output capture on (as
+/// it is under `cargo test`): `eprintln!` was swallowed there, so the recorded times kept the
+/// waits.
+#[test]
+fn a_passing_tests_world_wait_reaches_the_log() {
+    let out = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "world_wait_child", "--test-threads=1"])
+        .env("MASON_WAIT_CHILD", "1")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.lines().any(|l| l == "mason-world-wait 1234 some::test"),
+        "stderr: {err}\nstdout: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}

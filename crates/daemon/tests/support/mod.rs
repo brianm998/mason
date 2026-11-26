@@ -104,10 +104,22 @@ impl Slot {
         let ms = t.elapsed().as_millis();
         if ms >= 50 {
             let me = std::thread::current();
-            eprintln!("mason-world-wait {ms} {}", me.name().unwrap_or("?"));
+            report_world_wait(ms, me.name().unwrap_or("?"));
         }
         Slot(claim)
     }
+}
+
+/// Say, in the run's log, that test `name` waited `ms` for a world slot.
+///
+/// This writes to the process's stderr itself. `eprintln!` is captured by libtest for the
+/// running test and shown only if it fails, so for a passing test (every one that matters here)
+/// the line never reached the log and the parser (`mason-testing`'s `subtract_world_waits`)
+/// never saw it: the recorded time of a test that waited 600 s stayed 600 s.
+#[cfg(unix)]
+pub fn report_world_wait(ms: u128, name: &str) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr(), "mason-world-wait {ms} {name}");
 }
 
 /// Windows has no flock-based slots; the daemon tests only build there, never run.

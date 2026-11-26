@@ -357,11 +357,7 @@ fn record_time(who: &Who, suite: &str, phase: &str, ran: &Ran) {
 /// Record each test's own time from a finished run, whole or narrowed (s634). Tests whose
 /// output carried no time are left out.
 fn record_test_times(who: &Who, suite: &str, results: &Results) {
-    let times: Vec<(String, u64)> = results
-        .cases
-        .iter()
-        .filter_map(|c| c.ms.map(|ms| (c.name.clone(), ms)))
-        .collect();
+    let times = results.test_times();
     let _ = who
         .d
         .store
