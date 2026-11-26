@@ -723,13 +723,6 @@ fn node_for(d: &Arc<Daemon>, spec: &CheckSpec) -> Option<(String, String)> {
     }
 }
 
-/// Does `spec` go to a node as a nodes-only project's run (#1150)? Then it holds no slot of this
-/// machine; one that comes back takes them when it does.
-pub fn holds_nothing_here(d: &Arc<Daemon>, spec: &CheckSpec) -> bool {
-    node_for(d, spec).is_some()
-        && crate::remote::project_of(d, &spec.cwd).is_some_and(|p| crate::place::nodes_only(d, &p))
-}
-
 /// What `spec` holds when it goes to GitHub: one `gha` unit per job it starts (its shards, else
 /// one), and as many `gha-macos` on a macOS runner (#818). `None`: it runs here.
 pub fn pool_units(
@@ -742,6 +735,16 @@ pub fn pool_units(
         &runs_on,
         crate::remote::jobs_of(suite, &spec.cmd),
     ))
+}
+
+/// What `spec` holds when it goes to a node: one unit of that node, and nothing of this machine.
+/// `None`: it does not go to a node (it runs here or on GitHub).
+pub fn node_units(
+    d: &Arc<Daemon>,
+    spec: &CheckSpec,
+) -> Option<std::collections::BTreeMap<String, u32>> {
+    let (nid, _) = node_for(d, spec)?;
+    Some(crate::remote::node_units_of(&nid))
 }
 
 /// Does `spec` leave this machine, for GitHub or a node? Then it needs no local `compile` or
@@ -1056,15 +1059,20 @@ fn collect(
     }
     // Meant for GitHub but sent here (`fallback = "local"`): it skipped this machine's queue,
     // so it takes the slots it holds when placed here before it starts, under the same limits
-    // and CPU and thermal holds as any local run. Held until the command ends.
+    // and CPU and thermal holds as any local run. What the caller's lease already holds is not
+    // asked for again (#1149). Held until the command ends.
     let _fallback = if bound_remote && !dir_has_host(d, id) {
         match crate::remote::project_of(d, &spec.cwd) {
-            Some(project) => match crate::remote::fallback_lease_until(
+            Some(project) => match crate::remote::fallback_lease_under(
                 d,
                 &project,
-                spec.place.as_ref().and_then(|(t, _)| *t),
+                spec.place
+                    .as_ref()
+                    .and_then(|(t, _)| *t)
+                    .or_else(|| check_owner(id).map(|(t, _)| mason_core::TaskId(t))),
                 &spec.holds,
                 &format!("{} (no GitHub runner, run here)", spec.label),
+                grant,
                 // A skip ends the wait for this machine's slots too (#873).
                 &|| spec.stop.as_ref().is_some_and(|f| f().is_some()),
             ) {
