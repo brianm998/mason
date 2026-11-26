@@ -898,7 +898,7 @@ message ActiveModel {
   ModelUse model_use = 6;
   // working (holds its llm slot), waiting_check, or waiting_slot. Empty from an older daemon.
   string state = 7;
-  // For waiting_check: `github` or `here`.
+  // For waiting_check: `github`, `node:<name>` or `here`.
   string place = 8;
   // For a check on GitHub: the runner label, and the run's link once GitHub has made it.
   string runs_on = 9;
@@ -938,6 +938,34 @@ message RemoteSummary {
   repeated RemoteRun runs = 6;
 }
 
+// One run in flight on a host (#1155).
+message HostRun {
+  // The task it is for, as the sidebar shows it; unset for a run no task owns.
+  TaskRow task = 1;
+  // agent (a step's LLM session), check, suite, batch or debt.
+  string kind = 2;
+  // The suite or check; for an agent, the step.
+  string name = 3;
+  // `local`, `node:<name>` or `github:<runs_on>`.
+  string host = 4;
+  // When it started, in daemon time (0: not known).
+  uint64 since_ms = 5;
+  // The run's page (a GitHub run); empty when there is none.
+  string url = 6;
+}
+
+// A host that runs work, and what runs on it now. Every configured host is sent, idle or not.
+message HostView {
+  // local, node or github.
+  string kind = 1;
+  // "this Mac", the node's name, or "GitHub".
+  string name = 2;
+  // What it is doing, in one line: this Mac's holds and slots, a node's accepting, off, absent
+  // or full, GitHub's runner pools.
+  string status = 3;
+  repeated HostRun runs = 4;
+}
+
 message HomeView {
   string status = 1;
   repeated AttentionItem attention = 2;
@@ -966,6 +994,9 @@ message HomeView {
   Placement placement = 14;
   // For a home view of one project: that project's mode. Additive.
   Placement project_placement = 15;
+  // The hosts and the runs on them (#1155). In a view of one project, only its runs; the hosts
+  // are all sent. Additive; an older daemon sends none.
+  repeated HostView hosts = 16;
 }
 
 // One job of a remote run, from the Actions jobs API.
@@ -1240,6 +1271,8 @@ message TaskDetailView {
   repeated CiLink ci_links = 23;
   // Where this task's runs go and who decided it (#834). Additive.
   Placement placement = 24;
+  // The task's runs in flight now, with the host of each (#1155). Additive.
+  repeated HostRun running_on = 25;
 }
 
 // A page on the git host a client opens in the browser. `label` is exactly the text the

@@ -145,8 +145,8 @@ pub struct World<'a> {
     /// freeze (s552): ordinary work may start again as long as it is done before the machine
     /// has drained. `None`: the freeze has no bound.
     pub exclusive_max_wait: Option<u64>,
-    /// The die is over the hard ceiling (`thermal_max_c + 2`): even a hold-exempt request waits.
-    pub heat_ceiling: bool,
+    /// Set while the die is over the hard ceiling: even a hold-exempt request waits.
+    pub heat_ceiling: Option<HeatCeiling>,
 }
 
 /// The build disk has stopped answering promptly. A stall shows up as *less* CPU
@@ -170,7 +170,29 @@ pub struct PolicyGate {
     pub max_pct: u32,
 }
 
-/// The CPU is held below full speed for heat or power (`CPU_Speed_Limit` under 100). On the
+/// The die, in whole °C, over the hard ceiling that no request passes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HeatCeiling {
+    pub die_c: u32,
+    pub ceiling_c: u32,
+}
+
+/// Which thermal condition holds work, with what is needed to say when it lets go.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ThermalHold {
+    /// Only the speed limit decides: it holds while `speed_pct` is under `min_pct`.
+    #[default]
+    Speed,
+    /// The die, in whole °C, is at or over `max_c`.
+    Die { c: u32, max_c: u32 },
+    /// The SMC has power-limited the package for this long.
+    PowerLimited { ms: u64 },
+    /// The die is over the hard ceiling. Only a hold-exempt request waits with this.
+    Ceiling(HeatCeiling),
+}
+
+/// The CPU is too hot for more work: held below full speed (`CPU_Speed_Limit` under 100), at its
+/// die temperature limit, or power-limited. On the
 /// owner's iMac Pro the SMC's power-limit storms came minutes before T2 watchdog resets
 /// (2026-11-18 07:29 and 12:23), with only a third of the machine busy. Like a stall, it is only a
 /// reason to wait while machine work is running, so a hot machine with nothing of ours on it
@@ -179,8 +201,17 @@ pub struct PolicyGate {
 pub struct ThermalGate {
     /// The CPU speed limit in percent (100: not limited).
     pub speed_pct: u32,
-    /// Below this, no further machine work starts. 0 turns the gate off.
+    /// Below this, no further machine work starts. 0 turns the speed check off.
     pub min_pct: u32,
+    /// A condition other than the speed that holds work (`Speed`: none).
+    pub hold: ThermalHold,
+}
+
+impl ThermalGate {
+    /// Whether this reading keeps further machine work from starting.
+    pub fn holds(&self) -> bool {
+        (self.min_pct > 0 && self.speed_pct < self.min_pct) || self.hold != ThermalHold::Speed
+    }
 }
 
 /// The disk floor. Below it no `compile` and no LLM session is granted, even when nothing
@@ -662,20 +693,12 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
             _ => None,
         };
         let throttled = match world.thermal {
-            _ if exempt => world.heat_ceiling.then(|| {
-                world.thermal.unwrap_or(ThermalGate {
-                    speed_pct: 0,
-                    min_pct: 1,
-                })
+            _ if exempt => world.heat_ceiling.map(|c| ThermalGate {
+                speed_pct: world.thermal.map_or(100, |g| g.speed_pct),
+                min_pct: world.thermal.map_or(0, |g| g.min_pct),
+                hold: ThermalHold::Ceiling(c),
             }),
-            Some(g)
-                if g.min_pct > 0
-                    && g.speed_pct < g.min_pct
-                    && usage.machine_any
-                    && uses_machine(capacity, &needs) =>
-            {
-                Some(g)
-            }
+            Some(g) if g.holds() && usage.machine_any && uses_machine(capacity, &needs) => Some(g),
             _ => None,
         };
         // The pacing lets a started compile show in the CPU reading; with none running
@@ -738,6 +761,7 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
                 Some(WaitCause::Thermal {
                     speed_pct: g.speed_pct,
                     min_pct: g.min_pct,
+                    hold: g.hold,
                 })
             }
             (Fit::Yes, None, _) if settling.is_some() => Some(WaitCause::Settling {

@@ -9,6 +9,7 @@ use crate::daemon::{now_ms, Daemon};
 use crate::pool::PoolError;
 use axum::extract::{Path, Query, State as Shared};
 use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use mason_core::*;
@@ -172,6 +173,12 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
         v["held_by"] = crate::blockers::links_json(d, w, t);
         v["held_line"] = crate::blockers::held_line(w, t).map_or(Value::Null, |s| json!(s));
         v["places"] = json!(crate::place::seen(Some(t.id.0)));
+        let now = crate::daemon::now_ms();
+        v["running_on"] = json!(crate::views::Ctx::new(d, w)
+            .running_on(t.id.0)
+            .iter()
+            .map(|r| crate::running::run_json(r, now))
+            .collect::<Vec<_>>());
         v["run_on"] = crate::place::effective_line(d, t.id.0);
         if t.state == State::Canceled && t.cancel_keeps_branch {
             v["revive"] = json!(format!(
@@ -236,6 +243,7 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
                 "started_at": r.started_at.0,
                 "outcome": r.outcome.map(|o| format!("{o:?}").to_lowercase()),
                 "launches": crate::launchview::history(d, r.id.0).iter().map(crate::launchview::json_of).collect::<Vec<_>>(),
+                "skills": crate::skills::invoked(&d.task_dir(t.id), r.id.0),
             }))
             .collect::<Vec<_>>());
     }
@@ -298,6 +306,9 @@ async fn status(Shared(d): Shared<Arc<Daemon>>) -> Res {
                     })).collect::<Vec<_>>(),
                 })),
                 "places": crate::place::seen(None),
+                "hosts": home.hosts.iter()
+                    .map(|h| crate::running::host_json(h, crate::daemon::now_ms()))
+                    .collect::<Vec<_>>(),
                 "event_loop_stalls": stalls,
                 "pools": {"blocking": d2.pool.stats(), "views": d2.view_pool.stats()},
                 "worst_stall_ms": worst,
@@ -1982,8 +1993,96 @@ async fn overrides_remove(
     Ok(Json(json!({"removed": n})))
 }
 
+/// The client a request or a WebSocket hello names, as an intervention records it:
+/// `monitor` for the monitors' hello names, else the name itself (`cli`, `mcp`, `agent:7`)
+/// reduced to a short plain word, and `unknown` for none. It is a note of what made a
+/// change, not an identity: nothing is allowed or refused by it.
+pub(crate) fn client_marker(name: &str) -> String {
+    if name.starts_with("mason-monitor") {
+        return "monitor".into();
+    }
+    let word: String = name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'))
+        .take(40)
+        .collect();
+    // (A trailing colon would run into the one that starts what changed.)
+    let word = word.trim_end_matches(':');
+    if word.is_empty() {
+        "unknown".into()
+    } else {
+        word.into()
+    }
+}
+
+/// What a handler changed, put in its response's extensions for the intervention's detail.
+#[derive(Clone)]
+struct Changed(String);
+
+/// One pause row, as an intervention's detail names it.
+fn pause_text(p: &mason_store::PauseRow) -> String {
+    format!(
+        "#{} {} for {}, expires {}",
+        p.id,
+        p.mode,
+        if p.project.is_empty() {
+            "everything"
+        } else {
+            &p.project
+        },
+        crate::hostloss::utc_text(p.expires_at)
+    )
+}
+
+/// What a resume did: the pauses in force that it lifted, then the ids of any rows that had
+/// already expired and were only cleared away. Starts with `lifted #` only if it lifted one.
+fn lifted_text(rows: &[mason_store::PauseRow], now: u64) -> String {
+    let (live, expired): (Vec<_>, Vec<_>) = rows.iter().partition(|p| p.expires_at > now);
+    let mut text = if live.is_empty() {
+        "lifted nothing".to_string()
+    } else {
+        let each: Vec<String> = live.into_iter().map(pause_text).collect();
+        format!("lifted {}", each.join("; "))
+    };
+    if !expired.is_empty() {
+        let ids: Vec<String> = expired.iter().map(|p| format!("#{}", p.id)).collect();
+        text.push_str(&format!("; cleared expired {}", ids.join(", ")));
+    }
+    text
+}
+
+/// How long after a lift `mason pause list` and the monitors still say who did it.
+const LAST_LIFT_SHOWN_MS: u64 = 10 * 60_000;
+
+/// The newest resume that lifted a pause, if it was within the last ten minutes.
+pub(crate) struct LastLift {
+    pub at: u64,
+    pub who: String,
+    pub via: String,
+    pub what: String,
+}
+
+pub(crate) fn last_lift(d: &Daemon, now: u64) -> Option<LastLift> {
+    d.store
+        .interventions(now.saturating_sub(LAST_LIFT_SHOWN_MS))
+        .ok()?
+        .into_iter()
+        .rev()
+        .filter(|r| r.kind == "resume")
+        .find_map(|r| {
+            let (via, what) = r.detail.strip_prefix("/resume via ")?.split_once(": ")?;
+            what.starts_with("lifted #").then(|| LastLift {
+                at: r.at,
+                via: via.to_string(),
+                what: what.to_string(),
+                who: r.who.clone(),
+            })
+        })
+}
+
 /// Every successful override leaves a record, whichever client made it: the
-/// "interventions per landed task" metric counts these (Part 10).
+/// "interventions per landed task" metric counts these (Part 10). Its detail is the path and
+/// the client (`/resume via monitor`), then for a pause or a resume what changed.
 async fn record_interventions(
     Shared(d): Shared<Arc<Daemon>>,
     req: axum::extract::Request,
@@ -1991,7 +2090,7 @@ async fn record_interventions(
 ) -> axum::response::Response {
     let post = req.method() == axum::http::Method::POST;
     let path = req.uri().path().to_string();
-    let (who, reason) = {
+    let (who, reason, client) = {
         let get = |h: &axum::http::HeaderMap, name: &str| {
             h.get(name).and_then(|v| v.to_str().ok()).map(String::from)
         };
@@ -2000,15 +2099,28 @@ async fn record_interventions(
             get(h, "x-mason-as")
                 .unwrap_or_else(|| d.cfg.owner_names.first().cloned().unwrap_or_default()),
             get(h, "x-mason-reason").unwrap_or_default(),
+            client_marker(&get(h, "x-mason-client").unwrap_or_default()),
         )
     };
     let resp = next.run(req).await;
     if post && resp.status().is_success() {
         if let Some((kind, task)) = override_kind(&path) {
+            let mut detail = format!("{path} via {client}");
+            if let Some(Changed(what)) = resp.extensions().get::<Changed>() {
+                detail = format!("{detail}: {what}");
+            }
             let d2 = d.clone();
-            let _ = d.pool.spawn(move || {
-                crate::attention::intervene(&d2, kind, task.map(TaskId), &who, &path, &reason)
-            });
+            let record = move || {
+                crate::attention::intervene(&d2, kind, task.map(TaskId), &who, &detail, &reason)
+            };
+            if matches!(kind, "pause" | "resume") {
+                // Written before the answer, so a list asked for next already shows it;
+                // then the views are rebuilt with it.
+                let _ = d.pool.run(record).await;
+                d.poke();
+            } else {
+                let _ = d.pool.spawn(record);
+            }
         }
     }
     resp
@@ -3159,31 +3271,62 @@ async fn ssh_key_choose(
     }
 }
 
-async fn pause_set(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
+async fn pause_set(
+    Shared(d): Shared<Arc<Daemon>>,
+    Json(b): Json<Value>,
+) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
     let project = b["project"].as_str().unwrap_or_default().to_string();
     let mode = b["mode"].as_str().unwrap_or("all").to_string();
     let owner = b["owner"].as_str().unwrap_or_default().to_string();
     let secs = b["for_s"].as_u64().unwrap_or(0);
     let d2 = d.clone();
-    d.pool
-        .run(move || crate::attention::pause(&d2, &project, &mode, &owner, secs))
+    let made = d
+        .pool
+        .run(move || {
+            crate::attention::pause(&d2, &project, &mode, &owner, secs)?;
+            // The row just made: the newest one with these words.
+            let rows = d2.store.pauses(now_ms()).unwrap_or_default();
+            Ok::<_, String>(
+                rows.into_iter()
+                    .rev()
+                    .find(|p| p.project == project && p.mode == mode && p.owner == owner),
+            )
+        })
         .await
         .map_err(pool_err)?
         .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
-    Ok(Json(json!({"ok": true})))
+    let mut resp = Json(json!({"ok": true})).into_response();
+    if let Some(p) = made {
+        resp.extensions_mut()
+            .insert(Changed(format!("paused {}", pause_text(&p))));
+    }
+    Ok(resp)
 }
 
-async fn pause_clear(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
+async fn pause_clear(
+    Shared(d): Shared<Arc<Daemon>>,
+    Json(b): Json<Value>,
+) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
     let project = b["project"].as_str().unwrap_or_default().to_string();
     let mode = b["mode"].as_str().unwrap_or_default().to_string();
     let d2 = d.clone();
-    let n = d
+    let rows = d
         .pool
-        .run(move || crate::attention::resume(&d2, &project, &mode))
+        .run(move || {
+            // As `attention::resume`, but keeping the rows, in one write.
+            let rows = d2.store.take_pauses(&project, &mode)?;
+            // Claims that were held back can go now.
+            d2.admit();
+            d2.poke();
+            Ok::<_, mason_store::StoreError>(rows)
+        })
         .await
         .map_err(pool_err)?
-        .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
-    Ok(Json(json!({"lifted": n})))
+        .map_err(|e| fail(StatusCode::BAD_REQUEST, e.to_string()))?;
+    let mut resp = Json(json!({"lifted": rows.len()})).into_response();
+    resp.extensions_mut()
+        .insert(Changed(lifted_text(&rows, now_ms())));
+    Ok(resp)
 }
 
 fn account_actor(d: &Daemon, b: &Value) -> String {
@@ -3241,16 +3384,24 @@ async fn usage_status(Shared(d): Shared<Arc<Daemon>>) -> Res {
 
 async fn pauses_list(Shared(d): Shared<Arc<Daemon>>) -> Res {
     let d2 = d.clone();
-    let rows = d
+    let (rows, lift) = d
         .pool
-        .run(move || d2.store.pauses(now_ms()))
+        .run(move || {
+            let now = now_ms();
+            Ok::<_, mason_store::StoreError>((d2.store.pauses(now)?, last_lift(&d2, now)))
+        })
         .await
         .map_err(pool_err)?
         .map_err(store_err)?;
-    Ok(Json(json!({"pauses": rows.iter().map(|p| json!({
-        "project": p.project, "mode": p.mode, "owner": p.owner,
-        "since": p.created_at, "expires_at": p.expires_at,
-    })).collect::<Vec<_>>()})))
+    Ok(Json(json!({
+        "pauses": rows.iter().map(|p| json!({
+            "project": p.project, "mode": p.mode, "owner": p.owner,
+            "since": p.created_at, "expires_at": p.expires_at,
+        })).collect::<Vec<_>>(),
+        "last_lift": lift.map(|l| json!({
+            "at": l.at, "who": l.who, "via": l.via, "what": l.what,
+        })),
+    })))
 }
 
 async fn alerts_list(
@@ -4334,6 +4485,8 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/nodes/update", post(crate::nodes::update))
         .route("/nodes/remove", post(crate::nodes::remove))
         .route("/nodes/use", post(crate::nodes::use_nodes))
+        .route("/nodes/sync", post(crate::nodes::sync))
+        .route("/nodes/show", post(crate::nodes::show))
         .route("/lan", get(crate::lan::status))
         .route("/pair/codes", post(crate::lan::issue_code))
         .route("/devices", get(crate::lan::devices))

@@ -1259,6 +1259,30 @@ pub struct AgentCfg {
     /// The model the last round a task may get runs on (`escalate_model`; default `opus` for
     /// the Claude provider, none for the others; empty turns it off).
     pub escalate_model: Option<String>,
+    /// `[agent] user_skills = false`: the owner's user-level skills do not load in this
+    /// project's sessions (they do by default; s1153).
+    pub user_skills_off: bool,
+}
+
+/// `[agent]` of the project file.
+fn parse_user_skills_off(id: &str, doc: &DocumentMut) -> Result<bool, String> {
+    let Some(item) = doc.get("agent") else {
+        return Ok(false);
+    };
+    let table = item
+        .as_table_like()
+        .ok_or_else(|| format!("{id}: `[agent]` is a table"))?;
+    let mut off = false;
+    for (k, v) in table.iter() {
+        match (k, v.as_bool()) {
+            ("user_skills", Some(on)) => off = !on,
+            ("user_skills", None) => {
+                return Err(format!("{id}: `[agent] user_skills` is `true` or `false`"))
+            }
+            _ => return Err(format!("{id}: unknown key `[agent] {k}`")),
+        }
+    }
+    Ok(off)
 }
 
 pub fn parse_agent(id: &str, doc: &DocumentMut) -> Result<AgentCfg, String> {
@@ -1316,6 +1340,7 @@ pub fn parse_agent(id: &str, doc: &DocumentMut) -> Result<AgentCfg, String> {
         .filter(|m| !m.is_empty()),
     };
     Ok(AgentCfg {
+        user_skills_off: parse_user_skills_off(id, doc)?,
         provider,
         escalate_model,
         account,
@@ -1504,6 +1529,8 @@ pub enum CiKind {
     Command {
         trigger: String,
         status: String,
+        /// Cancels a run MASON stops waiting on; optional.
+        cancel: Option<String>,
         cwd: PathBuf,
     },
     /// Jenkins: a parameterised job taking `REF` and `SHA`.
@@ -1627,6 +1654,7 @@ fn parse_services(id: &str, doc: &DocumentMut) -> Result<ServicesCfg, String> {
             "command" => CiKind::Command {
                 trigger: need(t, "ci", "trigger")?,
                 status: need(t, "ci", "status")?,
+                cancel: get(t, "cancel"),
                 cwd: get(t, "cwd").map_or_else(|| PathBuf::from("."), PathBuf::from),
             },
             "jenkins" => CiKind::Jenkins {
@@ -2331,6 +2359,21 @@ mod tests {
         assert!(a.ladder.is_empty() && a.codex_bin.is_none());
         assert_eq!(a.max_retries, 1);
         assert_eq!(a.sandbox, mason_adapters::sandbox::SandboxKind::None);
+    }
+
+    #[test]
+    fn user_skills_load_unless_the_agent_table_turns_them_off() {
+        let off = |extra: &str| {
+            let doc: DocumentMut = extra.parse().unwrap();
+            parse_agent("p", &doc).map(|a| a.user_skills_off)
+        };
+        assert_eq!(off(""), Ok(false));
+        assert_eq!(off("[agent]\nuser_skills = true"), Ok(false));
+        assert_eq!(off("[agent]\nuser_skills = false"), Ok(true));
+        assert!(off("[agent]\nuser_skills = \"no\"").is_err());
+        assert!(off("[agent]\nuser_skils = false").is_err());
+        assert!(off("agent = 1").is_err());
+        assert!(!AgentCfg::default().user_skills_off);
     }
 
     #[test]

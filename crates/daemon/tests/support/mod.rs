@@ -80,6 +80,17 @@ pub fn world_limit() -> usize {
         })
 }
 
+/// How long a test waits for a world slot before it goes ahead without one.
+///
+/// Going ahead is what the wait always ends in when it ends badly: a test that makes two worlds
+/// cannot deadlock on its own slot, and a slot held by a leaked or hung process cannot stop the
+/// suite for good. So a long patience only delays. It was 600 s, and in a week of recorded
+/// times tests that needed one second were charged 284, 384, 601 and 602 s, 160 of the 196
+/// minutes of the workspace's slowest tests. A world is held for seconds by most tests and for
+/// a few minutes by the slowest, so two minutes outlasts an ordinary queue (the wait is fair,
+/// see [`slots`]) and still gives up quickly on a slot that is not coming free.
+pub const WORLD_PATIENCE: Duration = Duration::from_secs(120);
+
 #[cfg(unix)]
 struct Slot(#[allow(dead_code)] slots::Claim);
 
@@ -87,20 +98,28 @@ struct Slot(#[allow(dead_code)] slots::Claim);
 impl Slot {
     fn take() -> Slot {
         let t = std::time::Instant::now();
-        let claim = slots::claim(
-            &slots::shared_dir(),
-            world_limit(),
-            Duration::from_secs(600),
-        );
+        let claim = slots::claim(&slots::shared_dir(), world_limit(), WORLD_PATIENCE);
         // The wait counts in libtest's `--report-time`; say how long it was so the parser can
         // take it off (#778). The thread's name is the test's name.
         let ms = t.elapsed().as_millis();
         if ms >= 50 {
             let me = std::thread::current();
-            eprintln!("mason-world-wait {ms} {}", me.name().unwrap_or("?"));
+            report_world_wait(ms, me.name().unwrap_or("?"));
         }
         Slot(claim)
     }
+}
+
+/// Say, in the run's log, that test `name` waited `ms` for a world slot.
+///
+/// This writes to the process's stderr itself. `eprintln!` is captured by libtest for the
+/// running test and shown only if it fails, so for a passing test (every one that matters here)
+/// the line never reached the log and the parser (`mason-testing`'s `subtract_world_waits`)
+/// never saw it: the recorded time of a test that waited 600 s stayed 600 s.
+#[cfg(unix)]
+pub fn report_world_wait(ms: u128, name: &str) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr(), "mason-world-wait {ms} {name}");
 }
 
 /// Windows has no flock-based slots; the daemon tests only build there, never run.
@@ -119,7 +138,7 @@ static PROCESS_WORLD: std::sync::OnceLock<Slot> = std::sync::OnceLock::new();
 /// Take one world slot for the whole test process, once, and let every [`Scratch`] made after
 /// it share it instead of taking its own. For a binary whose tests run one at a time under a
 /// process-wide lock (so one world exists at a time): each test taking its own slot waited up
-/// to 10 minutes for it with the lock held while other binaries held every slot, and the
+/// to its whole patience ([`WORLD_PATIENCE`]) for it with the lock held while other binaries held every slot, and the
 /// waits of the tests queued behind added up. Call it with the lock held.
 pub fn hold_world_for_process() {
     PROCESS_WORLD.get_or_init(Slot::take);

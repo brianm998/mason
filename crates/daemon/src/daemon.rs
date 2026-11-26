@@ -997,6 +997,13 @@ impl Daemon {
         }
     }
 
+    /// How many step runs this daemon still has a thread for. A run's thread does its landing
+    /// follow-up (`suites::after_landing`) after the task shows as `Landed`, so zero means that
+    /// work has read the debts it will pay.
+    pub fn jobs_running(&self) -> usize {
+        self.jobs.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
     /// Stop every running step host whose id starts with `prefix`.
     pub fn stop_hosts(&self, prefix: &str) {
         let reg = mason_step_host::registry::Registry::new(self.cfg.hosts_dir());
@@ -1020,14 +1027,7 @@ impl Daemon {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .record(&s.info.id, Instant::now());
-                if let Ok(mut c) = mason_step_host::client::HostClient::connect(
-                    &s.info.sock,
-                    mason_step_host::protocol::PREVIOUS,
-                    mason_step_host::protocol::CURRENT,
-                    "daemon",
-                ) {
-                    let _ = c.stop(1000);
-                }
+                mason_step_host::client::stop_or_reap(&s.info.dir, 1000, "daemon");
             }
         }
     }

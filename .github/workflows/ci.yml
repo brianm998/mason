@@ -106,6 +106,10 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # A runner runs this one job, so its scratch-world slots are shared with nothing: allow
+      # as many worlds as cores (one per libtest thread). The default, cores/4, is 2 on a
+      # 4-vCPU runner and queued the other tests for a slot.
+      - run: echo "MASON_TEST_WORLDS=$(getconf _NPROCESSORS_ONLN)" >> "$GITHUB_ENV"
       - run: cargo test --workspace --exclude mason-daemon
         if: matrix.scope == 'rest'
       - run: bash scripts/check-daemon-shards.sh 3
@@ -125,7 +129,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        shard: [1, 2, 3, 4, 5, 6]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     runs-on: ${{ matrix.os }}
     # The full run's repeat scripts (s170, s482, s497, s636, s773) take about 60 minutes of cargo time, so the job limit is 90.
     timeout-minutes: 90
@@ -134,7 +138,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: bash scripts/run-exit-scripts.sh
         env:
-          MASON_EXIT_SHARD: "${{ matrix.shard }}/6"
+          MASON_EXIT_SHARD: "${{ matrix.shard }}/10"
           # The workspace suite has a job of its own (above); exit scripts skip re-running it.
           MASON_TESTS_ALREADY_RAN: "1"
           # The monitors have jobs of their own (below); these are the Rust jobs.
