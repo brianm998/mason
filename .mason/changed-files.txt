@@ -1,0 +1,13 @@
+.mason/run.json
+crates/adapter-api/src/contract.rs
+crates/cli/src/main.rs
+crates/daemon/src/diagnose.rs
+crates/daemon/src/http.rs
+crates/daemon/src/jobs.rs
+crates/daemon/src/lib.rs
+crates/daemon/src/prompts.rs
+crates/daemon/src/tried.rs
+crates/daemon/tests/it/prompt_packs.rs
+docs/decisions/1098-tried-notes-for-later-rounds.md
+docs/stages/s1109.md
+scripts/exit/s1109.sh
