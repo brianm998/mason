@@ -986,6 +986,7 @@ fn node_check(
     progress: Option<&CheckProgress>,
     spill: Option<String>,
     grant: &crate::remote::Grant,
+    node_failed: &mut Option<String>,
 ) -> Option<Shared> {
     use crate::remote as rm;
     let nid = match spill {
@@ -1036,9 +1037,17 @@ fn node_check(
         ) {
             Err(rm::Fail::Environmental(why)) => {
                 tracing::warn!(check = %id, "{why}; running it here instead");
+                // The result of wherever it runs next says why it left the node (#1197).
+                if crate::node_exec::is_base_failure(&why) {
+                    *node_failed = Some(why);
+                }
                 return None;
             }
-            Err(rm::Fail::Error(e)) => Err(e),
+            // A node without the job's base (#1197) is said as an outage: no verdict.
+            Err(rm::Fail::Error(e)) => Err(match rm::environmental(&e) {
+                Some(why) => format!("{OUTAGE_PREFIX}{why}"),
+                None => e,
+            }),
             // A wait for a node ends with the daemon: that is no verdict on the check.
             Ok(rm::Outcome::Stopped(rm::StopWhy::Gone)) if d.is_shutting_down() => {
                 Err("the daemon is stopping; run the check again".into())
@@ -1073,6 +1082,19 @@ pub fn is_outage(e: &str) -> bool {
     e.starts_with(OUTAGE_PREFIX)
 }
 
+/// A check's result, naming first the node failure that moved it elsewhere, if one did.
+fn with_node_failure(r: Shared, failed: Option<String>) -> Shared {
+    let Some(why) = failed else { return r };
+    match r {
+        Ok(mut o) => {
+            o.output = format!("({why})\n{}", o.output);
+            Ok(o)
+        }
+        // After the error: an outage is told by how its text starts.
+        Err(e) => Err(format!("{e}\n({why})")),
+    }
+}
+
 /// May `spec` never run on this Mac when nothing off it takes it? True for a project with a
 /// `[remote_runs]` whose mode for this check is `remote` (the task's own, else the project's,
 /// else the global one) and whose fallback is not `local`. A project without `[remote_runs]`
@@ -1099,6 +1121,19 @@ fn collect(
     progress: Option<&CheckProgress>,
     grant: &crate::remote::Grant,
 ) -> Shared {
+    let mut node_failed = None;
+    let r = collect_placed(d, spec, id, progress, grant, &mut node_failed);
+    with_node_failure(r, node_failed)
+}
+
+fn collect_placed(
+    d: &Arc<Daemon>,
+    spec: &CheckSpec,
+    id: &str,
+    progress: Option<&CheckProgress>,
+    grant: &crate::remote::Grant,
+    node_failed: &mut Option<String>,
+) -> Shared {
     let bound_remote = goes_remote(d, spec);
     // The check left the runner queue for a node's free unit while it waited: that unit is held,
     // so it runs there, whatever placement would say now that its own unit is counted as used.
@@ -1107,7 +1142,7 @@ fn collect(
     let mut failed = 0u32;
     loop {
         if since.elapsed() >= rest {
-            if let Some(r) = node_check(d, spec, id, progress, grant.node(), grant) {
+            if let Some(r) = node_check(d, spec, id, progress, grant.node(), grant, node_failed) {
                 return r;
             }
             if let Some(r) = remote_check(d, spec, id, progress, grant) {
@@ -1119,7 +1154,9 @@ fn collect(
                 let project = crate::remote::project_of(d, &spec.cwd);
                 let suite = spec.place.as_ref().map(|(_, s)| &**s);
                 if let Some(room) = project.and_then(|p| crate::nodes::best_room(d, &p, suite)) {
-                    if let Some(r) = node_check(d, spec, id, progress, Some(room.nid), grant) {
+                    if let Some(r) =
+                        node_check(d, spec, id, progress, Some(room.nid), grant, node_failed)
+                    {
                         return r;
                     }
                 }
@@ -1129,6 +1166,11 @@ fn collect(
             // again, and a GitHub that cannot take it is an outage, not a verdict.
             if !bound_remote || !stays_off_this_mac(d, spec) {
                 break;
+            }
+            // A node without the job's base is not waited for in silence (#1197): the check
+            // has no result, and says why.
+            if let Some(why) = node_failed.take() {
+                return Err(format!("{OUTAGE_PREFIX}{why}"));
             }
             if node_for(d, spec).is_none() {
                 if runs_on_github(d, spec).is_none() {

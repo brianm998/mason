@@ -909,6 +909,8 @@ pub fn router(d: Arc<Daemon>) -> Router {
         .route("/node/status", post(remote_status))
         .route("/node/mirror/{project}/has", get(mirror_has))
         .route("/node/mirror/{project}", put(mirror_put))
+        .route("/node/mirror/{project}/base", post(mirror_base))
+        .route("/node/mirrors", get(mirror_list))
         .route("/node/jobs", post(job_start))
         .route("/node/jobs/{id}", get(job_get).delete(job_cancel))
         .route("/node/jobs/{id}/log", get(job_log))
@@ -1132,6 +1134,50 @@ async fn mirror_put(
             Json(json!({"error": e, "missing": true})),
         )),
     }
+}
+
+/// `POST /node/mirror/{project}/base {name, sha}`: set `origin/<name>` of the project's mirror
+/// (`mason node sync`, after the bundle that carries `sha`). The answer says where it is.
+async fn mirror_base(
+    State(d): State<Arc<Daemon>>,
+    Extension(PeerFp(fp)): Extension<PeerFp>,
+    UrlPath(project): UrlPath<String>,
+    Json(b): Json<Value>,
+) -> Res {
+    project_ok(&project)?;
+    let name = b["name"].as_str().unwrap_or_default().to_string();
+    let sha = b["sha"].as_str().unwrap_or_default().to_string();
+    if name.is_empty() || !crate::node_run::valid_sha(&sha) {
+        return Err(fail(400, "`name` and a full commit id `sha` are needed"));
+    }
+    let d2 = d.clone();
+    let r = d
+        .pool
+        .run(move || {
+            let coord = coord_of(&fp);
+            let jobs = &d2.node.jobs;
+            let at = jobs.sync_base(&coord, &project, &name, &sha)?;
+            Ok::<_, String>(json!({
+                "sha": at, "path": jobs.mirror_path(&coord, &project).to_string_lossy(),
+            }))
+        })
+        .await
+        .map_err(|_| fail(503, "the daemon is busy; try again"))?;
+    r.map(Json).map_err(|e| fail(409, e))
+}
+
+/// `GET /node/mirrors`: the mirrors this node keeps for the asking coordinator.
+async fn mirror_list(
+    State(d): State<Arc<Daemon>>,
+    Extension(PeerFp(fp)): Extension<PeerFp>,
+) -> Res {
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || d2.node.jobs.mirrors(&coord_of(&fp)))
+        .await
+        .map_err(|_| fail(503, "the daemon is busy; try again"))?;
+    Ok(Json(json!({"mirrors": v})))
 }
 
 /// `POST /node/jobs {id, project, sha, run, limit_s, lease_s}`: start a job, if there is room

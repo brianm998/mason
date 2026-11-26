@@ -547,7 +547,7 @@ impl RoomCache {
 }
 
 /// `<remote>/<base>` when the repository has it, else the local branch.
-fn remote_base_ref(repo: &Path, remote: &str, base: &str) -> String {
+pub(crate) fn remote_base_ref(repo: &Path, remote: &str, base: &str) -> String {
     let r = format!("{remote}/{base}");
     if git::ok(repo, &["rev-parse", "--verify", "--quiet", &r]) {
         r
