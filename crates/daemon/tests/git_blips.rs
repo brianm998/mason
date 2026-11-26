@@ -24,9 +24,12 @@ static SERIAL: Mutex<()> = Mutex::new(());
 static STUB: OnceLock<Stub> = OnceLock::new();
 
 /// Installs the stub once for this process and serialises the tests (the stub and `PATH`
-/// are process-wide).
+/// are process-wide). The tests run one at a time, so they share one world slot, taken by the
+/// first of them: each taking its own, with `SERIAL` held, queued every other test behind a
+/// wait of up to 10 minutes (while other test binaries held all the slots), one after another.
 fn stub() -> (MutexGuard<'static, ()>, &'static Stub) {
     let g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    hold_world_for_process();
     let s = STUB.get_or_init(|| {
         let real = String::from_utf8(
             std::process::Command::new("sh")
