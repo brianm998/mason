@@ -31,9 +31,8 @@ use mason_definition::layers::{resolve, Resolved, RuntimeOverride};
 use mason_definition::validate::contract_kind;
 use mason_definition::{Definition, Step, StepType};
 use mason_landing::git::{self, CatchUp};
-use mason_step_host::client::{collect_to_file_observed, ClientError, HostClient};
+use mason_step_host::client::{collect_to_file_observed, ClientError};
 use mason_step_host::launcher::{spawn_host, SpawnOptions};
-use mason_step_host::protocol::{CURRENT, PREVIOUS};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -2414,7 +2413,10 @@ impl TestChecks {
                         self.phase(mason_core::checks::CheckPhase::Building);
                         self.phase(mason_core::checks::CheckPhase::Building);
                         let grant = grant_of(lease);
-                        let res = crate::hostedcheck::run(&self.slots.d, &bspec, &grant);
+                        // A run that waits again at its place (#822) waits inside this call.
+                        let res = self.remote_credited(&bspec, || {
+                            crate::hostedcheck::run(&self.slots.d, &bspec, &grant)
+                        });
                         drop(grant);
                         if matches!(&res, Ok(o) if o.stopped.is_some()) {
                             if let Some(r) = self.skipped_run(&name) {
@@ -2538,8 +2540,9 @@ impl TestChecks {
             }
             match res {
                 Ok(o) if o.passed => lines.push(format!(
-                    "{name}: passed ({})",
-                    crate::hostedcheck::where_ran(&self.slots.d, &rspec)
+                    "{name}: passed ({}){}",
+                    crate::hostedcheck::where_ran(&self.slots.d, &rspec),
+                    waited_again_note(&o.output)
                 )),
                 Ok(o) => {
                     failed = true;
@@ -3043,7 +3046,10 @@ impl TestChecks {
                 };
                 self.phase(mason_core::checks::CheckPhase::Building);
                 let grant = grant_of(lease);
-                let res = crate::hostedcheck::run(&self.slots.d, &bspec, &grant);
+                // A run that waits again at its place (#822) waits inside this call.
+                let res = self.remote_credited(&bspec, || {
+                    crate::hostedcheck::run(&self.slots.d, &bspec, &grant)
+                });
                 drop(grant);
                 if let Some(t) = ctree.as_deref() {
                     let bk = crate::cmdreuse::build_key(build);
@@ -3269,6 +3275,23 @@ const FOLDED_STOP: &str = "stopped: develop was merged into your branch while th
 /// Was this run stopped because the red-develop watch folded develop in under it?
 fn stopped_by_fold(res: &Result<crate::hostedcheck::CheckOutcome, String>) -> bool {
     matches!(res, Ok(o) if o.stopped.as_deref() == Some(FOLDED_STOP))
+}
+
+/// What a passing check's line says of a run that waited again at its place in line (#822):
+/// the retry notes lead the output, and their number is how often it waited.
+fn waited_again_note(output: &str) -> String {
+    let n = output
+        .lines()
+        .take_while(|l| l.starts_with('('))
+        .filter(|l| l.contains("waiting again at its place in line"))
+        .count();
+    match n {
+        0 => String::new(),
+        1 => "; GitHub gave no result once, so the run waited again at its place in line".into(),
+        n => format!(
+            "; GitHub gave no result {n} times, so the run waited again at its place in line each time"
+        ),
+    }
 }
 
 /// The note a check's stop hook gives (#823): `Some` once the task's open run is no longer the
@@ -4116,14 +4139,24 @@ fn agent_job(c: &Ctx) {
     };
 
     // The numbers MASON reserved for this task (a task claimed before numbers existed gets
-    // them now), stated as facts in every explore and develop prompt.
+    // them now), stated as facts in every explore and develop prompt. A review is told the
+    // ones already stored, so it does not take those files for unrequested ones; it
+    // reserves nothing.
     let prompt = if kind == StepKind::Review {
         let prompt = format!(
             "{prompt}\n\n{}",
             review_diff_block(&c.wt, &c.project.base_ref())
         );
         // Base lines the merge replaced in place are the reviewer's to settle (s395).
-        match crate::landing::replaced_for_review(c) {
+        let prompt = match crate::landing::replaced_for_review(c) {
+            Some(block) => format!("{prompt}\n\n{block}"),
+            None => prompt,
+        };
+        let numbers = c.d.world().ok().and_then(|w| {
+            let t = w.tasks.get(&c.task)?;
+            Some(crate::numbers::review_block(&c.d.numbers_of(t)))
+        });
+        match numbers.filter(|b| !b.is_empty()) {
             Some(block) => format!("{prompt}\n\n{block}"),
             None => prompt,
         }
@@ -5641,6 +5674,21 @@ fn run_command_on(
     let id = format!("t{}r{}-{suffix}{}{hsuf}", c.task.0, c.run.0, again(k));
     let hosts = c.d.cfg.hosts_dir();
     let dir = hosts.join(&id);
+    // Listed as running here until this returns (#1155).
+    let _running = crate::running::start(
+        &hosts,
+        crate::running::Run {
+            id: id.clone(),
+            project: c.project.id.clone(),
+            task: Some(c.task.0),
+            kind: crate::running::Kind::Suite,
+            name: c.step.name.clone(),
+            host: crate::running::Host::Local,
+            since_ms: mason_step_host::registry::HostInfo::read(&dir)
+                .map_or_else(|_| crate::daemon::now_ms(), |i| i.started_ms),
+            url: String::new(),
+        },
+    );
     let limit = c
         .res
         .budget
@@ -5695,7 +5743,7 @@ fn run_command_on(
     // Stop the run if it takes too long.
     let done = Arc::new(AtomicBool::new(false));
     {
-        let (done, sock, hdir) = (done.clone(), dir.join("sock"), dir.clone());
+        let (done, hdir) = (done.clone(), dir.clone());
         std::thread::spawn(move || {
             let end = Instant::now() + mason_step_host::registry::remaining_limit(limit, &hdir);
             while Instant::now() < end {
@@ -5704,9 +5752,7 @@ fn run_command_on(
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
-            if let Ok(mut h) = HostClient::connect(&sock, PREVIOUS, CURRENT, "daemon") {
-                let _ = h.stop(1000);
-            }
+            mason_step_host::client::stop_or_reap(&hdir, 1000, "daemon");
         });
     }
     let name = format!("{suffix}-r{}{}{hsuf}", c.run.0, again(k));
@@ -6762,6 +6808,22 @@ pub fn end_run_leases(d: &Arc<Daemon>, task: TaskId) {
             });
             d.broker.lease_close(l.id);
         });
+    }
+}
+
+#[cfg(test)]
+mod waited_again_tests {
+    use super::waited_again_note;
+
+    #[test]
+    fn a_passing_check_says_how_often_its_run_waited_again() {
+        let note =
+            "(no result from run 1 on GitHub (x); waiting again at its place in line (time 1))\n";
+        let two = format!("{note}{note}(ran on GitHub)\ntest a ... ok\n");
+        assert!(waited_again_note(&two).contains("2 times"));
+        assert!(waited_again_note(&format!("{note}ok\n")).contains("once"));
+        // Only the lines MASON put first count, not what the tests printed.
+        assert_eq!(waited_again_note(&format!("ok\n{note}")), "");
     }
 }
 
