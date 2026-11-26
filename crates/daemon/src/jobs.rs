@@ -3792,6 +3792,7 @@ pub(crate) fn adapter_for(
                 .unwrap_or_else(|| PathBuf::from("claude"));
             let mut a = ClaudeAdapter::new(bin, d.cfg.mcp_bin.clone(), d.cfg.agent_state_dir())
                 .with_host(host);
+            a.env_file = Some(d.cfg.config_dir.join("claude.env"));
             a.sandbox = sandbox;
             // From the base commit, never the worktree (s1153).
             a.skills = mason_adapters::skills::Skills {
