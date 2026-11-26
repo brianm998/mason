@@ -1,0 +1,13 @@
+.mason/run.json
+crates/cli/src/client.rs
+crates/cli/src/main.rs
+crates/daemon/src/http.rs
+crates/daemon/src/views.rs
+crates/daemon/src/ws.rs
+crates/daemon/tests/it/main.rs
+crates/daemon/tests/it/pause_record.rs
+crates/protocol/src/client.rs
+crates/store/src/lib.rs
+docs/decisions/1106-pause-lift-record.md
+docs/stages/s1117.md
+scripts/exit/s1117.sh
