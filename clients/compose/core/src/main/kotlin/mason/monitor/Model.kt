@@ -65,6 +65,8 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     var lastSeq by mutableStateOf(0L)
     /** Highest seq of a view update actually applied; events and stale views never move it. */
     var lastViewSeq = 0L
+    /** Whether the daemon said it is a demo, which resends every view at each new seq. */
+    var demo = false
     /** The highest sequence number of a view applied so far; an older one is dropped. */
     private val appliedViewSeq = HashMap<String, Long>()
 
@@ -1082,6 +1084,7 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
             pending = emptyMap()
             if (w.resume == ResumeKind.SNAPSHOT) { lastSeq = 0; lastViewSeq = 0; appliedViewSeq.clear() }
             daemonVersion = w.version
+            demo = w.demo
             localDaemon = w.role.isEmpty()
             // A build asked for on the connection that just went has no answer coming.
             if (!monitorAsked) updating = null

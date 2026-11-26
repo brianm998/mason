@@ -3693,6 +3693,8 @@ mod base_red;
 /// The test step. A suite that is red in a way the base has too (s246) makes the task wait; once
 /// the base is green and folded in, the step runs again from the start.
 pub fn run(c: &Ctx) {
+    // A takeover now would cut this step mid-suite (#1082).
+    let _mid_suite = crate::update_plan::test_step_started();
     let again = std::cell::Cell::new(false);
     let mut pass = 0u32;
     loop {
