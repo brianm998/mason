@@ -16,8 +16,7 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
-use std::thread::ThreadId;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 /// One held slot; dropping it releases the lock and this process's claim on it.
@@ -218,8 +217,8 @@ fn lock_free_slot(dir: &Path, limit: usize) -> Option<Flock<File>> {
 }
 
 /// Wait up to `patience` for a slot, counted as present the whole time so the processes
-/// holding slots leave this one its share. `None` after that, and the caller goes ahead
-/// rather than wait for ever.
+/// holding slots leave this one its share. `None` after that: a test that holds one world
+/// and makes another could wait for ever if every slot were held that way, so it goes ahead.
 pub fn take(dir: &Path, limit: usize, patience: Duration) -> Option<Held> {
     let _waiting = join(dir);
     let end = Instant::now() + patience;
@@ -234,43 +233,29 @@ pub fn take(dir: &Path, limit: usize, patience: Duration) -> Option<Held> {
     }
 }
 
-/// The thread of every live [`World`].
-static WORLD_THREADS: Mutex<Vec<ThreadId>> = Mutex::new(Vec::new());
-
-fn world_threads() -> MutexGuard<'static, Vec<ThreadId>> {
-    WORLD_THREADS.lock().unwrap_or_else(|e| e.into_inner())
+thread_local! {
+    /// Cloned into every [`Claim`] this thread makes, so its count says whether one lives.
+    static CLAIMING: Arc<()> = Arc::new(());
 }
 
-/// One world's claim: its slot, if it got one, and the thread that made it.
-pub struct World {
-    thread: ThreadId,
-    slot: Option<Held>,
+/// One scratch world's claim: a slot, or none when it went ahead without one.
+pub struct Claim {
+    pub held: Option<Held>,
+    _mark: Arc<()>,
 }
 
-impl World {
-    pub fn has_slot(&self) -> bool {
-        self.slot.is_some()
-    }
-}
-
-impl Drop for World {
-    fn drop(&mut self) {
-        let mut t = world_threads();
-        if let Some(i) = t.iter().position(|x| *x == self.thread) {
-            t.swap_remove(i);
-        }
-    }
-}
-
-/// [`take`] for a world. A thread that already has one takes a slot only if one is free and
-/// never waits: two tests each holding a slot and waiting for their second would hold every
-/// slot of a small machine until their patience ran out, and every other test behind them.
-pub fn take_world(dir: &Path, limit: usize, patience: Duration) -> World {
-    let thread = std::thread::current().id();
-    let nested = world_threads().contains(&thread);
-    let slot = take(dir, limit, if nested { Duration::ZERO } else { patience });
-    world_threads().push(thread);
-    World { thread, slot }
+/// [`take`] for a thread's first live claim. A thread (a test) that already has one takes a
+/// free slot or goes ahead at once: waiting could not end any other way if every slot were
+/// held by tests wanting another, and the machine ends up no more loaded than after the wait.
+pub fn claim(dir: &Path, limit: usize, patience: Duration) -> Claim {
+    let mark = CLAIMING.with(Arc::clone);
+    // The thread's own reference and `mark`; any more belong to live claims.
+    let held = if Arc::strong_count(&mark) > 2 {
+        try_take(dir, limit)
+    } else {
+        take(dir, limit, patience)
+    };
+    Claim { held, _mark: mark }
 }
 
 /// How many of the `limit` slots in `dir` are held right now, by anybody.

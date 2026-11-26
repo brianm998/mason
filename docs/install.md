@@ -71,6 +71,19 @@ git branches and machine-wide settings alone.
 
 The example workflows are in `templates/` (MIT licensed, so copying them creates no obligation).
 
+## Claude credentials (`claude.env`)
+
+Agents use the login of the `claude` CLI, unless `~/.config/mason/claude.env` (beside the other
+config files) exists. Put the token from `claude setup-token` in it and `chmod 600` it:
+
+```sh
+export CLAUDE_CODE_OAUTH_TOKEN=...
+```
+
+Only `ANTHROPIC_*` and `CLAUDE_*` lines are read, and nothing is expanded. The file is read each
+time a session starts or resumes, so a new token needs no restart. When it sets a token or an API
+key, any inherited from the daemon's environment is dropped; a project's `[agent_env]` still wins.
+
 ## Reaching the daemon away from home (Tailscale)
 
 A phone paired on the home Wi-Fi finds the daemon as `<host>.local` (mDNS), which works only on that network. To check from elsewhere, put the Mac and the phone on a private overlay network such as Tailscale. Nothing is forwarded from your router and the daemon is never on the internet.

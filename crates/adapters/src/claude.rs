@@ -32,6 +32,74 @@ const PASS: &[&str] = &[
 ];
 const PASS_PREFIX: &[&str] = &["LC_", "ANTHROPIC_", "CLAUDE_"];
 
+/// The variables that say who the agent is. When the env file sets one of them, none
+/// of them is inherited: an inherited `ANTHROPIC_API_KEY` would otherwise outrank the
+/// file's OAuth token.
+const CREDENTIALS: &[&str] = &[
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+];
+
+/// The `ANTHROPIC_*` and `CLAUDE_*` settings of an env file: `NAME=value` lines, with
+/// an optional `export` and optional quotes. Comments, empty values and other names
+/// are skipped. This is not a shell: nothing is expanded.
+fn parse_env_file(text: &str) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = vec![];
+    for line in text.lines() {
+        let line = line.trim();
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        let (k, v) = (k.trim(), v.trim());
+        if !(k.starts_with("ANTHROPIC_") || k.starts_with("CLAUDE_"))
+            || !k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            continue;
+        }
+        let quoted = ['"', '\''].into_iter().find_map(|q| {
+            let rest = v.strip_prefix(q)?;
+            rest.find(q).map(|end| &rest[..end])
+        });
+        let v = match quoted {
+            Some(v) => v,
+            None => v.split_whitespace().next().unwrap_or(""),
+        };
+        if v.is_empty() {
+            continue;
+        }
+        out.retain(|(ek, _)| ek != k);
+        out.push((k.to_string(), v.to_string()));
+    }
+    out
+}
+
+/// `parent` with the settings of the env file at `path` laid over it. No file leaves
+/// `parent` alone, so the CLI uses its own login.
+fn with_env_file(
+    mut parent: Vec<(String, String)>,
+    path: &Path,
+) -> Result<Vec<(String, String)>, AdapterError> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(parent),
+        Err(e) => {
+            return Err(AdapterError::Other(format!(
+                "cannot read {}: {e}",
+                path.display()
+            )))
+        }
+    };
+    let file = parse_env_file(&text);
+    let replaces_login = file.iter().any(|(k, _)| CREDENTIALS.contains(&k.as_str()));
+    parent.retain(|(k, _)| {
+        !(file.iter().any(|(f, _)| f == k) || replaces_login && CREDENTIALS.contains(&k.as_str()))
+    });
+    parent.extend(file);
+    Ok(parent)
+}
+
 /// The environment the agent gets: an allowlist from `parent`, then fixed
 /// hardening, then the step's own `spec.env`.
 pub fn sanitized_env(
@@ -113,6 +181,9 @@ pub struct ClaudeAdapter {
     pub state_dir: PathBuf,
     /// The environment to filter. Defaults to this process's.
     pub parent_env: Option<Vec<(String, String)>>,
+    /// A `claude.env` holding the credentials, read again for every session that
+    /// starts or resumes, so a renewed token needs no restart.
+    pub env_file: Option<PathBuf>,
     /// Run the CLI under a step host (so it survives the controller).
     pub host: Option<crate::hosted::HostLaunch>,
     /// Run the CLI under an OS sandbox (off by default).
@@ -132,6 +203,7 @@ impl ClaudeAdapter {
             mcp_bin: mcp_bin.into(),
             state_dir: state_dir.into(),
             parent_env: None,
+            env_file: None,
             host: None,
             sandbox: None,
         }
@@ -154,7 +226,11 @@ impl ClaudeAdapter {
         resume: Option<(&str, &str)>,
     ) -> Result<AgentCommand, AdapterError> {
         let sock = spec.contract.as_ref().and_then(|c| c.sock());
-        let mut env = sanitized_env(spec, self.parent(), sock.as_deref());
+        let mut parent = self.parent();
+        if let Some(f) = &self.env_file {
+            parent = with_env_file(parent, f)?;
+        }
+        let mut env = sanitized_env(spec, parent, sock.as_deref());
         // What the command guard lets a recursive `rm` reach (s1107). Set last, so a
         // project's agent_env cannot widen it.
         for (k, dir) in [
@@ -1461,6 +1537,49 @@ mod tests {
     }
 
     #[test]
+    fn the_env_file_is_parsed_without_a_shell() {
+        let text = "# comment\n#export CLAUDE_CODE_OAUTH_TOKEN=old\n\n\
+                    export CLAUDE_CODE_OAUTH_TOKEN=first\n\
+                    CLAUDE_CODE_OAUTH_TOKEN='tok' # note\n\
+                    ANTHROPIC_BASE_URL=\"http://127.0.0.1:1\"\n\
+                    ANTHROPIC_API_KEY=\nPATH=/evil\nnot a line\n";
+        let want = [
+            ("CLAUDE_CODE_OAUTH_TOKEN", "tok"),
+            ("ANTHROPIC_BASE_URL", "http://127.0.0.1:1"),
+        ];
+        assert_eq!(
+            parse_env_file(text),
+            want.map(|(k, v)| (k.to_string(), v.to_string()))
+        );
+    }
+
+    #[test]
+    fn the_env_file_is_read_for_every_session() {
+        let mut a = adapter(&[
+            ("PATH", "/usr/bin"),
+            ("ANTHROPIC_API_KEY", "inherited"),
+            ("CLAUDE_CODE_OAUTH_TOKEN", "inherited"),
+        ]);
+        let file = a
+            .state_dir
+            .with_file_name(format!("mason-claude-env-{}", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+        a.env_file = Some(file.clone());
+        let creds = |resume| {
+            let c = a.build_command(&spec(StepKind::Develop), resume).unwrap();
+            let get = |k: &str| c.env.iter().find(|(ek, _)| ek == k).map(|(_, v)| v.clone());
+            (get("CLAUDE_CODE_OAUTH_TOKEN"), get("ANTHROPIC_API_KEY"))
+        };
+        let inherited = Some("inherited".to_string());
+        assert_eq!(creds(None), (inherited.clone(), inherited), "no file");
+        for (token, resume) in [("one", None), ("two", Some(("s1", "go on")))] {
+            std::fs::write(&file, format!("export CLAUDE_CODE_OAUTH_TOKEN={token}\n")).unwrap();
+            assert_eq!(creds(resume), (Some(token.to_string()), None));
+        }
+        std::fs::remove_file(&file).unwrap();
+    }
+
+    #[test]
     fn read_only_steps_get_read_only_tools_and_no_remote_git() {
         let a = adapter(&[
             ("PATH", "/usr/bin"),
@@ -1560,7 +1679,11 @@ mod tests {
             let hook = &v["hooks"]["PreToolUse"][0];
             assert_eq!(hook["matcher"], "Bash");
             let command = hook["hooks"][0]["command"].as_str().unwrap();
-            let guard = format!("'/bin/mason{}' hook guard ||", std::env::consts::EXE_SUFFIX);
+            // Joined as `write_settings` joins it: the separator differs on Windows.
+            let mason = a
+                .mcp_bin
+                .with_file_name(format!("mason{}", std::env::consts::EXE_SUFFIX));
+            let guard = format!("'{}' hook guard ||", mason.display());
             assert!(command.starts_with(&guard), "{command}");
             assert!(command.contains("exit 2"), "{command}");
             let env = |k: &str| {

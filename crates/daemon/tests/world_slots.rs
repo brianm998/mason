@@ -175,29 +175,37 @@ fn a_presence_file_nobody_holds_is_not_counted_and_is_swept() {
 }
 
 #[test]
+fn a_thread_holding_a_world_takes_its_next_one_without_waiting() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    // On a thread of its own, so a claim that waits fails the test instead of hanging it.
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let patience = std::time::Duration::from_secs(24 * 3600);
+        let first = slots::claim(&path, 1, patience);
+        let second = slots::claim(&path, 1, patience);
+        let got = (first.held.is_some(), second.held.is_some());
+        // With the first gone but the second alive, the thread still holds a world.
+        drop(first);
+        let third = slots::claim(&path, 1, patience);
+        let fourth = slots::claim(&path, 1, patience);
+        let later = (third.held.is_some(), fourth.held.is_some());
+        drop((second, third, fourth));
+        let alone = slots::claim(&path, 1, patience).held.is_some();
+        let _ = tx.send((got, later, alone));
+    });
+    let seen = rx
+        .recv_timeout(std::time::Duration::from_secs(120))
+        .expect("a claim waited while its thread held a world");
+    // A free slot is still taken; with none free the claim goes ahead without one.
+    assert_eq!(seen, ((true, false), (true, false), true));
+}
+
+#[test]
 fn shares_round_up_so_no_slot_is_left_idle() {
     assert_eq!(slots::share(8, 1), 8);
     assert_eq!(slots::share(8, 3), 3);
     assert_eq!(slots::share(3, 2), 2);
     assert_eq!(slots::share(2, 5), 1);
     assert_eq!(slots::share(4, 0), 4);
-}
-
-/// A test that holds one world and makes another must not wait for a slot: with every slot
-/// held that way, all of them would sit out their patience. A broken version hangs here.
-#[test]
-fn a_second_world_on_a_thread_does_not_wait_for_a_slot() {
-    let dir = tempfile::tempdir().unwrap();
-    let patience = std::time::Duration::from_secs(600);
-    let first = slots::take_world(dir.path(), 1, patience);
-    assert!(first.has_slot());
-    let second = slots::take_world(dir.path(), 1, patience);
-    assert!(!second.has_slot());
-    assert_eq!(slots::held_count(dir.path(), 1), 1);
-    drop(first);
-    // A free slot is still taken, so a later world counts against the limit.
-    let third = slots::take_world(dir.path(), 1, patience);
-    assert!(third.has_slot());
-    drop((second, third));
-    assert_eq!(slots::held_count(dir.path(), 1), 0);
 }
