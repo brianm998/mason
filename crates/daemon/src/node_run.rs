@@ -110,6 +110,9 @@ pub struct Job {
     pub env: Vec<(String, String)>,
     pub limit_s: u64,
     pub lease_s: u64,
+    /// The base branch the coordinator measures from, as `(name, tip)`: the checkout gets
+    /// `origin/<name>` at `tip`. Absent from an older coordinator.
+    pub base: Option<(String, String)>,
     pub state: JobState,
     /// `build` or `run`: where the job is, or where it ended.
     pub phase: String,
@@ -135,6 +138,7 @@ impl Job {
             "build": self.build, "command": self.command, "results_file": self.results_file,
             "env": self.env.iter().map(|(k, v)| json!([k, v])).collect::<Vec<_>>(),
             "limit_s": self.limit_s, "lease_s": self.lease_s,
+            "base": self.base.as_ref().map(|(n, s)| json!({"name": n, "sha": s})),
             "state": self.state.name(), "phase": self.phase, "slot": self.slot,
             "prepared": self.prepared, "started_ms": self.started_ms, "ended_ms": self.ended_ms,
             "last_poll_ms": self.last_poll_ms, "code": self.code, "signal": self.signal,
@@ -161,6 +165,7 @@ impl Job {
                 .collect(),
             limit_s: n("limit_s"),
             lease_s: n("lease_s"),
+            base: parse_base(&v["base"]),
             state: JobState::parse(v["state"].as_str().unwrap_or("")),
             phase: s("phase").unwrap_or_default(),
             slot: n("slot") as u32,
@@ -186,6 +191,21 @@ impl Job {
             "why": self.why, "slot": self.slot,
         })
     }
+}
+
+/// `{"name": "develop", "sha": <40 hex>}` as the base of a job; anything else is no base. A name
+/// that could not be a branch is no base either (checked again with git where it is used).
+fn parse_base(v: &Value) -> Option<(String, String)> {
+    let name = v["name"].as_str()?;
+    let sha = v["sha"].as_str()?;
+    let plain = !name.is_empty()
+        && name.len() <= 200
+        && !name.starts_with('-')
+        && !name.contains("..")
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'/'));
+    (plain && valid_sha(sha)).then(|| (name.to_string(), sha.to_string()))
 }
 
 /// A job in memory: its record, and the flag that cancels it.
@@ -217,6 +237,8 @@ pub struct StartReq {
     pub env: Vec<(String, String)>,
     pub limit_s: u64,
     pub lease_s: u64,
+    /// See [`Job::base`].
+    pub base: Option<(String, String)>,
 }
 
 impl StartReq {
@@ -268,6 +290,7 @@ impl StartReq {
             env,
             limit_s: b["limit_s"].as_u64().unwrap_or(1800).clamp(10, 24 * 3600),
             lease_s: b["lease_s"].as_u64().unwrap_or(300),
+            base: parse_base(&b["base"]),
         })
     }
 }
@@ -529,6 +552,7 @@ impl Jobs {
             env: req.env,
             limit_s: req.limit_s,
             lease_s: req.lease_s.min(settings.lease_s).max(10),
+            base: req.base,
             state: JobState::Running,
             phase: "setup".into(),
             slot,
@@ -575,6 +599,17 @@ impl Jobs {
         let k = pick_slot(&taken, max, used_at)?;
         busy.insert((coord.to_string(), project.to_string(), k));
         Some(k)
+    }
+
+    /// Is `job` the only job of its project (of its coordinator) holding a slot just now?
+    fn alone(&self, job: &Job) -> bool {
+        self.busy
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|(c, p, _)| *c == job.coord && *p == job.project)
+            .count()
+            <= 1
     }
 
     fn free_slot(&self, job: &Job) {
@@ -877,6 +912,46 @@ pub fn prepare_slot(mirror: &Path, slot: &Path, sha: &str) -> Result<(), String>
     Ok(())
 }
 
+/// Make `origin/<name>` resolve in the slots of this mirror: `refs/remotes/origin/<name>` is set to
+/// `tip`, when the mirror has that commit (a coordinator that sends a base always sends it too).
+///
+/// The slots are worktrees of one mirror, and `refs/remotes` is shared by all of them, so a ref
+/// cannot be set per slot. What keeps concurrent jobs of a project safe: with `exclusive` (no
+/// other job of the project holds a slot) the ref is set to `tip` exactly, so the job sees its own
+/// coordinator's base, whatever the ref was (a force-pushed base included); otherwise it only
+/// moves forward, to a `tip` that descends from the ref's commit, so a running job never has its
+/// base taken back to an older or unrelated commit, and may see a newer one a concurrent job sent.
+/// The ref also keeps the base's commits from being collected.
+pub fn set_origin_base(
+    mirror: &Path,
+    name: &str,
+    tip: &str,
+    exclusive: bool,
+) -> Result<(), String> {
+    let r = format!("refs/remotes/origin/{name}");
+    git::run(mirror, &["check-ref-format", &r]).map_err(|e| e.to_string())?;
+    if !valid_sha(tip) || !git::ok(mirror, &["cat-file", "-e", &format!("{tip}^{{commit}}")]) {
+        return Err(format!("the mirror lacks the base commit {tip}"));
+    }
+    let current = git::run(
+        mirror,
+        &["rev-parse", "--verify", "-q", &format!("{r}^{{commit}}")],
+    )
+    .ok()
+    .map(|s| s.trim().to_string())
+    .filter(|s| !s.is_empty());
+    let advance = match &current {
+        None => true,
+        Some(c) if c == tip => false,
+        Some(_) if exclusive => true,
+        Some(c) => git::ok(mirror, &["merge-base", "--is-ancestor", c, tip]),
+    };
+    if advance {
+        git::run(mirror, &["update-ref", &r, tip]).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 // ---- the environment --------------------------------------------------------------------------
 
 /// The shims a node puts first on `PATH`: nothing a job does may appear on the screen. `caffeinate`
@@ -917,6 +992,51 @@ pub fn write_shims(dir: &Path, path: &str) -> std::io::Result<()> {
     #[cfg(not(unix))]
     {
         let _ = (dir, path);
+    }
+    Ok(())
+}
+
+/// The `mason` command line a node's jobs get: the one in the directory of the running daemon (the
+/// runtime that has `masond` and `step-host`), or the file `MASON_NODE_CLI` names (for tests).
+pub fn node_cli() -> Option<PathBuf> {
+    let p = std::env::var_os("MASON_NODE_CLI")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .map(|e| e.with_file_name("mason"))
+        })?;
+    p.is_file().then_some(p)
+}
+
+/// Put `mason` in the shims directory, as a script that runs `target` (or remove it when there is
+/// none): so a suite can run `mason definition check` on a node. It is a script rather than a
+/// link so that it can never be mistaken for a file of the job's checkout, and is rewritten each
+/// job so that it follows a runtime update.
+pub fn write_cli_shim(dir: &Path, target: Option<&Path>) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let file = dir.join("mason");
+        let Some(target) = target else {
+            let _ = std::fs::remove_file(&file);
+            return Ok(());
+        };
+        std::fs::create_dir_all(dir)?;
+        let text = format!(
+            "#!/bin/sh\n# SPDX-License-Identifier: GPL-3.0-or-later\n# Written by masond for a node's jobs.\nexec '{}' \"$@\"\n",
+            target.to_string_lossy().replace('\'', r"'\''")
+        );
+        if std::fs::read_to_string(&file).ok().as_deref() != Some(text.as_str()) {
+            let tmp = dir.join(format!(".mason.{}.tmp", std::process::id()));
+            std::fs::write(&tmp, text)?;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
+            std::fs::rename(&tmp, &file)?;
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (dir, target);
     }
     Ok(())
 }
@@ -1021,6 +1141,23 @@ pub fn job_env(
     }
     put("MASON_WORKTREE", slot.to_string_lossy().into_owned());
     put("MASON_NODE", "1".into());
+    // The `mason` on a job's PATH finds no daemon and no configuration of this node: the commands
+    // that need one say masond is not running, while `mason definition check` (which reads files)
+    // works. The directories are named and never made.
+    put(
+        "MASON_DATA_DIR",
+        shims
+            .with_file_name("no-daemon")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    put(
+        "MASON_CONFIG_DIR",
+        shims
+            .with_file_name("no-config")
+            .to_string_lossy()
+            .into_owned(),
+    );
     put("MASON_PROJECT", job.project.clone());
     // Set so that everything that treats a pipeline run differently (the shims above, the test
     // mode of a project's scripts) does here; the coordinator's own number is kept when sent.
@@ -1158,6 +1295,15 @@ fn drive(jobs: &Arc<Jobs>, d: &Arc<Daemon>, h: &Arc<Handle>) {
     if !job.prepared {
         match prepare_slot(&mirror, &slot, &job.sha) {
             Ok(()) => {
+                if let Some((name, tip)) = &job.base {
+                    if let Err(e) = set_origin_base(&mirror, name, tip, jobs.alone(&job)) {
+                        // The job still runs: only a command that reads `origin/<base>` fails.
+                        eprintln!(
+                            "node job {} of coordinator {}: no origin/{name}: {e}",
+                            job.id, job.coord
+                        );
+                    }
+                }
                 job.prepared = true;
                 job.phase = if job.build.is_some() { "build" } else { "run" }.into();
                 if let Ok(mut j) = h.job.lock() {
@@ -1179,6 +1325,7 @@ fn drive(jobs: &Arc<Jobs>, d: &Arc<Daemon>, h: &Arc<Handle>) {
     let base = |k: &str| std::env::var(k).ok();
     let path = base("PATH").unwrap_or_default();
     let _ = write_shims(&shims, &path);
+    let _ = write_cli_shim(&shims, node_cli().as_deref());
     let env = job_env(&job, &slot, &shims, &base);
     let deadline = Instant::now()
         + Duration::from_millis((job.started_ms + job.limit_s * 1000).saturating_sub(now_ms()));
@@ -1330,6 +1477,53 @@ mod tests {
     const DOCUMENTED: &str = "/Users/masonnode/Library/Application Support/mason";
 
     #[test]
+    fn the_base_of_a_job_is_optional_and_a_bad_one_is_no_base() {
+        let sha = "a".repeat(40);
+        let body = |base: Value| json!({"id": "j", "project": "p", "sha": sha, "run": {"command": "true"}, "base": base});
+        let r = StartReq::parse(&body(json!({"name": "release/1.0", "sha": sha}))).unwrap();
+        assert_eq!(r.base, Some(("release/1.0".into(), sha.clone())));
+        // No field (an older coordinator), or one that cannot be used: the job starts without.
+        let old = json!({"id": "j", "project": "p", "sha": sha, "run": {"command": "true"}});
+        assert_eq!(StartReq::parse(&old).unwrap().base, None);
+        for bad in [
+            json!({"name": "a..b", "sha": sha}),
+            json!({"name": "-x", "sha": sha}),
+            json!({"name": "", "sha": sha}),
+            json!({"name": "ok", "sha": "zz"}),
+            json!("develop"),
+        ] {
+            assert_eq!(
+                StartReq::parse(&body(bad.clone())).unwrap().base,
+                None,
+                "{bad}"
+            );
+        }
+        // A job record from before the field reads back with none.
+        assert_eq!(parse_base(&Value::Null), None);
+    }
+
+    #[test]
+    fn the_cli_shim_runs_its_target_and_goes_when_there_is_none() {
+        let t = tempfile::tempdir().unwrap();
+        let target = t.path().join("it's mason");
+        std::fs::write(&target, "#!/bin/sh\necho \"cli $*\"\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let dir = t.path().join("shims");
+            write_cli_shim(&dir, Some(&target)).unwrap();
+            let o = std::process::Command::new(dir.join("mason"))
+                .args(["a", "b"])
+                .output()
+                .unwrap();
+            assert_eq!(String::from_utf8_lossy(&o.stdout), "cli a b\n");
+            write_cli_shim(&dir, None).unwrap();
+            assert!(!dir.join("mason").exists());
+        }
+    }
+
+    #[test]
     fn a_host_key_is_stable_and_differs_when_any_part_does() {
         let k = host_key("ad7507fdc188cdd0", "t1113r6691-check", "run");
         assert_eq!(k.len(), HOST_KEY_LEN);
@@ -1438,6 +1632,7 @@ mod tests {
             env: vec![("MASON_X".into(), "1".into())],
             limit_s: 60,
             lease_s: 30,
+            base: None,
             state: JobState::Done,
             phase: "run".into(),
             slot: 2,
@@ -1524,6 +1719,7 @@ mod tests {
             ],
             limit_s: 60,
             lease_s: 30,
+            base: None,
             state: JobState::Running,
             phase: String::new(),
             slot: 1,
