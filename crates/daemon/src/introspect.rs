@@ -1097,6 +1097,28 @@ pub fn is_analyst_task(d: &Daemon, task: TaskId, project: &str) -> bool {
         .is_some_and(|r| r.last_task == Some(task.0))
 }
 
+/// A task that carries the analyst's title, in a project whose analyst schedule names another
+/// task or none, is not read. Say so: its findings would otherwise vanish without a word.
+fn warn_if_passed_over(d: &Daemon, task: TaskId, project: &str, wt: &Path) {
+    let Ok(Some(row)) = d.store.schedule(&format!("analyst:{project}")) else {
+        return;
+    };
+    let titled = d
+        .world()
+        .ok()
+        .and_then(|w| w.tasks.get(&task).map(|t| t.title == ANALYST_TITLE))
+        .unwrap_or(false);
+    if titled {
+        tracing::warn!(
+            task = task.0,
+            project,
+            worktree = %wt.display(),
+            last_task = ?row.last_task,
+            "the analyst schedule does not name this analyst task; its result was not read"
+        );
+    }
+}
+
 /// After the develop step of an analyst task: read the file it wrote, check every finding, and
 /// file the good ones, once per task. The consumed file is kept in `dir` (the task's log
 /// directory), not in the worktree. Refusals are written beside it.
@@ -1108,6 +1130,7 @@ pub fn ingest_analyst(
     dir: &Path,
 ) -> Ingest {
     if !is_analyst_task(d, task, project) {
+        warn_if_passed_over(d, task, project, wt);
         return Ingest::NotAnalyst;
     }
     let done = dir.join("analyst-ingested");
@@ -1118,6 +1141,12 @@ pub fn ingest_analyst(
     }
     let file = wt.join(ANALYST_FILE);
     let Ok(text) = std::fs::read_to_string(&file) else {
+        tracing::warn!(
+            task = task.0,
+            project,
+            worktree = %wt.display(),
+            "the analyst task has no result file; nothing was filed"
+        );
         return Ingest::Missing;
     };
     let drafts = match parse_drafts(&text) {
