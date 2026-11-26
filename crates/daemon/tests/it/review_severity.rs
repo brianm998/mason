@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use std::path::Path;
 use support::*;
 
-/// Review, then a test step that is red until develop has run `rounds` times.
+/// Test, review, then a check after the review that is red until develop has run `rounds` times.
 fn def(rounds: u32) -> String {
     format!(
         r#"schema = 1
@@ -19,6 +19,14 @@ start = "develop"
 [step.develop]
 type = "agent"
 category = "developing"
+next = "test"
+
+[step.test]
+type = "test"
+category = "testing"
+command = "true"
+on_red = "develop"
+max_rounds = 3
 next = "review"
 
 [step.review]
@@ -26,11 +34,11 @@ type = "agent"
 category = "review"
 on_red = "develop"
 max_rounds = 3
-next = "test"
+next = "check"
 
-[step.test]
-type = "test"
-category = "testing"
+[step.check]
+type = "command"
+category = "review"
 command = "test $(wc -l < a.txt) -ge {rounds}"
 on_red = "develop"
 max_rounds = 3
@@ -135,7 +143,7 @@ fn an_approvals_advice_reaches_a_develop_round_that_follows() {
         json!([review("approve", "fine", json!([minor("LATER-NIT")]))]),
         json!([review("approve", "fine", json!([]))]),
     ];
-    // The test step is red after the first round, so there is a second one.
+    // The check after the review is red after the first round, so there is a second one.
     let (_s, _v) = run(2, &[1, 2], reviews, rec.path());
     let get = |n: &str| std::fs::read_to_string(rec.path().join(n)).unwrap_or_default();
     assert!(!get("dev1.txt").contains("LATER-NIT"));
