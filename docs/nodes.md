@@ -124,7 +124,9 @@ What happens, in this order:
 2. The iMac's build passes its self-test. Before it takes over, it sends each reachable node its
    runtime (`PUT /node/runtime`). The Studio checks the package against the team it pinned when you
    paired (`codesign --verify --strict`, and the team id of the signature), installs it, and takes over
-   once its running jobs have ended; until then it takes no new job. A package that is ad hoc,
+   at once. Running jobs are not waited for: their commands run under step hosts, which the new
+   daemon finds again as after any restart (only a job still being checked out is waited for, a few
+   seconds, and the node takes no new job meanwhile). A package that is ad hoc,
    unsigned, from another team or broken is refused and nothing of it is installed.
 3. The iMac takes over. Both Macs now run the commit, give or take the Studio's running jobs.
 
@@ -138,7 +140,7 @@ brackets) and the monitor's Nodes section:
 |---|---|
 | `building for arm64` | the cross-build is running |
 | `sending the new runtime` / `sent; installing` | on its way / the node has it |
-| `installed; waiting for 2 jobs to end` | installed; it takes over when its jobs end |
+| `installed; taking over now, 2 running jobs carry on` | installed; it takes over at once and its running jobs keep going under their step hosts |
 | `up to date` | it runs the iMac's commit |
 | `failed (reason)` | the send failed; an alert says so too |
 | `will update when it returns` | it was off or silent; the first poll that finds it sends the runtime |
@@ -442,6 +444,10 @@ Pairing is done once. The code lasts **2 minutes** and works once; five wrong gu
 
    shows the Studio as `not accepting (the owner turned remote work off)`: the switch is off.
 
+`mason hosts`, on the coordinator, shows this Mac, each node and GitHub with what runs on each
+now (a node reads as accepting, full, off or absent), and `mason task show` says where a task is
+running.
+
 ## 3. Turning it on and off
 
 On the Studio, the switch is one command, run as the node user:
@@ -545,6 +551,31 @@ mode = "remote"      # or "favor-remote", "favor-local", "local"
 - Baseline runs, and landing's lint tier and build floor unless the definition sends them away,
   still run on the coordinator.
 - A project with `[remote_runs]` keeps using `[remote_runs] mode`, which wins over `[placement]`.
+
+## A node's git state
+
+A node's mirrors (`<data>/node/mirrors/<coordinator>/<project>.git`) have no remote: they only
+get commits as bundles from the coordinator, so a `git fetch` or `git pull` there does nothing.
+MASON keeps them itself. Each job sends the project's base, and the node sets `origin/<base>`
+before the command runs. A finished run says which (`ran on node studio (arm64), 3 min, base: set
+develop@0123456789`).
+
+When the node cannot set it, or the coordinator cannot resolve it, the run is a node failure,
+never a red for the task: `origin/develop not set on node studio (base: failed: ...)`. The run
+goes to the next place; for a project that only runs on nodes it is retried later.
+
+On the coordinator:
+
+```
+mason node show studio                        # each mirror, its path and its origin/<name> commits
+mason node sync studio --project mason        # send the base again and re-set origin/<base>
+mason node sync studio --project mason --base release/1.0
+```
+
+`sync` sends a bundle of the base's whole history, as the coordinator's clone has it (it fetches
+nothing), and prints where `origin/<base>` is in the node's mirror. If git refuses (a `.lock` file
+left in the mirror, a full disk), it prints git's own words. While a job of the project runs on the
+node the ref only moves forward. Both commands need a node on this runtime (`mason node update`).
 
 ## When something goes wrong
 

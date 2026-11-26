@@ -275,6 +275,10 @@ pub enum AgentEvent {
     Plan {
         items: Vec<PlanItem>,
     },
+    /// A skill the agent called by name (Claude's `Skill` tool), before its `ToolCall`.
+    Skill {
+        name: String,
+    },
     /// Final figures for this invocation, as reported by the stream.
     Tokens(TokenReport),
     /// The model the CLI says it is really using (Claude's `system/init`).
