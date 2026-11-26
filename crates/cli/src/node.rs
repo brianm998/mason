@@ -419,10 +419,12 @@ fn mirror_lines(mirrors: &Value) -> Vec<String> {
     out
 }
 
-/// `mason node export-runtime --arch ARCH --out DIR`: the signed runtime and "MASON Daemon.app" for
-/// a node of another architecture, written into `DIR` to copy to the node (docs/nodes.md). It
+/// `mason node export-runtime --arch ARCH --out DIR`: the signed runtime, "MASON Daemon.app" and
+/// the node user's `mason` wrapper for a node of another architecture, written into `DIR` to copy
+/// to the node (docs/nodes.md). It
 /// needs no daemon: it reads `update.toml` and the runtimes directory. A cross build is a build:
-/// run it as `mason run --needs compile -- mason node export-runtime ...` to wait for a slot.
+/// run it as `mason run --needs compile -- <runtime's mason> node export-runtime ...` to wait for
+/// a slot (`mason run` execs a file, so a `mason` shell function will not do after `--`).
 pub fn export_runtime(
     mut rest: Vec<String>,
     data_dir: &std::path::Path,
@@ -453,12 +455,12 @@ pub fn export_runtime(
     match mason_daemon::node_runtime::export(&cfg, &rt, &arch, &out) {
         Ok(sha) => {
             println!(
-                "wrote the signed runtime {} for {arch} to {}/runtimes/{sha} and MASON Daemon.app to {}/",
+                "wrote the signed runtime {} for {arch} to {}/runtimes/{sha}, and MASON Daemon.app and the mason wrapper to {}/",
                 &sha[..sha.len().min(10)],
                 out.display(),
                 out.display()
             );
-            println!("Copy both to the node and install them as docs/nodes.md says.");
+            println!("Copy the folder to the node and install it as docs/nodes.md says.");
             0
         }
         Err(e) => {

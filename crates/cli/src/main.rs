@@ -14,7 +14,7 @@
 //! mason debt list | run <id>
 //! mason quarantine list | add <suite> <test> --owner O --days N [--reason R] | remove <suite> <test>
 //! mason test parse <parser> <file> [--min N]
-//! mason task answer <id> <option number | 1,3 for a multi-select card | text> [--card HASH] [--as NAME]
+//! mason task answer <id> <option number | 1,3 for a multi-select card | text> [--context TEXT] [--card HASH] [--as NAME]
 //! mason task land-now <id> | force <id> [--reason R]
 //! mason task open <id> [--anyway]
 //! mason pause [--project P] [--mode all|claims|landing] --for 2h | mason resume [--project P] [--mode M] | mason pause list
@@ -93,8 +93,9 @@ mason: command-line client for the MASON pipeline
   mason task override <id> <key> <value>
   mason task priority <id> urgent|high|normal|low   owner only; re-ranks its waiting requests
   mason task update-priority <id> urgent|normal   owner only; urgent: its landing takes the daemon's own update over at once
-  mason task answer <id> <option number | 1,3 | text> [--card HASH] [--as NAME]
-                                      answer the open question (a multi-select card takes 1,3); the card's hash guards against a stale one
+  mason task answer <id> <option number | 1,3 | text> [--context TEXT] [--card HASH] [--as NAME]
+                                      answer the open question or a failed task's diagnosis card (a multi-select card takes 1,3);
+                                      --context adds your words to the answer; the card's hash guards against a stale one
   mason task refresh <id>             ask the tracker now (what opening a task does)
   mason task land-now <id> | force <id> [--reason R]   marks the task and records an override and a debt
   mason task open <id> [--anyway]     open an interactive agent in the task's worktree, resuming its session
@@ -372,16 +373,22 @@ fn row(v: &Value) -> String {
     )
 }
 
-fn ago_until(ms: u64) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as u64);
-    let s = ms.saturating_sub(now) / 1000;
-    match s {
-        0..=3599 => format!("in {}m", s / 60),
-        3600..=172_799 => format!("in {}h", s / 3600),
-        _ => format!("in {}d", s / 86_400),
+/// How long from `now` until `ms` (both ms since the epoch), rounded up: to the minute
+/// below 48 hours (`in 2h 59m`), else to the day.
+fn ago_until(ms: u64, now: u64) -> String {
+    let mins = ms.saturating_sub(now).div_ceil(60_000);
+    match (mins / 60, mins % 60) {
+        (0, m) => format!("in {m}m"),
+        (h @ 1..=47, 0) => format!("in {h}h"),
+        (h @ 1..=47, m) => format!("in {h}h {m}m"),
+        _ => format!("in {}d", mins.div_ceil(24 * 60)),
     }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
 }
 
 fn ago(ms: u64) -> String {
@@ -1560,7 +1567,15 @@ fn main() {
                             p["project"].as_str().unwrap_or("")
                         },
                         p["owner"].as_str().unwrap_or("?"),
-                        ago_until(p["expires_at"].as_u64().unwrap_or(0))
+                        ago_until(p["expires_at"].as_u64().unwrap_or(0), now_ms())
+                    );
+                }
+                if let Some(l) = r["last_lift"].as_object() {
+                    println!(
+                        "lifted {} by {} via {}",
+                        local_clock(l["at"].as_u64().unwrap_or(0)),
+                        l["who"].as_str().unwrap_or("?"),
+                        l["via"].as_str().unwrap_or("?")
                     );
                 }
             }
@@ -2889,7 +2904,7 @@ fn main() {
                         x["suite"].as_str().unwrap_or("?"),
                         x["test"].as_str().unwrap_or("?"),
                         x["owner"].as_str().unwrap_or("?"),
-                        ago_until(x["expires_at"].as_u64().unwrap_or(0)),
+                        ago_until(x["expires_at"].as_u64().unwrap_or(0), now_ms()),
                         x["reason"].as_str().unwrap_or("")
                     );
                 }
@@ -3741,6 +3756,7 @@ fn main() {
                         .or_else(|| std::env::var("USER").ok())
                         .unwrap_or_default();
                     let card = a.opt("--card");
+                    let context = a.opt("--context");
                     let answer: Vec<String> = std::mem::take(&mut a.rest);
                     if answer.is_empty() {
                         die("give the answer: an option number, or text for \"Other\"");
@@ -3753,11 +3769,11 @@ fn main() {
                             t["card"]["hash"].as_str().unwrap_or_default().to_string()
                         }
                     };
-                    let r = or_die(d.call(
-                        "POST",
-                        &format!("/tasks/{id}/answer"),
-                        Some(&json!({"answer": answer_text(&answer), "hash": hash, "as": who})),
-                    ));
+                    let mut body = json!({"answer": answer_text(&answer), "hash": hash, "as": who});
+                    if let Some(c) = context {
+                        body["context"] = json!(c);
+                    }
+                    let r = or_die(d.call("POST", &format!("/tasks/{id}/answer"), Some(&body)));
                     println!(
                         "Answered task #{id}: {}",
                         r["answer"].as_str().unwrap_or("")
@@ -4877,5 +4893,28 @@ mod owner_identity_tests {
         assert_eq!(super::owner_identity(), "owner");
         std::env::set_var("USER", "u");
         assert_eq!(super::owner_identity(), "u");
+    }
+}
+
+#[cfg(test)]
+mod ago_until_tests {
+    use super::ago_until;
+
+    #[test]
+    fn an_expiry_is_rounded_up_never_cut_to_the_hour_below() {
+        let now = 1_700_000_000_000;
+        let after = |s: u64| ago_until(now + s * 1000, now);
+        assert_eq!(after(2 * 3600 - 1), "in 2h");
+        assert_eq!(ago_until(now + 2 * 3_600_000 - 1, now), "in 2h");
+        assert_eq!(after(59 * 60 + 30), "in 1h");
+        assert_eq!(after(2 * 3600 + 59 * 60), "in 2h 59m");
+        assert_eq!(after(3600 + 1), "in 1h 1m");
+        assert_eq!(after(59 * 60), "in 59m");
+        assert_eq!(after(1), "in 1m");
+        assert_eq!(after(0), "in 0m");
+        assert_eq!(ago_until(now - 5000, now), "in 0m");
+        assert_eq!(after(47 * 3600 + 59 * 60), "in 47h 59m");
+        assert_eq!(after(48 * 3600), "in 2d");
+        assert_eq!(after(48 * 3600 + 1), "in 3d");
     }
 }
