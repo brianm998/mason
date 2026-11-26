@@ -17,11 +17,14 @@ use std::fs::{File, OpenOptions};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
+use std::thread::ThreadId;
 use std::time::{Duration, Instant};
 
 /// One held slot; dropping it releases the lock and this process's claim on it.
 pub struct Held {
     dir: PathBuf,
+    /// The thread that took it.
+    by: ThreadId,
     _lock: Flock<File>,
 }
 
@@ -29,7 +32,9 @@ impl Drop for Held {
     fn drop(&mut self) {
         let mut st = state();
         let s = entry(&mut st, &self.dir);
-        s.own = s.own.saturating_sub(1);
+        if let Some(i) = s.holders.iter().position(|t| *t == self.by) {
+            s.holders.swap_remove(i);
+        }
         drop(st);
         leave(&self.dir);
     }
@@ -38,8 +43,8 @@ impl Drop for Held {
 /// This process's standing in one slot directory.
 #[derive(Default)]
 struct DirState {
-    /// Slots this process holds.
-    own: usize,
+    /// The slots this process holds: one entry each, the thread that took it.
+    holders: Vec<ThreadId>,
     /// Held slots, waiting `take`s and `Presence` guards. The presence lock is held while
     /// this is above zero.
     users: usize,
@@ -176,17 +181,19 @@ pub fn try_take(dir: &Path, limit: usize) -> Option<Held> {
     let procs = present(dir);
     let mut st = state();
     let s = entry(&mut st, dir);
-    let lock = if s.own < share(limit, procs) {
+    let lock = if s.holders.len() < share(limit, procs) {
         lock_free_slot(dir, limit)
     } else {
         None
     };
     match lock {
         Some(lock) => {
-            s.own += 1;
+            let by = std::thread::current().id();
+            s.holders.push(by);
             // The `enter` above stays counted for as long as the slot is held.
             Some(Held {
                 dir: dir.to_path_buf(),
+                by,
                 _lock: lock,
             })
         }
@@ -217,9 +224,16 @@ fn lock_free_slot(dir: &Path, limit: usize) -> Option<Flock<File>> {
 }
 
 /// Wait up to `patience` for a slot, counted as present the whole time so the processes
-/// holding slots leave this one its share. `None` after that: a test that holds one world
-/// and makes another could wait for ever if every slot were held that way, so it goes ahead.
+/// holding slots leave this one its share. `None` after that, and the caller goes ahead.
+///
+/// A thread that already holds a slot does not wait at all for another: a test that holds
+/// one world and makes another would wait on the tests doing the same, every one of them
+/// for the whole of `patience`, while all the tests behind them queued.
 pub fn take(dir: &Path, limit: usize, patience: Duration) -> Option<Held> {
+    let me = std::thread::current().id();
+    if entry(&mut state(), dir).holders.contains(&me) {
+        return try_take(dir, limit);
+    }
     let _waiting = join(dir);
     let end = Instant::now() + patience;
     loop {

@@ -175,6 +175,24 @@ fn a_presence_file_nobody_holds_is_not_counted_and_is_swept() {
 }
 
 #[test]
+fn a_thread_that_holds_a_slot_does_not_wait_for_a_second() {
+    let dir = tempfile::tempdir().unwrap();
+    // Far past any suite's limit: a nested take that waited would hang here.
+    let patience = std::time::Duration::from_secs(24 * 3600);
+    let first = slots::take(dir.path(), 1, patience);
+    assert!(first.is_some());
+    assert!(slots::take(dir.path(), 1, patience).is_none());
+    // A free slot is still taken and counted.
+    let second = slots::take(dir.path(), 2, patience);
+    assert!(second.is_some());
+    assert_eq!(slots::held_count(dir.path(), 2), 2);
+    drop((first, second));
+    // Holding nothing again, this thread takes a slot as before.
+    assert!(slots::take(dir.path(), 1, patience).is_some());
+    assert_eq!(slots::held_count(dir.path(), 1), 0);
+}
+
+#[test]
 fn shares_round_up_so_no_slot_is_left_idle() {
     assert_eq!(slots::share(8, 1), 8);
     assert_eq!(slots::share(8, 3), 3);
