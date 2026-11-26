@@ -4082,7 +4082,12 @@ fn agent_job(c: &Ctx) {
         check_failing: Default::default(),
         replay: Default::default(),
     });
-    let validator = (kind == StepKind::Develop).then(|| {
+    // The analyst's task is not a change: its result is an uncommitted file in its worktree, read
+    // when its submission is accepted, and its branch is never merged. The proofs below (a clean
+    // tree, commits beyond the base) would refuse the very result it was asked for.
+    let analyst = kind == StepKind::Develop
+        && crate::introspect::is_analyst_task(&c.d, c.task, &c.project.id);
+    let validator = (kind == StepKind::Develop && !analyst).then(|| {
         change_validator(
             c.wt.clone(),
             c.project.base_ref(),
