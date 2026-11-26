@@ -33,6 +33,7 @@ use mason_adapters::runner::{RunnerConfig, StepEnd, StepRunner};
 use mason_core::*;
 use mason_store::DiagnosisRow;
 use serde_json::{json, Value};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Sessions per task, ever (one per failure, so a task that fails again after the owner acted on a
@@ -103,35 +104,61 @@ pub fn budget(rows: &[DiagnosisRow], failed_at: u64) -> Result<(), String> {
     Ok(())
 }
 
-/// Diagnoses that are running now: task -> (started ms, model and effort).
-static RUNNING: std::sync::Mutex<Vec<(u64, u64, String)>> = std::sync::Mutex::new(Vec::new());
+/// A diagnosis that is running now. Task numbers are only unique within one daemon, and a
+/// process (a test binary) may hold several, so the data directory is part of the key.
+struct Running {
+    data_dir: PathBuf,
+    task: u64,
+    started_ms: u64,
+    ran_on: String,
+}
 
-/// A diagnosis running for `task`: when it started and on what model and effort.
-pub fn running(task: u64) -> Option<(u64, String)> {
+impl Running {
+    fn is(&self, data_dir: &Path, task: u64) -> bool {
+        self.task == task && self.data_dir == data_dir
+    }
+}
+
+static RUNNING: std::sync::Mutex<Vec<Running>> = std::sync::Mutex::new(Vec::new());
+
+/// A diagnosis the daemon of `data_dir` is running for `task`: when it started and on what
+/// model and effort.
+pub fn running(data_dir: &Path, task: u64) -> Option<(u64, String)> {
     RUNNING
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .iter()
-        .find(|r| r.0 == task)
-        .map(|r| (r.1, r.2.clone()))
+        .find(|r| r.is(data_dir, task))
+        .map(|r| (r.started_ms, r.ran_on.clone()))
 }
 
 /// Takes a task's running mark, and gives it back when dropped.
-struct RunMark(u64);
+struct RunMark {
+    data_dir: PathBuf,
+    task: u64,
+}
 
 impl RunMark {
-    fn take(task: u64) -> Option<RunMark> {
+    fn take(data_dir: &Path, task: u64) -> Option<RunMark> {
         let mut v = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
-        if v.iter().any(|r| r.0 == task) {
+        if v.iter().any(|r| r.is(data_dir, task)) {
             return None;
         }
-        v.push((task, now_ms(), String::new()));
-        Some(RunMark(task))
+        v.push(Running {
+            data_dir: data_dir.to_path_buf(),
+            task,
+            started_ms: now_ms(),
+            ran_on: String::new(),
+        });
+        Some(RunMark {
+            data_dir: data_dir.to_path_buf(),
+            task,
+        })
     }
     fn ran_on(&self, text: &str) {
         let mut v = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(r) = v.iter_mut().find(|r| r.0 == self.0) {
-            r.2 = text.to_string();
+        if let Some(r) = v.iter_mut().find(|r| r.is(&self.data_dir, self.task)) {
+            r.ran_on = text.to_string();
         }
     }
 }
@@ -141,7 +168,7 @@ impl Drop for RunMark {
         RUNNING
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .retain(|r| r.0 != self.0);
+            .retain(|r| !r.is(&self.data_dir, self.task));
     }
 }
 
@@ -432,7 +459,7 @@ pub fn start(d: &Arc<Daemon>, task: TaskId, run: StepRunId, manual: bool) -> Res
     // two sessions.
     let rows = d.store.diagnoses(Some(task.0)).map_err(|e| e.to_string())?;
     budget(&rows, failed_at)?;
-    let mark = RunMark::take(task.0).ok_or("a diagnosis is already running")?;
+    let mark = RunMark::take(&d.cfg.data_dir, task.0).ok_or("a diagnosis is already running")?;
     let d = d.clone();
     std::thread::Builder::new()
         .name(format!("diagnose-{}", task.0))
@@ -900,16 +927,21 @@ mod tests {
 
     #[test]
     fn a_running_mark_is_taken_once_and_given_back() {
-        let m = RunMark::take(990_001).expect("first");
+        let (a, b) = (Path::new("/data/a"), Path::new("/data/b"));
+        let m = RunMark::take(a, 990_001).expect("first");
         m.ran_on("model x on high");
         assert_eq!(
-            running(990_001).map(|r| r.1),
+            running(a, 990_001).map(|r| r.1),
             Some("model x on high".into())
         );
-        assert!(RunMark::take(990_001).is_none(), "refused while running");
+        assert!(RunMark::take(a, 990_001).is_none(), "refused while running");
+        // Another daemon's task of the same number is another task.
+        assert!(running(b, 990_001).is_none());
+        drop(RunMark::take(b, 990_001).expect("another daemon's"));
+        assert!(running(a, 990_001).is_some());
         drop(m);
-        assert!(running(990_001).is_none());
-        assert!(RunMark::take(990_001).is_some());
+        assert!(running(a, 990_001).is_none());
+        assert!(RunMark::take(a, 990_001).is_some());
     }
 
     fn submission(rec: &str) -> Value {
