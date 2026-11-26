@@ -8007,7 +8007,8 @@ mod tests {
         assert!(!notes[0].contains("run it again"), "{notes:?}");
         // The run had its unit and the younger one still waited for it.
         assert_eq!(*second.lock().unwrap(), Some((1, 1, true)));
-        // Its job done, the unit goes on to the younger one.
+        // The run over, its grant goes and the unit with it, on to the younger one.
+        drop(grant);
         let y = younger.lock().unwrap().take().unwrap();
         assert!(y.recv_timeout(Duration::from_secs(60)).unwrap().is_ok());
     }
