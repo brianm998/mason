@@ -7902,7 +7902,7 @@ mod tests {
         let dir = r._t.path().join("runs");
         let e =
             run_retrying(&s, &spec("pr1"), &dir, &|| None, &|_| {}, &Grant::test()).unwrap_err();
-        let why = environmental(&e).unwrap();
+        let why = environmental(&e).unwrap_or_else(|| panic!("not environmental: {e}"));
         assert!(why.contains("could not push"), "{why}");
         assert!(!gave_up_in_place(why), "{why}");
         assert!(gh.dispatches.lock().unwrap().is_empty());
