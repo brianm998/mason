@@ -223,14 +223,14 @@ fn a_red_pull_request_has_its_other_checks_cancelled() {
 
 #[test]
 fn a_debt_ci_run_that_times_out_is_cancelled() {
-    let x = world("direct-ci", "echo pending", 0, "true");
+    let x = world("direct-ci", "echo pending", 1, "true");
     let debt =
         x.w.d
             .store
             .add_debt(0, "scratch", "ci:ci", "land now", "owner", true, 1)
             .unwrap();
     let said = mason_daemon::suites::pay(&x.w.d, debt).unwrap_err();
-    assert!(said.contains("still not finished after 0 s"), "{said}");
+    assert!(said.contains("still not finished after 1 s"), "{said}");
     let name = format!("mason/ci/scratch-debt{debt}");
     assert!(!x.cancels(&name).is_empty(), "{:?}", x.cancels("mason/"));
 }
