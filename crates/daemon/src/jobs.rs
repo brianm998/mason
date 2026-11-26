@@ -3577,11 +3577,19 @@ fn not_run_skipped(debt: u64, passed: bool, ran: &str) -> String {
     )
 }
 
+/// Asked at submission time: is this the analyst's task? Asked then, not when the step starts,
+/// because the schedule row that says so is written just after the task is filed.
+type IsAnalyst = Box<dyn Fn() -> bool + Send + Sync>;
+
 /// Proof before acceptance: the submitted commit really is the tip of the
 /// task's branch, the tree is clean, the branch has work in it, and if the
 /// change edits the pipeline's own definition, the new one is valid. (The
 /// definition that judges *this* task is the pinned one, never the edited one:
 /// a change cannot relax the gates it is judged by.)
+///
+/// The analyst's task is told to commit nothing and to leave its findings in
+/// [`crate::introspect::ANALYST_FILE`], and its branch is never merged: for it alone, that
+/// untracked file does not make the tree dirty and a branch with no commits is accepted.
 fn change_validator(
     wt: PathBuf,
     base_ref: String,
@@ -3589,6 +3597,7 @@ fn change_validator(
     caps: mason_definition::Capabilities,
     weakening: Option<WeakeningCheck>,
     planned: Option<PlannedChange>,
+    is_analyst: IsAnalyst,
 ) -> Validator {
     let warned = std::sync::atomic::AtomicBool::new(false);
     Box::new(move |tool, args| {
@@ -3596,6 +3605,7 @@ fn change_validator(
             return Ok(());
         }
         let mut problems = vec![];
+        let analyst = is_analyst();
         let head = args["head"].as_str().unwrap_or_default();
         let tip = git::rev_parse(&wt, "HEAD").unwrap_or_default();
         match git::rev_parse(&wt, head) {
@@ -3606,8 +3616,16 @@ fn change_validator(
             )),
             Ok(_) => {}
         }
-        let dirty =
+        let mut dirty =
             git::run(&wt, &["--no-optional-locks", "status", "--porcelain"]).unwrap_or_default();
+        if analyst {
+            let findings = format!("?? {}", crate::introspect::ANALYST_FILE);
+            dirty = dirty
+                .lines()
+                .filter(|l| *l != findings)
+                .collect::<Vec<_>>()
+                .join("\n");
+        }
         if !dirty.trim().is_empty() {
             problems.push(format!(
                 "the tree has uncommitted changes; commit or discard them:\n{}",
@@ -3615,7 +3633,7 @@ fn change_validator(
             ));
         }
         match git::commits_ahead(&wt, &base_ref, "HEAD") {
-            Ok(0) => problems.push(format!(
+            Ok(0) if !analyst => problems.push(format!(
                 "the branch has no commits beyond {base_ref}; there is nothing to submit"
             )),
             Err(e) => problems.push(format!("cannot compare with {base_ref}: {e}")),
@@ -4079,6 +4097,7 @@ fn agent_job(c: &Ctx) {
         replay: Default::default(),
     });
     let validator = (kind == StepKind::Develop).then(|| {
+        let (d, task, project) = (c.d.clone(), c.task, c.project.id.clone());
         change_validator(
             c.wt.clone(),
             c.project.base_ref(),
@@ -4104,6 +4123,7 @@ fn agent_job(c: &Ctx) {
                     .task_dir()
                     .join(format!("source-free-note-r{}.txt", c.run.0)),
             }),
+            Box::new(move || crate::introspect::is_analyst_task(&d, task, &project)),
         )
     });
     // A head whose tree was red on the test step, unchanged since, is not submitted again.
@@ -6174,8 +6194,41 @@ mod tests {
                 note_file: note.clone(),
             }),
             None,
+            Box::new(|| false),
         );
         (v("submit_change", &serde_json::json!({"head": head})), note)
+    }
+
+    #[test]
+    fn only_the_analyst_may_submit_no_commit_and_only_its_findings_file_may_be_left_over() {
+        let dir = tempfile::tempdir().unwrap().keep();
+        sh(&dir, &["init", "-q", "-b", "main"]);
+        std::fs::write(dir.join("README"), "x\n").unwrap();
+        sh(&dir, &["add", "-A"]);
+        sh(&dir, &["commit", "-qm", "init"]);
+        sh(&dir, &["checkout", "-q", "-b", "work"]);
+        let head = git::rev_parse(&dir, "HEAD").unwrap();
+        std::fs::write(dir.join(crate::introspect::ANALYST_FILE), "{}").unwrap();
+        let submit = |analyst: bool| {
+            change_validator(
+                dir.clone(),
+                "main".into(),
+                "work".into(),
+                mason_definition::Capabilities::now(),
+                None,
+                None,
+                Box::new(move || analyst),
+            )("submit_change", &serde_json::json!({"head": head}))
+        };
+        assert_eq!(submit(true), Ok(()));
+        let other = submit(false).unwrap_err().join("\n");
+        assert!(other.contains("uncommitted changes"), "{other}");
+        assert!(other.contains("no commits beyond main"), "{other}");
+        // Any other leftover is still refused, the analyst's included.
+        std::fs::write(dir.join("stray.txt"), "x\n").unwrap();
+        let refused = submit(true).unwrap_err().join("\n");
+        assert!(refused.contains("stray.txt"), "{refused}");
+        assert!(!refused.contains("no commits"), "{refused}");
     }
 
     #[test]
@@ -6207,6 +6260,7 @@ mod tests {
                 plan: "Problem.\n\n**Change**\n1. Edit `crates/x/src/a.rs`.\n".into(),
                 note_file: note.clone(),
             }),
+            Box::new(|| false),
         );
         let first = v("submit_change", &serde_json::json!({"head": head}));
         let problems = first.unwrap_err();
