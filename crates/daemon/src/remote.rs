@@ -3076,8 +3076,7 @@ impl Grant {
     ) -> bool {
         let released = {
             let g = self.lock();
-            g.given_up
-                || g.giver.as_ref().is_some_and(|g| g.short_of(&units))
+            g.given_up || g.giver.as_ref().is_some_and(|g| g.short_of(&units))
         };
         !released || self.ask_again(units, stop)
     }

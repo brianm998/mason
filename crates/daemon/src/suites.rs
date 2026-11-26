@@ -7340,7 +7340,6 @@ mod batch_cover_tests {
         assert!(!none.holds(&Needs::default()), "no lease: not even nothing");
 
         let lease = BatchCover {
-            giver: None,
             owner: None,
             held: Some(needs(&[("test-suite", 2), ("compile", 1)])),
             pool: None,
