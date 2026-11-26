@@ -16,3 +16,4 @@ pub mod plain;
 pub mod runner;
 pub mod runref;
 pub mod sandbox;
+pub mod skills;

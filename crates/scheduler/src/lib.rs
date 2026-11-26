@@ -20,13 +20,13 @@ mod rank;
 pub use cpu_hold::{CpuHold, MAX_GAP_MS};
 pub use deadlock::{self_deadlocks, Deadlock};
 pub use explain::{
-    cause_class, describe_command, explain, label_parts, ordinal, since, Ahead, HeldBy, Wait,
-    WaitCause, DESCRIPTION_LIMIT,
+    cause_class, describe_command, explain, label_parts, ordinal, since, thermal_sentence,
+    thermal_short, Ahead, HeldBy, Wait, WaitCause, DESCRIPTION_LIMIT,
 };
 pub use ledger::{Ledger, Snapshot, Stall};
 pub use plan::{
-    is_gha_pool, is_runner_request, plan, Capacity, CompilePace, CpuGate, DiskGate, Holder, Kind,
-    Needs, Plan, PolicyGate, Request, StallGate, ThermalGate, World, COMPILE, GHA, GHA_DEBT,
-    GHA_MACOS,
+    is_gha_pool, is_runner_request, plan, Capacity, CompilePace, CpuGate, DiskGate, HeatCeiling,
+    Holder, Kind, Needs, Plan, PolicyGate, Request, StallGate, ThermalGate, ThermalHold, World,
+    COMPILE, GHA, GHA_DEBT, GHA_MACOS,
 };
 pub use rank::{Rank, RunnerKind};

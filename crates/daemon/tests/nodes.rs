@@ -1148,6 +1148,14 @@ fn a_node_that_goes_away_is_given_up_on_and_its_orphan_is_killed_when_its_lease_
     let b = p.b.clone();
     let r = std::thread::scope(|sc| {
         let h = sc.spawn(|| run_on_b(&p, &spec("run-lost", None, &cmd), &|| None));
+        // The node counts the job before the coordinator has its answer: wait for the
+        // coordinator to be following the run on b, or the listener goes while it is placing it.
+        support::wait_for("the coordinator to follow the job on the node", 60, || {
+            mason_daemon::remote_runs::view(&p.a, &|_| None, "")
+                .runs
+                .iter()
+                .any(|r| r.id == "run-lost" && r.runs_on == "node b" && r.state == "running")
+        });
         support::wait_for("the job to run on the node", 60, || {
             b.node.jobs.running() == 1
         });
@@ -1480,6 +1488,81 @@ fn a_node_that_is_to_take_over_a_runtime_takes_no_new_job_and_says_why() {
     *p.b.node.pending_runtime.lock().unwrap() = None;
     poll(&p);
     assert_eq!(listed(&p, "b")["usable"], true);
+}
+
+/// The stall of 2026-11-26: a runtime that arrived made the node refuse every job until the
+/// running ones ended (some run an hour), with free slots idle. A running job now does not hold
+/// the takeover up: the node says it takes over now, and the job carries on and is collected.
+#[test]
+fn a_runtime_waiting_to_take_over_does_not_wait_for_a_running_job_and_the_job_survives_it() {
+    let p = working_pair(2);
+    let flag = p.sa.root.path().join("go");
+    let cmd = flag_script(&p, "wait.sh", &flag);
+    let s = spec("run-over", None, &cmd);
+    let base = remote::base_ref_of(&p.a, "scratch").unwrap();
+    let log = p.sa.root.path().join("logs");
+    let b = p.b.clone();
+    // The coordinator sends the job and does not collect it yet, so nothing deletes it below.
+    mason_daemon::node_exec::start(&p.a, None, &s, &p.sa.repo, &base, &log).unwrap();
+    support::wait_for("the job's command to run under its host", 60, || {
+        b.node.jobs.running() == 1 && b.node.jobs.settling() == 0
+    });
+    *b.node.pending_runtime.lock().unwrap() = Some("a".repeat(40));
+    poll(&p);
+    let n = listed(&p, "b");
+    let state = n["state"].as_str().unwrap();
+    assert!(
+        state.contains("taking over now; 1 running job carries on"),
+        "{n}"
+    );
+    assert!(!state.contains("waiting for"), "{n}");
+    // The takeover itself (the exec) cannot run in a test, and a second daemon cannot follow
+    // the same host beside this one without the two fighting over its record; what is checked is
+    // that nothing in the pending state touches the job: it runs on and the coordinator collects.
+    assert_eq!(b.node.jobs.running(), 1);
+    std::fs::write(&flag, "go").unwrap();
+    // And the coordinator collects the result as usual.
+    let f = done(mason_daemon::node_exec::execute(
+        &p.a,
+        None,
+        &s,
+        &p.sa.repo,
+        &base,
+        &log,
+        &|| None,
+        &mut |_, _| {},
+    ));
+    assert_eq!((f.code, f.output.as_str()), (0, "finished\n"));
+}
+
+/// A takeover that could not start the new runtime does not leave the node refusing work: it
+/// serves as it was, with free slots, until the retry.
+#[test]
+fn a_node_whose_takeover_failed_keeps_taking_jobs_under_the_runtime_it_has() {
+    let p = working_pair(2);
+    let flag = p.sa.root.path().join("go");
+    let cmd = flag_script(&p, "wait.sh", &flag);
+    let b = p.b.clone();
+    *b.node.pending_runtime.lock().unwrap() = Some("a".repeat(40));
+    b.node
+        .takeover_failed_ms
+        .store(1, std::sync::atomic::Ordering::SeqCst);
+    std::thread::scope(|sc| {
+        let h = sc.spawn(|| run_on_b(&p, &spec("run-held", None, &cmd), &|| None));
+        support::wait_for("the job to run on the node", 60, || {
+            b.node.jobs.running() == 1
+        });
+        poll(&p);
+        let n = listed(&p, "b");
+        assert_eq!(n["accepting"], true, "a free slot is taken: {n}");
+        assert!(b.node.pending_runtime.lock().unwrap().is_some());
+        std::fs::write(&flag, "go").unwrap();
+        let f = done(h.join().unwrap());
+        assert_eq!(f.output, "finished\n");
+    });
+    // And a second job is accepted while the runtime is still pending.
+    let f = done(run_on_b(&p, &spec("run-next", None, "echo next"), &|| None));
+    assert_eq!(f.output, "next\n");
 }
 
 fn put_runtime(p: &Pair, bytes: Vec<u8>) -> mason_daemon::node_client::Response {
@@ -1867,7 +1950,7 @@ mod fleet {
         assert_eq!(io.sends.load(Ordering::SeqCst), 1);
         // Sent, and the node lists it: installed, taking over when its jobs end.
         poll(&p);
-        assert_eq!(state(&p), Fleet::WaitingForJobs(0));
+        assert_eq!(state(&p), Fleet::Installed(0));
         assert_eq!(update_status_line(&p), "installed; taking over now");
         let row = listed(&p, "b");
         assert_eq!(row["update"], "installed; taking over now");
@@ -1940,7 +2023,7 @@ mod fleet {
                 && node_fleet::record_of(&nid(&p)).unwrap().phase == Phase::Sent
         });
         poll(&p);
-        assert_eq!(state(&p), Fleet::WaitingForJobs(0));
+        assert_eq!(state(&p), Fleet::Installed(0));
         assert!(
             nodes::alerts(&p.a)
                 .iter()
@@ -1988,7 +2071,7 @@ mod fleet {
         });
         assert_eq!(io.sends.load(Ordering::SeqCst), 1);
         poll(&p);
-        assert_eq!(state(&p), Fleet::WaitingForJobs(0));
+        assert_eq!(state(&p), Fleet::Installed(0));
     }
 
     /// A source repository with two commits, and the `update.toml` that builds them into
