@@ -284,9 +284,18 @@ pub fn tool_spec(tool: &str) -> Option<(String, Value)> {
                 "summary": {"type": "string"},
                 "findings": {"type": "array", "items": {"type": "object", "properties": {
                     "issue": {"type": "string"}, "file": {"type": "string"},
+                    "line": {"type": "integer", "description": "The line in file the finding is about"},
+                    "quote": {"type": "string", "description": "The code or rule the finding quotes"},
+                    "kind": {"type": "string", "enum": ["wont_build", "wrong_for_every_input", "other"],
+                        "description": "From round 2 on, a new blocking finding is accepted only on a line changed since the last review, or of kind wont_build or wrong_for_every_input"},
                     "severity": {"type": "string", "enum": ["blocking", "minor"],
                         "description": "'blocking' sends the task back; 'minor' is kept as advice"}},
                     "required": ["issue", "severity"]}},
+                "earlier": {"type": "array", "description": "From round 2 on: an answer to each earlier blocking finding that is still open", "items": {"type": "object", "properties": {
+                    "round": {"type": "integer"}, "index": {"type": "integer", "description": "Position of the finding in that round, from 0"},
+                    "status": {"type": "string", "enum": ["fixed", "not_fixed", "withdrawn"]},
+                    "note": {"type": "string"}},
+                    "required": ["round", "index", "status"]}},
                 "removes": {"type": "array", "items": {"type": "object", "properties": {
                     "file": {"type": "string"}, "line": {"type": "string"}, "reason": {"type": "string"}},
                     "required": ["file", "line", "reason"]},
@@ -670,6 +679,29 @@ pub fn validate(tool: &str, a: &Value) -> Result<(), Vec<String>> {
                 None => p.push("verdict: required, 'approve' or 'changes'".into()),
             }
             removes(a, &mut p);
+            for (i, e) in a
+                .get("earlier")
+                .and_then(Value::as_array)
+                .map_or(&[][..], Vec::as_slice)
+                .iter()
+                .enumerate()
+            {
+                if e.get("round").and_then(Value::as_u64).is_none()
+                    || e.get("index").and_then(Value::as_u64).is_none()
+                {
+                    p.push(format!(
+                        "earlier[{i}]: round and index are required whole numbers"
+                    ));
+                }
+                if !matches!(
+                    e.get("status").and_then(Value::as_str),
+                    Some("fixed" | "not_fixed" | "withdrawn")
+                ) {
+                    p.push(format!(
+                        "earlier[{i}].status: required, 'fixed', 'not_fixed' or 'withdrawn'"
+                    ));
+                }
+            }
             for (i, f) in findings.iter().enumerate() {
                 if f.get("issue")
                     .and_then(Value::as_str)

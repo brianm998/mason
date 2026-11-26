@@ -3499,6 +3499,9 @@ fn main() {
                     for l in t["review_findings"].as_array().into_iter().flatten() {
                         println!("  review    {}", l.as_str().unwrap_or(""));
                     }
+                    for l in t["review_rounds"].as_array().into_iter().flatten() {
+                        println!("  rounds    {}", l.as_str().unwrap_or(""));
+                    }
                     for n in t["owner_notes"].as_array().into_iter().flatten() {
                         println!(
                             "  owner note ({}) {}",
