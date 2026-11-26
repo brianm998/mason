@@ -7931,7 +7931,7 @@ mod tests {
         let queued = |b: &crate::sched::Broker, n: usize| {
             let began = std::time::Instant::now();
             while b.gha_waiting() != n {
-                assert!(began.elapsed().as_secs() < 600, "timed out: {n} never queued");
+                assert!(began.elapsed().as_secs() < 600, "timeout: {n}");
                 std::thread::sleep(Duration::from_millis(5));
             }
         };
