@@ -72,7 +72,8 @@ pub fn default_low() -> Vec<String> {
 /// `[auto]` of `update.toml`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AutoCfg {
-    /// `enabled = false` leaves updating to the owner.
+    /// Off unless `[auto] enabled = true`: the owner's rule is that an update needs their OK,
+    /// so masond starts none of its own until the owner turns this on.
     pub enabled: bool,
     pub normal_max_wait_s: u64,
     /// The off-peak window as minutes of the local day, `(from, to)`; `None` has no window.
@@ -87,7 +88,7 @@ pub struct AutoCfg {
 impl Default for AutoCfg {
     fn default() -> Self {
         AutoCfg {
-            enabled: true,
+            enabled: false,
             normal_max_wait_s: DEFAULT_NORMAL_MAX_WAIT_S,
             offpeak: parse_window(DEFAULT_OFFPEAK),
             cost_max: DEFAULT_COST_MAX,
@@ -771,6 +772,8 @@ fn run_planned(d: &Arc<Daemon>, first: Pending) {
                 let mut p = lock(&d.update_plan);
                 p.failed = Some((cur.target.clone(), now_ms()));
                 p.running = None;
+                // A newer build filed meanwhile must not cut a later drain short.
+                d.update_replace.store(false, Ordering::SeqCst);
                 return;
             }
         };
@@ -793,6 +796,7 @@ fn run_planned(d: &Arc<Daemon>, first: Pending) {
         let mut p = lock(&d.update_plan);
         p.failed = Some((target, now_ms()));
         p.running = None;
+        d.update_replace.store(false, Ordering::SeqCst);
         return;
     }
 }
@@ -1107,15 +1111,17 @@ mod tests {
     #[test]
     fn auto_config_reads_the_table() {
         let doc: toml_edit::DocumentMut =
-            "[auto]\nenabled = false\nnormal_max_wait_s = 60\noffpeak = \"02:00-03:00\"\ncost_max = 2\nnone = [\"x/\"]\n"
+            "[auto]\nenabled = true\nnormal_max_wait_s = 60\noffpeak = \"02:00-03:00\"\ncost_max = 2\nnone = [\"x/\"]\n"
                 .parse()
                 .unwrap();
         let c = AutoCfg::from_doc(&doc);
-        assert!(!c.enabled);
+        assert!(c.enabled);
         assert_eq!(c.normal_max_wait_s, 60);
         assert_eq!(c.offpeak, Some((120, 180)));
         assert_eq!(c.cost_max, 2);
         assert_eq!(c.none, Some(vec!["x/".to_string()]));
-        assert!(AutoCfg::from_doc(&"".parse().unwrap()).enabled);
+        // Nothing is switched on by silence: no `[auto]`, or one without `enabled`.
+        assert!(!AutoCfg::from_doc(&"".parse().unwrap()).enabled);
+        assert!(!AutoCfg::from_doc(&"[auto]\ncost_max = 1\n".parse().unwrap()).enabled);
     }
 }

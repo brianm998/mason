@@ -1498,7 +1498,10 @@ pub fn check_once(d: &Arc<Daemon>) -> std::time::Duration {
             }
         }
     };
-    let newer = (next.outdated && cfg.channel != Channel::Release).then(|| next.latest.clone());
+    // Ahead of the running build by any commit, not only by one the banner counts: a range that
+    // changed nothing the daemon runs is still filed, as priority none, so the status says so
+    // (#1082). `behind` is set only for a forward move.
+    let newer = (next.behind > 0 && cfg.channel != Channel::Release).then(|| next.latest.clone());
     set_check(d, next);
     if let Some(target) = newer {
         crate::update_plan::found_newer(d, &cfg, &target);

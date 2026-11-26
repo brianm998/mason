@@ -3,7 +3,7 @@
 
 ## Decision
 
-When the channel has a newer build, masond schedules the update itself. Its priority comes from what `running..target` contains: urgent (an urgent or fix task landed, an `Update-Urgent:` line, or an owner mark) goes as soon as running landing batches finish; normal (daemon code changed) waits until a takeover interrupts nothing or `normal_max_wait_s` passes; off-peak (CLI, tests, scripts) waits for the window or a quiet machine; none (docs, clients, markdown) causes no takeover. A newer build replaces a waiting one with the higher priority of the two.
+When the channel has a newer build and `[auto] enabled = true` is set in `update.toml` (off by default, since updates need the owner's OK), masond schedules the update itself. Its priority comes from what `running..target` contains: urgent (an urgent or fix task landed, an `Update-Urgent:` line, or an owner mark) goes as soon as running landing batches finish; normal (daemon code changed) waits until a takeover interrupts nothing or `normal_max_wait_s` passes; off-peak (CLI, tests, scripts) waits for the window or a quiet machine; none (docs, clients, markdown) causes no takeover. A newer build replaces a waiting one with the higher priority of the two.
 
 ## Why
 

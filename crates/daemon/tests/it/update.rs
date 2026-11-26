@@ -644,11 +644,21 @@ fn a_daemon_with_no_update_toml_says_nothing() {
 
 /// Let the daemon look at the channel every second and give `[auto]` its settings.
 fn auto_cfg(s: &Scratch, auto: &str) {
+    // Automatic updates are off unless asked for; these tests ask, unless they say otherwise.
+    let on = if auto.contains("enabled") {
+        ""
+    } else {
+        "enabled = true\n"
+    };
+    write_auto(s, &format!("[auto]\n{on}{auto}\n"));
+}
+
+fn write_auto(s: &Scratch, auto_table: &str) {
     let p = s.config_dir.join("update.toml");
     let t = std::fs::read_to_string(&p).unwrap();
     std::fs::write(
         &p,
-        format!("check_interval_s = 1\nupdate_wait_max_s = 0\n{t}\n[auto]\n{auto}\n"),
+        format!("check_interval_s = 1\nupdate_wait_max_s = 0\n{t}\n{auto_table}"),
     )
     .unwrap();
 }
@@ -835,6 +845,31 @@ fn auto_disabled_starts_no_update() {
     let s = Scratch::new("true", json!({"steps": {}}));
     let src = source(&s, &[&[]]);
     auto_cfg(&s, "enabled = false");
+    let mut m = start(&s);
+    s.mason_ok(&["update", "--sha", &src.shas[0]]);
+    wait_status(&s, "c1 to run", 600, |v| {
+        v["running"] == src.shas[0].as_str()
+    });
+    let next = push(
+        &s,
+        &[("crates/daemon/src/x.rs", "// x")],
+        "change the daemon",
+    );
+    wait_status(&s, "the check to see it", 600, |v| {
+        v["latest"] == next.as_str()
+    });
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(status(&s)["running"], src.shas[0].as_str());
+    assert_eq!(plan_text(&status(&s)), "");
+    drop(m.child.kill());
+    kill_hosts(&s.data_dir);
+}
+
+#[test]
+fn without_an_auto_table_the_daemon_starts_no_update() {
+    let s = Scratch::new("true", json!({"steps": {}}));
+    let src = source(&s, &[&[]]);
+    write_auto(&s, "");
     let mut m = start(&s);
     s.mason_ok(&["update", "--sha", &src.shas[0]]);
     wait_status(&s, "c1 to run", 600, |v| {
