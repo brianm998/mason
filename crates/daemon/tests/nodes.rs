@@ -1431,6 +1431,93 @@ fn a_node_refuses_a_runtime_it_cannot_check_and_installs_nothing_of_one_that_doe
     assert!(text.contains("TEAM111111"), "{text}");
 }
 
+/// The data directory of `docs/nodes.md` made every job id of any length too long a socket path
+/// for its step host. A node whose data directory is as long as that one starts its hosts and
+/// finishes its jobs, and its doctor passes the socket check.
+#[test]
+fn a_node_with_the_documented_length_of_data_dir_runs_jobs_with_long_ids() {
+    use mason_daemon::{config::NodeSettings, node_doctor, node_run};
+    const DOCUMENTED: &str = "/Users/masonnode/Library/Application Support/mason";
+    let p = pair();
+    // Under /tmp: $TMPDIR on macOS is already too long for a socket with this much after it.
+    let tmp = tempfile::Builder::new()
+        .prefix("mn")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let used = tmp.path().as_os_str().len() + 1;
+    let data = tmp.path().join("d".repeat(DOCUMENTED.len() - used));
+    assert_eq!(data.as_os_str().len(), DOCUMENTED.len());
+    let jobs = Arc::new(node_run::Jobs::new(&data));
+    let coord = "ad7507fdc188cdd0";
+    let mirror = jobs.mirror_path(coord, "scratch");
+    std::fs::create_dir_all(mirror.parent().unwrap()).unwrap();
+    sh(
+        &p.sa.repo,
+        &["clone", "-q", "--bare", ".", mirror.to_str().unwrap()],
+    );
+    let sha = sh(&p.sa.repo, &["rev-parse", "HEAD"]).trim().to_string();
+    for id in [
+        "t1113r6691-check-cargo-workspace-build3".to_string(),
+        format!("b421-r1-bis6-7-{}", "x".repeat(45)),
+    ] {
+        let req = node_run::StartReq {
+            id: id.clone(),
+            project: "scratch".into(),
+            sha: sha.clone(),
+            build: Some("echo built".into()),
+            command: "echo ran".into(),
+            results_file: None,
+            env: vec![],
+            limit_s: 120,
+            lease_s: 300,
+        };
+        jobs.start(&p.b, coord, req, &NodeSettings::default(), &|_| None)
+            .unwrap();
+        support::wait_for("the job to end", 60, || {
+            jobs.list().iter().all(|j| j["state"] != "running")
+        });
+        let a = jobs.artifact(coord, &id).unwrap();
+        assert_eq!(a["result"]["state"], "done", "{a}");
+        assert_eq!(a["result"]["code"], 0, "{a}");
+        assert_eq!(
+            String::from_utf8(jobs.log(coord, &id, 0)).unwrap(),
+            "built\nran\n"
+        );
+        // The folder is named by the key; what it is for is written in it.
+        for phase in ["build", "run"] {
+            let dir = data
+                .join("node/hosts")
+                .join(node_run::host_key(coord, &id, phase));
+            assert!(dir.join("host.kv").exists(), "{}", dir.display());
+            assert_eq!(
+                std::fs::read_to_string(dir.join("name")).unwrap(),
+                format!("{coord}-{id}-{phase}\n")
+            );
+        }
+        assert!(jobs.ack(coord, &id));
+    }
+    // What `mason node doctor` says of the socket paths, here and under the documented one.
+    for dir in [data.as_path(), Path::new(DOCUMENTED)] {
+        let report = node_doctor::evaluate(
+            &node_doctor::Inputs {
+                signature: node_doctor::Signature::Unchecked,
+                paths: vec![],
+                host_socket: node_doctor::longest_host_socket(dir),
+                listener_bound: true,
+                mdns: node_doctor::Mdns::Off,
+                tools: vec![],
+            },
+            1,
+        );
+        let check = report
+            .checks
+            .iter()
+            .find(|c| c.name == "socket path")
+            .expect("the doctor checks the socket path");
+        assert!(check.ok, "{}", check.detail);
+    }
+}
+
 // ---- s1122: the fleet update ----------------------------------------------------------------
 
 mod fleet {
