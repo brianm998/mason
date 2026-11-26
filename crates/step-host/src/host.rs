@@ -11,7 +11,7 @@ use mason_platform::net::{UnixListener, UnixStream};
 use mason_platform::process::{self, Signal};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{channel, RecvTimeoutError};
 use std::sync::{Arc, Condvar, Mutex};
@@ -19,7 +19,23 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 /// Longest socket path we accept (macOS limits `sun_path` to 104 bytes).
-const MAX_SOCK_PATH: usize = 100;
+pub const MAX_SOCK_PATH: usize = 100;
+
+/// Refuse a host socket path that is over [`MAX_SOCK_PATH`], naming it and its length.
+pub fn check_sock_path(sock: &Path) -> io::Result<()> {
+    let len = sock.as_os_str().len();
+    if len > MAX_SOCK_PATH {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "socket path too long: {len} characters, and the limit is {MAX_SOCK_PATH}: {} \
+                 (use a shorter data directory)",
+                sock.display()
+            ),
+        ));
+    }
+    Ok(())
+}
 
 #[derive(Clone, Debug)]
 pub struct HostConfig {
@@ -65,12 +81,7 @@ pub fn run(cfg: HostConfig) -> io::Result<()> {
 
     fs::create_dir_all(&cfg.dir)?;
     let sock_path = cfg.dir.join("sock");
-    if sock_path.as_os_str().len() > MAX_SOCK_PATH {
-        return Err(io::Error::other(format!(
-            "socket path too long: {}",
-            sock_path.display()
-        )));
-    }
+    check_sock_path(&sock_path)?;
     let journal_path = cfg.dir.join("journal");
     let journal = OpenOptions::new()
         .create_new(true)
@@ -83,7 +94,9 @@ pub fn run(cfg: HostConfig) -> io::Result<()> {
     let (reader, writer) = io::pipe()?;
     let mut cmd = Command::new(&cfg.cmd[0]);
     let stdin = match &cfg.stdin {
-        Some(p) => Stdio::from(File::open(p)?),
+        Some(p) => Stdio::from(File::open(p).map_err(|e| {
+            io::Error::new(e.kind(), format!("cannot open stdin {}: {e}", p.display()))
+        })?),
         None => Stdio::null(),
     };
     cmd.args(&cfg.cmd[1..])
