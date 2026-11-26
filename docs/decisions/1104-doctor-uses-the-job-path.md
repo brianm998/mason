@@ -13,3 +13,8 @@ One function, `node_run::job_path`, builds the `PATH` for jobs and for the docto
 
 - Only documenting a `PATH`: the daemon's check would still differ from what a job gets.
 - Resolving `~/.cargo/bin/cargo` directly: a second rule to keep in step with the job environment.
+
+## Test worlds (added after the GitHub run timed out)
+
+The owner approved changing the test harness in this task: a test holding a world no longer waits 600 s for its next one. The wait ended by going ahead without a slot, so the limit's maximum overshoot is the same, only reached sooner. Raising the 60-minute limit was not done.
+

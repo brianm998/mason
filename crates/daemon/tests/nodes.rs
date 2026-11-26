@@ -21,8 +21,8 @@ use std::sync::Arc;
 use support::*;
 
 /// A test that needs two worlds takes them one test at a time: the worlds are a limited set
-/// (`support::world_limit`), and tests that each held one while waiting for a second would wait
-/// for each other for ever.
+/// (`support::world_limit`), and tests that each held one while another waits for its first
+/// would push the machine past it.
 static WORLDS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn worlds() -> std::sync::MutexGuard<'static, ()> {
