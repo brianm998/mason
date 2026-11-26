@@ -32,6 +32,21 @@ fn demo() -> (Arc<Daemon>, u16, tempfile::TempDir) {
     (d, port, dir)
 }
 
+/// A non-demo daemon, whose dedupe of unchanged views is the production one.
+fn live() -> (Arc<Daemon>, u16, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = DaemonConfig::new(
+        dir.path().join("d"),
+        dir.path().join("c"),
+        bin("mason-step-host", "step-host"),
+        bin("mason-adapters", "mason-mcp"),
+    );
+    std::fs::create_dir_all(&cfg.data_dir).unwrap();
+    let d = Daemon::start(cfg).unwrap();
+    let port = serve(&d);
+    (d, port, dir)
+}
+
 fn serve(d: &Arc<Daemon>) -> u16 {
     let d2 = d.clone();
     std::thread::spawn(move || {
@@ -1332,7 +1347,7 @@ fn sidebar_views(msgs: &[ServerMessage]) -> Vec<mason_protocol::SidebarView> {
 
 #[test]
 fn an_unchanged_view_is_not_sent_again_and_a_changed_one_is() {
-    let (d, port, _dir) = demo();
+    let (d, port, _dir) = live();
     let mut c = Client::connect(port, Encoding::Protobuf).unwrap();
     c.hello(0, true).unwrap();
     let kinds = [ViewKind::Sidebar, ViewKind::Usage];
@@ -1344,6 +1359,10 @@ fn an_unchanged_view_is_not_sent_again_and_a_changed_one_is() {
         has(m, is_usage) && has(m, is_side)
     });
     assert!(has(&first, is_usage) && has(&first, is_side));
+    let first_usage = views_of(&first)
+        .into_iter()
+        .find(is_usage)
+        .expect("asserted above");
     // The same subscription again rebuilds everything; nothing differs, then one task is filed.
     c.subscribe(&kinds, "", 0).unwrap();
     let pid = ProjectId(1);
@@ -1367,7 +1386,14 @@ fn an_unchanged_view_is_not_sent_again_and_a_changed_one_is() {
     let mut got = collect(&mut c, Duration::from_secs(10), |m| has(m, is_side));
     got.extend(collect(&mut c, Duration::from_millis(800), |_| false));
     assert_eq!(sidebar_views(&got).len(), 1, "the changed sidebar, once");
-    assert!(!has(&got, is_usage), "usage did not change: not sent again");
+    // The Usage text counts from the wall clock ("as of 12 min ago", "resets in 2 h 9 m"), so
+    // it may rightly change while this runs. An identical copy of the view last sent must still
+    // never be sent again, so each usage view is compared with the one before it.
+    let mut last_usage = first_usage;
+    for usage in views_of(&got).into_iter().filter(is_usage) {
+        assert_ne!(usage, last_usage, "an unchanged usage view was sent again");
+        last_usage = usage;
+    }
 }
 
 #[test]
@@ -1446,4 +1472,35 @@ fn history_bodies_come_with_row_bodies_and_the_sidebar_is_sent_once() {
         size(&sidebar_views(&full)[0]),
     );
     assert!(l * 4 < f, "without bodies {l} bytes, with {f}");
+}
+
+#[test]
+fn a_demo_client_gets_all_three_views_at_every_step_even_when_nothing_changed() {
+    let (d, port, _dir) = demo();
+    let mut c = Client::connect(port, Encoding::Json).unwrap();
+    c.hello(0, false).unwrap();
+    collect(&mut c, Duration::from_secs(5), |m| !m.is_empty());
+    for _ in 0..8 {
+        next_step(&mut c);
+        let seq = d.store.last_seq().unwrap();
+        // Wait on the messages themselves: a view of each kind stamped at the step's seq.
+        let got = collect(&mut c, Duration::from_secs(30), |m| {
+            let kinds: std::collections::HashSet<_> = m
+                .iter()
+                .filter_map(|m| match &m.body {
+                    Some(server_message::Body::View(u)) if u.seq >= seq => {
+                        u.view.as_ref()?.body.as_ref().map(std::mem::discriminant)
+                    }
+                    _ => None,
+                })
+                .collect();
+            kinds.len() >= 3
+        });
+        assert!(!got.is_empty(), "no views at seq {seq}");
+        let n = got
+            .iter()
+            .filter(|m| matches!(&m.body, Some(server_message::Body::View(u)) if u.seq >= seq))
+            .count();
+        assert!(n >= 3, "only {n} views at seq {seq}");
+    }
 }

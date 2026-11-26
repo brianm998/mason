@@ -92,7 +92,8 @@ uses = { compile = 1 }
 
 TOML
 # Both suites are green here too: which one ran where is read from the pushes.
-printf '#!/bin/sh\necho 1..3\necho "ok 1 - a"\necho "ok 2 - b"\necho "ok 3 - c"\n' > "$root/repo/checks.sh"
+# A local run waits while "$root/hold" exists, so step 3 can keep task 1 from landing.
+printf '#!/bin/sh\nwhile [ -e "%s/hold" ]; do sleep 0.1; done\necho 1..3\necho "ok 1 - a"\necho "ok 2 - b"\necho "ok 3 - c"\n' "$root" > "$root/repo/checks.sh"
 echo scratch > "$root/repo/README"
 git -C "$root/repo" add -A
 git -C "$root/repo" -c user.name=t -c user.email=t@t commit -qm "base"
@@ -143,17 +144,23 @@ m task show 0 | grep -q 'suite checks: on GitHub (ubuntu-latest), from the task'
 
 echo "== 2. no flag follows the switch"
 n1=$(pushes)
+touch "$root/hold"
 m task add "Follows the switch" --project alpha --body "y" > /dev/null
 m task show 1 | grep -q 'runs on: this Mac (global switch)' || fail "task show does not say this Mac (global switch)"
-wait_state 1 landed 240
-[ "$(pushes)" = "$n1" ] || fail "a task with no choice pushed a run"
 
 echo "== 3. run-on changes it later"
+# Task 2 is filed and set to local while task 1 cannot land, so it is held throughout.
+unlanded() { [ "$(m task show 1 --json | jq_state)" != landed ] || fail "task 1 landed $1, so task 2 was not held"; }
 n2=$(pushes)
+unlanded "before task 2 was filed"
 m task add "Held" --project alpha --body "z" --run-on github --after 1 > /dev/null
 m task show 2 | grep -q 'runs on: GitHub (task choice)' || fail "held task does not say GitHub"
 m task run-on 2 local | grep -q 'this Mac (task choice)' || fail "run-on local did not take"
 m task show 2 | grep -q 'runs on: this Mac (task choice)' || fail "task show after run-on local"
+unlanded "before task 2 was set to local"
+rm -f "$root/hold"
+wait_state 1 landed 240
+[ "$(pushes)" = "$n1" ] || fail "a task with no choice pushed a run"
 wait_state 2 landed 240
 [ "$(pushes)" = "$n2" ] || fail "a task set to local pushed a run"
 m task run-on 2 default | grep -q 'this Mac (global switch)' || fail "run-on default did not remove the choice"
