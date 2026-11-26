@@ -1353,6 +1353,207 @@ fn a_run_on_a_node_is_a_row_of_remote_runs() {
     assert!(mason_daemon::remote_runs::view(&p.a, &|_| None, "").enabled);
 }
 
+// ---- #1155: what runs where ---------------------------------------------------------------------
+
+/// A suite of `name` for a check's place.
+fn named_suite(name: &str) -> Box<mason_testing::Suite> {
+    Box::new(mason_testing::Suite::new(
+        name,
+        "true",
+        mason_testing::ParserKind::Tap,
+    ))
+}
+
+/// The hosts of `/status` (as `mason status --json` prints it) that have a run of task `t`.
+fn hosts_running(p: &Pair, t: u64) -> Vec<String> {
+    let s: Value = serde_json::from_str(&p.sa.mason_ok(&["status", "--json"])).unwrap();
+    let mut out = vec![];
+    for h in s["hosts"].as_array().expect("status has hosts") {
+        for r in h["runs"].as_array().unwrap() {
+            if r["task"] == t {
+                assert_eq!(r["state"], "proposed", "the run carries the task: {r}");
+                assert_eq!(r["title"], "Watched", "{r}");
+                out.push(r["host"].as_str().unwrap().to_string());
+            }
+        }
+    }
+    out
+}
+
+/// The hosts `/tasks/{id}` says task `t` is running on.
+fn running_on(p: &Pair, t: u64) -> Vec<String> {
+    p.sa.task_json(t)["running_on"]
+        .as_array()
+        .expect("the task has running_on")
+        .iter()
+        .map(|r| r["host"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// The lines `mason hosts` prints under the host whose line starts with `head`.
+fn under(text: &str, head: &str) -> Vec<String> {
+    let mut lines = text.lines().skip_while(|l| !l.starts_with(head));
+    assert!(lines.next().is_some(), "no host {head} in:\n{text}");
+    lines
+        .take_while(|l| l.starts_with("  "))
+        .map(str::to_string)
+        .collect()
+}
+
+/// A check is listed under the node while it runs there, under this Mac once the node gives it
+/// back, and nowhere once it has ended; the placement decision is still on record. A GitHub run
+/// is listed from its hold.
+#[test]
+fn a_check_in_flight_is_listed_under_its_host_until_it_ends() {
+    use mason_daemon::hostedcheck::{run as run_check, CheckSpec};
+    let p = working_pair_full(
+        2,
+        "",
+        "on_switch_off = \"cancel\"",
+        |c| c.port = 0,
+        |_| {},
+        |_| {},
+    );
+    mason_daemon::place::set_global(&p.a, mason_daemon::place::Mode::Remote, "test").unwrap();
+    let served = p.a.clone();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _ = rt.block_on(mason_daemon::http::serve(served));
+    });
+    wait_for("the daemon to be served", 60, || {
+        p.a.cfg.info_path().exists()
+    });
+    let t = file_task_as(
+        &p.a,
+        "Watched",
+        "Please watch.",
+        false,
+        mason_core::TrustSource::Owner,
+        true,
+    )
+    .0;
+    assert!(hosts_running(&p, t).is_empty());
+
+    let logs = tempfile::tempdir().unwrap();
+    let flag = p.sa.root.path().join("finish");
+    let spec = CheckSpec {
+        id_prefix: format!("t{t}r1-check"),
+        log_dir: logs.path().to_path_buf(),
+        // On the node this hangs; here it waits for the flag.
+        cmd: format!(
+            "if [ -n \"$MASON_NODE\" ]; then sleep 300; else while [ ! -f '{}' ]; do sleep 0.1; done; fi",
+            flag.display()
+        ),
+        build: None,
+        cwd: p.sa.repo.clone(),
+        env: vec![],
+        limit: std::time::Duration::from_secs(120),
+        tree: "tree-watched".into(),
+        stop: None,
+        holds: Default::default(),
+        label: String::new(),
+        place: Some((Some(mason_core::TaskId(t)), named_suite("unit"))),
+        global: false,
+    };
+    std::thread::scope(|sc| {
+        let h = sc.spawn(|| run_check(&p.a, &spec, &mason_daemon::remote::Grant::attached()));
+        wait_for("the check to be listed on the node", 60, || {
+            p.b.node.jobs.running() == 1 && running_on(&p, t) == ["node:b"]
+        });
+        assert_eq!(hosts_running(&p, t), ["node:b"]);
+        let listed = p.sa.mason_ok(&["hosts"]);
+        let on_b = under(&listed, "node:b");
+        assert!(
+            on_b.iter()
+                .any(|l| l.contains(&format!("#{t} proposed")) && l.contains("check unit")),
+            "{listed}"
+        );
+        let shown = p.sa.mason_ok(&["task", "show", &t.to_string()]);
+        assert!(shown.contains("running on: node b (check unit"), "{shown}");
+
+        // The node gives the job back: it runs here, and is listed here only.
+        set_switch(&p, false);
+        let _ = run(
+            &p,
+            node_serve::accept(
+                State(p.b.clone()),
+                axum::http::HeaderMap::new(),
+                Json(json!({"on": false})),
+            ),
+        )
+        .unwrap();
+        wait_for("the check to be listed here", 60, || {
+            running_on(&p, t) == ["local"]
+        });
+        assert_eq!(hosts_running(&p, t), ["local"]);
+        std::fs::write(&flag, "go").unwrap();
+        let out = h.join().unwrap().unwrap();
+        assert!(out.passed, "{}", out.full);
+    });
+    assert!(hosts_running(&p, t).is_empty());
+    assert!(running_on(&p, t).is_empty());
+    assert!(!p.sa.mason_ok(&["hosts"]).contains(&format!("#{t} ")));
+    assert!(!p
+        .sa
+        .mason_ok(&["task", "show", &t.to_string()])
+        .contains("running on:"));
+    assert!(
+        mason_daemon::place::seen(Some(t))
+            .iter()
+            .any(|s| s["where"] == "node"),
+        "the decision stays on record"
+    );
+
+    // A run on GitHub, as the executor records it while it is out.
+    let rs = {
+        let mut rs = remote::spec_for(
+            "scratch",
+            &format!("t{t}r2-check0"),
+            None,
+            "true",
+            std::time::Duration::from_secs(60),
+            &[],
+            "macos-15",
+            "",
+        );
+        rs.suite = "unit".into();
+        rs
+    };
+    let dir = logs.path();
+    mason_step_host::registry::write_kv(
+        &dir.join(format!("{}.remote", rs.id)),
+        &[
+            ("sha", "abc".to_string()),
+            ("collected", "0".to_string()),
+            ("url", "https://github.com/o/r/actions/runs/9".to_string()),
+            ("runs_on", "macos-15".to_string()),
+        ],
+    )
+    .unwrap();
+    let hold = remote::HoldGuard::new(
+        &p.a.cfg.hosts_dir(),
+        &rs,
+        &rs.id,
+        &rs.id,
+        1,
+        dir,
+        "check",
+        t,
+    );
+    assert_eq!(running_on(&p, t), ["github:macos-15"]);
+    assert_eq!(hosts_running(&p, t), ["github:macos-15"]);
+    let listed = p.sa.mason_ok(&["hosts"]);
+    assert!(
+        under(&listed, "GitHub")
+            .iter()
+            .any(|l| l.contains("check unit on macos-15") && l.contains("actions/runs/9")),
+        "{listed}"
+    );
+    drop(hold);
+    assert!(running_on(&p, t).is_empty());
+    assert!(hosts_running(&p, t).is_empty());
+}
+
 // ---- §3.14: privacy prompts, signing and the doctor ---------------------------------------------
 
 /// The doctor checks the node and keeps what it found; a blocking problem is why the node takes
@@ -1415,6 +1616,59 @@ fn what_the_doctor_finds_stops_the_node_taking_work_until_it_is_fixed() {
     *p.b.node.doctor.lock().unwrap() = None;
     poll(&p);
     assert_eq!(listed(&p, "b")["usable"], true);
+}
+
+/// The doctor looks for tools where a job does: a `cargo` in `$HOME/.cargo/bin` counts although
+/// the `PATH` it was started with (`sudo -H`, a LaunchDaemon) does not name that folder.
+#[cfg(unix)]
+#[test]
+fn the_doctor_finds_cargo_on_the_path_a_job_gets() {
+    use mason_daemon::node_doctor::{evaluate, gather_in, Check, Mdns};
+    use std::os::unix::fs::PermissionsExt;
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path().join("home");
+    let bin = home.join(".cargo/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let base = |k: &str| match k {
+        "HOME" => Some(home.to_string_lossy().into_owned()),
+        "PATH" => Some("/usr/bin:/bin".to_string()),
+        _ => None,
+    };
+    let cargo = || -> Check {
+        let data = t.path().join("data");
+        let i = gather_in(&base, &data, &data, true, Mdns::Off, true);
+        evaluate(&i, 1)
+            .checks
+            .into_iter()
+            .find(|c| c.name == "cargo")
+            .unwrap()
+    };
+    let stub = |body: &str| {
+        let f = bin.join("cargo");
+        std::fs::write(&f, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    // A machine with a cargo of its own in a system folder cannot be made to have none.
+    let system = mason_daemon::node_run::job_path(None, "", "/usr/bin:/bin");
+    if !std::env::split_paths(&system).any(|d| d.join("cargo").exists()) {
+        let c = cargo();
+        assert!(!c.ok && c.blocks, "{c:?}");
+        assert!(c.detail.contains("does not run as this user"), "{c:?}");
+    }
+    // It runs from the home folder.
+    stub(r#"[ "$(pwd -P)" = "$(cd "$HOME" && pwd -P)" ] || exit 1; echo "cargo 9.9.9 (stub)""#);
+    let c = cargo();
+    assert!(c.ok, "{c:?}");
+    assert_eq!(c.detail, "cargo: cargo 9.9.9 (stub)");
+    stub(
+        r#"echo "info: syncing" >&2
+echo "error: rustup could not choose a version of cargo to run, because one wasn't specified explicitly" >&2
+exit 1"#,
+    );
+    let c = cargo();
+    assert!(!c.ok && c.blocks, "{c:?}");
+    assert!(c.detail.contains("could not choose a version"), "{c:?}");
+    assert!(c.detail.contains("rustup default"), "{c:?}");
 }
 
 /// A runtime waiting for the node's jobs to end holds the node, and says so.
@@ -2817,4 +3071,91 @@ fn a_check_the_node_gives_back_waits_for_a_node_when_the_project_may_not_run_it_
         assert!(out.output.contains("ran on node b"), "{}", out.output);
     });
     assert_eq!(b.used("test-suite"), 0);
+}
+
+/// A job whose command starts a long-running grandchild: the script writes the grandchild's pid
+/// to a file of the test's and waits for it.
+fn grandchild_script(p: &Pair, name: &str, pidfile: &Path) -> String {
+    std::fs::write(
+        p.sa.repo.join(name),
+        format!(
+            "sleep 3000 &\necho $! > '{}.tmp'\nmv '{}.tmp' '{}'\nwait\n",
+            pidfile.display(),
+            pidfile.display(),
+            pidfile.display()
+        ),
+    )
+    .unwrap();
+    format!("sh {name}")
+}
+
+fn grandchild_pid(pidfile: &Path) -> Option<u32> {
+    std::fs::read_to_string(pidfile).ok()?.trim().parse().ok()
+}
+
+/// Cleanup for a test that fails before the grandchild goes: it is a `sleep 3000`.
+struct KillOnDrop(std::path::PathBuf);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        if let Some(pid) = grandchild_pid(&self.0) {
+            let _ =
+                mason_platform::process::signal_process(pid, mason_platform::process::Signal::Kill);
+        }
+    }
+}
+
+/// A job that ends early must not leave its processes running. These were found on the node
+/// hours after the job was cancelled or timed out: test binaries holding scratch-world slots.
+/// Nothing here is a timing assertion: each test waits, up to the harness's limit, for the
+/// grandchild to be gone.
+#[test]
+fn a_cancelled_node_job_leaves_no_grandchild_behind() {
+    let p = working_pair(2);
+    let pidfile = p.sa.root.path().join("grandchild-cancel.pid");
+    let _guard = KillOnDrop(pidfile.clone());
+    let cmd = grandchild_script(&p, "gc-cancel.sh", &pidfile);
+    let stop = || {
+        // Cancel once the grandchild is running.
+        grandchild_pid(&pidfile).map(|_| StopWhy::Skipped)
+    };
+    let r = run_on_b(&p, &spec("run-gc-cancel", None, &cmd), &stop);
+    assert!(matches!(r, Ok(Outcome::Stopped(StopWhy::Skipped))), "{r:?}");
+    let pid = grandchild_pid(&pidfile).expect("the job started its grandchild");
+    support::wait_for("the cancelled job's grandchild to be gone", 60, || {
+        !mason_step_host::registry::pid_alive(pid)
+    });
+}
+
+/// The host of a running job dies (killed, or the machine stalled it past its heartbeat): the
+/// job is lost, and its command, which the host no longer watches, is killed with its group.
+#[test]
+fn a_node_job_whose_host_dies_leaves_no_grandchild_behind() {
+    let p = working_pair(2);
+    let pidfile = p.sa.root.path().join("grandchild-lost.pid");
+    let _guard = KillOnDrop(pidfile.clone());
+    let cmd = grandchild_script(&p, "gc-lost.sh", &pidfile);
+    let hosts = p.b.cfg.data_dir.join("node").join("hosts");
+    let r = std::thread::scope(|sc| {
+        let h = sc.spawn(|| run_on_b(&p, &spec("run-gc-lost", None, &cmd), &|| None));
+        support::wait_for("the job's grandchild to run", 60, || {
+            grandchild_pid(&pidfile).is_some()
+        });
+        let found = mason_step_host::registry::Registry::new(&hosts)
+            .scan()
+            .unwrap();
+        assert_eq!(found.len(), 1, "one host runs the job");
+        // The host goes; the command and its grandchild are left running.
+        mason_platform::process::signal_process(
+            found[0].info.host_pid,
+            mason_platform::process::Signal::Kill,
+        )
+        .unwrap();
+        h.join().unwrap()
+    });
+    assert!(r.is_err(), "a lost host is a failed run: {r:?}");
+    let pid = grandchild_pid(&pidfile).expect("the job started its grandchild");
+    support::wait_for("the lost job's grandchild to be gone", 60, || {
+        !mason_step_host::registry::pid_alive(pid)
+    });
 }

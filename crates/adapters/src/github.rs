@@ -951,6 +951,62 @@ impl BuildSystemAdapter for GitHub {
         self.status_detail(run).map(|(s, _)| s)
     }
 
+    /// The runs are found by their commit (`run`), or by the branch when there is none, and
+    /// only the unfinished ones on exactly that branch are cancelled: another `mason/ci/**`
+    /// ref can test the same commit. On a `mason/ci/**` ref the rules of `may_cancel` hold;
+    /// on a `mason/pr/**` ref, a branch MASON pushed for its own pull request, that
+    /// pull request's checks are cancelled too. Any other ref is left alone.
+    fn cancel(&self, run: &str, git_ref: &str) -> Result<usize, ApiError> {
+        let branch = git_ref.strip_prefix("refs/heads/").unwrap_or(git_ref);
+        let pr = branch.starts_with("mason/pr/");
+        if !(pr || branch.starts_with("mason/ci/")) {
+            return Ok(0);
+        }
+        let by = if run.is_empty() {
+            format!("branch={branch}")
+        } else {
+            format!("head_sha={run}")
+        };
+        let v = self.json(Request::get(
+            &self.url(&format!("/actions/runs?{by}&per_page=100")),
+        ))?;
+        let mut cancelled = 0;
+        let mut failed = None;
+        for r in v["workflow_runs"].as_array().into_iter().flatten() {
+            if r["head_branch"].as_str() != Some(branch)
+                || r["status"] == "completed"
+                || !(pr || may_cancel(r))
+            {
+                continue;
+            }
+            let Some(id) = r["id"].as_u64() else { continue };
+            let done = if pr {
+                self.cancel_run(id)
+            } else {
+                self.cancel_own_run(&ActionRun {
+                    id,
+                    branch: branch.to_string(),
+                    ..Default::default()
+                })
+            };
+            // One that cannot be cancelled does not keep the others running.
+            match done {
+                Ok(()) => cancelled += 1,
+                Err(e) => failed = Some((id, e)),
+            }
+        }
+        match failed {
+            None => Ok(cancelled),
+            Some((id, e)) => Err(ApiError::new(
+                e.kind,
+                format!(
+                    "{cancelled} run(s) cancelled; run {id} could not be: {}",
+                    e.detail
+                ),
+            )),
+        }
+    }
+
     /// While a run is unfinished the jobs of every run of the commit are read (one request
     /// each, no logs) and told apart by state, one entry per workflow run. A failed read of
     /// the jobs only leaves the detail out; the verdict never depends on it.

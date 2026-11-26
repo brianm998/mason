@@ -436,14 +436,25 @@ mod deadline_tests {
     #[test]
     fn a_hung_git_is_killed_at_its_deadline() {
         let dir = tempfile::tempdir().unwrap();
-        let e = run_for(
-            dir.path(),
-            &["-c", "alias.hang=!sleep 30 & echo $! > pid; wait", "hang"],
-            Duration::from_millis(500),
-        )
-        .unwrap_err();
-        assert!(e.timed_out, "{e}");
-        assert!(e.to_string().contains("timed out"));
+        // The deadline has to outlast git's own start-up, or git is killed before its alias has
+        // written the pid and there is no grandchild to look for (a busy macOS runner took over
+        // half a second: ENOENT on the pid file). So a deadline that fell before the pid was
+        // written is tried again with a longer one; every attempt must still time out.
+        let mut deadline = Duration::from_millis(500);
+        loop {
+            let e = run_for(
+                dir.path(),
+                &["-c", "alias.hang=!sleep 30 & echo $! > pid; wait", "hang"],
+                deadline,
+            )
+            .unwrap_err();
+            assert!(e.timed_out, "{e}");
+            assert!(e.to_string().contains("timed out"));
+            if dir.path().join("pid").exists() || deadline >= Duration::from_secs(20) {
+                break;
+            }
+            deadline *= 4;
+        }
         // The sleep (a grandchild) died with the group.
         let pid = std::fs::read_to_string(dir.path().join("pid")).unwrap();
         assert!(!pid.trim().is_empty(), "the helper never recorded its pid");
