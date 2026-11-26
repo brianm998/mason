@@ -65,6 +65,27 @@ fn fail(code: u16, msg: impl Into<String>) -> (StatusCode, Json<Value>) {
     )
 }
 
+/// The most characters a coordinator's name may have on a node.
+pub const COORDINATOR_NAME_MAX: usize = 60;
+
+/// The name a coordinator goes by: `full`, trimmed, when it fits in [`COORDINATOR_NAME_MAX`]
+/// characters, else its start and a short hash of the whole of it, so that two long names with the
+/// same start stay apart. The coordinator sends this, and the node applies it again to every name
+/// it stores or looks up (it leaves a name that fits as it is), so a full host name finds the
+/// coordinator too.
+pub fn coordinator_name(full: &str) -> String {
+    let full = full.trim();
+    if full.chars().count() <= COORDINATOR_NAME_MAX {
+        return full.to_string();
+    }
+    let hash = &lan::sha256_hex(full.as_bytes())[..8];
+    let start: String = full
+        .chars()
+        .take(COORDINATOR_NAME_MAX - hash.len() - 1)
+        .collect();
+    format!("{start}-{hash}")
+}
+
 /// A coordinator this node trusts: its certificate's fingerprint, and what the owner called it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Coordinator {
@@ -163,7 +184,7 @@ impl NodeState {
         std::fs::rename(&tmp, self.file())
     }
 
-    /// Trust `fingerprint`, called `name`. The same fingerprint again renames it. A name already
+    /// Trust `fingerprint`, called [`coordinator_name`] of `name`. The same fingerprint again renames it. A name already
     /// used by another fingerprint is refused.
     pub fn add_coordinator(
         &self,
@@ -172,10 +193,11 @@ impl NodeState {
         now: u64,
         team_id: Option<String>,
     ) -> Result<(), String> {
+        let name = &coordinator_name(name);
         let mut list = self.coordinators();
         if list
             .iter()
-            .any(|c| c.name == name && c.fingerprint != fingerprint)
+            .any(|c| c.name == *name && c.fingerprint != fingerprint)
         {
             return Err(format!(
                 "a coordinator called {name} is already paired; pair with another name"
@@ -195,6 +217,7 @@ impl NodeState {
 
     /// Stop trusting the coordinator called `name`. `false`: there is none.
     pub fn remove_coordinator(&self, name: &str) -> Result<bool, String> {
+        let name = coordinator_name(name);
         let mut list = self.coordinators();
         let Some(gone) = list.iter().find(|c| c.name == name).cloned() else {
             return Ok(false);
@@ -949,13 +972,7 @@ async fn pair(
         return Err(fail(400, "no client certificate"));
     }
     let code = b["code"].as_str().unwrap_or_default().to_string();
-    let name: String = b["name"]
-        .as_str()
-        .unwrap_or_default()
-        .trim()
-        .chars()
-        .take(60)
-        .collect();
+    let name = coordinator_name(b["name"].as_str().unwrap_or_default());
     if name.is_empty() {
         return Err(fail(400, "the coordinator needs a name"));
     }
@@ -1756,6 +1773,46 @@ mod tests {
         assert!(again.remove_coordinator("desk").unwrap());
         assert!(!again.is_paired("aa"));
         assert!(NodeState::new(dir.path()).coordinators().is_empty());
+    }
+
+    #[test]
+    fn a_long_coordinator_name_is_the_same_when_paired_listed_and_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let n = NodeState::new(dir.path());
+        let full = "iad20-eo1208-4d9d4e11-5ec7-4380-9ca6-a318516bf388-A2C80B34A8C3";
+        assert_eq!(full.chars().count(), 62);
+        let sent = coordinator_name(full);
+        assert_eq!(sent.chars().count(), COORDINATOR_NAME_MAX);
+        assert_eq!(coordinator_name(&sent), sent);
+        n.add_coordinator("aa", &sent, 1, None).unwrap();
+        assert_eq!(NodeState::new(dir.path()).coordinators()[0].name, sent);
+        assert!(n.remove_coordinator(&sent).unwrap());
+        // The full host name finds it too, as `pair` and the removal normalise alike.
+        n.add_coordinator("aa", full, 2, None).unwrap();
+        assert_eq!(n.coordinators()[0].name, sent);
+        assert!(n.remove_coordinator(full).unwrap());
+        assert!(n.coordinators().is_empty());
+    }
+
+    #[test]
+    fn long_coordinator_names_with_the_same_start_stay_distinct() {
+        let dir = tempfile::tempdir().unwrap();
+        let n = NodeState::new(dir.path());
+        // Two bytes a character: the cut must fall between characters.
+        let start = "é".repeat(COORDINATOR_NAME_MAX);
+        let (one, two) = (format!("{start}-one"), format!("{start}-two"));
+        n.add_coordinator("aa", &one, 1, None).unwrap();
+        n.add_coordinator("bb", &two, 2, None).unwrap();
+        let list = n.coordinators();
+        assert_ne!(list[0].name, list[1].name);
+        assert!(list
+            .iter()
+            .all(|c| c.name.chars().count() == COORDINATOR_NAME_MAX));
+        assert!(n.remove_coordinator(&one).unwrap());
+        assert_eq!(n.coordinators()[0].fingerprint, "bb");
+        // A name that fits is left as it is.
+        let fits = "é".repeat(COORDINATOR_NAME_MAX);
+        assert_eq!(coordinator_name(&format!(" {fits} ")), fits);
     }
 
     #[test]
