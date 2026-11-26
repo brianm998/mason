@@ -547,7 +547,7 @@ impl RoomCache {
 }
 
 /// `<remote>/<base>` when the repository has it, else the local branch.
-fn remote_base_ref(repo: &Path, remote: &str, base: &str) -> String {
+pub(crate) fn remote_base_ref(repo: &Path, remote: &str, base: &str) -> String {
     let r = format!("{remote}/{base}");
     if git::ok(repo, &["rev-parse", "--verify", "--quiet", &r]) {
         r
@@ -2995,6 +2995,10 @@ impl Grant {
     /// Say where the run's hold is recorded, so units given back are written there.
     pub fn note_hold(&self, dir: &Path, id: &str) {
         self.lock().hold = Some((dir.to_path_buf(), id.to_string()));
+    }
+    /// The node whose unit the lease behind this grant holds, if any: the run goes there.
+    pub fn node(&self) -> Option<String> {
+        self.lock().owned.as_ref().and_then(|l| l.node())
     }
     /// The runner units this grant holds.
     pub fn units(&self) -> std::collections::BTreeMap<String, u32> {

@@ -747,6 +747,40 @@ pub fn node_units(
     Some(crate::remote::node_units_of(&nid))
 }
 
+/// Asked while a check waits for runner units: the unit of a node that has room for it now, or
+/// `None` while none has.
+pub type NodeHop = Arc<dyn Fn() -> Option<std::collections::BTreeMap<String, u32>> + Send + Sync>;
+
+/// For a check queued for GitHub: what it asks while it waits for runner units, to see whether a
+/// node has room for it in the meantime (placement was decided once, when it queued, and a node
+/// may have been full then). It answers with the node's unit under the rules every node run
+/// answers to: the suite must be allowed to leave this machine (no `remote = false`, device or
+/// `exclusive`) and the project to use nodes. `None`: no node could ever take this check, so it
+/// only waits for GitHub.
+pub fn node_hop(d: &Arc<Daemon>, spec: &CheckSpec) -> Option<NodeHop> {
+    runs_on_github(d, spec)?;
+    if !d.nodes.cfg(&d.cfg.config_dir).enabled {
+        return None;
+    }
+    let project = crate::remote::project_of(d, &spec.cwd)?;
+    let d = d.clone();
+    let global = spec.global;
+    let place = spec.place.clone();
+    if place.is_none() && !global {
+        return None;
+    }
+    Some(Arc::new(move || {
+        let room = match &place {
+            Some((task, suite)) => {
+                crate::place::node_room_for(&d, &project, task.map(|t| t.0), suite)
+            }
+            // A landing check no task or suite describes: only the project's own rules.
+            None => crate::nodes::best_room(&d, &project, None),
+        }?;
+        Some(crate::remote::node_units_of(&room.nid))
+    }))
+}
+
 /// Does `spec` leave this machine, for GitHub or a node? Then it needs no local `compile` or
 /// `test-suite` slot and no CPU or heat gate: it uses nothing on this Mac (#759).
 pub fn goes_remote(d: &Arc<Daemon>, spec: &CheckSpec) -> bool {
@@ -952,6 +986,7 @@ fn node_check(
     progress: Option<&CheckProgress>,
     spill: Option<String>,
     grant: &crate::remote::Grant,
+    node_failed: &mut Option<String>,
 ) -> Option<Shared> {
     use crate::remote as rm;
     let nid = match spill {
@@ -1002,9 +1037,17 @@ fn node_check(
         ) {
             Err(rm::Fail::Environmental(why)) => {
                 tracing::warn!(check = %id, "{why}; running it here instead");
+                // The result of wherever it runs next says why it left the node (#1197).
+                if crate::node_exec::is_base_failure(&why) {
+                    *node_failed = Some(why);
+                }
                 return None;
             }
-            Err(rm::Fail::Error(e)) => Err(e),
+            // A node without the job's base (#1197) is said as an outage: no verdict.
+            Err(rm::Fail::Error(e)) => Err(match rm::environmental(&e) {
+                Some(why) => format!("{OUTAGE_PREFIX}{why}"),
+                None => e,
+            }),
             // A wait for a node ends with the daemon: that is no verdict on the check.
             Ok(rm::Outcome::Stopped(rm::StopWhy::Gone)) if d.is_shutting_down() => {
                 Err("the daemon is stopping; run the check again".into())
@@ -1039,6 +1082,38 @@ pub fn is_outage(e: &str) -> bool {
     e.starts_with(OUTAGE_PREFIX)
 }
 
+/// A check's result, naming first the node failure that moved it elsewhere, if one did.
+fn with_node_failure(r: Shared, failed: Option<String>) -> Shared {
+    let Some(why) = failed else { return r };
+    match r {
+        Ok(mut o) => {
+            o.output = format!("({why})\n{}", o.output);
+            Ok(o)
+        }
+        // After the error: an outage is told by how its text starts.
+        Err(e) => Err(format!("{e}\n({why})")),
+    }
+}
+
+/// May `spec` never run on this Mac when nothing off it takes it? True for a project with a
+/// `[remote_runs]` whose mode for this check is `remote` (the task's own, else the project's,
+/// else the global one) and whose fallback is not `local`. A project without `[remote_runs]`
+/// keeps the way back here that a node gives it.
+fn stays_off_this_mac(d: &Arc<Daemon>, spec: &CheckSpec) -> bool {
+    use crate::place::Mode;
+    let Some(project) = crate::remote::project_of(d, &spec.cwd) else {
+        return false;
+    };
+    let Some(cfg) = crate::remote::remote_cfg(d, &project) else {
+        return false;
+    };
+    let task = spec.place.as_ref().and_then(|(t, _)| t.map(|t| t.0));
+    !cfg.fallback_local
+        && crate::place::task_choice(d, task)
+            .unwrap_or_else(|| crate::place::project_effective(d, &project).0)
+            == Mode::Remote
+}
+
 fn collect(
     d: &Arc<Daemon>,
     spec: &CheckSpec,
@@ -1046,23 +1121,86 @@ fn collect(
     progress: Option<&CheckProgress>,
     grant: &crate::remote::Grant,
 ) -> Shared {
+    let mut node_failed = None;
+    let r = collect_placed(d, spec, id, progress, grant, &mut node_failed);
+    with_node_failure(r, node_failed)
+}
+
+fn collect_placed(
+    d: &Arc<Daemon>,
+    spec: &CheckSpec,
+    id: &str,
+    progress: Option<&CheckProgress>,
+    grant: &crate::remote::Grant,
+    node_failed: &mut Option<String>,
+) -> Shared {
     let bound_remote = goes_remote(d, spec);
-    if let Some(r) = node_check(d, spec, id, progress, None, grant) {
-        return r;
-    }
-    if let Some(r) = remote_check(d, spec, id, progress, grant) {
-        return r;
-    }
-    // GitHub gave the check back (it waited too long for a runner): a node with room takes it
-    // before this machine does.
-    if runs_on_github(d, spec).is_some() {
-        let project = crate::remote::project_of(d, &spec.cwd);
-        let suite = spec.place.as_ref().map(|(_, s)| &**s);
-        if let Some(room) = project.and_then(|p| crate::nodes::best_room(d, &p, suite)) {
-            if let Some(r) = node_check(d, spec, id, progress, Some(room.nid), grant) {
+    // The check left the runner queue for a node's free unit while it waited: that unit is held,
+    // so it runs there, whatever placement would say now that its own unit is counted as used.
+    let step = crate::node_exec::poll_interval();
+    let (mut rest, mut since) = (Duration::ZERO, std::time::Instant::now());
+    let mut failed = 0u32;
+    loop {
+        if since.elapsed() >= rest {
+            if let Some(r) = node_check(d, spec, id, progress, grant.node(), grant, node_failed) {
                 return r;
             }
+            if let Some(r) = remote_check(d, spec, id, progress, grant) {
+                return r;
+            }
+            // GitHub gave the check back (it waited too long for a runner): a node with room takes it
+            // before this machine does.
+            if runs_on_github(d, spec).is_some() {
+                let project = crate::remote::project_of(d, &spec.cwd);
+                let suite = spec.place.as_ref().map(|(_, s)| &**s);
+                if let Some(room) = project.and_then(|p| crate::nodes::best_room(d, &p, suite)) {
+                    if let Some(r) =
+                        node_check(d, spec, id, progress, Some(room.nid), grant, node_failed)
+                    {
+                        return r;
+                    }
+                }
+            }
+            // Nothing took it. Where this project may not run a check here (`remote` mode with a
+            // `[remote_runs]`, fallback none), it does not: a node that gave it back is asked
+            // again, and a GitHub that cannot take it is an outage, not a verdict.
+            if !bound_remote || !stays_off_this_mac(d, spec) {
+                break;
+            }
+            // A node without the job's base is not waited for in silence (#1197): the check
+            // has no result, and says why.
+            if let Some(why) = node_failed.take() {
+                return Err(format!("{OUTAGE_PREFIX}{why}"));
+            }
+            if node_for(d, spec).is_none() {
+                if runs_on_github(d, spec).is_none() {
+                    break;
+                }
+                return Err(crate::remote::env_err(
+                    "no GitHub runner could take the check, and this project's mode does not \
+                     run it on this Mac",
+                ));
+            }
+            tracing::warn!(check = %id, "the node gave the check back; waiting for a node (this project does not run checks here)");
+            rest = step * (1u32 << failed.min(6));
+            failed += 1;
+            since = std::time::Instant::now();
         }
+        if let Some(note) = spec.stop.as_ref().and_then(|f| f()) {
+            return Ok(CheckOutcome {
+                passed: false,
+                timed_out: false,
+                output: String::new(),
+                full: String::new(),
+                id: id.to_string(),
+                stopped: Some(note),
+                phase: None,
+            });
+        }
+        if d.is_shutting_down() {
+            return Err("the daemon is stopping; run the check again".into());
+        }
+        std::thread::sleep(step);
     }
     // Meant for GitHub but sent here (`fallback = "local"`): it skipped this machine's queue,
     // so it takes the slots it holds when placed here before it starts, under the same limits

@@ -2411,3 +2411,327 @@ fn a_node_jobs_path_has_a_mason_that_runs_and_finds_no_daemon() {
     // The node's own daemon is out of reach of a job's `mason`.
     assert!(f.output.contains("not running"), "{}", f.output);
 }
+
+/// Serve `d`'s loopback API, as `masond` does, so that the `mason` command line finds it.
+fn serve_api(d: &Arc<Daemon>) {
+    let d2 = d.clone();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let _ = rt.block_on(mason_daemon::http::serve(d2));
+    });
+    let info = d.cfg.info_path();
+    support::wait_for("the API to be served", 60, || {
+        std::fs::read_to_string(&info)
+            .ok()
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+            .is_some_and(|v| v["port"].is_u64())
+    });
+}
+
+/// #1197: a node whose mirror cannot take `origin/<base>` says so, and the run is a node failure
+/// that names the cause; `mason node sync` puts the ref back and `mason node show` lists it.
+#[test]
+fn a_node_without_origin_base_is_a_node_failure_and_node_sync_restores_it() {
+    use mason_daemon::hostedcheck;
+    use mason_daemon::place::{self, Mode};
+    let p = working_pair(2);
+    let tip = sh(&p.sa.repo, &["rev-parse", "origin/main"])
+        .trim()
+        .to_string();
+    std::fs::write(p.sa.repo.join("t.sh"), "git rev-parse origin/main\n").unwrap();
+    // A first run makes the mirror, and says the base it set.
+    let f = done(run_on_b(&p, &spec("run-first", None, "sh t.sh"), &|| None));
+    assert!(
+        f.ran_on
+            .ends_with(&format!("base: set main@{}", &tip[..10])),
+        "{}",
+        f.ran_on
+    );
+    let mirror =
+        p.sb.data_dir
+            .join("node/mirrors")
+            .join(coord_of_a(&p))
+            .join("scratch.git");
+    // The ref is gone, and a lock left behind keeps any job from setting it again.
+    sh(&mirror, &["update-ref", "-d", "refs/remotes/origin/main"]);
+    let lock = mirror.join("refs/remotes/origin/main.lock");
+    std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
+    std::fs::write(&lock, "").unwrap();
+
+    match run_on_b(&p, &spec("run-locked", None, "sh t.sh"), &|| None) {
+        Err(Fail::Environmental(why)) => {
+            assert!(why.starts_with("origin/main not set on node b"), "{why}");
+            assert!(why.contains("base: failed: "), "{why}");
+            assert!(why.contains("mason node sync b --project scratch"), "{why}");
+        }
+        other => panic!("expected a node failure, got {other:?}"),
+    }
+    // A check that can run here does, and its result says why it left the node.
+    place::set_global(&p.a, Mode::Remote, "test").unwrap();
+    let logs = tempfile::tempdir().unwrap();
+    let out = hostedcheck::run(
+        &p.a,
+        &check_spec(&p, "t7r1-back", "echo ran-here", logs.path()),
+        &remote::Grant::attached(),
+    )
+    .unwrap();
+    assert!(out.passed && out.full.contains("ran-here"), "{}", out.full);
+    assert!(
+        out.output.contains("origin/main not set on node b"),
+        "{}",
+        out.output
+    );
+    // A nodes-only project has nowhere else: no result, as an outage, not a red.
+    place::set_project_mode(&p.a, "scratch", Mode::Remote).unwrap();
+    let why = hostedcheck::run(
+        &p.a,
+        &check_spec(&p, "t7r2-only", "echo never", logs.path()),
+        &remote::Grant::attached(),
+    )
+    .map(|o| o.output)
+    .unwrap_err();
+    assert!(hostedcheck::is_outage(&why), "{why}");
+    assert!(why.contains("origin/main not set on node b"), "{why}");
+
+    serve_api(&p.a);
+    let sync = ["node", "sync", "b", "--project", "scratch"];
+    // While the cause is there, the sync says what it is.
+    let o = p.sa.mason(&sync);
+    assert!(!o.status.success());
+    assert!(
+        String::from_utf8_lossy(&o.stderr).contains("main.lock"),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    let shown = p.sa.mason_ok(&["node", "show", "b"]);
+    assert!(shown.contains("origin/main not set"), "{shown}");
+    std::fs::remove_file(&lock).unwrap();
+    let said = p.sa.mason_ok(&sync);
+    assert!(said.contains(&format!("origin/main = {tip}")), "{said}");
+    assert_eq!(
+        sh(&mirror, &["rev-parse", "refs/remotes/origin/main"]).trim(),
+        tip
+    );
+    let shown = p.sa.mason_ok(&["node", "show", "b"]);
+    assert!(shown.contains("scratch.git"), "{shown}");
+    assert!(shown.contains(&format!("origin/main {tip}")), "{shown}");
+    let f = done(run_on_b(&p, &spec("run-after", None, "sh t.sh"), &|| None));
+    assert_eq!(f.output, format!("{tip}\n"));
+    // A project nobody registered is refused.
+    assert!(!p
+        .sa
+        .mason(&["node", "sync", "b", "--project", "nope"])
+        .status
+        .success());
+}
+
+const SPILL_REMOTE_RUNS: &str =
+    "[remote_runs]\nkind = \"github-actions\"\nrepo = \"o/r\"\ntoken = \"env:MASON_NODE_SPILL_TOKEN\"\n";
+
+/// A pair whose project also has `[remote_runs]`, with the node switched off so that placement
+/// at queue time finds no room and picks GitHub, the way it did for checks queued while the node
+/// was full.
+fn github_project_with_a_node_off() -> Pair {
+    let p = working_pair(1);
+    p.sa.write_project("scratch", "true", SPILL_REMOTE_RUNS);
+    p.a.reload_registration("scratch").unwrap();
+    mason_daemon::place::set_global(&p.a, mason_daemon::place::Mode::Remote, "test").unwrap();
+    set_switch(&p, false);
+    poll(&p);
+    p
+}
+
+fn gha_units(n: u32) -> std::collections::BTreeMap<String, u32> {
+    std::collections::BTreeMap::from([("gha".to_string(), n)])
+}
+
+/// A check queued for GitHub while no node had room waited for a runner unit and never looked at
+/// a node again, though the node freed up at once: it waited for GitHub's pool (full of other
+/// repositories' runs) until GitHub gave it back. It now takes the node's unit as soon as a node
+/// has room, holds that and no runner unit, and runs on the node.
+#[test]
+fn a_check_waiting_for_a_full_runner_pool_takes_a_node_that_has_room_and_runs_there() {
+    use mason_daemon::hostedcheck;
+    use mason_daemon::jobs::{pool_or_node, want_of, Want};
+    use mason_daemon::remote::Grant;
+    let p = github_project_with_a_node_off();
+    let logs = tempfile::tempdir().unwrap();
+    let b = &p.a.broker;
+    b.declare("gha", 1);
+    b.set_limit("gha", 1).unwrap();
+    let other_repo = b.lease_open_as("another repository's run", &gha_units(1), None);
+    let spec = check_spec(&p, "t9r1-check", "echo node=$MASON_NODE", logs.path());
+    let want = want_of(&p.a, &spec);
+    let Want::PoolOrNode(units, hop) = want else {
+        panic!("a check for a full pool may take a node");
+    };
+    assert_eq!(units, gha_units(1));
+    assert!(hop().is_none(), "no node has room yet");
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let waiter = {
+        let (b, hop) = (b.clone(), hop.clone());
+        std::thread::spawn(move || {
+            let rank = || mason_scheduler::Rank::new(false, 1, 0, 9, 9, false);
+            let got = pool_or_node(
+                &*hop,
+                std::time::Duration::from_millis(20),
+                |leave| {
+                    b.acquire(
+                        mason_core::TaskId(9),
+                        "#9 check",
+                        rank(),
+                        mason_scheduler::Needs::of(&[("gha", 1)]).flexible(),
+                        &|| !leave(),
+                        &mut |_| {},
+                    )
+                },
+                |units| {
+                    b.try_acquire_expecting(
+                        mason_core::TaskId(9),
+                        "#9",
+                        rank(),
+                        mason_daemon::sched::needs_of(&units, None),
+                        None,
+                    )
+                },
+            );
+            tx.send(got.map(Grant::of)).unwrap();
+        })
+    };
+    // The node takes work again: the waiting check takes its unit.
+    set_switch(&p, true);
+    poll(&p);
+    let grant = rx
+        .recv_timeout(std::time::Duration::from_secs(120))
+        .expect("the check took the node's unit")
+        .expect("granted");
+    waiter.join().unwrap();
+    assert_eq!(
+        grant.node().as_deref(),
+        listed(&p, "b")["nid"].as_str(),
+        "it holds the node's unit"
+    );
+    assert!(grant.units().is_empty(), "and no runner unit");
+    assert_eq!(b.used("gha"), 1, "the runner pool is still the other run's");
+
+    // With that unit held the node reads as full, so placement alone would send the check to
+    // GitHub; the held unit keeps it on the node.
+    let out = hostedcheck::run(&p.a, &spec, &grant).unwrap();
+    assert!(out.passed, "{}", out.output);
+    assert!(out.output.contains("ran on node b"), "{}", out.output);
+    drop(grant);
+    b.lease_close(other_repo);
+}
+
+/// The rules every node run answers to hold for a check that left the runner queue: a suite that
+/// says `remote = false`, uses `exclusive` or leases a device never takes a node's unit, and
+/// stays with its own placement.
+#[test]
+fn a_suite_that_must_not_leave_this_mac_never_takes_a_nodes_unit_while_it_waits() {
+    use mason_daemon::jobs::{want_of, Want};
+    let p = github_project_with_a_node_off();
+    let logs = tempfile::tempdir().unwrap();
+    let suite_of =
+        |name: &str| mason_testing::Suite::new(name, "true", mason_testing::ParserKind::Tap);
+    let mut stays = suite_of("stays");
+    stays.remote = false;
+    let mut exclusive = suite_of("alone");
+    exclusive.uses.insert("exclusive".into(), 1);
+    let free = suite_of("free");
+    let spec_for = |suite: &mason_testing::Suite| {
+        let mut s = check_spec(&p, &format!("t8-{}", suite.name), "true", logs.path());
+        s.global = false;
+        s.place = Some((None, Box::new(suite.clone())));
+        s
+    };
+
+    // The suite that may leave: placed on GitHub with the node off, it may hop to the node.
+    assert!(
+        matches!(want_of(&p.a, &spec_for(&free)), Want::PoolOrNode(..)),
+        "a suite with no rules of its own may take a node"
+    );
+    // The node now has room.
+    set_switch(&p, true);
+    poll(&p);
+    assert!(
+        mason_daemon::place::node_room_for(&p.a, "scratch", None, &free).is_some(),
+        "the node has room for it"
+    );
+    assert!(
+        mason_daemon::place::node_room_for(&p.a, "scratch", None, &stays).is_none(),
+        "remote = false never goes to a node"
+    );
+    assert!(
+        mason_daemon::place::node_room_for(&p.a, "scratch", None, &exclusive).is_none(),
+        "exclusive never goes to a node"
+    );
+    // And such a suite waits for its own placement: this Mac's slots, no runner or node unit.
+    assert!(matches!(want_of(&p.a, &spec_for(&stays)), Want::Slots));
+    assert!(matches!(want_of(&p.a, &spec_for(&exclusive)), Want::Slots));
+}
+
+/// A project with `[remote_runs]` in `remote` mode (fallback none) whose node gave a check back
+/// ("no room": its one job slot was taken) ran the check on this Mac, under this Mac's slots and
+/// heat hold, labelled "no GitHub runner, run here". It now waits for a node and runs there, and
+/// never takes this Mac's slot.
+#[test]
+fn a_check_the_node_gives_back_waits_for_a_node_when_the_project_may_not_run_it_here() {
+    use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+    let p = working_pair(1);
+    p.sa.write_project("scratch", "true", SPILL_REMOTE_RUNS);
+    p.a.reload_registration("scratch").unwrap();
+    std::fs::write(p.sa.repo.join("slow.sh"), "sleep 300\n").unwrap();
+    mason_daemon::place::set_global(&p.a, mason_daemon::place::Mode::Remote, "test").unwrap();
+    let logs = tempfile::tempdir().unwrap();
+    let b = &p.a.broker;
+    b.declare("test-suite", 2);
+    b.set_limit("test-suite", 2).unwrap();
+    let release = AtomicBool::new(false);
+    std::thread::scope(|sc| {
+        // The node's only job slot is taken.
+        let slow = sc.spawn(|| {
+            run_on_b(&p, &spec("run-one", None, "sh slow.sh"), &|| {
+                release.load(SeqCst).then_some(StopWhy::Skipped)
+            })
+        });
+        support::wait_for("the first job to run on the node", 60, || {
+            p.b.node.jobs.running() == 1
+        });
+        let check = sc.spawn(|| {
+            mason_daemon::hostedcheck::run(
+                &p.a,
+                &check_spec(
+                    &p,
+                    "t7r1-wait",
+                    "if [ -n \"$MASON_NODE\" ]; then echo on-the-node; else echo ran-here; fi",
+                    logs.path(),
+                ),
+                &mason_daemon::remote::Grant::attached(),
+            )
+        });
+        // It never asks for this Mac's slot while it waits for the node.
+        for _ in 0..20 {
+            assert!(
+                !b.snapshot().to_string().contains("run here"),
+                "{}",
+                b.snapshot()
+            );
+            std::thread::yield_now();
+        }
+        release.store(true, SeqCst);
+        assert!(matches!(slow.join().unwrap(), Ok(Outcome::Stopped(_))));
+        let out = check.join().unwrap().unwrap();
+        assert!(
+            out.passed && out.full.contains("on-the-node"),
+            "{}",
+            out.full
+        );
+        assert!(out.output.contains("ran on node b"), "{}", out.output);
+    });
+    assert_eq!(b.used("test-suite"), 0);
+}

@@ -570,9 +570,114 @@ pub async fn update(
     Ok(axum::Json(json!({"runtime": mine, "nodes": out})))
 }
 
+/// The paired node called `name`, and a client for it.
+fn named(
+    d: &Daemon,
+    name: &str,
+) -> Result<(mason_store::NodeRow, NodeClient), (axum::http::StatusCode, axum::Json<Value>)> {
+    let row = paired(d)
+        .into_iter()
+        .find(|r| r.name == name)
+        .ok_or_else(|| fail(404, format!("no paired node is called {name:?}")))?;
+    let (row, client, _) = d
+        .nodes
+        .client_for(d, &row.nid)
+        .ok_or_else(|| fail(500, format!("cannot make a client for node {name}")))?;
+    Ok((row, client))
+}
+
+/// `POST /nodes/sync {name, project, base?}`: `mason node sync`. Sends the node a full bundle of
+/// the project's base tip and re-sets `origin/<base>` in its mirror.
+pub async fn sync(
+    axum::extract::State(d): axum::extract::State<Arc<Daemon>>,
+    axum::Json(b): axum::Json<Value>,
+) -> Res {
+    let name = b["name"].as_str().unwrap_or_default().to_string();
+    let project = b["project"].as_str().unwrap_or_default().to_string();
+    let (row, client) = named(&d, &name)?;
+    let cfg = d
+        .project_id_by_name(&project)
+        .and_then(|i| d.project(i))
+        .cloned()
+        .ok_or_else(|| fail(404, format!("no project is called {project:?}")))?;
+    let base_ref = match b["base"].as_str().filter(|s| !s.is_empty()) {
+        // The remote's branch when there is one, as for the project's own base.
+        Some(base) => {
+            let remote = cfg.remote.clone().unwrap_or_else(|| "origin".into());
+            crate::remote::remote_base_ref(&cfg.path, &remote, base)
+        }
+        None => crate::remote::base_ref_of(&d, &project)
+            .ok_or_else(|| fail(409, format!("{project} has no base")))?,
+    };
+    let node = row.name.clone();
+    let p = project.clone();
+    // A thread of its own: a large bundle must not hold one of the pool's.
+    let synced = tokio::task::spawn_blocking(move || {
+        let client = client.with_timeout(crate::node_exec::SYNC_TIMEOUT);
+        crate::node_exec::sync_base(&client, &node, &cfg.path, &p, &base_ref)
+    })
+    .await
+    .map_err(|_| fail(500, "the sync did not finish"))?
+    .map_err(|e| fail(502, e))?;
+    tracing::info!(node = %row.name, %project, "synced origin/{} to {}", synced.name, synced.sha);
+    Ok(axum::Json(json!({
+        "node": row.name, "project": project, "base": synced.name,
+        "tip": synced.tip, "sha": synced.sha, "path": synced.path,
+    })))
+}
+
+/// `POST /nodes/show {name}`: one node's row of `GET /nodes`, with the mirrors it keeps for this
+/// coordinator and their `origin/*` refs, asked of it now.
+pub async fn show(
+    axum::extract::State(d): axum::extract::State<Arc<Daemon>>,
+    axum::Json(b): axum::Json<Value>,
+) -> Res {
+    let name = b["name"].as_str().unwrap_or_default().to_string();
+    let (row, client) = named(&d, &name)?;
+    let cfg = load_nodes(&d.cfg.config_dir).unwrap_or_default();
+    let goal = crate::node_fleet::goal(&d);
+    let mut out = row_json(
+        &row,
+        &d.nodes.view(&row.nid).unwrap_or_default(),
+        &cfg,
+        goal.as_deref(),
+    );
+    match client.request("GET", "/node/mirrors", None).await {
+        Ok(r) if r.status == 200 => {
+            let mut mirrors = r.json()["mirrors"].as_array().cloned().unwrap_or_default();
+            for m in &mut mirrors {
+                // The branch the coordinator measures this project from, to say when it is not set.
+                let base = m["project"]
+                    .as_str()
+                    .and_then(|p| d.project_id_by_name(p))
+                    .and_then(|i| d.project(i))
+                    .map(|p| p.base.clone());
+                if let Some(base) = base {
+                    m["base"] = json!(base);
+                }
+            }
+            out["mirrors"] = Value::Array(mirrors);
+        }
+        Ok(r) if r.status == 404 => {
+            out["mirrors_error"] = json!(format!(
+                "its runtime is older than this coordinator's (`mason node update {name}`)"
+            ));
+        }
+        Ok(r) => out["mirrors_error"] = json!(r.error_text()),
+        Err(e) => out["mirrors_error"] = json!(e.to_string()),
+    }
+    Ok(axum::Json(out))
+}
+
 /// The broker resource a node's units are leased from.
 pub fn resource(nid: &str) -> String {
     format!("node:{nid}")
+}
+
+/// The node whose units `resource` names (the inverse of [`resource`]); `None` for any other
+/// resource.
+pub fn nid_of_resource(resource: &str) -> Option<&str> {
+    resource.strip_prefix("node:").filter(|n| !n.is_empty())
 }
 
 /// The units this coordinator may hold on a node: what the node has free plus what this
