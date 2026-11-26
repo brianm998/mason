@@ -59,7 +59,8 @@ data class SettingsSnapshot(
 
 /**
  * `GET /remote`: where runs go (#831). The global mode, and for each project whether it has
- * `[remote_runs]`, where it runs, its effective mode and why ([Project.source]).
+ * `[remote_runs]`, where it runs, its effective mode and why ([Project.source]). Every project can
+ * be set: one with no `[remote_runs]` and a mode of its own sends its runs to nodes only (#1150).
  */
 data class RemoteSettings(
     val mode: String = "local",
@@ -69,16 +70,17 @@ data class RemoteSettings(
     val projects: List<Project> = emptyList(),
 ) {
     /** [source] is `project`, `global` or `no [remote_runs]`. */
-    data class Project(val project: String, val remote: Boolean, val runsOn: String, val mode: String, val source: String) {
+    /** [nodesOnly]: no `[remote_runs]`, but a mode of its own (`[placement]`). */
+    data class Project(
+        val project: String, val remote: Boolean, val runsOn: String, val mode: String, val source: String,
+        val nodesOnly: Boolean = false,
+    ) {
         val sourceText: String
-            get() = when (source) {
+            get() = if (nodesOnly) "$mode (nodes only: no GitHub setup)" else when (source) {
                 "project" -> "set for this project"
                 "global" -> "follows the global mode"
-                else -> "always runs here: the project file has no [remote_runs]"
+                else -> "always runs here: the project file has no [remote_runs]; a mode chosen here sends its runs to nodes"
             }
-
-        /** A project with no `[remote_runs]` cannot be changed. */
-        val canChange: Boolean get() = remote && source != "no [remote_runs]"
     }
 
     fun project(name: String): Project? = projects.firstOrNull { it.project == name }
@@ -107,6 +109,7 @@ data class RemoteSettings(
                     Project(
                         it["project"] as? String ?: "?", it["remote"] as? Boolean ?: false,
                         it["runs_on"] as? String ?: "", it["mode"] as? String ?: "local", it["source"] as? String ?: "",
+                        it["nodes_only"] as? Boolean ?: false,
                     )
                 },
             )

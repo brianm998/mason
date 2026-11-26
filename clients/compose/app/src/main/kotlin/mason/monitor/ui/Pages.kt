@@ -1098,7 +1098,7 @@ internal fun RemotePlacementBody(remote: RemoteSettings, project: String, pickGl
     remote.problem?.let { Text(it, style = theme.small(color = theme.muted)) }
     remote.changedText?.let { Text(it, style = theme.small(color = theme.muted)) }
     remote.project(project)?.let { p ->
-        SettingChoice(project, "settings:remote:project", p.mode, options = RemoteSettings.MODES, enabled = p.canChange, onPick = pickProject)
+        SettingChoice(project, "settings:remote:project", p.mode, options = RemoteSettings.MODES, onPick = pickProject)
         Text(p.sourceText, style = theme.small(color = theme.muted))
         if (p.runsOn.isNotEmpty()) Text("GitHub runner: ${p.runsOn}", style = theme.small(color = theme.muted))
     }
