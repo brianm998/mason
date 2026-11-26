@@ -9,7 +9,9 @@
 //! disagree.
 
 use mason_protocol::{QueueHold, WaitInfo, WaitLink, WaitParty};
-use mason_scheduler::{explain, label_parts, since, Needs, Snapshot, Wait, WaitCause};
+use mason_scheduler::{
+    explain, label_parts, since, thermal_short, Needs, Snapshot, Wait, WaitCause,
+};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// The longest chain shown: this task waits for X, X waits for Y, ...

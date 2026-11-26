@@ -14,8 +14,8 @@ use crate::stall::StallSource;
 use mason_core::TaskId;
 use mason_resources::{Held, Locks, Take, TakeError};
 use mason_scheduler::{
-    explain, since, CpuGate, DiskGate, Kind, Ledger, Needs, PolicyGate, Rank, StallGate, WaitCause,
-    COMPILE, GHA, GHA_MACOS,
+    explain, since, thermal_short, CpuGate, DiskGate, HeatCeiling, Kind, Ledger, Needs, PolicyGate,
+    Rank, StallGate, ThermalGate, ThermalHold, WaitCause, COMPILE, GHA, GHA_MACOS,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
