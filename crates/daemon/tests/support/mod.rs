@@ -80,13 +80,13 @@ pub fn world_limit() -> usize {
 }
 
 #[cfg(unix)]
-struct Slot(#[allow(dead_code)] Option<slots::Held>);
+struct Slot(#[allow(dead_code)] slots::World);
 
 #[cfg(unix)]
 impl Slot {
     fn take() -> Slot {
         let t = std::time::Instant::now();
-        let held = slots::take(
+        let held = slots::take_world(
             &slots::shared_dir(),
             world_limit(),
             Duration::from_secs(600),

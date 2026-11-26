@@ -182,3 +182,22 @@ fn shares_round_up_so_no_slot_is_left_idle() {
     assert_eq!(slots::share(2, 5), 1);
     assert_eq!(slots::share(4, 0), 4);
 }
+
+/// A test that holds one world and makes another must not wait for a slot: with every slot
+/// held that way, all of them would sit out their patience. A broken version hangs here.
+#[test]
+fn a_second_world_on_a_thread_does_not_wait_for_a_slot() {
+    let dir = tempfile::tempdir().unwrap();
+    let patience = std::time::Duration::from_secs(600);
+    let first = slots::take_world(dir.path(), 1, patience);
+    assert!(first.has_slot());
+    let second = slots::take_world(dir.path(), 1, patience);
+    assert!(!second.has_slot());
+    assert_eq!(slots::held_count(dir.path(), 1), 1);
+    drop(first);
+    // A free slot is still taken, so a later world counts against the limit.
+    let third = slots::take_world(dir.path(), 1, patience);
+    assert!(third.has_slot());
+    drop((second, third));
+    assert_eq!(slots::held_count(dir.path(), 1), 0);
+}

@@ -6,4 +6,5 @@ cd "$(dirname "$0")/../.."
 
 grep -q '^Summary: ' docs/stages/s1094.md
 cargo test -q -p mason-daemon --lib remote_runs::tests
+cargo test -q -p mason-daemon --test world_slots
 echo "OK s1094"
