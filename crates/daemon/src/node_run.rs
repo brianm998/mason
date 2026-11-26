@@ -1191,6 +1191,15 @@ for a in "$@"; do
 done
 exec "$real" "$@"
 "#;
+/// Scratch worlds a node allows its daemon tests at once: two thirds of its cores, at least 2 and
+/// at most 16. A world is a real daemon with step hosts and git, mostly idle between a test's
+/// steps, so a node's cores can carry more worlds than a quarter of them; the iMac Pro that sets
+/// 12 of 18 cores by hand has run that for days. The cap keeps a very large node from running
+/// more daemons than the disk and the pipeline's other work want.
+pub fn node_test_worlds(cores: usize) -> usize {
+    (cores * 2 / 3).clamp(2, 16)
+}
+
 
 /// The environment a job's commands run in: built here, from nothing. The node's own base (its
 /// `PATH` with the shims first, `HOME`, `TMPDIR` and the toolchain homes), then the coordinator's
@@ -1262,6 +1271,22 @@ pub fn job_env(
         }
     }
     put("MASON_WORKTREE", slot.to_string_lossy().into_owned());
+    // How many scratch worlds the daemon tests may run at once on this node. The test slots are
+    // counted across every process on the machine, so this is a limit for the whole node, not
+    // for one job; the default (a quarter of the cores) is 4 on an 18-core node that runs up to
+    // 12 jobs, and the tests of those jobs queued for a slot until their patience ran out. The
+    // coordinator's value, if it sent one, was kept above; otherwise the node daemon's own
+    // environment, so the owner can set it per node; otherwise a share of this node's cores.
+    if !job.env.iter().any(|(k, _)| k == "MASON_TEST_WORLDS") {
+        let own = base("MASON_TEST_WORLDS")
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|n| *n > 0);
+        let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
+        put(
+            "MASON_TEST_WORLDS",
+            own.unwrap_or_else(|| node_test_worlds(cores)).to_string(),
+        );
+    }
     put("MASON_NODE", "1".into());
     // The `mason` on a job's PATH finds no daemon and no configuration of this node: the commands
     // that need one say masond is not running, while `mason definition check` (which reads files)
@@ -1913,11 +1938,30 @@ mod tests {
         );
         // Without a task number a job is still marked as a run of the pipeline.
         let mut j2 = job.clone();
+        // Daemon tests on the node get a world limit fitting it (a number, whatever the cores).
+        assert!(get("MASON_TEST_WORLDS").is_some_and(|v| v.parse::<usize>().is_ok_and(|n| n >= 2)));
         j2.env.retain(|(k, _)| k != "MASON_TASK");
         let env = job_env(&j2, Path::new("/n/s"), Path::new("/n/shims"), &base);
         assert_eq!(
             env.iter()
                 .find(|(n, _)| n == "MASON_TASK")
+        // The node daemon's own setting wins over the share of cores, and the coordinator's over
+        // both.
+        let own = |k: &str| match k {
+            "MASON_TEST_WORLDS" => Some("7".to_string()),
+            _ => base(k),
+        };
+        let env = job_env(&job, Path::new("/n/s"), Path::new("/n/shims"), &own);
+        let worlds = |env: &[(String, String)]| {
+            env.iter()
+                .find(|(n, _)| n == "MASON_TEST_WORLDS")
+                .map(|(_, v)| v.clone())
+        };
+        assert_eq!(worlds(&env).as_deref(), Some("7"));
+        let mut j3 = job.clone();
+        j3.env.push(("MASON_TEST_WORLDS".into(), "3".into()));
+        let env = job_env(&j3, Path::new("/n/s"), Path::new("/n/shims"), &own);
+        assert_eq!(worlds(&env).as_deref(), Some("3"));
                 .map(|(_, v)| v.as_str()),
             Some("node")
         );
@@ -1930,6 +1974,18 @@ mod tests {
             assert_eq!(base64_decode(&e).unwrap(), s.as_bytes(), "{s:?}");
         }
         assert_eq!(base64_encode(b"Man"), "TWFu");
+    #[test]
+    fn the_nodes_world_limit_is_a_share_of_its_cores_and_can_be_set() {
+        assert_eq!(node_test_worlds(1), 2, "never below the floor of 2");
+        assert_eq!(node_test_worlds(4), 2);
+        assert_eq!(
+            node_test_worlds(18),
+            12,
+            "marmot: the owner's 12 of 18 cores"
+        );
+        assert_eq!(node_test_worlds(128), 16, "capped");
+    }
+
         assert_eq!(base64_encode(b"Ma"), "TWE=");
         assert!(base64_decode("!!!!").is_none());
     }
