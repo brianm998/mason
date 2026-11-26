@@ -837,3 +837,22 @@ fn a_socket_path_over_the_limit_is_refused_before_a_host_is_started() {
     assert!(e.contains(&sock.display().to_string()), "{e}");
     assert!(!marker.exists() && !r.exists(), "nothing was started");
 }
+
+#[test]
+fn a_secret_reaches_the_command_without_being_a_host_argument() {
+    let (_d, r) = root();
+    let mut o = opts(&r, "a", "echo $X_TOKEN; ps -o args= -p $PPID");
+    o.clear_env = true;
+    o.env = vec![
+        ("PATH".into(), "/usr/bin:/bin".into()),
+        ("X_TOKEN".into(), "s3cret".into()),
+    ];
+    let info = spawn_host(&o).unwrap();
+    let (bytes, rec, _) = drain(&mut connect(&info.sock), 0);
+    let out = String::from_utf8(bytes).unwrap();
+    assert_eq!(rec.code, 0, "{out}");
+    let (value, args) = out.split_once('\n').unwrap();
+    assert_eq!(value, "s3cret");
+    assert!(args.contains("--env-pass X_TOKEN"), "{args}");
+    assert!(!args.contains("s3cret"), "{args}");
+}
