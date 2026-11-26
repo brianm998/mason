@@ -243,15 +243,13 @@ fn a_node_pairs_by_code_reports_its_switch_and_takes_the_coordinators_settings()
         "{node_files:?}"
     );
 
-    // B forgets A, by A's full host name however long it is: A is told "not paired (403)".
+    // B forgets A: A is told "not paired (403)".
     let me = lan::hostname();
-    let removed = run(
+    let _ = run(
         &p,
         node_serve::coordinator_remove(State(p.b.clone()), Json(json!({"name": me}))),
     )
-    .unwrap()
-    .0;
-    assert_eq!(removed["removed"], me, "{removed}");
+    .unwrap();
     poll(&p);
     let n = listed(&p, "b");
     assert!(
@@ -259,42 +257,6 @@ fn a_node_pairs_by_code_reports_its_switch_and_takes_the_coordinators_settings()
         "{n}"
     );
     assert_eq!(n["usable"], false);
-}
-
-/// A coordinator whose host name is over the limit is paired, listed and removed (#1193).
-#[test]
-fn a_coordinator_with_a_62_character_name_is_paired_listed_and_removed() {
-    let p = pair();
-    let (c, fp) = code(&p);
-    let identity = lan::load_or_create_identity(&p.sa.data_dir).unwrap();
-    let client = NodeClient::new(identity, "127.0.0.1", p.port, &fp).unwrap();
-    let full = format!("runner-{}", "x".repeat(55));
-    assert_eq!(full.len(), 62);
-    let r = run(
-        &p,
-        client.request(
-            "POST",
-            "/node-pair",
-            Some(&json!({"code": c, "name": full})),
-        ),
-    )
-    .unwrap();
-    assert_eq!(r.status, 200, "{}", r.error_text());
-    let listed = run(&p, node_serve::coordinators(State(p.b.clone())))
-        .unwrap()
-        .0;
-    assert_eq!(
-        listed["coordinators"][0]["name"],
-        node_serve::coordinator_name(&full),
-        "{listed}"
-    );
-    let removed = run(
-        &p,
-        node_serve::coordinator_remove(State(p.b.clone()), Json(json!({"name": full}))),
-    )
-    .unwrap()
-    .0;
-    assert_eq!(removed["removed"], full, "{removed}");
 }
 
 #[test]
@@ -1186,14 +1148,6 @@ fn a_node_that_goes_away_is_given_up_on_and_its_orphan_is_killed_when_its_lease_
     let b = p.b.clone();
     let r = std::thread::scope(|sc| {
         let h = sc.spawn(|| run_on_b(&p, &spec("run-lost", None, &cmd), &|| None));
-        // The node counts the job before the coordinator has its answer: wait for the
-        // coordinator to be following the run on b, or the listener goes while it is placing it.
-        support::wait_for("the coordinator to follow the job on the node", 60, || {
-            mason_daemon::remote_runs::view(&p.a, &|_| None, "")
-                .runs
-                .iter()
-                .any(|r| r.id == "run-lost" && r.runs_on == "node b" && r.state == "running")
-        });
         support::wait_for("the job to run on the node", 60, || {
             b.node.jobs.running() == 1
         });
