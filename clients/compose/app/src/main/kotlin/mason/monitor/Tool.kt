@@ -69,7 +69,10 @@ private fun settle(model: MonitorModel) {
         val covered = model.lastViewSeq >= seq
         if (missing.isEmpty() && (covered || (seq == prev && model.lastSeq == prevLast))) agreed++ else agreed = 0
         if (missing.isEmpty() && covered && agreed >= 1) return
-        if (agreed >= AGREEING_ROUND_TRIPS) return
+        if (agreed >= AGREEING_ROUND_TRIPS) {
+            if (model.lastViewSeq < seq) System.err.println("settle: quiet exit, views at ${model.lastViewSeq}, daemon seq $seq")
+            return
+        }
         prev = seq
         prevLast = model.lastSeq
         if (System.currentTimeMillis() > end) {
