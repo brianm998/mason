@@ -67,7 +67,8 @@ pub struct Scratch {
 /// agent) run at once on the whole machine, across every test binary and every task's
 /// suites. A per-binary limit let N binaries run 8*N daemons and hang the Mac. A test
 /// waits for a slot before its world exists, so the wait never counts against its
-/// deadlines. `MASON_TEST_WORLDS` overrides the number.
+/// deadlines. A test that already holds a world does not wait for its next one
+/// ([`slots::claim`]). `MASON_TEST_WORLDS` overrides the number.
 pub fn world_limit() -> usize {
     std::env::var("MASON_TEST_WORLDS")
         .ok()
@@ -80,13 +81,13 @@ pub fn world_limit() -> usize {
 }
 
 #[cfg(unix)]
-struct Slot(#[allow(dead_code)] Option<slots::Held>);
+struct Slot(#[allow(dead_code)] slots::Claim);
 
 #[cfg(unix)]
 impl Slot {
     fn take() -> Slot {
         let t = std::time::Instant::now();
-        let held = slots::take(
+        let claim = slots::claim(
             &slots::shared_dir(),
             world_limit(),
             Duration::from_secs(600),
@@ -98,7 +99,7 @@ impl Slot {
             let me = std::thread::current();
             eprintln!("mason-world-wait {ms} {}", me.name().unwrap_or("?"));
         }
-        Slot(held)
+        Slot(claim)
     }
 }
 
