@@ -929,6 +929,7 @@ fn an_agent_whose_check_is_on_github_is_waiting_and_the_run_is_counted() {
             record,
             kind: "check".into(),
             task: t.0,
+            ..Default::default()
         },
     );
     let world = d.world().unwrap();
@@ -943,6 +944,63 @@ fn an_agent_whose_check_is_on_github_is_waiting_and_the_run_is_counted() {
     assert_eq!((r.checks, r.test_steps, r.batches, r.debts), (1, 0, 0, 0));
     assert_eq!(r.runs.len(), 1);
     assert_eq!(r.runs[0].task, t.0);
+}
+
+/// #1155: a check running on a node names the node, from the list of runs.
+#[test]
+fn an_agent_whose_check_is_on_a_node_names_the_node() {
+    use mason_daemon::running;
+    let s = Scratch::new("test -f hello.txt", unique_script());
+    let d = s.start_with(|c| c.max_concurrent = 1);
+    d.broker.set_limit("llm:claude", 0).unwrap();
+    let t = file_task(&d, "Checking on a node");
+    let entry = d.entry_for(&task_of(&d, t));
+    d.emit(EventKind::Admitted {
+        task: t,
+        entry: Some(entry),
+    })
+    .unwrap();
+    wait_explained(&d, t);
+    let on_node = running::start(
+        &d.cfg.hosts_dir(),
+        running::Run {
+            id: format!("t{}r1-check0", t.0),
+            project: "scratch".into(),
+            task: Some(t.0),
+            kind: running::Kind::Check,
+            name: "unit".into(),
+            host: running::Host::Node("marmot".into()),
+            since_ms: 1,
+            url: String::new(),
+        },
+    );
+    let world = d.world().unwrap();
+    let h = mason_daemon::views::Ctx::new(&d, &world).home("");
+    let a = h.active.iter().find(|a| a.task == t.0).expect("listed");
+    assert_eq!(
+        (a.state.as_str(), a.place.as_str()),
+        ("waiting_check", "node:marmot")
+    );
+    let node = h
+        .hosts
+        .iter()
+        .find(|x| x.kind == "node" && x.name == "marmot")
+        .expect("the node of a run is a host");
+    assert_eq!(
+        node.runs[0].task.as_ref().map(|r| r.id),
+        Some(t.0),
+        "{node:?}"
+    );
+    // Another project's view keeps the hosts and drops the run.
+    let other = mason_daemon::views::Ctx::new(&d, &world).home("elsewhere");
+    assert!(other.hosts.iter().any(|x| x.kind == "local"));
+    assert!(other.hosts.iter().all(|x| x.runs.is_empty()));
+    drop(on_node);
+    let h = mason_daemon::views::Ctx::new(&d, &world).home("");
+    assert!(h
+        .hosts
+        .iter()
+        .all(|x| x.runs.iter().all(|r| !r.host.starts_with("node:"))));
 }
 
 fn file_in(d: &Arc<Daemon>, project: &str, title: &str) -> TaskId {

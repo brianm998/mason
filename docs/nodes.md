@@ -444,6 +444,10 @@ Pairing is done once. The code lasts **2 minutes** and works once; five wrong gu
 
    shows the Studio as `not accepting (the owner turned remote work off)`: the switch is off.
 
+`mason hosts`, on the coordinator, shows this Mac, each node and GitHub with what runs on each
+now (a node reads as accepting, full, off or absent), and `mason task show` says where a task is
+running.
+
 ## 3. Turning it on and off
 
 On the Studio, the switch is one command, run as the node user:

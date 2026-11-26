@@ -3140,6 +3140,8 @@ fn set_hold_units(dir: &Path, id: &str, units: &std::collections::BTreeMap<Strin
             ("record", kv.get("record").cloned().unwrap_or_default()),
             ("kind", kv.get("kind").cloned().unwrap_or_default()),
             ("task", kv.get("task").cloned().unwrap_or_default()),
+            ("suite", kv.get("suite").cloned().unwrap_or_default()),
+            ("project", kv.get("project").cloned().unwrap_or_default()),
         ],
     );
 }
@@ -3528,11 +3530,19 @@ pub struct RemoteHold {
     pub kind: String,
     /// The task the run is for; 0 for a run no task owns.
     pub task: u64,
+    /// The suite it runs, and its project (#1155); empty in a hold written before they were kept.
+    pub suite: String,
+    pub project: String,
 }
 
 /// The URL of the run behind `record` (empty until GitHub has made it) and its runner label.
 pub fn record_view(record: &Path) -> (String, String) {
     State::load(record).map_or_else(Default::default, |s| (s.url, s.runs_on))
+}
+
+/// When the run behind `record` was pushed, in ms (0: not known).
+pub fn record_since(record: &Path) -> u64 {
+    State::load(record).map_or(0, |s| s.pushed_ms)
 }
 
 /// Where the holds are kept, beside the step hosts' directory.
@@ -3567,6 +3577,8 @@ pub fn write_hold(dir: &Path, id: &str, h: &RemoteHold) {
             ("record", h.record.display().to_string()),
             ("kind", h.kind.clone()),
             ("task", h.task.to_string()),
+            ("suite", h.suite.clone()),
+            ("project", h.project.clone()),
         ],
     );
 }
@@ -3625,6 +3637,8 @@ pub fn running_holds(dir: &Path) -> Vec<RemoteHold> {
                 record,
                 kind: kv.get("kind").cloned().unwrap_or_default(),
                 task: kv.get("task").and_then(|t| t.parse().ok()).unwrap_or(0),
+                suite: kv.get("suite").cloned().unwrap_or_default(),
+                project: kv.get("project").cloned().unwrap_or_default(),
             })
         })
         .collect();
@@ -4086,6 +4100,8 @@ impl HoldGuard {
                 record: record_path(dir, &spec.id),
                 kind: kind.to_string(),
                 task,
+                suite: spec.suite.clone(),
+                project: spec.project.clone(),
             },
         );
         HoldGuard {
@@ -6935,6 +6951,7 @@ mod tests {
                 record: record_path(logs.path(), "g1"),
                 kind: "test_step".into(),
                 task: 1,
+                ..Default::default()
             },
         );
         grant.note_hold(&holds, "g1");
@@ -7159,6 +7176,8 @@ mod tests {
             record: rec.clone(),
             kind: "debt".into(),
             task: 4,
+            suite: "unit".into(),
+            project: "p".into(),
         };
         write_hold(&holds, "a", &h);
         assert_eq!(running_holds(&holds), vec![h]);

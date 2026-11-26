@@ -1268,6 +1268,8 @@ fn collect_placed(
         write_holds(&dir, spec);
     }
     let started = HostInfo::read(&dir).map_or_else(|_| now_ms(), |i| i.started_ms);
+    // Listed as running here until this returns (#1155).
+    let _running = crate::running::start(&hosts, local_run(d, spec, id, started));
     let deadline = started.saturating_add(spec.limit.as_millis() as u64);
     // Stop it when the limit, counted from the host's start, has passed.
     let done = Arc::new(AtomicBool::new(false));
@@ -1328,6 +1330,30 @@ fn collect_placed(
         stopped,
         phase: None,
     })
+}
+
+/// The check `id` of `spec` as the list of runs shows it while it runs on this Mac.
+fn local_run(d: &Arc<Daemon>, spec: &CheckSpec, id: &str, since_ms: u64) -> crate::running::Run {
+    use crate::running::Kind;
+    let (kind, id_task) = crate::running::classify(id);
+    let place = spec.place.as_ref();
+    let name = place
+        .map(|(_, s)| s.name.clone())
+        .or_else(|| suite_of(id))
+        .unwrap_or_else(|| id.to_string());
+    crate::running::Run {
+        id: id.to_string(),
+        project: crate::remote::project_of(d, &spec.cwd).unwrap_or_default(),
+        task: place.and_then(|(t, _)| *t).map(|t| t.0).or(id_task),
+        kind: match kind {
+            Kind::Suite => Kind::Check,
+            k => k,
+        },
+        name,
+        host: crate::running::Host::Local,
+        since_ms,
+        url: String::new(),
+    }
 }
 
 #[cfg(test)]

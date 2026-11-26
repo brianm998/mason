@@ -5648,6 +5648,21 @@ fn run_command_on(
     let id = format!("t{}r{}-{suffix}{}{hsuf}", c.task.0, c.run.0, again(k));
     let hosts = c.d.cfg.hosts_dir();
     let dir = hosts.join(&id);
+    // Listed as running here until this returns (#1155).
+    let _running = crate::running::start(
+        &hosts,
+        crate::running::Run {
+            id: id.clone(),
+            project: c.project.id.clone(),
+            task: Some(c.task.0),
+            kind: crate::running::Kind::Suite,
+            name: c.step.name.clone(),
+            host: crate::running::Host::Local,
+            since_ms: mason_step_host::registry::HostInfo::read(&dir)
+                .map_or_else(|_| crate::daemon::now_ms(), |i| i.started_ms),
+            url: String::new(),
+        },
+    );
     let limit = c
         .res
         .budget

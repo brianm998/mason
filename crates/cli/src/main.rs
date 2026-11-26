@@ -23,6 +23,7 @@
 //! mason health | mason digest [--days N] [--project P] | mason schedule list | run <name>
 //! mason triage list | review <id> (--agree | --disagree)
 //! mason status [--json] [--watch]
+//! mason hosts [--json]
 //! mason run --needs compile[=N],... [--exclusive] [--label L] [--origin O] -- <cmd>...
 //! mason hold --needs R[,R...] [--exclusive] --pipeline NAME --label L [--pid P]
 //! mason targets list [--json]
@@ -42,6 +43,7 @@ mod client;
 mod definition;
 mod doctor;
 mod guard;
+mod hosts;
 mod init;
 mod node;
 mod progress;
@@ -125,6 +127,7 @@ mason: command-line client for the MASON pipeline
   mason test parse <parser> <file> [--min N]   read a results file the way a suite would, and judge it
   mason logs <id> [--follow]
   mason status [--json] [--watch]     with --watch, follow every running step's progress
+  mason hosts [--json]                this Mac, each node and GitHub, with what runs on each now
   mason service install [--print] [--force] | uninstall | status
                                       run masond --managed under launchd (macOS) or a systemd user unit
   mason doctor                        checks the setup, and that `mason` on PATH is this program
@@ -2930,6 +2933,16 @@ fn main() {
             }
             Some(other) => die(&format!("unknown quarantine command {other:?}\n\n{HELP}")),
         },
+        "hosts" => {
+            finish(&a);
+            let s = or_die(d.call("GET", "/status", None));
+            if json_out {
+                return println!("{:#}", s["hosts"]);
+            }
+            for l in hosts::lines(&s["hosts"]) {
+                println!("{l}");
+            }
+        }
         "status" => {
             let watch = a.flag("--watch") || a.flag("-w");
             finish(&a);
@@ -3004,10 +3017,12 @@ fn main() {
                         Some("working") => " (working)".to_string(),
                         Some("waiting_check") => format!(
                             " (waiting on a check {})",
-                            if a["where"] == "github" {
-                                "on GitHub"
-                            } else {
-                                "here"
+                            match a["where"].as_str().unwrap_or("") {
+                                "github" => "on GitHub".to_string(),
+                                w => match w.strip_prefix("node:") {
+                                    Some(n) => format!("on node {n}"),
+                                    None => "here".to_string(),
+                                },
                             }
                         ),
                         Some("waiting_slot") => format!(
@@ -3310,6 +3325,9 @@ fn main() {
                         }
                     }
                     if let Some(l) = t["run_on"]["line"].as_str() {
+                        println!("  {l}");
+                    }
+                    if let Some(l) = hosts::running_line(&t["running_on"]) {
                         println!("  {l}");
                     }
                     for p in t["places"].as_array().into_iter().flatten() {
@@ -4735,7 +4753,11 @@ fn agents_line(s: &Value) -> Option<String> {
             "waiting on GitHub checks".to_string(),
         ),
         (
-            n(&|x| x.0 == "waiting_check" && x.1 != "github"),
+            n(&|x| x.0 == "waiting_check" && x.1.starts_with("node:")),
+            "waiting on checks on nodes".to_string(),
+        ),
+        (
+            n(&|x| x.0 == "waiting_check" && x.1 != "github" && !x.1.starts_with("node:")),
             "waiting on checks here".to_string(),
         ),
         (
