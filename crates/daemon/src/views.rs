@@ -1034,16 +1034,43 @@ impl<'a> Ctx<'a> {
         t: &Task,
         llm_holders: &std::collections::HashSet<TaskId>,
         holds: &[crate::remote::RemoteHold],
-    ) -> Option<(&'static str, &'static str, String, String, String)> {
+        runs: &[crate::running::Run],
+    ) -> Option<(&'static str, String, String, String, String)> {
         if llm_holders.contains(&t.id) {
-            return Some(("working", "", String::new(), String::new(), String::new()));
+            return Some((
+                "working",
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+            ));
         }
         if !t.state.is_step() {
             return None;
         }
         if let Some(h) = holds.iter().find(|h| h.task == t.id.0 && h.kind == "check") {
             let (url, runs_on) = crate::remote::record_view(&h.record);
-            return Some(("waiting_check", "github", runs_on, url, String::new()));
+            return Some((
+                "waiting_check",
+                "github".into(),
+                runs_on,
+                url,
+                String::new(),
+            ));
+        }
+        let node = runs.iter().find(|r| {
+            r.task == Some(t.id.0)
+                && r.kind == crate::running::Kind::Check
+                && matches!(r.host, crate::running::Host::Node(_))
+        });
+        if let Some(r) = node {
+            return Some((
+                "waiting_check",
+                r.host.key(),
+                String::new(),
+                String::new(),
+                String::new(),
+            ));
         }
         // A step that has not started its agent is queued, not an active model; one that
         // has started (it has a live record) and waits for a session again is `waiting_slot`.
@@ -1051,7 +1078,7 @@ impl<'a> Ctx<'a> {
         if live.check_open().is_some() {
             return Some((
                 "waiting_check",
-                "here",
+                "here".into(),
                 String::new(),
                 String::new(),
                 String::new(),
@@ -1061,7 +1088,7 @@ impl<'a> Ctx<'a> {
         if w.resource.starts_with("llm") {
             return Some((
                 "waiting_slot",
-                "",
+                String::new(),
                 String::new(),
                 String::new(),
                 w.resource.clone(),
@@ -1092,7 +1119,9 @@ impl<'a> Ctx<'a> {
         let llm_holders = self.d.broker.llm_holders();
         let holds =
             crate::remote::running_holds(&crate::remote::holds_dir(&self.d.cfg.hosts_dir()));
+        let runs = crate::running::runs(self.d, self.w);
         HomeView {
+            hosts: self.hosts(project, &runs),
             project: project.to_string(),
             placement: Some(crate::place::global_placement(self.d)),
             project_placement: (!project.is_empty())
@@ -1110,7 +1139,7 @@ impl<'a> Ctx<'a> {
                 .iter()
                 .filter_map(|t| {
                     let (state, place, runs_on, run_url, resource) =
-                        self.agent_state(t, &llm_holders, &holds)?;
+                        self.agent_state(t, &llm_holders, &holds, &runs)?;
                     let r = self.row(t);
                     // A held session is never hidden: with no model on the
                     // row, fall back to its display name, then the step.
@@ -1129,7 +1158,7 @@ impl<'a> Ctx<'a> {
                         task: t.id.0,
                         step: t.step.clone(),
                         state: state.into(),
-                        place: place.into(),
+                        place,
                         runs_on,
                         run_url,
                         resource,
@@ -1184,6 +1213,42 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    /// Every configured host with the runs of `project` (empty: all) on it (#1155).
+    fn hosts(&self, project: &str, runs: &[crate::running::Run]) -> Vec<HostView> {
+        crate::running::arrange(crate::running::lines(self.d), runs, project)
+            .into_iter()
+            .map(|(line, runs)| HostView {
+                kind: line.kind.into(),
+                name: line.name,
+                status: line.status,
+                runs: runs.iter().map(|r| self.host_run(r)).collect(),
+            })
+            .collect()
+    }
+
+    fn host_run(&self, r: &crate::running::Run) -> HostRun {
+        HostRun {
+            task: r
+                .task
+                .and_then(|t| self.w.tasks.get(&TaskId(t)))
+                .map(|t| self.row(t)),
+            kind: r.kind.label().into(),
+            name: r.name.clone(),
+            host: r.host.key(),
+            since_ms: r.since_ms,
+            url: r.url.clone(),
+        }
+    }
+
+    /// The runs of task `id` that are in flight, wherever they are (#1155).
+    pub fn running_on(&self, id: u64) -> Vec<HostRun> {
+        crate::running::runs(self.d, self.w)
+            .iter()
+            .filter(|r| r.task == Some(id))
+            .map(|r| self.host_run(r))
+            .collect()
+    }
+
     pub fn task_detail(&self, id: u64) -> Option<TaskDetailView> {
         let t = self.w.tasks.get(&TaskId(id))?;
         let p = self.d.project(t.project);
@@ -1211,6 +1276,7 @@ impl<'a> Ctx<'a> {
         let plan_view = (!plan.is_empty()).then(|| crate::plan_view::parse_plan(&plan));
         let removes = crate::landing::removals_view(&self.d.cfg.task_dir(id));
         Some(TaskDetailView {
+            running_on: self.running_on(id),
             placement: Some(crate::place::task_placement(
                 self.d,
                 &self.project_name(t),

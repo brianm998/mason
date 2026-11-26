@@ -4112,9 +4112,11 @@ impl Runner {
         )))
     }
 
-    /// Run a check that may go to GitHub. When GitHub, not the code, kept it from running, wait
-    /// (charged to no task) and run it again, for up to [`OUTAGE_LIMIT_S`]; only then is it an
-    /// error, which the caller raises as a service failure (#772).
+    /// Run a check that may go to GitHub. A run GitHub does not take or fails waits again at
+    /// the batch's landing rank, and three such failures in a row are an error (#822). When
+    /// GitHub would not take the run at all (a refused push or dispatch), wait (charged to no
+    /// task) and run it again, for up to [`OUTAGE_LIMIT_S`]; only then is it an error (#772).
+    /// The caller raises an error as a service failure.
     fn check_through_outage(
         &self,
         def: &mason_definition::Definition,
@@ -5890,7 +5892,11 @@ fn retry_outage<T>(
     let (mut waited, mut step) = (0u64, OUTAGE_STEP_S);
     loop {
         match f() {
-            Err(e) if crate::hostedcheck::is_outage(&e) && waited < OUTAGE_LIMIT_S => {
+            Err(e)
+                if crate::hostedcheck::is_outage(&e)
+                    && !crate::remote::gave_up_in_place(&e)
+                    && waited < OUTAGE_LIMIT_S =>
+            {
                 waiting(
                     waited,
                     e.trim_start_matches(crate::hostedcheck::OUTAGE_PREFIX),
@@ -5936,6 +5942,26 @@ mod outage_tests {
         assert_eq!(waits.len(), 2);
         assert!(waits[0].starts_with("push rejected"));
         assert_eq!(*slept.borrow(), vec![30, 60]);
+    }
+
+    /// #822: a run that already waited at its place three times in a row is the batch's error
+    /// at once; there is no second wait around it.
+    #[test]
+    fn a_run_that_already_waited_in_place_is_not_waited_for_again() {
+        let spent = format!(
+            "{}no runner picked up x (3 environmental failures in a row, waiting again at its place each time)",
+            crate::hostedcheck::OUTAGE_PREFIX
+        );
+        let mut calls = 0;
+        let r: Result<(), String> = retry_outage(
+            || {
+                calls += 1;
+                Err(spent.clone())
+            },
+            |_, _| panic!("no wait"),
+            |_| panic!("no sleep"),
+        );
+        assert_eq!((r, calls), (Err(spent), 1));
     }
 
     #[test]

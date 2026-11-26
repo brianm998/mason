@@ -172,6 +172,12 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
         v["held_by"] = crate::blockers::links_json(d, w, t);
         v["held_line"] = crate::blockers::held_line(w, t).map_or(Value::Null, |s| json!(s));
         v["places"] = json!(crate::place::seen(Some(t.id.0)));
+        let now = crate::daemon::now_ms();
+        v["running_on"] = json!(crate::views::Ctx::new(d, w)
+            .running_on(t.id.0)
+            .iter()
+            .map(|r| crate::running::run_json(r, now))
+            .collect::<Vec<_>>());
         v["run_on"] = crate::place::effective_line(d, t.id.0);
         if t.state == State::Canceled && t.cancel_keeps_branch {
             v["revive"] = json!(format!(
@@ -299,6 +305,9 @@ async fn status(Shared(d): Shared<Arc<Daemon>>) -> Res {
                     })).collect::<Vec<_>>(),
                 })),
                 "places": crate::place::seen(None),
+                "hosts": home.hosts.iter()
+                    .map(|h| crate::running::host_json(h, crate::daemon::now_ms()))
+                    .collect::<Vec<_>>(),
                 "event_loop_stalls": stalls,
                 "pools": {"blocking": d2.pool.stats(), "views": d2.view_pool.stats()},
                 "worst_stall_ms": worst,
