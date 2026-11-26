@@ -409,21 +409,7 @@ pub fn make_remote(
         return Ok(None);
     }
     let _ = std::fs::remove_file(site.cwd.join(RESULTS));
-    let id = format!("covmap-{}", &want.tip[..want.tip.len().min(12)]);
-    let env = vec![("MASON_COVMAP_COMMIT".to_string(), want.tip.to_string())];
-    let mut spec = rm::spec_for(
-        project,
-        &id,
-        None,
-        REMOTE_COMMAND,
-        limit,
-        &env,
-        "ubuntu-latest",
-        "",
-    );
-    spec.suite = "covmap".into();
-    spec.results_file = Some(RESULTS.into());
-    let spec = rm::with_site_env(spec, site);
+    let spec = rm::with_site_env(covmap_spec(want, project, limit, "ubuntu-latest"), site);
     let out = match rm::execute(
         site,
         &spec,
@@ -434,16 +420,42 @@ pub fn make_remote(
         Ok(o) => o,
         Err(rm::Fail::Environmental(e)) | Err(rm::Fail::Error(e)) => return Err(e),
     };
+    read_map(out, &site.cwd, want.tip, hash).map(Some)
+}
+
+/// The run that makes the map of `want.tip`, away from this machine.
+fn covmap_spec(
+    want: &Want,
+    project: &str,
+    limit: std::time::Duration,
+    runs_on: &str,
+) -> crate::remote::RunSpec {
+    let id = format!("covmap-{}", &want.tip[..want.tip.len().min(12)]);
+    let env = vec![("MASON_COVMAP_COMMIT".to_string(), want.tip.to_string())];
+    let mut spec =
+        crate::remote::spec_for(project, &id, None, REMOTE_COMMAND, limit, &env, runs_on, "");
+    spec.suite = "covmap".into();
+    spec.results_file = Some(RESULTS.into());
+    spec
+}
+
+/// The map a finished run left in the checkout `cwd`.
+fn read_map(
+    out: crate::remote::Outcome,
+    cwd: &Path,
+    tip: &str,
+    hash: u64,
+) -> Result<CoverageMap, String> {
     let f = match out {
-        rm::Outcome::Done(f) => f,
-        rm::Outcome::Stopped(_) => return Err("stopped".into()),
+        crate::remote::Outcome::Done(f) => f,
+        crate::remote::Outcome::Stopped(_) => return Err("stopped".into()),
     };
     if f.code != 0 {
         return Err(format!("the covmap run exited {}", f.code));
     }
-    let text = std::fs::read_to_string(site.cwd.join(RESULTS))
+    let text = std::fs::read_to_string(cwd.join(RESULTS))
         .map_err(|_| "the covmap run left no covmap.kv".to_string())?;
-    accept(&text, want.tip, hash).map(Some)
+    accept(&text, tip, hash)
 }
 
 /// The package the map is made for. The job is about the daemon's `it` executable.
@@ -522,6 +534,27 @@ pub fn pass(d: &std::sync::Arc<crate::daemon::Daemon>) {
         if !due(old.as_ref(), now_secs(), changed_src, hash_text(&main_text)) {
             continue;
         }
+        // A nodes-only project (#1150) has a node make it, holding nothing here. One that may
+        // never run here waits for a later pass while no node has room.
+        if crate::place::nodes_only(d, &p.id) {
+            if let crate::remote::Executor::Node { nid, .. } =
+                crate::remote::executor_global(d, &p.id)
+            {
+                if crate::place::wait_for(&nid) != Some("") {
+                    let want = Want {
+                        old: old.as_ref(),
+                        tip: &tip,
+                        main_text: &main_text,
+                        changed_src,
+                        now_secs: now_secs(),
+                    };
+                    // Not marked to wait: this loop must not stand on one project's node.
+                    let nid = crate::place::wait_for(&nid).unwrap_or(&nid);
+                    make_away(d, pid, &p.id, &p.path, &dir, &want, Some(nid));
+                }
+                continue;
+            }
+        }
         // With remote runs on, GitHub makes the map (a node does not: it is GitHub's own `gha`
         // pool that is leased here) and the work leases `gha`, not this Mac's
         // `test-suite` (#780). `gha` full: wait for a later pass.
@@ -571,7 +604,7 @@ pub fn pass(d: &std::sync::Arc<crate::daemon::Daemon>) {
                 changed_src,
                 now_secs: now_secs(),
             };
-            make_on_github(d, pid, &p.id, &p.path, &dir, &want);
+            make_away(d, pid, &p.id, &p.path, &dir, &want, None);
         } else if granted {
             make(d, pid, &p.path, &dir, &tip);
         }
@@ -579,14 +612,16 @@ pub fn pass(d: &std::sync::Arc<crate::daemon::Daemon>) {
     }
 }
 
-/// Make the map on GitHub, from a checkout of the tip, and keep it.
-fn make_on_github(
+/// Make the map away from this machine, from a checkout of the tip, and keep it: on the node
+/// `node`, else on GitHub.
+fn make_away(
     d: &std::sync::Arc<crate::daemon::Daemon>,
     pid: mason_core::ProjectId,
     project: &str,
     repo: &Path,
     dir: &Path,
     want: &Want,
+    node: Option<&str>,
 ) {
     use mason_landing::git;
     let _ = std::fs::create_dir_all(dir);
@@ -609,38 +644,55 @@ fn make_on_github(
             return;
         }
     }
-    let r = match crate::remote::site_for(d, project, &wt) {
-        Some(site) => {
-            let spec_like = crate::remote::spec_for(
-                project,
-                &format!("covmap-{}", &want.tip[..want.tip.len().min(12)]),
-                None,
-                REMOTE_COMMAND,
-                REMOTE_LIMIT,
-                &[],
-                "ubuntu-latest",
-                "",
-            );
-            let _hold = crate::remote::HoldGuard::new(
-                &d.cfg.hosts_dir(),
-                &spec_like,
-                "coverage map",
-                "coverage map",
-                1,
-                &dir.join("remote"),
-                "debt",
-                0,
-            );
-            make_remote(
-                &site,
-                want,
-                project,
-                &dir.join("remote"),
-                REMOTE_LIMIT,
-                &|| d.is_shutting_down().then_some(crate::remote::StopWhy::Gone),
-            )
-        }
-        None => Err("the project has no [remote_runs] section".into()),
+    let stop = || d.is_shutting_down().then_some(crate::remote::StopWhy::Gone);
+    let r = match node {
+        Some(nid) => crate::node_exec::execute(
+            d,
+            Some(nid),
+            &covmap_spec(want, project, REMOTE_LIMIT, "node"),
+            &wt,
+            &d.project(pid).map_or_else(String::new, |p| p.base_ref()),
+            &dir.join("remote"),
+            &stop,
+            &mut |_, _| {},
+        )
+        .map_err(|e| match e {
+            crate::remote::Fail::Environmental(e) | crate::remote::Fail::Error(e) => e,
+        })
+        .and_then(|out| read_map(out, &wt, want.tip, hash_text(want.main_text)).map(Some)),
+        None => match crate::remote::site_for(d, project, &wt) {
+            Some(site) => {
+                let spec_like = crate::remote::spec_for(
+                    project,
+                    &format!("covmap-{}", &want.tip[..want.tip.len().min(12)]),
+                    None,
+                    REMOTE_COMMAND,
+                    REMOTE_LIMIT,
+                    &[],
+                    "ubuntu-latest",
+                    "",
+                );
+                let _hold = crate::remote::HoldGuard::new(
+                    &d.cfg.hosts_dir(),
+                    &spec_like,
+                    "coverage map",
+                    "coverage map",
+                    1,
+                    &dir.join("remote"),
+                    "debt",
+                    0,
+                );
+                make_remote(
+                    &site,
+                    want,
+                    project,
+                    &dir.join("remote"),
+                    REMOTE_LIMIT,
+                    &|| d.is_shutting_down().then_some(crate::remote::StopWhy::Gone),
+                )
+            }
+            None => Err("the project has no [remote_runs] section".into()),
+        },
     };
     {
         let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -649,7 +701,7 @@ fn make_on_github(
     match r {
         Ok(Some(m)) => store(dir, &m, want.tip),
         Ok(None) => {}
-        Err(e) => tracing::warn!("coverage map (GitHub): {e}"),
+        Err(e) => tracing::warn!("coverage map (away from this machine): {e}"),
     }
 }
 
