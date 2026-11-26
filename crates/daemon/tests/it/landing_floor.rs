@@ -208,6 +208,39 @@ fn a_branch_that_adds_conflict_markers_goes_back_before_it_joins_a_batch() {
     );
 }
 
+#[test]
+fn a_branch_that_adds_a_secret_or_a_banned_word_goes_back_and_an_allowed_line_is_logged() {
+    let w = world("window = \"2s\"\n", &[]);
+    std::fs::create_dir_all(&w.d.cfg.config_dir).unwrap();
+    std::fs::write(w.d.cfg.config_dir.join("banned-words.txt"), "zebraword\n").unwrap();
+    // Put together here, so this file holds no token.
+    let token = format!("ghp_{}", "d4".repeat(18));
+    let leak = format!("keep\nGH={token}\n");
+    let allowed = format!("GH={token} # mason:allow-secret\n");
+    let secret = w.task("adds a token", &[("x/s.txt", &leak)]);
+    let word = w.task("adds a banned word", &[("x/w.txt", "ZebraWord\n")]);
+    let fine = w.task("an allowed line", &[("y/a.txt", &allowed)]);
+    wait_for("the allowed task to land", 90, || w.landed(fine));
+    wait_for("the others to go back", 60, || {
+        w.sent_back(secret).is_some() && w.sent_back(word).is_some()
+    });
+    let why = w.sent_back(secret).unwrap();
+    assert!(why.contains("x/s.txt:2") && !why.contains(&token), "{why}");
+    let why = w.sent_back(word).unwrap();
+    assert!(why.contains("x/w.txt:1"), "{why}");
+    assert!(!why.to_lowercase().contains("zebraword"), "{why}");
+    assert!(!w.on_main("x/s.txt") && !w.on_main("x/w.txt"));
+    let batches = w.d.cfg.task_dir(0).parent().unwrap().join("batches");
+    let logs: String = std::fs::read_dir(&batches)
+        .unwrap()
+        .filter_map(|e| std::fs::read_to_string(e.ok()?.path().join("content-scan.log")).ok())
+        .collect();
+    assert!(
+        logs.contains(&format!("task #{}: y/a.txt:1", fine.0)) && !logs.contains(&token),
+        "{logs}"
+    );
+}
+
 // ---- #816: the floor builds on this Mac while the switch says GitHub --------------------------
 
 const WORKFLOW: &str = "name: mason-run\non:\n  workflow_dispatch:\n";
