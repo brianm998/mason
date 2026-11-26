@@ -473,7 +473,7 @@ fn has_room(d: &Arc<Daemon>, spec: &RunSpec) -> bool {
         })
 }
 
-fn poll_interval() -> Duration {
+pub(crate) fn poll_interval() -> Duration {
     Duration::from_millis(
         std::env::var("MASON_NODE_POLL_MS")
             .ok()

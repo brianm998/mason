@@ -59,6 +59,7 @@ mod landing_yield;
 mod lease_pid;
 mod limits;
 mod live_tokens;
+mod log_plain;
 mod notify;
 mod onboarding;
 mod orphans;
