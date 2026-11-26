@@ -113,6 +113,8 @@ pub struct Job {
     /// The base branch the coordinator measures from, as `(name, tip)`: the checkout gets
     /// `origin/<name>` at `tip`. Absent from an older coordinator.
     pub base: Option<(String, String)>,
+    /// What came of `base` once the checkout was made ([`apply_base`]); empty before that.
+    pub base_state: String,
     pub state: JobState,
     /// `build` or `run`: where the job is, or where it ended.
     pub phase: String,
@@ -139,6 +141,7 @@ impl Job {
             "env": self.env.iter().map(|(k, v)| json!([k, v])).collect::<Vec<_>>(),
             "limit_s": self.limit_s, "lease_s": self.lease_s,
             "base": self.base.as_ref().map(|(n, s)| json!({"name": n, "sha": s})),
+            "base_state": self.base_state,
             "state": self.state.name(), "phase": self.phase, "slot": self.slot,
             "prepared": self.prepared, "started_ms": self.started_ms, "ended_ms": self.ended_ms,
             "last_poll_ms": self.last_poll_ms, "code": self.code, "signal": self.signal,
@@ -166,6 +169,7 @@ impl Job {
             limit_s: n("limit_s"),
             lease_s: n("lease_s"),
             base: parse_base(&v["base"]),
+            base_state: s("base_state").unwrap_or_default(),
             state: JobState::parse(v["state"].as_str().unwrap_or("")),
             phase: s("phase").unwrap_or_default(),
             slot: n("slot") as u32,
@@ -189,6 +193,8 @@ impl Job {
             "started_ms": self.started_ms, "ended_ms": self.ended_ms,
             "code": self.code, "signal": self.signal, "timed_out": self.timed_out,
             "why": self.why, "slot": self.slot,
+            // `set <name>@<sha>`, `failed: <why>` or `not sent`; empty until it is known.
+            "base": self.base_state,
         })
     }
 }
@@ -392,6 +398,26 @@ impl Jobs {
             .count() as u32
     }
 
+    /// Running jobs that are not yet in their step host's hands: still being checked out, or
+    /// between one phase's host and the next. A restart now would have to start them over, so a
+    /// takeover waits for these (a few seconds) and for nothing else: a job whose command runs
+    /// under a step host is found again by [`Jobs::resume`] and does not notice the new daemon.
+    pub fn settling(&self) -> u32 {
+        let live: Vec<Arc<Handle>> = self.lock_live().values().cloned().collect();
+        live.iter()
+            .filter(|h| {
+                h.job.lock().is_ok_and(|j| {
+                    j.state == JobState::Running
+                        && (!j.prepared
+                            || !self
+                                .host_dir(&j.coord, &j.id, &j.phase)
+                                .join("host.kv")
+                                .exists())
+                })
+            })
+            .count() as u32
+    }
+
     /// The jobs the node knows, for `mason node jobs`.
     pub fn list(&self) -> Vec<Value> {
         self.lock_live()
@@ -460,6 +486,70 @@ impl Jobs {
         )
         .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    /// `POST /node/mirror/{project}/base`: set `origin/<name>` of the project's mirror to `tip`
+    /// (`mason node sync`), as a job would, and say where it is afterwards. While a job of the
+    /// project holds a slot the ref only moves forward ([`set_origin_base`]).
+    pub fn sync_base(
+        &self,
+        coord: &str,
+        project: &str,
+        name: &str,
+        tip: &str,
+    ) -> Result<String, String> {
+        let m = self.mirror_path(coord, project);
+        if !m.join("HEAD").exists() {
+            return Err(format!("this node has no mirror of {project}"));
+        }
+        let idle = !self
+            .busy
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|(c, p, _)| c == coord && p == project);
+        set_origin_base(&m, name, tip, idle)?;
+        origin_base(&m, name).ok_or_else(|| format!("origin/{name} does not resolve"))
+    }
+
+    /// The mirrors this node keeps for `coord`: each one's project, path and `origin/*` refs.
+    pub fn mirrors(&self, coord: &str) -> Vec<Value> {
+        let Ok(rd) = std::fs::read_dir(self.root.join("mirrors").join(coord)) else {
+            return vec![];
+        };
+        let mut out: Vec<(String, Value)> = rd
+            .flatten()
+            .filter_map(|e| {
+                let file = e.file_name().to_string_lossy().into_owned();
+                let project = file.strip_suffix(".git")?.to_string();
+                let refs = git::run(
+                    &e.path(),
+                    &[
+                        "for-each-ref",
+                        "--format=%(refname) %(objectname)",
+                        "refs/remotes/origin",
+                    ],
+                );
+                let mut v = json!({"project": project, "path": e.path().to_string_lossy()});
+                match refs {
+                    Ok(text) => {
+                        v["origin"] = text
+                            .lines()
+                            .filter_map(|l| {
+                                let (r, sha) = l.split_once(' ')?;
+                                let name = r.strip_prefix("refs/remotes/origin/")?;
+                                Some((name.to_string(), json!(sha)))
+                            })
+                            .collect::<serde_json::Map<_, _>>()
+                            .into();
+                    }
+                    Err(e) => v["error"] = json!(e.to_string()),
+                }
+                Some((project, v))
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out.into_iter().map(|(_, v)| v).collect()
     }
 
     /// The share of the whole machine's CPU, in percent, that the running jobs' process trees
@@ -553,6 +643,7 @@ impl Jobs {
             limit_s: req.limit_s,
             lease_s: req.lease_s.min(settings.lease_s).max(10),
             base: req.base,
+            base_state: String::new(),
             state: JobState::Running,
             phase: "setup".into(),
             slot,
@@ -933,13 +1024,7 @@ pub fn set_origin_base(
     if !valid_sha(tip) || !git::ok(mirror, &["cat-file", "-e", &format!("{tip}^{{commit}}")]) {
         return Err(format!("the mirror lacks the base commit {tip}"));
     }
-    let current = git::run(
-        mirror,
-        &["rev-parse", "--verify", "-q", &format!("{r}^{{commit}}")],
-    )
-    .ok()
-    .map(|s| s.trim().to_string())
-    .filter(|s| !s.is_empty());
+    let current = origin_base(mirror, name);
     let advance = match &current {
         None => true,
         Some(c) if c == tip => false,
@@ -950,6 +1035,43 @@ pub fn set_origin_base(
         git::run(mirror, &["update-ref", &r, tip]).map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+/// How a [`apply_base`] outcome that failed starts.
+pub const BASE_FAILED: &str = "failed: ";
+
+/// The [`apply_base`] outcome of a job that named no base.
+pub const BASE_NOT_SENT: &str = "not sent";
+
+/// [`set_origin_base`] for a job, and what came of it, as the job's status reports it:
+/// `set <name>@<sha>` (where `origin/<name>` is now), `failed: <why>` or `not sent`.
+pub fn apply_base(mirror: &Path, base: Option<&(String, String)>, exclusive: bool) -> String {
+    let Some((name, tip)) = base else {
+        return BASE_NOT_SENT.into();
+    };
+    match set_origin_base(mirror, name, tip, exclusive) {
+        Ok(()) => match origin_base(mirror, name) {
+            Some(at) => format!("set {name}@{at}"),
+            None => format!("{BASE_FAILED}origin/{name} does not resolve after it was set"),
+        },
+        Err(e) => format!("{BASE_FAILED}origin/{name}: {e}"),
+    }
+}
+
+/// The commit `origin/<name>` resolves to in `mirror`.
+pub fn origin_base(mirror: &Path, name: &str) -> Option<String> {
+    git::run(
+        mirror,
+        &[
+            "rev-parse",
+            "--verify",
+            "-q",
+            &format!("refs/remotes/origin/{name}^{{commit}}"),
+        ],
+    )
+    .ok()
+    .map(|s| s.trim().to_string())
+    .filter(|s| !s.is_empty())
 }
 
 // ---- the environment --------------------------------------------------------------------------
@@ -1295,14 +1417,14 @@ fn drive(jobs: &Arc<Jobs>, d: &Arc<Daemon>, h: &Arc<Handle>) {
     if !job.prepared {
         match prepare_slot(&mirror, &slot, &job.sha) {
             Ok(()) => {
-                if let Some((name, tip)) = &job.base {
-                    if let Err(e) = set_origin_base(&mirror, name, tip, jobs.alone(&job)) {
-                        // The job still runs: only a command that reads `origin/<base>` fails.
-                        eprintln!(
-                            "node job {} of coordinator {}: no origin/{name}: {e}",
-                            job.id, job.coord
-                        );
-                    }
+                // The job still runs when this fails: the coordinator reads the outcome in
+                // the job's status and judges the run by it.
+                job.base_state = apply_base(&mirror, job.base.as_ref(), jobs.alone(&job));
+                if job.base_state.starts_with(BASE_FAILED) {
+                    eprintln!(
+                        "node job {} of coordinator {}: base {}",
+                        job.id, job.coord, job.base_state
+                    );
                 }
                 job.prepared = true;
                 job.phase = if job.build.is_some() { "build" } else { "run" }.into();
@@ -1503,6 +1625,29 @@ mod tests {
     }
 
     #[test]
+    fn a_base_the_mirror_cannot_set_is_reported_in_the_jobs_status() {
+        let t = tempfile::tempdir().unwrap();
+        let m = t.path().join("m.git");
+        std::fs::create_dir_all(&m).unwrap();
+        git::run(&m, &["init", "-q", "--bare"]).unwrap();
+        let tip = "1".repeat(40);
+        assert_eq!(apply_base(&m, None, true), "not sent");
+        let state = apply_base(&m, Some(&("develop".into(), tip.clone())), true);
+        assert!(
+            state.starts_with("failed: origin/develop: ") && state.contains(&tip),
+            "{state}"
+        );
+        // A job record carries it into the job's status, and keeps it over a restart.
+        let record = json!({
+            "id": "j", "project": "p", "sha": tip, "coord": "c", "command": "true", "env": [],
+            "base_state": state,
+        });
+        let job = Job::from_json(&record).unwrap();
+        assert_eq!(job.view()["base"], state);
+        assert_eq!(Job::from_json(&job.to_json()).unwrap().base_state, state);
+    }
+
+    #[test]
     fn the_cli_shim_runs_its_target_and_goes_when_there_is_none() {
         let t = tempfile::tempdir().unwrap();
         let target = t.path().join("it's mason");
@@ -1633,6 +1778,7 @@ mod tests {
             limit_s: 60,
             lease_s: 30,
             base: None,
+            base_state: String::new(),
             state: JobState::Done,
             phase: "run".into(),
             slot: 2,
@@ -1720,6 +1866,7 @@ mod tests {
             limit_s: 60,
             lease_s: 30,
             base: None,
+            base_state: String::new(),
             state: JobState::Running,
             phase: String::new(),
             slot: 1,

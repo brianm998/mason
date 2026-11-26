@@ -109,11 +109,14 @@ run_limited() {
 }
 
 # The first panic (with its message line) or failing line of a script's log, for the summary.
+# A script's own `== ` headings are not failures, and neither is the word "error" in prose:
+# only the forms a failure is reported in count. With none, the last line is named.
 cause_of() {
   local clean; clean=$(mktemp)
   sed $'s/\x1b\\[[0-9;]*[A-Za-z]//g' "$1" > "$clean"
   local n c=""
-  n=$(grep -naE 'panicked at|FAIL|[Ee]rror|not ok' "$clean" | head -n 1 | cut -d: -f1)
+  local re='panicked at|FAIL|not ok|timed out waiting|(^|:)[[:space:]]*error(\[E[0-9]+\])?:|^[[:space:]]*(Error|fatal):|[A-Za-z]Error:|##\[error\]'
+  n=$(grep -naE "$re" "$clean" | grep -vaE '^[0-9]+:== ' | head -n 1 | cut -d: -f1)
   if [ -n "$n" ]; then
     c=$(sed -n "${n}p" "$clean")
     case $c in *"panicked at"*) c="$c $(sed -n "$((n + 1))p" "$clean")" ;; esac
