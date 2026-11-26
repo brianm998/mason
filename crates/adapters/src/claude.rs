@@ -274,7 +274,8 @@ impl ClaudeAdapter {
     }
 
     /// The settings file beside `mcp.json` that puts the command guard (`mason hook
-    /// guard`, s1107) in front of every Bash call. `mason` is the binary installed next
+    /// guard`, s1107) in front of every Bash call, and `mason hook edit` (s1152) in front
+    /// of every edit. `mason` is the binary installed next
     /// to the MCP bridge. A guard that cannot run refuses the command (exit 2): any
     /// other failure of a hook lets the command through.
     fn write_settings(&self, mcp_path: &Path) -> Result<PathBuf, AdapterError> {
@@ -286,9 +287,17 @@ impl ClaudeAdapter {
              refused' >&2; exit 2; }}",
             mason.display().to_string().replace('\'', "'\\''")
         );
+        // The write-time rules (s1152). Unlike the guard it fails open.
+        let edit = format!(
+            "'{}' hook edit",
+            mason.display().to_string().replace('\'', "'\\''")
+        );
         let settings = json!({"hooks": {"PreToolUse": [{
             "matcher": "Bash",
             "hooks": [{"type": "command", "command": command}],
+        }, {
+            "matcher": "Edit|Write|MultiEdit",
+            "hooks": [{"type": "command", "command": edit, "timeout": 30}],
         }]}});
         let path = mcp_path.with_file_name("settings.json");
         std::fs::write(&path, settings.to_string()).map_err(AdapterError::Spawn)?;
@@ -1563,6 +1572,13 @@ mod tests {
             let guard = format!("'/bin/mason{}' hook guard ||", std::env::consts::EXE_SUFFIX);
             assert!(command.starts_with(&guard), "{command}");
             assert!(command.contains("exit 2"), "{command}");
+            let edit = &v["hooks"]["PreToolUse"][1];
+            assert_eq!(edit["matcher"], "Edit|Write|MultiEdit");
+            let command = edit["hooks"][0]["command"].as_str().unwrap();
+            assert_eq!(
+                command,
+                format!("'/bin/mason{}' hook edit", std::env::consts::EXE_SUFFIX)
+            );
             let env = |k: &str| {
                 let all: Vec<&str> = c
                     .env

@@ -831,6 +831,13 @@ pub struct ProgressReport {
     pub unit: String,
 }
 
+/// The request `mason hook edit` sends (s1152). Not an agent tool: it is offered to
+/// no step and leaves the contract's state alone.
+pub const HOOK_EDIT: &str = "hook_edit";
+
+/// Answers a `PreToolUse` input for an edit with the hook's reply, empty for none.
+pub type OnEdit = Arc<dyn Fn(&str) -> String + Send + Sync>;
+
 /// Called with each accepted `report_progress`, as it is made.
 pub type OnProgress = Arc<dyn Fn(&ProgressReport) + Send + Sync>;
 
@@ -864,6 +871,7 @@ struct Inner {
     ask_rewriter: Mutex<Option<AskRewriter>>,
     on_accept: Mutex<Option<OnAccept>>,
     on_progress: Mutex<Option<OnProgress>>,
+    on_edit: Mutex<Option<OnEdit>>,
     allowed: Mutex<Option<Vec<String>>>,
     validator: Option<Validator>,
     step: StepKind,
@@ -904,6 +912,7 @@ impl ContractHandle {
             ask_rewriter: Mutex::new(None),
             on_accept: Mutex::new(None),
             on_progress: Mutex::new(None),
+            on_edit: Mutex::new(None),
             allowed: Mutex::new(None),
             validator,
             step,
@@ -944,6 +953,12 @@ impl ContractHandle {
     /// contract's lock is released, so `f` may take its own locks).
     pub fn set_on_progress(&self, f: OnProgress) {
         *self.0.on_progress.lock().unwrap_or_else(|e| e.into_inner()) = Some(f);
+    }
+
+    /// Run `f` for each edit the session's hook asks about; without one every edit
+    /// passes.
+    pub fn set_on_edit(&self, f: OnEdit) {
+        *self.0.on_edit.lock().unwrap_or_else(|e| e.into_inner()) = Some(f);
     }
 
     /// Re-establish a submission accepted before the controller restarted.
@@ -987,6 +1002,19 @@ impl ContractHandle {
     }
 
     pub fn call(&self, tool: &str, args: &Value) -> ToolReply {
+        if tool == HOOK_EDIT {
+            let hook = self
+                .0
+                .on_edit
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            let input = args["input"].as_str().unwrap_or_default();
+            return ToolReply {
+                ok: true,
+                text: hook.map(|h| h(input)).unwrap_or_default(),
+            };
+        }
         self.0.in_flight.fetch_add(1, Ordering::SeqCst);
         let _open = InFlight(&self.0.in_flight);
         self.call_inner(tool, args)

@@ -161,6 +161,8 @@ mason: command-line client for the MASON pipeline
                                       or one project; a task's own is `mason task run-on <id> <mode>|default`
   mason remote on|off|status [--json]  aliases for mode remote / local, and the mode per project and where it came from. Send every compile and test that can go to GitHub Actions there, or bring them back
                                       (suites with remote = false, a device or exclusive always stay here)
+  mason hook edit                      the PreToolUse hook MASON gives its agents for Edit, Write and MultiEdit:
+                                       the project's .mason/rules on the base commit
   mason hook bash [--needs compile]   optional Claude Code PreToolUse hook: builds go through the queue, and in a
                                       MASON agent session destructive git and rm commands are refused
   mason hook guard                    that refusal alone; MASON registers it for every Claude agent it starts
@@ -501,12 +503,18 @@ fn main() {
         let sub = a.pos().unwrap_or_default();
         let needs = a.opt("--needs").unwrap_or_else(|| "compile".into());
         finish(&a);
-        if sub != "bash" && sub != "guard" {
-            die("the hooks are `mason hook bash` and `mason hook guard`");
+        if !["bash", "guard", "edit"].contains(&sub.as_str()) {
+            die("the hooks are `mason hook bash`, `mason hook guard` and `mason hook edit`");
         }
         let mut input = String::new();
         let _ = std::io::stdin().read_to_string(&mut input);
         let env = |k: &str| std::env::var(k).ok();
+        if sub == "edit" {
+            if let Some(out) = guard::hook_edit(&input, &env) {
+                println!("{out}");
+            }
+            return;
+        }
         // `hook bash` is also in a repository's own settings, which a person's session
         // reads: it refuses only inside a session MASON started (s1107).
         if sub == "guard" || env("MASON_STEP_KIND").is_some() || env("MASON_TASK").is_some() {
@@ -3425,6 +3433,16 @@ fn main() {
                     }
                     for l in t["excused"].as_array().into_iter().flatten() {
                         println!("  excused   {}", l.as_str().unwrap_or(""));
+                    }
+                    for h in t["rule_hits"].as_array().into_iter().flatten() {
+                        println!(
+                            "  rule hit  run {} {}: {} `{}` on {}",
+                            h["run"],
+                            h["step"].as_str().unwrap_or("?"),
+                            h["action"].as_str().unwrap_or("?"),
+                            h["rule"].as_str().unwrap_or("?"),
+                            h["path"].as_str().unwrap_or("?")
+                        );
                     }
                     for l in t["host_losses"].as_array().into_iter().flatten() {
                         println!(

@@ -4138,6 +4138,18 @@ fn agent_job(c: &Ctx) {
             d.crash.point("accepted_persisted");
         }));
     }
+    // The write-time rules, from the base commit (s1152): `mason hook edit` asks here.
+    if !kind.read_only() {
+        let rules = crate::rules::Checker::new(
+            &c.project.path,
+            &c.project.base_ref(),
+            &c.wt,
+            &c.task_dir(),
+            c.run.0,
+            &c.step.name,
+        );
+        contract.set_on_edit(Arc::new(move |input| rules.answer(input)));
+    }
     if let Err(e) = contract.serve(&c.d.cfg.sockets_dir().join(format!("{key}.sock"))) {
         return c.fail(format!("cannot serve the step contract: {e}"));
     }
