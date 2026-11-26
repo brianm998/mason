@@ -434,6 +434,21 @@ pub fn check_filing_as(d: &Daemon, pid: ProjectId, trust: TrustSource) -> Result
     check_as(&u.status, u.yours, cfg, trust)
 }
 
+/// A filing by the health session: held to the rollback cooldown, `max_open` and `max_steps`
+/// as an agent's is, but the week's count is left out (the health session has its own limit,
+/// `[health] health_proposals_per_week`; s1175).
+pub fn check_filing_health(d: &Daemon, pid: ProjectId) -> Result<(), String> {
+    let Some(p) = d.project(pid) else {
+        return Ok(());
+    };
+    let Some(cfg) = &p.self_cfg else {
+        return Ok(());
+    };
+    let mut u = usage(d, pid, cfg, now_ms());
+    u.status.week = 0;
+    check_as(&u.status, u.yours, cfg, TrustSource::OwnerAgent)
+}
+
 /// A *proposed* filing (a task waiting for the owner's approval) spends nothing, so it is
 /// not held to `max_open`, `per_week` or `max_steps`; only the rollback cooldown still
 /// refuses it. Decision 0046.
