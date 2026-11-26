@@ -1148,6 +1148,14 @@ fn a_node_that_goes_away_is_given_up_on_and_its_orphan_is_killed_when_its_lease_
     let b = p.b.clone();
     let r = std::thread::scope(|sc| {
         let h = sc.spawn(|| run_on_b(&p, &spec("run-lost", None, &cmd), &|| None));
+        // The node counts the job before the coordinator has its answer: wait for the
+        // coordinator to be following the run on b, or the listener goes while it is placing it.
+        support::wait_for("the coordinator to follow the job on the node", 60, || {
+            mason_daemon::remote_runs::view(&p.a, &|_| None, "")
+                .runs
+                .iter()
+                .any(|r| r.id == "run-lost" && r.runs_on == "node b" && r.state == "running")
+        });
         support::wait_for("the job to run on the node", 60, || {
             b.node.jobs.running() == 1
         });
@@ -1427,6 +1435,81 @@ fn a_node_that_is_to_take_over_a_runtime_takes_no_new_job_and_says_why() {
     *p.b.node.pending_runtime.lock().unwrap() = None;
     poll(&p);
     assert_eq!(listed(&p, "b")["usable"], true);
+}
+
+/// The stall of 2026-11-26: a runtime that arrived made the node refuse every job until the
+/// running ones ended (some run an hour), with free slots idle. A running job now does not hold
+/// the takeover up: the node says it takes over now, and the job carries on and is collected.
+#[test]
+fn a_runtime_waiting_to_take_over_does_not_wait_for_a_running_job_and_the_job_survives_it() {
+    let p = working_pair(2);
+    let flag = p.sa.root.path().join("go");
+    let cmd = flag_script(&p, "wait.sh", &flag);
+    let s = spec("run-over", None, &cmd);
+    let base = remote::base_ref_of(&p.a, "scratch").unwrap();
+    let log = p.sa.root.path().join("logs");
+    let b = p.b.clone();
+    // The coordinator sends the job and does not collect it yet, so nothing deletes it below.
+    mason_daemon::node_exec::start(&p.a, None, &s, &p.sa.repo, &base, &log).unwrap();
+    support::wait_for("the job's command to run under its host", 60, || {
+        b.node.jobs.running() == 1 && b.node.jobs.settling() == 0
+    });
+    *b.node.pending_runtime.lock().unwrap() = Some("a".repeat(40));
+    poll(&p);
+    let n = listed(&p, "b");
+    let state = n["state"].as_str().unwrap();
+    assert!(
+        state.contains("taking over now; 1 running job carries on"),
+        "{n}"
+    );
+    assert!(!state.contains("waiting for"), "{n}");
+    // The takeover itself (the exec) cannot run in a test, and a second daemon cannot follow
+    // the same host beside this one without the two fighting over its record; what is checked is
+    // that nothing in the pending state touches the job: it runs on and the coordinator collects.
+    assert_eq!(b.node.jobs.running(), 1);
+    std::fs::write(&flag, "go").unwrap();
+    // And the coordinator collects the result as usual.
+    let f = done(mason_daemon::node_exec::execute(
+        &p.a,
+        None,
+        &s,
+        &p.sa.repo,
+        &base,
+        &log,
+        &|| None,
+        &mut |_, _| {},
+    ));
+    assert_eq!((f.code, f.output.as_str()), (0, "finished\n"));
+}
+
+/// A takeover that could not start the new runtime does not leave the node refusing work: it
+/// serves as it was, with free slots, until the retry.
+#[test]
+fn a_node_whose_takeover_failed_keeps_taking_jobs_under_the_runtime_it_has() {
+    let p = working_pair(2);
+    let flag = p.sa.root.path().join("go");
+    let cmd = flag_script(&p, "wait.sh", &flag);
+    let b = p.b.clone();
+    *b.node.pending_runtime.lock().unwrap() = Some("a".repeat(40));
+    b.node
+        .takeover_failed_ms
+        .store(1, std::sync::atomic::Ordering::SeqCst);
+    std::thread::scope(|sc| {
+        let h = sc.spawn(|| run_on_b(&p, &spec("run-held", None, &cmd), &|| None));
+        support::wait_for("the job to run on the node", 60, || {
+            b.node.jobs.running() == 1
+        });
+        poll(&p);
+        let n = listed(&p, "b");
+        assert_eq!(n["accepting"], true, "a free slot is taken: {n}");
+        assert!(b.node.pending_runtime.lock().unwrap().is_some());
+        std::fs::write(&flag, "go").unwrap();
+        let f = done(h.join().unwrap());
+        assert_eq!(f.output, "finished\n");
+    });
+    // And a second job is accepted while the runtime is still pending.
+    let f = done(run_on_b(&p, &spec("run-next", None, "echo next"), &|| None));
+    assert_eq!(f.output, "next\n");
 }
 
 fn put_runtime(p: &Pair, bytes: Vec<u8>) -> mason_daemon::node_client::Response {
@@ -1814,7 +1897,7 @@ mod fleet {
         assert_eq!(io.sends.load(Ordering::SeqCst), 1);
         // Sent, and the node lists it: installed, taking over when its jobs end.
         poll(&p);
-        assert_eq!(state(&p), Fleet::WaitingForJobs(0));
+        assert_eq!(state(&p), Fleet::Installed(0));
         assert_eq!(update_status_line(&p), "installed; taking over now");
         let row = listed(&p, "b");
         assert_eq!(row["update"], "installed; taking over now");
@@ -1887,7 +1970,7 @@ mod fleet {
                 && node_fleet::record_of(&nid(&p)).unwrap().phase == Phase::Sent
         });
         poll(&p);
-        assert_eq!(state(&p), Fleet::WaitingForJobs(0));
+        assert_eq!(state(&p), Fleet::Installed(0));
         assert!(
             nodes::alerts(&p.a)
                 .iter()
@@ -1935,7 +2018,7 @@ mod fleet {
         });
         assert_eq!(io.sends.load(Ordering::SeqCst), 1);
         poll(&p);
-        assert_eq!(state(&p), Fleet::WaitingForJobs(0));
+        assert_eq!(state(&p), Fleet::Installed(0));
     }
 
     /// A source repository with two commits, and the `update.toml` that builds them into
@@ -2410,6 +2493,123 @@ fn a_node_jobs_path_has_a_mason_that_runs_and_finds_no_daemon() {
     assert!(lines[1].to_lowercase().contains("mason"), "{}", f.output);
     // The node's own daemon is out of reach of a job's `mason`.
     assert!(f.output.contains("not running"), "{}", f.output);
+}
+
+/// Serve `d`'s loopback API, as `masond` does, so that the `mason` command line finds it.
+fn serve_api(d: &Arc<Daemon>) {
+    let d2 = d.clone();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let _ = rt.block_on(mason_daemon::http::serve(d2));
+    });
+    let info = d.cfg.info_path();
+    support::wait_for("the API to be served", 60, || {
+        std::fs::read_to_string(&info)
+            .ok()
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+            .is_some_and(|v| v["port"].is_u64())
+    });
+}
+
+/// #1197: a node whose mirror cannot take `origin/<base>` says so, and the run is a node failure
+/// that names the cause; `mason node sync` puts the ref back and `mason node show` lists it.
+#[test]
+fn a_node_without_origin_base_is_a_node_failure_and_node_sync_restores_it() {
+    use mason_daemon::hostedcheck;
+    use mason_daemon::place::{self, Mode};
+    let p = working_pair(2);
+    let tip = sh(&p.sa.repo, &["rev-parse", "origin/main"])
+        .trim()
+        .to_string();
+    std::fs::write(p.sa.repo.join("t.sh"), "git rev-parse origin/main\n").unwrap();
+    // A first run makes the mirror, and says the base it set.
+    let f = done(run_on_b(&p, &spec("run-first", None, "sh t.sh"), &|| None));
+    assert!(
+        f.ran_on
+            .ends_with(&format!("base: set main@{}", &tip[..10])),
+        "{}",
+        f.ran_on
+    );
+    let mirror =
+        p.sb.data_dir
+            .join("node/mirrors")
+            .join(coord_of_a(&p))
+            .join("scratch.git");
+    // The ref is gone, and a lock left behind keeps any job from setting it again.
+    sh(&mirror, &["update-ref", "-d", "refs/remotes/origin/main"]);
+    let lock = mirror.join("refs/remotes/origin/main.lock");
+    std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
+    std::fs::write(&lock, "").unwrap();
+
+    match run_on_b(&p, &spec("run-locked", None, "sh t.sh"), &|| None) {
+        Err(Fail::Environmental(why)) => {
+            assert!(why.starts_with("origin/main not set on node b"), "{why}");
+            assert!(why.contains("base: failed: "), "{why}");
+            assert!(why.contains("mason node sync b --project scratch"), "{why}");
+        }
+        other => panic!("expected a node failure, got {other:?}"),
+    }
+    // A check that can run here does, and its result says why it left the node.
+    place::set_global(&p.a, Mode::Remote, "test").unwrap();
+    let logs = tempfile::tempdir().unwrap();
+    let out = hostedcheck::run(
+        &p.a,
+        &check_spec(&p, "t7r1-back", "echo ran-here", logs.path()),
+        &remote::Grant::attached(),
+    )
+    .unwrap();
+    assert!(out.passed && out.full.contains("ran-here"), "{}", out.full);
+    assert!(
+        out.output.contains("origin/main not set on node b"),
+        "{}",
+        out.output
+    );
+    // A nodes-only project has nowhere else: no result, as an outage, not a red.
+    place::set_project_mode(&p.a, "scratch", Mode::Remote).unwrap();
+    let why = hostedcheck::run(
+        &p.a,
+        &check_spec(&p, "t7r2-only", "echo never", logs.path()),
+        &remote::Grant::attached(),
+    )
+    .map(|o| o.output)
+    .unwrap_err();
+    assert!(hostedcheck::is_outage(&why), "{why}");
+    assert!(why.contains("origin/main not set on node b"), "{why}");
+
+    serve_api(&p.a);
+    let sync = ["node", "sync", "b", "--project", "scratch"];
+    // While the cause is there, the sync says what it is.
+    let o = p.sa.mason(&sync);
+    assert!(!o.status.success());
+    assert!(
+        String::from_utf8_lossy(&o.stderr).contains("main.lock"),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    let shown = p.sa.mason_ok(&["node", "show", "b"]);
+    assert!(shown.contains("origin/main not set"), "{shown}");
+    std::fs::remove_file(&lock).unwrap();
+    let said = p.sa.mason_ok(&sync);
+    assert!(said.contains(&format!("origin/main = {tip}")), "{said}");
+    assert_eq!(
+        sh(&mirror, &["rev-parse", "refs/remotes/origin/main"]).trim(),
+        tip
+    );
+    let shown = p.sa.mason_ok(&["node", "show", "b"]);
+    assert!(shown.contains("scratch.git"), "{shown}");
+    assert!(shown.contains(&format!("origin/main {tip}")), "{shown}");
+    let f = done(run_on_b(&p, &spec("run-after", None, "sh t.sh"), &|| None));
+    assert_eq!(f.output, format!("{tip}\n"));
+    // A project nobody registered is refused.
+    assert!(!p
+        .sa
+        .mason(&["node", "sync", "b", "--project", "nope"])
+        .status
+        .success());
 }
 
 const SPILL_REMOTE_RUNS: &str =
