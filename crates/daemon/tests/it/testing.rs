@@ -1309,6 +1309,12 @@ fn base_tip(d: &Arc<mason_daemon::Daemon>) -> String {
 
 /// The task landed; its debts are put back as owed with no green on record.
 fn owe(d: &Arc<mason_daemon::Daemon>, t: TaskId, scopes: &[&str]) {
+    // The task shows as Landed before its run's thread has finished: that thread then pays the
+    // task's open debts once (`after_landing`). Wait for it, or the debts added below are paid
+    // by it, and the suite runs once more than the test counts.
+    wait_for("the landed task's run to finish", 60, || {
+        d.jobs_running() == 0
+    });
     for sc in scopes {
         let id = d
             .store

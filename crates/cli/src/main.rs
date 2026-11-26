@@ -23,6 +23,7 @@
 //! mason health | mason digest [--days N] [--project P] | mason schedule list | run <name>
 //! mason triage list | review <id> (--agree | --disagree)
 //! mason status [--json] [--watch]
+//! mason hosts [--json]
 //! mason run --needs compile[=N],... [--exclusive] [--label L] [--origin O] -- <cmd>...
 //! mason hold --needs R[,R...] [--exclusive] --pipeline NAME --label L [--pid P]
 //! mason targets list [--json]
@@ -42,6 +43,7 @@ mod client;
 mod definition;
 mod doctor;
 mod guard;
+mod hosts;
 mod init;
 mod node;
 mod progress;
@@ -125,6 +127,7 @@ mason: command-line client for the MASON pipeline
   mason test parse <parser> <file> [--min N]   read a results file the way a suite would, and judge it
   mason logs <id> [--follow]
   mason status [--json] [--watch]     with --watch, follow every running step's progress
+  mason hosts [--json]                this Mac, each node and GitHub, with what runs on each now
   mason service install [--print] [--force] | uninstall | status
                                       run masond --managed under launchd (macOS) or a systemd user unit
   mason doctor                        checks the setup, and that `mason` on PATH is this program
@@ -369,16 +372,22 @@ fn row(v: &Value) -> String {
     )
 }
 
-fn ago_until(ms: u64) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as u64);
-    let s = ms.saturating_sub(now) / 1000;
-    match s {
-        0..=3599 => format!("in {}m", s / 60),
-        3600..=172_799 => format!("in {}h", s / 3600),
-        _ => format!("in {}d", s / 86_400),
+/// How long from `now` until `ms` (both ms since the epoch), rounded up: to the minute
+/// below 48 hours (`in 2h 59m`), else to the day.
+fn ago_until(ms: u64, now: u64) -> String {
+    let mins = ms.saturating_sub(now).div_ceil(60_000);
+    match (mins / 60, mins % 60) {
+        (0, m) => format!("in {m}m"),
+        (h @ 1..=47, 0) => format!("in {h}h"),
+        (h @ 1..=47, m) => format!("in {h}h {m}m"),
+        _ => format!("in {}d", mins.div_ceil(24 * 60)),
     }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
 }
 
 fn ago(ms: u64) -> String {
@@ -1557,7 +1566,15 @@ fn main() {
                             p["project"].as_str().unwrap_or("")
                         },
                         p["owner"].as_str().unwrap_or("?"),
-                        ago_until(p["expires_at"].as_u64().unwrap_or(0))
+                        ago_until(p["expires_at"].as_u64().unwrap_or(0), now_ms())
+                    );
+                }
+                if let Some(l) = r["last_lift"].as_object() {
+                    println!(
+                        "lifted {} by {} via {}",
+                        local_clock(l["at"].as_u64().unwrap_or(0)),
+                        l["who"].as_str().unwrap_or("?"),
+                        l["via"].as_str().unwrap_or("?")
                     );
                 }
             }
@@ -2886,7 +2903,7 @@ fn main() {
                         x["suite"].as_str().unwrap_or("?"),
                         x["test"].as_str().unwrap_or("?"),
                         x["owner"].as_str().unwrap_or("?"),
-                        ago_until(x["expires_at"].as_u64().unwrap_or(0)),
+                        ago_until(x["expires_at"].as_u64().unwrap_or(0), now_ms()),
                         x["reason"].as_str().unwrap_or("")
                     );
                 }
@@ -2930,6 +2947,16 @@ fn main() {
             }
             Some(other) => die(&format!("unknown quarantine command {other:?}\n\n{HELP}")),
         },
+        "hosts" => {
+            finish(&a);
+            let s = or_die(d.call("GET", "/status", None));
+            if json_out {
+                return println!("{:#}", s["hosts"]);
+            }
+            for l in hosts::lines(&s["hosts"]) {
+                println!("{l}");
+            }
+        }
         "status" => {
             let watch = a.flag("--watch") || a.flag("-w");
             finish(&a);
@@ -3004,10 +3031,12 @@ fn main() {
                         Some("working") => " (working)".to_string(),
                         Some("waiting_check") => format!(
                             " (waiting on a check {})",
-                            if a["where"] == "github" {
-                                "on GitHub"
-                            } else {
-                                "here"
+                            match a["where"].as_str().unwrap_or("") {
+                                "github" => "on GitHub".to_string(),
+                                w => match w.strip_prefix("node:") {
+                                    Some(n) => format!("on node {n}"),
+                                    None => "here".to_string(),
+                                },
                             }
                         ),
                         Some("waiting_slot") => format!(
@@ -3310,6 +3339,9 @@ fn main() {
                         }
                     }
                     if let Some(l) = t["run_on"]["line"].as_str() {
+                        println!("  {l}");
+                    }
+                    if let Some(l) = hosts::running_line(&t["running_on"]) {
                         println!("  {l}");
                     }
                     for p in t["places"].as_array().into_iter().flatten() {
@@ -4735,7 +4767,11 @@ fn agents_line(s: &Value) -> Option<String> {
             "waiting on GitHub checks".to_string(),
         ),
         (
-            n(&|x| x.0 == "waiting_check" && x.1 != "github"),
+            n(&|x| x.0 == "waiting_check" && x.1.starts_with("node:")),
+            "waiting on checks on nodes".to_string(),
+        ),
+        (
+            n(&|x| x.0 == "waiting_check" && x.1 != "github" && !x.1.starts_with("node:")),
             "waiting on checks here".to_string(),
         ),
         (
@@ -4855,5 +4891,28 @@ mod owner_identity_tests {
         assert_eq!(super::owner_identity(), "owner");
         std::env::set_var("USER", "u");
         assert_eq!(super::owner_identity(), "u");
+    }
+}
+
+#[cfg(test)]
+mod ago_until_tests {
+    use super::ago_until;
+
+    #[test]
+    fn an_expiry_is_rounded_up_never_cut_to_the_hour_below() {
+        let now = 1_700_000_000_000;
+        let after = |s: u64| ago_until(now + s * 1000, now);
+        assert_eq!(after(2 * 3600 - 1), "in 2h");
+        assert_eq!(ago_until(now + 2 * 3_600_000 - 1, now), "in 2h");
+        assert_eq!(after(59 * 60 + 30), "in 1h");
+        assert_eq!(after(2 * 3600 + 59 * 60), "in 2h 59m");
+        assert_eq!(after(3600 + 1), "in 1h 1m");
+        assert_eq!(after(59 * 60), "in 59m");
+        assert_eq!(after(1), "in 1m");
+        assert_eq!(after(0), "in 0m");
+        assert_eq!(ago_until(now - 5000, now), "in 0m");
+        assert_eq!(after(47 * 3600 + 59 * 60), "in 47h 59m");
+        assert_eq!(after(48 * 3600), "in 2d");
+        assert_eq!(after(48 * 3600 + 1), "in 3d");
     }
 }

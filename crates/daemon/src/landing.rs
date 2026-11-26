@@ -24,8 +24,8 @@ use crate::daemon::{now_ms, Daemon};
 use crate::jobs::Ctx;
 use crate::newtests::Added;
 use mason_adapter_api::service::{
-    CheckCounts, Checks, CiJobCounts, CiRunJobs, CiState, GitHostAdapter, Observed, PollEvent,
-    Poller, PrState, Review,
+    BuildSystemAdapter, CheckCounts, Checks, CiJobCounts, CiRunJobs, CiState, GitHostAdapter,
+    Observed, PollEvent, Poller, PrState, Review,
 };
 use mason_core::progress::{Change, Figure};
 use mason_core::*;
@@ -839,7 +839,7 @@ fn coordinate(weak: &Weak<Daemon>, pid: ProjectId, first: &mut bool, last: &mut 
                 .store
                 .prune_batch_runs(now_ms().saturating_sub(2 * 24 * 3600 * 1000));
             sweep_integration(&d, pid);
-            remove_refs(&d, pid, None);
+            remove_refs(&d, pid, None, None);
         }
     }
     d.crash.panic_point("coordinator");
@@ -1263,6 +1263,7 @@ fn run_batch(
                     lint_where: Mutex::new(String::new()),
                     host,
                     pr: Mutex::new(None),
+                    merged_ref: Mutex::new(None),
                     service_error: Mutex::new(None),
                     stopped: Default::default(),
                 }
@@ -1297,17 +1298,54 @@ enum PrEnd {
     BaseKeptMoving,
 }
 
+/// Cancel the CI runs of a ref MASON stops waiting on, before it is deleted (task 1108).
+/// Best effort: a failure is only logged and changes no verdict or error.
+pub(crate) fn cancel_runs(ci: &dyn BuildSystemAdapter, run: &str, git_ref: &str) -> usize {
+    ci.cancel(run, git_ref).unwrap_or_else(|e| {
+        tracing::warn!("CI on {git_ref} could not be cancelled: {}", e.detail);
+        0
+    })
+}
+
+/// What a batch's note says about runs cancelled on `name`; nothing when none were.
+fn cancelled_note(name: &str, why: &str, n: usize) -> Option<String> {
+    (n > 0).then(|| {
+        format!(
+            "CI on {name}: not waited for ({why}); {}",
+            runs_cancelled(n)
+        )
+    })
+}
+
+fn runs_cancelled(n: usize) -> String {
+    format!("{n} run{} cancelled", if n == 1 { "" } else { "s" })
+}
+
 /// Close the pull requests and delete the candidate refs a batch (or, with
-/// `None`, every batch a dead daemon left) put on the remote.
-fn remove_refs(d: &Arc<Daemon>, pid: ProjectId, batch: Option<u64>) {
+/// `None`, every batch a dead daemon left) put on the remote. Their unfinished CI runs
+/// are cancelled first, except those of `merged`, the ref of a pull request that landed.
+fn remove_refs(d: &Arc<Daemon>, pid: ProjectId, batch: Option<u64>, merged: Option<u64>) {
     let Some(p) = d.project(pid) else { return };
     let host = crate::services::host(p).ok().flatten();
+    let ci = crate::services::ci(p).ok().flatten();
     for r in d.store.open_refs(&p.id).unwrap_or_default() {
         if batch.is_some_and(|b| b != r.batch) {
             continue;
         }
         if let (Some(h), Some(n), "pr") = (&host, r.number, r.kind.as_str()) {
             let _ = h.close_pr(n);
+        }
+        if let Some((ci, _)) = ci.as_ref().filter(|_| merged != Some(r.id)) {
+            // The ref row has no commit: the runs are found by the branch.
+            let n = cancel_runs(ci.as_ref(), "", &r.name);
+            let why = if batch.is_some() {
+                "the batch ended"
+            } else {
+                "the daemon restarted"
+            };
+            if let Some(note) = cancelled_note(&r.name, why, n) {
+                let _ = d.store.append_batch_note(r.batch, &note);
+            }
         }
         if let Some(remote) = &p.remote {
             let _ = git::run(
@@ -1367,6 +1405,8 @@ struct Runner {
     host: Option<Arc<dyn GitHostAdapter>>,
     /// The pull request the batch is about to merge (pr modes).
     pr: Mutex<Option<OpenPr>>,
+    /// The candidate ref of the pull request that landed: its runs are not cancelled.
+    merged_ref: Mutex<Option<u64>>,
     /// Set when a service could not answer: the batch ends with this reason.
     service_error: Mutex<Option<String>>,
     /// What Land now stopped in this batch's verification (`suite:NAME`, `ci:NAME`): the
@@ -4112,9 +4152,11 @@ impl Runner {
         )))
     }
 
-    /// Run a check that may go to GitHub. When GitHub, not the code, kept it from running, wait
-    /// (charged to no task) and run it again, for up to [`OUTAGE_LIMIT_S`]; only then is it an
-    /// error, which the caller raises as a service failure (#772).
+    /// Run a check that may go to GitHub. A run GitHub does not take or fails waits again at
+    /// the batch's landing rank, and three such failures in a row are an error (#822). When
+    /// GitHub would not take the run at all (a refused push or dispatch), wait (charged to no
+    /// task) and run it again, for up to [`OUTAGE_LIMIT_S`]; only then is it an error (#772).
+    /// The caller raises an error as a service failure.
     fn check_through_outage(
         &self,
         def: &mason_definition::Definition,
@@ -4522,6 +4564,24 @@ impl Runner {
         Ok((sha, id))
     }
 
+    /// [`cancel_runs`] with the project's CI; nothing without a `[ci]` section.
+    fn cancel_ci(&self, run: &str, git_ref: &str) -> usize {
+        self.ci
+            .as_ref()
+            .map_or(0, |(ci, _)| cancel_runs(ci.as_ref(), run, git_ref))
+    }
+
+    /// Give up on a pull request's checks: close it, cancel their runs, delete its branch.
+    /// Returns how many runs were cancelled.
+    fn abandon_pr(&self, number: u64, branch: &str, ref_id: u64) -> usize {
+        if let Some(host) = &self.host {
+            let _ = host.close_pr(number);
+        }
+        let n = self.cancel_ci("", branch);
+        self.drop_candidate(branch, ref_id);
+        n
+    }
+
     fn drop_candidate(&self, name: &str, ref_id: u64) {
         if let Ok(remote) = self.remote() {
             let _ = git::run(
@@ -4692,10 +4752,13 @@ impl Runner {
         let skipped = std::cell::Cell::new(false);
         let looks = std::cell::RefCell::new(Vec::<mason_core::ci_stuck::Look>::new());
         let stuck_key = self.alert_key("ci-stuck");
+        // The commit until the trigger names the run.
+        let mut run_id = sha.clone();
         let r = (|| {
             let run = self.ask("CI trigger", started, cfg.timeout_s, cfg.poll_s, || {
                 ci.trigger(&name, &sha).map(Some)
             })?;
+            run_id.clone_from(&run);
             self.ask("CI", started, cfg.timeout_s, cfg.poll_s, || {
                 // Land now: stop waiting. CI is owed on the base after the merge.
                 if self.land_now() {
@@ -4740,6 +4803,12 @@ impl Runner {
             _ => {}
         }
         self.point("ci_finished");
+        // No verdict (land now, timeout, an error): the run must not carry on by itself.
+        let cancelled = if skipped.get() || r.is_err() {
+            self.cancel_ci(&run_id, &name)
+        } else {
+            0
+        };
         self.drop_candidate(&name, ref_id);
         if skipped.get() {
             self.d.landing.ci.finish(batch, "skipped");
@@ -4747,14 +4816,23 @@ impl Runner {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .insert(crate::suites::ci_scope(self.project()));
+            let cancelled = if cancelled > 0 {
+                format!("; {}", runs_cancelled(cancelled))
+            } else {
+                String::new()
+            };
             return Ok((
                 true,
                 vec![format!(
-                    "CI on {name}: not waited for (land now); it runs on the base after the merge"
+                    "CI on {name}: not waited for (land now){cancelled}; it runs on the base after the merge"
                 )],
                 vec![],
             ));
         }
+        let r = r.map_err(|e| match cancelled_note(&name, "no verdict", cancelled) {
+            Some(note) => format!("{e}; {note}"),
+            None => e,
+        });
         Ok(match r? {
             CiState::Green => {
                 self.d.landing.clear(self.pid, "redbase");
@@ -4895,8 +4973,12 @@ impl Runner {
         let pr = match opened {
             Ok(pr) => pr,
             Err(e) => {
+                let n = self.cancel_ci("", &name);
                 self.drop_candidate(&name, ref_id);
-                return Err(e);
+                return Err(match cancelled_note(&name, "no verdict", n) {
+                    Some(note) => format!("{e}; {note}"),
+                    None => e,
+                });
             }
         };
         let _ = self.d.store.set_ref_number(ref_id, pr.number);
@@ -4907,9 +4989,11 @@ impl Runner {
             kind: "pull_request",
         }]);
         // A newer green PR replaces an older one the batch was holding.
-        if let Some(old) = self.pr.lock().unwrap_or_else(|e| e.into_inner()).take() {
-            let _ = host.close_pr(old.number);
-            self.drop_candidate(&old.branch, old.ref_id);
+        let mut replaced = None;
+        let old = self.pr.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(old) = old {
+            let n = self.abandon_pr(old.number, &old.branch, old.ref_id);
+            replaced = cancelled_note(&old.branch, "a newer pull request", n);
         }
         self.say(&format!(
             "waiting for the pull request's checks (#{})",
@@ -4929,9 +5013,11 @@ impl Runner {
         let st = match st {
             Ok(st) => st,
             Err(e) => {
-                let _ = host.close_pr(pr.number);
-                self.drop_candidate(&name, ref_id);
-                return Err(e);
+                let n = self.abandon_pr(pr.number, &name, ref_id);
+                let notes = replaced
+                    .into_iter()
+                    .chain(cancelled_note(&name, "no verdict", n));
+                return Err(notes.fold(e, |e, note| format!("{e}; {note}")));
             }
         };
         self.point("pr_checked");
@@ -4948,8 +5034,7 @@ impl Runner {
                 .collect::<Vec<_>>(),
         );
         if st.checks == Checks::Red || st.state == PrState::Closed {
-            let _ = host.close_pr(pr.number);
-            self.drop_candidate(&name, ref_id);
+            let cancelled = self.abandon_pr(pr.number, &name, ref_id);
             let why = if st.state == PrState::Closed && st.checks != Checks::Red {
                 "the PR was closed"
             } else {
@@ -4964,6 +5049,10 @@ impl Runner {
                 notes.extend(self.judge_notes(&st.jobs));
             }
             notes.extend(self.red_notes(&st.jobs));
+            notes.extend(replaced);
+            if cancelled > 0 {
+                notes.push(format!("CI on {name}: {}", runs_cancelled(cancelled)));
+            }
             return Ok((false, notes, st.failed));
         }
         *self.pr.lock().unwrap_or_else(|e| e.into_inner()) = Some(OpenPr {
@@ -4971,11 +5060,9 @@ impl Runner {
             branch: name.clone(),
             ref_id,
         });
-        Ok((
-            true,
-            vec![format!("PR #{}: checks green", pr.number)],
-            vec![],
-        ))
+        let mut notes = vec![format!("PR #{}: checks green", pr.number)];
+        notes.extend(replaced);
+        Ok((true, notes, vec![]))
     }
 
     /// Merge the verified PR (or hand it to the host's queue), waiting for any
@@ -5014,6 +5101,7 @@ impl Runner {
             })?;
             match st.state {
                 PrState::Merged => {
+                    *self.merged_ref.lock().unwrap_or_else(|e| e.into_inner()) = Some(open.ref_id);
                     self.d.landing.clear(self.pid, &waiting);
                     let _ = git::run(&self.project().path, &["fetch", "--prune", &self.remote()?]);
                     let commit = git::rev_parse(&self.project().path, &base_ref)
@@ -5125,7 +5213,8 @@ impl Runner {
     /// Take down whatever the batch put on the outside: close its PR, delete its refs.
     fn clean_outside(&self) {
         let batch = self.batch_id.load(std::sync::atomic::Ordering::SeqCst);
-        remove_refs(&self.d, self.pid, Some(batch));
+        let merged = *self.merged_ref.lock().unwrap_or_else(|e| e.into_inner());
+        remove_refs(&self.d, self.pid, Some(batch), merged);
         self.d.landing.clear(self.pid, &self.alert_key("review"));
         self.d.landing.clear(self.pid, &self.alert_key("service"));
     }
@@ -5890,7 +5979,11 @@ fn retry_outage<T>(
     let (mut waited, mut step) = (0u64, OUTAGE_STEP_S);
     loop {
         match f() {
-            Err(e) if crate::hostedcheck::is_outage(&e) && waited < OUTAGE_LIMIT_S => {
+            Err(e)
+                if crate::hostedcheck::is_outage(&e)
+                    && !crate::remote::gave_up_in_place(&e)
+                    && waited < OUTAGE_LIMIT_S =>
+            {
                 waiting(
                     waited,
                     e.trim_start_matches(crate::hostedcheck::OUTAGE_PREFIX),
@@ -5936,6 +6029,26 @@ mod outage_tests {
         assert_eq!(waits.len(), 2);
         assert!(waits[0].starts_with("push rejected"));
         assert_eq!(*slept.borrow(), vec![30, 60]);
+    }
+
+    /// #822: a run that already waited at its place three times in a row is the batch's error
+    /// at once; there is no second wait around it.
+    #[test]
+    fn a_run_that_already_waited_in_place_is_not_waited_for_again() {
+        let spent = format!(
+            "{}no runner picked up x (3 environmental failures in a row, waiting again at its place each time)",
+            crate::hostedcheck::OUTAGE_PREFIX
+        );
+        let mut calls = 0;
+        let r: Result<(), String> = retry_outage(
+            || {
+                calls += 1;
+                Err(spent.clone())
+            },
+            |_, _| panic!("no wait"),
+            |_| panic!("no sleep"),
+        );
+        assert_eq!((r, calls), (Err(spent), 1));
     }
 
     #[test]

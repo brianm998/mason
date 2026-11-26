@@ -53,6 +53,15 @@ pub fn find(data_dir: &Path) -> Result<Daemon, CallError> {
     })
 }
 
+/// What this command line calls itself in its hello: `agent:<task>` inside a task's step
+/// (`MASON_TASK` is in its environment), else `cli`.
+fn client_name(task: Option<&str>) -> String {
+    match task.filter(|t| !t.is_empty()) {
+        Some(t) => format!("agent:{t}"),
+        None => "cli".into(),
+    }
+}
+
 impl Daemon {
     /// One call, over the same WebSocket protocol the monitors use (Part 16):
     /// connect, say hello asking for no views, send the command, read its
@@ -77,6 +86,7 @@ impl Daemon {
                 )?
             }
         };
+        c.named(&client_name(std::env::var("MASON_TASK").ok().as_deref()));
         c.hello(0, true).map_err(CallError::Io)?;
         let cmd = Command {
             id: String::new(),
@@ -104,5 +114,17 @@ impl Daemon {
             ));
         }
         Ok(serde_json::from_str(&r.json).unwrap_or(Value::Null))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_tasks_step_names_its_task() {
+        assert_eq!(client_name(None), "cli");
+        assert_eq!(client_name(Some("")), "cli");
+        assert_eq!(client_name(Some("1144")), "agent:1144");
     }
 }

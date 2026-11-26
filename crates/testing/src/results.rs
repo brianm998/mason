@@ -51,6 +51,16 @@ impl Results {
         Results { cases }
     }
 
+    /// Each test's own time, for the store's `test_times` (s634): the cases whose output carried
+    /// one. A world-slot wait was already taken off by the parser, so this is the test's work and
+    /// not its queueing; a test with no time in the output is left out.
+    pub fn test_times(&self) -> Vec<(String, u64)> {
+        self.cases
+            .iter()
+            .filter_map(|c| c.ms.map(|ms| (c.name.clone(), ms)))
+            .collect()
+    }
+
     /// Cases that actually ran. A skipped test proves nothing.
     pub fn executed(&self) -> usize {
         self.cases
