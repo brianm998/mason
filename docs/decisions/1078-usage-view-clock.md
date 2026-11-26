@@ -4,7 +4,7 @@
 The usage view's text depends on the wall clock, so it can change with no change in MASON's state. `send_views` sends a view whenever its encoded bytes differ from the last one sent, which is correct.
 
 ## Decision
-`an_unchanged_view_is_not_sent_again_and_a_changed_one_is` accepts a later usage view only if its content differs from the first one sent. An identical resend, the regression the test guards against, still fails.
+`an_unchanged_view_is_not_sent_again_and_a_changed_one_is` accepts a later usage view only if its content differs from the usage view sent just before it (the first one, for the first later view). An identical resend, the regression the test guards against, still fails.
 
 ## Alternatives
 A fixed clock for the demo daemon's views: a product change made only for one test. Dropping the usage assertion: loses the check for an identical resend.

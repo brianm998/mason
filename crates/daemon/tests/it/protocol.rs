@@ -1372,9 +1372,12 @@ fn an_unchanged_view_is_not_sent_again_and_a_changed_one_is() {
     got.extend(collect(&mut c, Duration::from_millis(800), |_| false));
     assert_eq!(sidebar_views(&got).len(), 1, "the changed sidebar, once");
     // The Usage text counts from the wall clock ("as of 12 min ago", "resets in 2 h 9 m"), so
-    // it may rightly change while this runs. An identical copy must still never be sent again.
+    // it may rightly change while this runs. An identical copy of the view last sent must still
+    // never be sent again, so each usage view is compared with the one before it.
+    let mut last_usage = first_usage;
     for usage in views_of(&got).into_iter().filter(is_usage) {
-        assert_ne!(usage, first_usage, "an unchanged usage view was sent again");
+        assert_ne!(usage, last_usage, "an unchanged usage view was sent again");
+        last_usage = usage;
     }
 }
 
