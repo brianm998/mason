@@ -951,6 +951,7 @@ fn node_check(
     id: &str,
     progress: Option<&CheckProgress>,
     spill: Option<String>,
+    failed: &mut Option<String>,
 ) -> Option<Shared> {
     use crate::remote as rm;
     let nid = match spill {
@@ -995,9 +996,17 @@ fn node_check(
         ) {
             Err(rm::Fail::Environmental(why)) => {
                 tracing::warn!(check = %id, "{why}; running it here instead");
+                // The result of wherever it runs next says why it left the node (#1197).
+                if crate::node_exec::is_base_failure(&why) {
+                    *failed = Some(why);
+                }
                 return None;
             }
-            Err(rm::Fail::Error(e)) => Err(e),
+            // A node without the job's base (#1197) is said as an outage: no verdict.
+            Err(rm::Fail::Error(e)) => Err(match rm::environmental(&e) {
+                Some(why) => format!("{OUTAGE_PREFIX}{why}"),
+                None => e,
+            }),
             // A wait for a node ends with the daemon: that is no verdict on the check.
             Ok(rm::Outcome::Stopped(rm::StopWhy::Gone)) if d.is_shutting_down() => {
                 Err("the daemon is stopping; run the check again".into())
@@ -1032,6 +1041,19 @@ pub fn is_outage(e: &str) -> bool {
     e.starts_with(OUTAGE_PREFIX)
 }
 
+/// A check's result, naming first the node failure that moved it elsewhere, if one did.
+fn with_node_failure(r: Shared, failed: Option<String>) -> Shared {
+    let Some(why) = failed else { return r };
+    match r {
+        Ok(mut o) => {
+            o.output = format!("({why})\n{}", o.output);
+            Ok(o)
+        }
+        // After the error: an outage is told by how its text starts.
+        Err(e) => Err(format!("{e}\n({why})")),
+    }
+}
+
 fn collect(
     d: &Arc<Daemon>,
     spec: &CheckSpec,
@@ -1039,8 +1061,21 @@ fn collect(
     progress: Option<&CheckProgress>,
     grant: &crate::remote::Grant,
 ) -> Shared {
+    let mut failed = None;
+    let r = collect_placed(d, spec, id, progress, grant, &mut failed);
+    with_node_failure(r, failed)
+}
+
+fn collect_placed(
+    d: &Arc<Daemon>,
+    spec: &CheckSpec,
+    id: &str,
+    progress: Option<&CheckProgress>,
+    grant: &crate::remote::Grant,
+    failed: &mut Option<String>,
+) -> Shared {
     let bound_remote = goes_remote(d, spec);
-    if let Some(r) = node_check(d, spec, id, progress, None) {
+    if let Some(r) = node_check(d, spec, id, progress, None, failed) {
         return r;
     }
     if let Some(r) = remote_check(d, spec, id, progress, grant) {
@@ -1052,7 +1087,7 @@ fn collect(
         let project = crate::remote::project_of(d, &spec.cwd);
         let suite = spec.place.as_ref().map(|(_, s)| &**s);
         if let Some(room) = project.and_then(|p| crate::nodes::best_room(d, &p, suite)) {
-            if let Some(r) = node_check(d, spec, id, progress, Some(room.nid)) {
+            if let Some(r) = node_check(d, spec, id, progress, Some(room.nid), failed) {
                 return r;
             }
         }

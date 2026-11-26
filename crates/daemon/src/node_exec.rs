@@ -12,7 +12,7 @@
 
 use crate::daemon::{now_ms, Daemon};
 use crate::node_client::{block_on, ClientError, NodeClient, Response};
-use crate::node_run::{base64_decode, valid_sha};
+use crate::node_run::{base64_decode, valid_sha, BASE_FAILED, BASE_NOT_SENT};
 use crate::remote::{Fail, Finished, Outcome, RunSpec, StopWhy};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -32,11 +32,14 @@ pub struct Record {
     pub job: String,
     pub sha: String,
     pub sent_ms: u64,
+    /// The base the job was sent with: `<name>@<sha>`, or [`BASE_NOT_SENT`] when the
+    /// coordinator had none. Empty in a record from before the field.
+    pub base: String,
 }
 
 impl Record {
     fn to_json(&self) -> Value {
-        json!({"nid": self.nid, "name": self.name, "job": self.job, "sha": self.sha, "sent_ms": self.sent_ms})
+        json!({"nid": self.nid, "name": self.name, "job": self.job, "sha": self.sha, "sent_ms": self.sent_ms, "base": self.base})
     }
     fn from_json(v: &Value) -> Option<Record> {
         Some(Record {
@@ -45,6 +48,7 @@ impl Record {
             job: v["job"].as_str()?.to_string(),
             sha: v["sha"].as_str()?.to_string(),
             sent_ms: v["sent_ms"].as_u64().unwrap_or(0),
+            base: v["base"].as_str().unwrap_or_default().to_string(),
         })
     }
 }
@@ -77,6 +81,63 @@ pub fn ran_on(name: &str, arch: &str, secs: u64) -> String {
         format!(" ({arch})")
     };
     format!("ran on node {name}{arch}, {took}")
+}
+
+/// What a failure of a job's `origin/<base>` says, wherever it is reported. It is how such a
+/// failure is told from other ones ([`is_base_failure`]).
+const NOT_SET: &str = " not set on node ";
+
+/// Is `why` a node without the job's base: node git state, which no change to the task's code
+/// can fix?
+pub fn is_base_failure(why: &str) -> bool {
+    why.contains(NOT_SET)
+}
+
+/// What a job's record keeps of the base it is sent with.
+fn base_record(base: Option<&(String, String)>) -> String {
+    base.map_or_else(
+        || BASE_NOT_SENT.to_string(),
+        |(name, tip)| format!("{name}@{tip}"),
+    )
+}
+
+/// The failure a job's base makes, from `sent` (the record's) and `state` (the job's status on
+/// the node: `set ...`, `failed: ...`, `not sent`, or empty while unknown and from a node on an
+/// older runtime). `None`: nothing is known to be wrong. Pure.
+fn base_failure(
+    node: &str,
+    project: &str,
+    base_ref: &str,
+    sent: &str,
+    state: &str,
+) -> Option<String> {
+    let why = if sent == BASE_NOT_SENT {
+        format!("not sent: the coordinator cannot resolve {base_ref}")
+    } else if state == BASE_NOT_SENT || state.starts_with(BASE_FAILED) {
+        state.to_string()
+    } else {
+        return None;
+    };
+    let name = sent
+        .split_once('@')
+        .map(|(n, _)| format!("origin/{n}"))
+        .unwrap_or_else(|| base_ref.to_string());
+    Some(format!(
+        "{name}{NOT_SET}{node} (base: {why}). This is a node failure, not the task's: node git \
+         state is MASON's job, so do not fetch or ask for a fetch by hand; the owner runs \
+         `mason node sync {node} --project {project}`"
+    ))
+}
+
+/// What a finished run's text says of its base, after [`ran_on`].
+fn base_note(state: &str) -> String {
+    match state.split_once('@') {
+        _ if state.is_empty() => "base: not reported (older node runtime)".into(),
+        Some((head, sha)) if state.starts_with("set ") => {
+            format!("base: {head}@{}", &sha[..sha.len().min(10)])
+        }
+        _ => format!("base: {state}"),
+    }
 }
 
 /// A path from the node that is safe to write under a worktree: plain components only, nothing
@@ -182,6 +243,77 @@ fn base_info(cwd: &Path, base_ref: &str) -> Option<(String, String)> {
         base_ref.strip_prefix("refs/heads/").unwrap_or(base_ref)
     };
     (!name.is_empty() && name.len() <= 200).then(|| (name.to_string(), tip))
+}
+
+/// How long one request of a sync may take: a bundle of a project's whole history.
+pub(crate) const SYNC_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// What [`sync_base`] did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Synced {
+    /// The base's name and the tip that was sent.
+    pub name: String,
+    pub tip: String,
+    /// Where `origin/<name>` is in the node's mirror afterwards.
+    pub sha: String,
+    /// The mirror's path on the node.
+    pub path: String,
+}
+
+/// `mason node sync`: send the node a full bundle of the base's tip in `repo`, then have it set
+/// `origin/<name>` in the project's mirror, and give back what it says. Blocks.
+pub fn sync_base(
+    client: &NodeClient,
+    node: &str,
+    repo: &Path,
+    project: &str,
+    base_ref: &str,
+) -> Result<Synced, String> {
+    let (name, tip) = base_info(repo, base_ref)
+        .ok_or_else(|| format!("{base_ref} does not resolve in {}", repo.display()))?;
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = format!(
+        "sync-{}-{}",
+        now_ms(),
+        N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    );
+    let tag = TempRef::new(repo, &id, &tip)?;
+    // No exclusions: whatever the mirror holds or lost, it has the whole base afterwards.
+    let bundle = git(repo, &["bundle", "create", "-", &tag.name])?;
+    let said = |r: Response, what: &str| {
+        if r.status == 200 {
+            Ok(r)
+        } else if r.status == 404 {
+            Err(format!(
+                "node {node} cannot {what}: its runtime is older than this coordinator's (`mason node update {node}`)"
+            ))
+        } else {
+            Err(format!("node {node} did not {what}: {}", r.error_text()))
+        }
+    };
+    let r = answered(block_on(client.send(
+        "PUT",
+        &format!("/node/mirror/{project}"),
+        Some("application/octet-stream"),
+        bundle,
+    )))?;
+    said(r, "take the bundle")?;
+    let r = answered(block_on(client.request(
+        "POST",
+        &format!("/node/mirror/{project}/base"),
+        Some(&json!({"name": name, "sha": tip})),
+    )))?;
+    let v = said(r, &format!("set origin/{name}"))?.json();
+    let sha = v["sha"]
+        .as_str()
+        .filter(|s| valid_sha(s))
+        .ok_or_else(|| format!("node {node} did not say where origin/{name} is"))?;
+    Ok(Synced {
+        sha: sha.to_string(),
+        path: v["path"].as_str().unwrap_or_default().to_string(),
+        name,
+        tip,
+    })
 }
 
 /// What the node answered to a start: it has the job, no room, or lacks the commit.
@@ -337,6 +469,9 @@ pub fn start(
     .map_err(|e| Fail::Error(format!("cannot snapshot the worktree: {e}")))?;
     let run: Value = serde_json::from_str(&crate::remote::run_json(spec)).unwrap_or(Value::Null);
     let base = base_info(cwd, base_ref);
+    if base.is_none() {
+        tracing::warn!(run = %spec.id, project = %spec.project, "base not sent: {base_ref} does not resolve here");
+    }
     let mut why: Vec<String> = vec![];
     'nodes: for c in &cands {
         // The record first: a daemon that dies from here on finds the run.
@@ -346,6 +481,7 @@ pub fn start(
             job: spec.id.clone(),
             sha: sha.clone(),
             sent_ms: now_ms(),
+            base: base_record(base.as_ref()),
         };
         save(&rec_path, &rec);
         let mut body = json!({
@@ -407,7 +543,9 @@ pub fn start(
 /// `want` marked by [`crate::place::wait_nid`] is a run that must not come back to this machine
 /// (a nodes-only project in `remote` mode, #1150): no node having room, or the node giving it up,
 /// is waited out and tried again, for as long as `stop` does not end it. Such a call never
-/// returns [`Fail::Environmental`].
+/// returns [`Fail::Environmental`]. A node that cannot give the job its base is not waited for:
+/// that is told at once, as a [`Fail::Error`] made by [`crate::remote::env_err`], so the caller
+/// shows it as an outside failure and tries again later.
 #[allow(clippy::too_many_arguments)]
 pub fn execute(
     d: &Arc<Daemon>,
@@ -441,6 +579,10 @@ pub fn execute(
         let sent = load(&record_path(dir, &spec.id)).is_some();
         if sent || (since.elapsed() >= rest && has_room(d, spec)) {
             match attempt(d, chosen.take(), spec, cwd, base_ref, dir, stop, live) {
+                Err(Fail::Environmental(why)) if is_base_failure(&why) => {
+                    tracing::warn!(run = %spec.id, "{why}");
+                    return Err(Fail::Error(crate::remote::env_err(&why)));
+                }
                 Err(Fail::Environmental(why)) => {
                     tracing::warn!(run = %spec.id, "{why}; waiting for a node (this project has no GitHub setup)");
                     // Doubling, up to 64 polls.
@@ -503,7 +645,7 @@ fn attempt(
         }
         None => start(d, want, spec, cwd, base_ref, dir)?,
     };
-    follow(d, &rec, spec, cwd, dir, stop, live)
+    follow(d, &rec, spec, cwd, base_ref, dir, stop, live)
 }
 
 /// Tells the "Remote runs" list that a run ended, when it goes out of scope.
@@ -521,12 +663,15 @@ impl Drop for Ended {
 
 /// Follow a started job to its end: ask after it (which renews its lease), tail its output, and
 /// bring the result back. A node that stops answering for `lost_after_polls` polls in a row is
-/// given up on ([`Fail::Environmental`]), and so is one that cancelled the job or could not run it.
+/// given up on ([`Fail::Environmental`]), and so is one that cancelled the job or could not run it,
+/// or whose job did not get its base ([`is_base_failure`]).
+#[allow(clippy::too_many_arguments)]
 pub fn follow(
     d: &Arc<Daemon>,
     rec: &Record,
     spec: &RunSpec,
     cwd: &Path,
+    base_ref: &str,
     dir: &Path,
     stop: &dyn Fn() -> Option<StopWhy>,
     live: &mut dyn FnMut(u64, &[u8]),
@@ -567,6 +712,15 @@ pub fn follow(
             Ok(r) if r.status == 200 => {
                 misses = 0;
                 let job = r.json()["job"].clone();
+                let base = job["base"].as_str().unwrap_or_default();
+                if let Some(why) = base_failure(&name, &spec.project, base_ref, &rec.base, base) {
+                    // Cancelled while it runs; a job that has ended is collected away.
+                    let _ = block_on(client.request("DELETE", &format!("/node/jobs/{id}"), None));
+                    let _ = block_on(client.request("POST", &format!("/node/jobs/{id}/ack"), None));
+                    let _ = std::fs::remove_file(&rec_path);
+                    let _ = std::fs::write(dir.join(format!("{id}.where")), format!("{why}\n"));
+                    return Err(Fail::Environmental(why));
+                }
                 // Tail what arrived, until nothing more does.
                 loop {
                     let l = block_on(client.request(
@@ -710,7 +864,11 @@ pub fn follow(
             .as_str()
             .filter(|p| matches!(*p, "build" | "run"))
             .map(str::to_string),
-        ran_on: ran_on(&name, &arch, build_s + run_s),
+        ran_on: format!(
+            "{}, {}",
+            ran_on(&name, &arch, build_s + run_s),
+            base_note(job["base"].as_str().unwrap_or_default())
+        ),
         parts: vec![],
         missing: vec![],
     };
@@ -750,6 +908,42 @@ mod tests {
     }
 
     #[test]
+    fn a_base_that_does_not_resolve_is_recorded_as_not_sent_and_fails_the_node() {
+        let t = tempfile::tempdir().unwrap();
+        git(t.path(), &["init", "-q"]).unwrap();
+        let base = base_info(t.path(), "origin/develop");
+        assert_eq!(base, None);
+        assert_eq!(base_record(base.as_ref()), "not sent");
+        // The record keeps it, and it is a node failure whatever the node says.
+        let why = base_failure("studio", "p", "origin/develop", "not sent", "").unwrap();
+        assert!(is_base_failure(&why), "{why}");
+        assert!(
+            why.starts_with("origin/develop not set on node studio (base: not sent"),
+            "{why}"
+        );
+    }
+
+    #[test]
+    fn only_a_failed_or_missing_base_is_a_node_failure() {
+        let sent = format!("develop@{}", "a".repeat(40));
+        let set = format!("set develop@{}", "a".repeat(40));
+        let of = |state: &str| base_failure("studio", "p", "origin/develop", &sent, state);
+        // Unknown yet, an older node, and a base that was set are no failure.
+        assert_eq!(of(""), None);
+        assert_eq!(of(&set), None);
+        let why = of("failed: origin/develop: locked").unwrap();
+        assert!(
+            why.starts_with("origin/develop not set on node studio (base: failed: "),
+            "{why}"
+        );
+        assert!(why.contains("mason node sync studio --project p"), "{why}");
+        assert!(of("not sent").is_some());
+        assert!(!is_base_failure("node studio went away"));
+        assert_eq!(base_note(&set), "base: set develop@aaaaaaaaaa");
+        assert_eq!(base_note(""), "base: not reported (older node runtime)");
+    }
+
+    #[test]
     fn the_record_survives_a_round_trip() {
         let r = Record {
             nid: "n".into(),
@@ -757,6 +951,7 @@ mod tests {
             job: "t1r1".into(),
             sha: "a".repeat(40),
             sent_ms: 9,
+            base: base_record(None),
         };
         let t = tempfile::tempdir().unwrap();
         let p = record_path(t.path(), "t1r1");
