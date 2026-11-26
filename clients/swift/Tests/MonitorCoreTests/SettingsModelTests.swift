@@ -69,12 +69,13 @@ final class SettingsModelTests: XCTestCase {
         let web = r.project("web")!
         XCTAssertEqual([web.remote, web.runsOn, web.mode, web.source], [true, "macos-latest", "remote", "project"] as [AnyHashable])
         XCTAssertEqual(web.sourceText, "set for this project")
-        XCTAssertTrue(web.canChange)
         XCTAssertEqual(r.project("api")?.sourceText, "follows the global mode")
         let none = r.project("local-only")!
         XCTAssertFalse(none.remote)
-        XCTAssertEqual(none.sourceText, "always runs here: the project file has no [remote_runs]")
-        XCTAssertFalse(none.canChange)
+        XCTAssertEqual(none.sourceText, "always runs here: the project file has no [remote_runs]; a mode chosen here sends its runs to nodes")
+        XCTAssertFalse(none.nodesOnly)
+        let only = RemoteSettings(json: ##"{"projects":[{"project":"app","remote":false,"nodes_only":true,"runs_on":null,"mode":"remote","source":"project"}]}"##).project("app")!
+        XCTAssertEqual(only.sourceText, "remote (nodes only: no GitHub setup)")
         XCTAssertEqual(RemoteSettings(json: "not json"), RemoteSettings())
     }
 
