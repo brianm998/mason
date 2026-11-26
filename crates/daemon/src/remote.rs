@@ -372,6 +372,9 @@ pub struct Site {
     pub clock: Arc<dyn Clock>,
     /// Seconds between looks at a run.
     pub poll_s: u64,
+    /// The base of the wait before a run that failed for the environment twice in a row is
+    /// pushed again (#822, [`wait_again`]).
+    pub env_retry: Duration,
     /// Told what a run in progress is doing ("on GitHub: running, 4 min"), whenever that text
     /// changes. For display only.
     pub on_phase: Option<PhaseFn>,
@@ -461,6 +464,7 @@ pub fn site_for_task(d: &Daemon, project: &str, cwd: &Path, task: Option<u64>) -
         gh: GitHub::new(http, &r.api, &r.repo, token),
         clock: Arc::new(SystemClock),
         poll_s: 10,
+        env_retry: d.cfg.env_retry,
         on_phase: None,
     })
 }
@@ -547,7 +551,7 @@ impl RoomCache {
 }
 
 /// `<remote>/<base>` when the repository has it, else the local branch.
-fn remote_base_ref(repo: &Path, remote: &str, base: &str) -> String {
+pub(crate) fn remote_base_ref(repo: &Path, remote: &str, base: &str) -> String {
     let r = format!("{remote}/{base}");
     if git::ok(repo, &["rev-parse", "--verify", "--quiet", &r]) {
         r
@@ -2998,6 +3002,11 @@ impl Grant {
     pub fn note_hold(&self, dir: &Path, id: &str) {
         self.lock().hold = Some((dir.to_path_buf(), id.to_string()));
     }
+    /// Who can give back and ask again for this grant's units; after [`Grant::ask_again`] it is
+    /// the new lease's.
+    pub fn giver(&self) -> Option<crate::sched::Giver> {
+        self.lock().giver.clone()
+    }
     /// The node whose unit the lease behind this grant holds, if any: the run goes there.
     pub fn node(&self) -> Option<String> {
         self.lock().owned.as_ref().and_then(|l| l.node())
@@ -3060,8 +3069,8 @@ impl Grant {
             Err(_) => false,
         }
     }
-    /// Ask for `units` again if every unit of the lease has already been given back (its jobs
-    /// finished and the run is made again). `false`: told to stop while it waited.
+    /// Ask for `units` again if the lease has given back runner units this run needs (jobs of an
+    /// earlier run finished, or a run waited again at its place). `false`: told to stop while it waited.
     pub fn regain(
         &self,
         units: std::collections::BTreeMap<String, u32>,
@@ -3069,7 +3078,7 @@ impl Grant {
     ) -> bool {
         let released = {
             let g = self.lock();
-            g.given_up || g.giver.as_ref().is_some_and(|g| !g.is_held())
+            g.given_up || g.giver.as_ref().is_some_and(|g| g.short_of(&units))
         };
         !released || self.ask_again(units, stop)
     }
@@ -3470,6 +3479,39 @@ pub fn fallback_lease_unless_covered(
         return Ok(None);
     }
     fallback_lease(d, project, task, uses, label)
+}
+
+/// A run that GitHub did not take, or failed for the environment, waits again at its place
+/// (#822): every runner unit of `grant` goes back, then (after `fails` failures in a row, from
+/// the second on) [`env_backoff`] of `base` since the last one passes with nothing held, then
+/// the broker is asked for `units` at the request's original rank and from when it first began
+/// to wait. `false`: told to stop while it waited. A grant that no broker lease is behind only
+/// waits out the backoff.
+pub fn wait_again(
+    clock: &dyn Clock,
+    base: Duration,
+    grant: &Grant,
+    units: std::collections::BTreeMap<String, u32>,
+    fails: u32,
+    stop: &dyn Fn() -> Option<StopWhy>,
+) -> bool {
+    grant.give(&grant.units());
+    if fails >= 2 {
+        let wait = env_backoff(base, fails - 2).as_millis() as u64;
+        let until = clock.now_ms().saturating_add(wait);
+        loop {
+            if stop().is_some() {
+                return false;
+            }
+            let left = until.saturating_sub(clock.now_ms());
+            if left == 0 {
+                break;
+            }
+            clock.sleep(left.min(500));
+        }
+    }
+    // Nothing to ask for: the run is no longer placed on GitHub.
+    units.is_empty() || grant.ask_again(units, stop)
 }
 
 /// What a remote run holds, written when it starts and removed when it ends, so a daemon that
@@ -4284,11 +4326,35 @@ fn no_github_run(
     Err(env_err(&why))
 }
 
-/// A run that did not give a result, tried again once on GitHub (#873). Both misses are told to
-/// `said`, which shows them in the check's progress. `Ok((outcome, notes))`: `outcome` is the
-/// result of the run that gave one; `None` means both runs missed and the project's `fallback`
-/// is `local`, so the caller runs it here. Two misses without that give an [`env_err`] worded
-/// "no result (infrastructure): ...", never a failure of the code.
+/// How many environmental failures in a row end a run that has no fallback to this machine
+/// (#822): then the caller is told, so an outage cannot hold an agent or a batch for good.
+const ENV_FAILS_IN_A_ROW: usize = 3;
+
+/// The end of the error of a run GitHub took in and failed [`ENV_FAILS_IN_A_ROW`] times in a
+/// row, each time waiting again at its place (#822).
+const WAITED_IN_PLACE: &str =
+    " (3 environmental failures in a row, waiting again at its place each time)";
+
+/// Has this error's run already had all its tries at its place in line (#822)? A caller with its
+/// own wait for an outage does not start another. A run GitHub would not take at all (a refused
+/// push or dispatch) is not one: such an outage is waited out as before (#772).
+pub fn gave_up_in_place(e: &str) -> bool {
+    e.ends_with(WAITED_IN_PLACE)
+}
+
+/// A run that never reached GitHub: the push or the dispatch was refused.
+fn never_reached_github(why: &str) -> bool {
+    why.starts_with("could not push ") || why.starts_with("could not start ")
+}
+
+/// A run that did not give a result, tried again on GitHub (#873) from its place in line (#822):
+/// the runner units go back, and the next run is pushed once the broker grants them again, at the
+/// original rank and wait start ([`wait_again`]). Each miss is told to `said`, which shows it in
+/// the check's progress. `Ok((outcome, notes))`: `outcome` is the result of the run that gave
+/// one, and the notes say how often it waited again; `None` means two runs missed and the
+/// project's `fallback` is `local`, so the caller runs it here. Without that fallback, three
+/// environmental failures in a row (or two runs cut off at the runner limit) give an
+/// [`env_err`] worded "no result (infrastructure): ...", never a failure of the code.
 pub fn run_retrying(
     site: &Site,
     spec: &RunSpec,
@@ -4324,7 +4390,10 @@ pub fn run_retrying(
     }
     let mut attempt = spec.clone();
     let mut waited_for_more = false;
-    for n in 0..2u32 {
+    // The units for the next run were just waited for ([`wait_for_grant`]).
+    let mut granted = false;
+    loop {
+        let n = whys.len();
         if n > 0 {
             if let Some(why) = stop() {
                 return Ok((Some(Outcome::Stopped(why)), notes));
@@ -4332,76 +4401,93 @@ pub fn run_retrying(
             attempt = spec.clone();
             attempt.id = format!("{}-r{n}", spec.id);
             let note = format!(
-                "no result from the first run ({}); running it again on GitHub",
-                whys[0]
+                "no result from run {n} on GitHub ({}); waiting again at its place in line (time {n})",
+                whys[n - 1]
             );
             tracing::warn!(run = %spec.id, "{note}");
             said(&note);
             notes.push(note);
+            let units = units_for(&spec.runs_on, spec.shards.max(1));
+            if !std::mem::take(&mut granted)
+                && !wait_again(&*site.clock, site.env_retry, grant, units, n as u32, stop)
+            {
+                let why = stop().unwrap_or(StopWhy::Gone);
+                return Ok((Some(Outcome::Stopped(why)), notes));
+            }
         }
         let r = execute_sharded(site, &attempt, dir, stop, grant);
-        match no_result(&r, spec.limit) {
-            None => {
-                return match r {
-                    Ok(o) => Ok((Some(o), notes)),
-                    Err(Fail::Environmental(why)) => Err(env_err(&why)),
-                    Err(Fail::Error(e)) => Err(e),
-                }
-            }
-            // A favor-remote run that came back here on purpose (#833) is the placement mode's
-            // answer, not a miss to retry on GitHub.
-            Some(why) if n == 0 && site.fallback_local && why.contains("(favor-remote:") => {
-                said(&format!("{why}; running it on this Mac"));
-                grant.give_back();
-                return Ok((None, notes));
-            }
-            // A run that hit the runner's limit on fewer runners than the suite asked for would
-            // hit it again as the same shape: it is not run again on GitHub.
-            Some(why)
-                if n == 0
-                    && spec.short_of_runners()
-                    && matches!(&r, Ok(Outcome::Done(f)) if f.timed_out) =>
-            {
-                let why = format!(
-                    "the run hit the runner's limit on {} of {} shards; not running it again on one runner ({why})",
-                    spec.runners(),
-                    spec.shards_wanted
-                );
-                // A machine that cannot run it waits for every runner the suite asked for, and
-                // the run goes out again at that size, once.
-                if !waited_for_more {
-                    waited_for_more = true;
-                    match wait_for_grant(site, spec, spec.shards_wanted, &why, stop, grant) {
-                        Waited::Ready(s, note) => {
-                            *spec = *s;
-                            said(&note);
-                            notes.push(note);
-                            whys.push(why);
-                            continue;
-                        }
-                        Waited::Stopped(w) => return Ok((Some(Outcome::Stopped(w)), notes)),
-                        Waited::NotNeeded => {}
+        let Some(why) = no_result(&r, spec.limit) else {
+            return match r {
+                Ok(o) => Ok((Some(o), notes)),
+                Err(Fail::Environmental(why)) => Err(env_err(&why)),
+                Err(Fail::Error(e)) => Err(e),
+            };
+        };
+        let cut_off = matches!(&r, Ok(Outcome::Done(f)) if f.timed_out);
+        // A favor-remote run that came back here on purpose (#833) is the placement mode's
+        // answer, not a miss to retry on GitHub.
+        if n == 0 && site.fallback_local && why.contains("(favor-remote:") {
+            said(&format!("{why}; running it on this Mac"));
+            grant.give_back();
+            return Ok((None, notes));
+        }
+        // A run that hit the runner's limit on fewer runners than the suite asked for would
+        // hit it again as the same shape: it is not run again on GitHub.
+        if n == 0 && spec.short_of_runners() && cut_off {
+            let why = format!(
+                "the run hit the runner's limit on {} of {} shards; not running it again on one runner ({why})",
+                spec.runners(),
+                spec.shards_wanted
+            );
+            // A machine that cannot run it waits for every runner the suite asked for, and
+            // the run goes out again at that size, once.
+            if !waited_for_more {
+                waited_for_more = true;
+                match wait_for_grant(site, spec, spec.shards_wanted, &why, stop, grant) {
+                    Waited::Ready(s, note) => {
+                        *spec = *s;
+                        said(&note);
+                        notes.push(note);
+                        whys.push(why);
+                        granted = true;
+                        continue;
                     }
+                    Waited::Stopped(w) => return Ok((Some(Outcome::Stopped(w)), notes)),
+                    Waited::NotNeeded => {}
                 }
-                return no_github_run(site, spec, why, said, grant, notes);
             }
-            Some(why) => whys.push(why),
+            return no_github_run(site, spec, why, said, grant, notes);
+        }
+        whys.push(why);
+        // A run that used up its whole limit is tried once more, not twice.
+        let limit = if site.fallback_local || cut_off {
+            2
+        } else {
+            ENV_FAILS_IN_A_ROW
+        };
+        if whys.len() >= limit {
+            break;
         }
     }
-    let both = format!("{}; then {}", whys[0], whys[1]);
+    let all = whys.join("; then ");
     if let Some(b) = barred_here(site) {
-        let why = format!("{both}; not running it here: this Mac can't run it ({b})");
+        let why = format!("{all}; not running it here: this Mac can't run it ({b})");
         said(&why);
         return Err(env_err(&why));
     }
     if site.fallback_local {
-        let note = format!("no result from two runs on GitHub ({both}); running it on this Mac");
+        let note = format!("no result from two runs on GitHub ({all}); running it on this Mac");
         tracing::warn!(run = %spec.id, "{note}");
         said(&note);
         grant.give_back();
         return Ok((None, notes));
     }
-    Err(env_err(&both))
+    let in_place =
+        whys.len() >= ENV_FAILS_IN_A_ROW && whys.last().is_some_and(|w| !never_reached_github(w));
+    Err(env_err(&format!(
+        "{all}{}",
+        if in_place { WAITED_IN_PLACE } else { "" }
+    )))
 }
 
 #[cfg(test)]
@@ -4939,6 +5025,7 @@ mod tests {
             ),
             clock,
             poll_s: 10,
+            env_retry: Duration::from_secs(30),
             on_phase: None,
         }
     }
@@ -7377,6 +7464,7 @@ mod tests {
             ),
             clock: clock(),
             poll_s: 10,
+            env_retry: Duration::from_secs(30),
             on_phase: None,
         };
         let dir = r._t.path().join("runs");
@@ -7921,13 +8009,208 @@ mod tests {
         );
     }
 
+    /// #822: two misses are not the end; the third in a row is, as an outage and not a red.
     #[test]
-    fn two_misses_are_no_result_not_a_failure() {
-        let (out, _, said) = retrying(Mode::NeverPicked, false, false);
+    fn two_misses_go_on_and_three_are_no_result_not_a_failure() {
+        let (out, gh, said) = retrying(Mode::NeverPicked, false, false);
         let e = out.unwrap_err();
         let why = environmental(&e).expect("an environmental error, not a red result");
-        assert!(why.contains("; then "), "{why}");
-        assert_eq!(said.len(), 1, "one retry was shown");
+        assert_eq!(why.matches("; then ").count(), 2, "{why}");
+        assert!(gave_up_in_place(why), "{why}");
+        assert_eq!(said.len(), 2, "both waits were shown");
+        assert_eq!(gh.dispatches.lock().unwrap().len(), 3);
+        assert_eq!(gh.cancels.lock().unwrap().len(), 3);
+    }
+
+    /// #822: a run GitHub never took in at all keeps the longer wait for an outage (#772).
+    #[test]
+    fn a_push_refused_every_time_is_not_one_that_waited_in_place() {
+        token();
+        let r = repo();
+        reject_first(&r.bare, 1000);
+        let zip = artifact(r._t.path(), GREEN, 0, None);
+        let gh = FakeGh::new(&r, &zip, Mode::Normal);
+        let s = site(&r, gh.clone(), clock(), false);
+        let dir = r._t.path().join("runs");
+        let e =
+            run_retrying(&s, &spec("pr1"), &dir, &|| None, &|_| {}, &Grant::test()).unwrap_err();
+        let why = environmental(&e).unwrap_or_else(|| panic!("not environmental: {e}"));
+        assert!(why.contains("could not push"), "{why}");
+        assert!(!gave_up_in_place(why), "{why}");
+        assert!(gh.dispatches.lock().unwrap().is_empty());
+    }
+
+    /// #822: a run nobody picks up is cancelled, its unit goes to whoever is first in line, and
+    /// it is granted again at its own rank and wait start: ahead of a younger waiter of its
+    /// kind. The second run's result is the answer.
+    fn nobody_picks_up_the_first_run(mine: mason_scheduler::Rank, id: &str) {
+        use crate::sched::tests::runner_broker;
+        use mason_core::TaskId;
+        use mason_scheduler::{Needs, Rank};
+        use std::sync::mpsc::{channel, Receiver};
+        token();
+        let r = repo();
+        let zip = artifact(r._t.path(), GREEN, 0, None);
+        let gh = FakeGh::new(&r, &zip, Mode::MissFirst);
+        let s = site(&r, gh.clone(), clock(), false);
+        let bdir = tempfile::tempdir().unwrap();
+        let b = runner_broker(bdir.path(), 1, 1, 0);
+        let one = || Needs::of(&[("gha", 1)]);
+        let lease = b
+            .acquire(TaskId(5), "#5 mine", mine, one(), &|| true, &mut |_| {})
+            .unwrap();
+        let grant = Grant::of(lease);
+        let queued = |b: &crate::sched::Broker, n: usize| {
+            let began = std::time::Instant::now();
+            while b.gha_waiting() != n {
+                assert!(began.elapsed().as_secs() < 600, "timeout: {n}");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        let younger: Mutex<Option<Receiver<_>>> = Mutex::new(None);
+        // Told of the miss before the unit goes back: queue an urgent request, which gets the
+        // unit when it is free, and a younger one of the run's kind. The urgent one ends once
+        // the run has queued again behind it.
+        let said = |_: &str| {
+            let (utx, urx) = channel();
+            let b1 = b.clone();
+            std::thread::spawn(move || {
+                let urgent = Rank::new(true, 3, 0, 0, 1, false);
+                let l = b1.acquire(TaskId(1), "#1 urgent", urgent, one(), &|| true, &mut |_| {});
+                let _ = utx.send(l);
+            });
+            queued(&b, 1);
+            let (ytx, yrx) = channel();
+            let b9 = b.clone();
+            std::thread::spawn(move || {
+                let rank = Rank::new(false, 3, 0, 99, 99, false);
+                let l = b9.acquire(
+                    TaskId(99),
+                    "#99 younger",
+                    rank,
+                    one(),
+                    &|| true,
+                    &mut |_| {},
+                );
+                let _ = ytx.send(l);
+            });
+            queued(&b, 2);
+            *younger.lock().unwrap() = Some(yrx);
+            let b2 = b.clone();
+            std::thread::spawn(move || {
+                // Granted only when the run's unit is free.
+                let urgent = urx.recv().unwrap();
+                let began = std::time::Instant::now();
+                while b2.gha_waiting() != 2 && began.elapsed().as_secs() < 60 {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                drop(urgent);
+            });
+        };
+        // What was so when the second run was out.
+        let second: Mutex<Option<(u32, usize, bool)>> = Mutex::new(None);
+        let stop = || {
+            if gh.dispatches.lock().unwrap().len() == 2 {
+                let mut seen = second.lock().unwrap();
+                if seen.is_none() {
+                    let held = grant.units().get("gha").copied().unwrap_or(0);
+                    let waiting = b.gha_waiting();
+                    let not_yet = younger
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .is_some_and(|y| y.try_recv().is_err());
+                    *seen = Some((held, waiting, not_yet));
+                }
+            }
+            None
+        };
+        let dir = r._t.path().join("runs");
+        let start = s.clock.now_ms();
+        let (out, notes) = run_retrying(&s, &spec(id), &dir, &stop, &said, &grant).unwrap();
+        let Some(Outcome::Done(f)) = out else {
+            panic!("no result");
+        };
+        assert_eq!(f.code, 0);
+        assert!(s.clock.now_ms() - start >= 1_200_000, "the pickup timeout");
+        assert_eq!(gh.cancels.lock().unwrap().len(), 1);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("waiting again at its place"), "{notes:?}");
+        assert!(!notes[0].contains("run it again"), "{notes:?}");
+        // The run had its unit and the younger one still waited for it.
+        assert_eq!(*second.lock().unwrap(), Some((1, 1, true)));
+        // The run over, its grant goes and the unit with it, on to the younger one.
+        drop(grant);
+        let y = younger.lock().unwrap().take().unwrap();
+        assert!(y.recv_timeout(Duration::from_secs(60)).unwrap().is_ok());
+    }
+
+    #[test]
+    fn a_run_nobody_picks_up_gives_its_units_back_and_is_granted_ahead_of_a_younger_waiter() {
+        let rank = mason_scheduler::Rank::new(false, 3, 0, 5, 5, false);
+        nobody_picks_up_the_first_run(rank, "q1");
+    }
+
+    #[test]
+    fn a_landing_floor_build_nobody_picks_up_runs_again_at_landing_rank() {
+        // Further from landed than the waiter, and later in line: only the landing rank puts
+        // it first.
+        let rank = mason_scheduler::Rank::new(false, 9, 0, 500, 500, false).landing();
+        nobody_picks_up_the_first_run(rank, "b1-floor-u");
+    }
+
+    /// #822: from the second failure in a row the next grant also waits out the backoff, and
+    /// holds nothing while it does: another waiter has the unit meanwhile.
+    #[test]
+    fn a_retry_backing_off_holds_no_unit_and_another_waiter_is_granted() {
+        use crate::sched::tests::{is_held, queue_gha, runner_broker};
+        let bdir = tempfile::tempdir().unwrap();
+        let b = runner_broker(bdir.path(), 1, 1, 0);
+        let lease = b
+            .acquire(
+                mason_core::TaskId(1),
+                "#1 test step",
+                mason_scheduler::Rank::new(false, 3, 0, 1, 1, false),
+                mason_scheduler::Needs::of(&[("gha", 1)]),
+                &|| true,
+                &mut |_| {},
+            )
+            .unwrap();
+        // The test step keeps its lease; the retry works through a borrowed grant.
+        let grant = Grant::borrowed(Some(lease.giver()), lease.units());
+        let waiter = queue_gha(&b, 9);
+        assert!(!is_held(&b, waiter));
+        let clk = clock();
+        let start = clk.now_ms();
+        let granted_in_the_backoff = std::sync::atomic::AtomicBool::new(false);
+        let stop = || {
+            if !granted_in_the_backoff.load(Ordering::SeqCst) {
+                assert!(is_held(&b, waiter), "the unit is free during the backoff");
+                assert!(lease.giver().held().is_empty());
+                assert_eq!(b.gha_waiting(), 0, "and nothing is asked for yet");
+                granted_in_the_backoff.store(true, Ordering::SeqCst);
+                b.release_for_test(waiter, mason_core::TaskId(9));
+            }
+            None
+        };
+        let base = Duration::from_secs(30);
+        assert!(wait_again(&*clk, base, &grant, units_of(1), 2, &stop));
+        assert!(granted_in_the_backoff.load(Ordering::SeqCst));
+        assert!(clk.now_ms() - start >= 30_000);
+        assert_eq!(grant.units(), units_of(1));
+        assert_eq!(grant.giver().unwrap().held(), units_of(1));
+        // The first failure does not back off; the third waits twice as long as the second.
+        for (fails, waits) in [(1, 0), (3, 60_000)] {
+            let start = clk.now_ms();
+            assert!(wait_again(&*clk, base, &grant, units_of(1), fails, &|| {
+                None
+            }));
+            assert_eq!(clk.now_ms() - start, waits, "{fails}");
+        }
+        // Told to stop during a backoff: it ends there, holding nothing.
+        let skip = || Some(StopWhy::Skipped);
+        assert!(!wait_again(&*clk, base, &grant, units_of(1), 2, &skip));
+        assert!(grant.giver().unwrap().held().is_empty());
     }
 
     #[test]
