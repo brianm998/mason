@@ -433,7 +433,10 @@ impl<'a> Ctx<'a> {
         }
         match &t.activity {
             Activity::Waiting(WaitReason::On(w)) => w.clone(),
-            Activity::Waiting(WaitReason::Slot) => "Waiting for an LLM session to be free".into(),
+            Activity::Waiting(WaitReason::Slot) => self
+                .d
+                .queued_wait_text(self.w, t)
+                .unwrap_or_else(|| "Waiting for an LLM session to be free".into()),
             Activity::Waiting(WaitReason::NotBefore(_)) => "Waiting for its start time".into(),
             Activity::Waiting(WaitReason::Owner) => "Waiting for your answer".into(),
             Activity::Held(_) if crate::blockers::held_line(self.w, t).is_some() => {
@@ -535,7 +538,10 @@ impl<'a> Ctx<'a> {
             title: t.title.clone(),
             project: self.project_name(t),
             state: state_name(t.state).to_string(),
-            activity: crate::http::activity_text(&t.activity),
+            activity: self
+                .d
+                .queued_wait_text(self.w, t)
+                .unwrap_or_else(|| crate::http::activity_text(&t.activity)),
             why_waiting: self.why_waiting(t),
             wait: self
                 .wait_view
