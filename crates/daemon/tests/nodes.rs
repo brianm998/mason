@@ -1353,6 +1353,207 @@ fn a_run_on_a_node_is_a_row_of_remote_runs() {
     assert!(mason_daemon::remote_runs::view(&p.a, &|_| None, "").enabled);
 }
 
+// ---- #1155: what runs where ---------------------------------------------------------------------
+
+/// A suite of `name` for a check's place.
+fn named_suite(name: &str) -> Box<mason_testing::Suite> {
+    Box::new(mason_testing::Suite::new(
+        name,
+        "true",
+        mason_testing::ParserKind::Tap,
+    ))
+}
+
+/// The hosts of `/status` (as `mason status --json` prints it) that have a run of task `t`.
+fn hosts_running(p: &Pair, t: u64) -> Vec<String> {
+    let s: Value = serde_json::from_str(&p.sa.mason_ok(&["status", "--json"])).unwrap();
+    let mut out = vec![];
+    for h in s["hosts"].as_array().expect("status has hosts") {
+        for r in h["runs"].as_array().unwrap() {
+            if r["task"] == t {
+                assert_eq!(r["state"], "proposed", "the run carries the task: {r}");
+                assert_eq!(r["title"], "Watched", "{r}");
+                out.push(r["host"].as_str().unwrap().to_string());
+            }
+        }
+    }
+    out
+}
+
+/// The hosts `/tasks/{id}` says task `t` is running on.
+fn running_on(p: &Pair, t: u64) -> Vec<String> {
+    p.sa.task_json(t)["running_on"]
+        .as_array()
+        .expect("the task has running_on")
+        .iter()
+        .map(|r| r["host"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// The lines `mason hosts` prints under the host whose line starts with `head`.
+fn under(text: &str, head: &str) -> Vec<String> {
+    let mut lines = text.lines().skip_while(|l| !l.starts_with(head));
+    assert!(lines.next().is_some(), "no host {head} in:\n{text}");
+    lines
+        .take_while(|l| l.starts_with("  "))
+        .map(str::to_string)
+        .collect()
+}
+
+/// A check is listed under the node while it runs there, under this Mac once the node gives it
+/// back, and nowhere once it has ended; the placement decision is still on record. A GitHub run
+/// is listed from its hold.
+#[test]
+fn a_check_in_flight_is_listed_under_its_host_until_it_ends() {
+    use mason_daemon::hostedcheck::{run as run_check, CheckSpec};
+    let p = working_pair_full(
+        2,
+        "",
+        "on_switch_off = \"cancel\"",
+        |c| c.port = 0,
+        |_| {},
+        |_| {},
+    );
+    mason_daemon::place::set_global(&p.a, mason_daemon::place::Mode::Remote, "test").unwrap();
+    let served = p.a.clone();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _ = rt.block_on(mason_daemon::http::serve(served));
+    });
+    wait_for("the daemon to be served", 60, || {
+        p.a.cfg.info_path().exists()
+    });
+    let t = file_task_as(
+        &p.a,
+        "Watched",
+        "Please watch.",
+        false,
+        mason_core::TrustSource::Owner,
+        true,
+    )
+    .0;
+    assert!(hosts_running(&p, t).is_empty());
+
+    let logs = tempfile::tempdir().unwrap();
+    let flag = p.sa.root.path().join("finish");
+    let spec = CheckSpec {
+        id_prefix: format!("t{t}r1-check"),
+        log_dir: logs.path().to_path_buf(),
+        // On the node this hangs; here it waits for the flag.
+        cmd: format!(
+            "if [ -n \"$MASON_NODE\" ]; then sleep 300; else while [ ! -f '{}' ]; do sleep 0.1; done; fi",
+            flag.display()
+        ),
+        build: None,
+        cwd: p.sa.repo.clone(),
+        env: vec![],
+        limit: std::time::Duration::from_secs(120),
+        tree: "tree-watched".into(),
+        stop: None,
+        holds: Default::default(),
+        label: String::new(),
+        place: Some((Some(mason_core::TaskId(t)), named_suite("unit"))),
+        global: false,
+    };
+    std::thread::scope(|sc| {
+        let h = sc.spawn(|| run_check(&p.a, &spec, &mason_daemon::remote::Grant::attached()));
+        wait_for("the check to be listed on the node", 60, || {
+            p.b.node.jobs.running() == 1 && running_on(&p, t) == ["node:b"]
+        });
+        assert_eq!(hosts_running(&p, t), ["node:b"]);
+        let listed = p.sa.mason_ok(&["hosts"]);
+        let on_b = under(&listed, "node:b");
+        assert!(
+            on_b.iter()
+                .any(|l| l.contains(&format!("#{t} proposed")) && l.contains("check unit")),
+            "{listed}"
+        );
+        let shown = p.sa.mason_ok(&["task", "show", &t.to_string()]);
+        assert!(shown.contains("running on: node b (check unit"), "{shown}");
+
+        // The node gives the job back: it runs here, and is listed here only.
+        set_switch(&p, false);
+        let _ = run(
+            &p,
+            node_serve::accept(
+                State(p.b.clone()),
+                axum::http::HeaderMap::new(),
+                Json(json!({"on": false})),
+            ),
+        )
+        .unwrap();
+        wait_for("the check to be listed here", 60, || {
+            running_on(&p, t) == ["local"]
+        });
+        assert_eq!(hosts_running(&p, t), ["local"]);
+        std::fs::write(&flag, "go").unwrap();
+        let out = h.join().unwrap().unwrap();
+        assert!(out.passed, "{}", out.full);
+    });
+    assert!(hosts_running(&p, t).is_empty());
+    assert!(running_on(&p, t).is_empty());
+    assert!(!p.sa.mason_ok(&["hosts"]).contains(&format!("#{t} ")));
+    assert!(!p
+        .sa
+        .mason_ok(&["task", "show", &t.to_string()])
+        .contains("running on:"));
+    assert!(
+        mason_daemon::place::seen(Some(t))
+            .iter()
+            .any(|s| s["where"] == "node"),
+        "the decision stays on record"
+    );
+
+    // A run on GitHub, as the executor records it while it is out.
+    let rs = {
+        let mut rs = remote::spec_for(
+            "scratch",
+            &format!("t{t}r2-check0"),
+            None,
+            "true",
+            std::time::Duration::from_secs(60),
+            &[],
+            "macos-15",
+            "",
+        );
+        rs.suite = "unit".into();
+        rs
+    };
+    let dir = logs.path();
+    mason_step_host::registry::write_kv(
+        &dir.join(format!("{}.remote", rs.id)),
+        &[
+            ("sha", "abc".to_string()),
+            ("collected", "0".to_string()),
+            ("url", "https://github.com/o/r/actions/runs/9".to_string()),
+            ("runs_on", "macos-15".to_string()),
+        ],
+    )
+    .unwrap();
+    let hold = remote::HoldGuard::new(
+        &p.a.cfg.hosts_dir(),
+        &rs,
+        &rs.id,
+        &rs.id,
+        1,
+        dir,
+        "check",
+        t,
+    );
+    assert_eq!(running_on(&p, t), ["github:macos-15"]);
+    assert_eq!(hosts_running(&p, t), ["github:macos-15"]);
+    let listed = p.sa.mason_ok(&["hosts"]);
+    assert!(
+        under(&listed, "GitHub")
+            .iter()
+            .any(|l| l.contains("check unit on macos-15") && l.contains("actions/runs/9")),
+        "{listed}"
+    );
+    drop(hold);
+    assert!(running_on(&p, t).is_empty());
+    assert!(hosts_running(&p, t).is_empty());
+}
+
 // ---- §3.14: privacy prompts, signing and the doctor ---------------------------------------------
 
 /// The doctor checks the node and keeps what it found; a blocking problem is why the node takes

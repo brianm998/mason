@@ -169,4 +169,70 @@ mod tests {
         let old: CompileHolder = serde_json::from_str(r##"{"label":"#5"}"##).unwrap();
         assert_eq!(old.command, "");
     }
+
+    /// A home view and a task page as a client built before #1155 knew them (some fields).
+    #[derive(Clone, PartialEq, prost::Message)]
+    struct Before {
+        #[prost(string, tag = "1")]
+        status: String,
+    }
+
+    #[test]
+    fn hosts_round_trip_and_an_older_client_skips_them() {
+        let run = HostRun {
+            task: Some(TaskRow {
+                id: 5,
+                state: "developing".into(),
+                ..Default::default()
+            }),
+            kind: "check".into(),
+            name: "unit".into(),
+            host: "node:marmot".into(),
+            since_ms: 7,
+            url: String::new(),
+        };
+        let home = HomeView {
+            status: "ok".into(),
+            hosts: vec![HostView {
+                kind: "node".into(),
+                name: "marmot".into(),
+                status: "accepting".into(),
+                runs: vec![run.clone()],
+            }],
+            ..Default::default()
+        };
+        let bytes = prost::Message::encode_to_vec(&home);
+        assert_eq!(
+            <HomeView as prost::Message>::decode(&bytes[..]).unwrap(),
+            home
+        );
+        let json = serde_json::to_vec(&home).unwrap();
+        assert_eq!(serde_json::from_slice::<HomeView>(&json).unwrap(), home);
+        let old = <Before as prost::Message>::decode(&bytes[..]).unwrap();
+        assert_eq!(old.status, "ok");
+        let detail = TaskDetailView {
+            running_on: vec![run],
+            ..Default::default()
+        };
+        let bytes = prost::Message::encode_to_vec(&detail);
+        assert_eq!(
+            <TaskDetailView as prost::Message>::decode(&bytes[..]).unwrap(),
+            detail
+        );
+        // The new fields have numbers of their own: 16 on the home view, 25 on the task page.
+        assert_eq!(
+            &prost::Message::encode_to_vec(&HomeView {
+                hosts: vec![HostView::default()],
+                ..Default::default()
+            })[..],
+            [0x82, 0x01, 0x00]
+        );
+        assert_eq!(
+            &prost::Message::encode_to_vec(&TaskDetailView {
+                running_on: vec![HostRun::default()],
+                ..Default::default()
+            })[..],
+            [0xca, 0x01, 0x00]
+        );
+    }
 }
