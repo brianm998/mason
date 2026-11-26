@@ -1453,4 +1453,20 @@ mod tests {
             ("10.0.0.7".into(), 7425)
         );
     }
+
+    #[test]
+    fn a_swift_suite_is_covered_by_a_node_reporting_a_plain_xcode() {
+        let node = json!({"toolchains": {"xcode": ["27.0"]}});
+        assert!(covers_run(&node, "swift", "swift test"));
+        assert!(!covers_run(
+            &node,
+            "swift",
+            "DEVELOPER_DIR=/Applications/Xcode_16.4.app/Contents/Developer swift test"
+        ));
+        assert!(!covers_run(
+            &json!({"toolchains": {"xcode": []}}),
+            "swift",
+            "swift test"
+        ));
+    }
 }
