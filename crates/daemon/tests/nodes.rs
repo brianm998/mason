@@ -2871,3 +2871,90 @@ fn a_check_the_node_gives_back_waits_for_a_node_when_the_project_may_not_run_it_
     });
     assert_eq!(b.used("test-suite"), 0);
 }
+
+/// A job whose command starts a long-running grandchild: the script writes the grandchild's pid
+/// to a file of the test's and waits for it.
+fn grandchild_script(p: &Pair, name: &str, pidfile: &Path) -> String {
+    std::fs::write(
+        p.sa.repo.join(name),
+        format!(
+            "sleep 3000 &\necho $! > '{}.tmp'\nmv '{}.tmp' '{}'\nwait\n",
+            pidfile.display(),
+            pidfile.display(),
+            pidfile.display()
+        ),
+    )
+    .unwrap();
+    format!("sh {name}")
+}
+
+fn grandchild_pid(pidfile: &Path) -> Option<u32> {
+    std::fs::read_to_string(pidfile).ok()?.trim().parse().ok()
+}
+
+/// Cleanup for a test that fails before the grandchild goes: it is a `sleep 3000`.
+struct KillOnDrop(std::path::PathBuf);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        if let Some(pid) = grandchild_pid(&self.0) {
+            let _ =
+                mason_platform::process::signal_process(pid, mason_platform::process::Signal::Kill);
+        }
+    }
+}
+
+/// A job that ends early must not leave its processes running. These were found on the node
+/// hours after the job was cancelled or timed out: test binaries holding scratch-world slots.
+/// Nothing here is a timing assertion: each test waits, up to the harness's limit, for the
+/// grandchild to be gone.
+#[test]
+fn a_cancelled_node_job_leaves_no_grandchild_behind() {
+    let p = working_pair(2);
+    let pidfile = p.sa.root.path().join("grandchild-cancel.pid");
+    let _guard = KillOnDrop(pidfile.clone());
+    let cmd = grandchild_script(&p, "gc-cancel.sh", &pidfile);
+    let stop = || {
+        // Cancel once the grandchild is running.
+        grandchild_pid(&pidfile).map(|_| StopWhy::Skipped)
+    };
+    let r = run_on_b(&p, &spec("run-gc-cancel", None, &cmd), &stop);
+    assert!(matches!(r, Ok(Outcome::Stopped(StopWhy::Skipped))), "{r:?}");
+    let pid = grandchild_pid(&pidfile).expect("the job started its grandchild");
+    support::wait_for("the cancelled job's grandchild to be gone", 60, || {
+        !mason_step_host::registry::pid_alive(pid)
+    });
+}
+
+/// The host of a running job dies (killed, or the machine stalled it past its heartbeat): the
+/// job is lost, and its command, which the host no longer watches, is killed with its group.
+#[test]
+fn a_node_job_whose_host_dies_leaves_no_grandchild_behind() {
+    let p = working_pair(2);
+    let pidfile = p.sa.root.path().join("grandchild-lost.pid");
+    let _guard = KillOnDrop(pidfile.clone());
+    let cmd = grandchild_script(&p, "gc-lost.sh", &pidfile);
+    let hosts = p.b.cfg.data_dir.join("node").join("hosts");
+    let r = std::thread::scope(|sc| {
+        let h = sc.spawn(|| run_on_b(&p, &spec("run-gc-lost", None, &cmd), &|| None));
+        support::wait_for("the job's grandchild to run", 60, || {
+            grandchild_pid(&pidfile).is_some()
+        });
+        let found = mason_step_host::registry::Registry::new(&hosts)
+            .scan()
+            .unwrap();
+        assert_eq!(found.len(), 1, "one host runs the job");
+        // The host goes; the command and its grandchild are left running.
+        mason_platform::process::signal_process(
+            found[0].info.host_pid,
+            mason_platform::process::Signal::Kill,
+        )
+        .unwrap();
+        h.join().unwrap()
+    });
+    assert!(r.is_err(), "a lost host is a failed run: {r:?}");
+    let pid = grandchild_pid(&pidfile).expect("the job started its grandchild");
+    support::wait_for("the lost job's grandchild to be gone", 60, || {
+        !mason_step_host::registry::pid_alive(pid)
+    });
+}

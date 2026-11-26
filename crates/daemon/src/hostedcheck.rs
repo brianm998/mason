@@ -19,9 +19,8 @@
 use crate::daemon::{now_ms, Daemon};
 use mason_core::StepRunId;
 use mason_landing::git;
-use mason_step_host::client::{collect_to_file, collect_to_file_observed, ClientError, HostClient};
+use mason_step_host::client::{collect_to_file, collect_to_file_observed, ClientError};
 use mason_step_host::launcher::{spawn_host, SpawnOptions};
-use mason_step_host::protocol::{CURRENT, PREVIOUS};
 use mason_step_host::registry::{read_kv, write_kv, HostInfo};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -604,8 +603,7 @@ fn running(d: &Daemon, id: &str) -> bool {
 /// Ask the step host `id` to stop its command (and its children). `false`: it could not be
 /// reached.
 fn stop_host(d: &Daemon, id: &str) -> bool {
-    let sock = d.cfg.hosts_dir().join(id).join("sock");
-    HostClient::connect(&sock, PREVIOUS, CURRENT, "daemon").is_ok_and(|mut h| h.stop(1000).is_ok())
+    mason_step_host::client::stop_or_reap(&d.cfg.hosts_dir().join(id), 1000, "daemon")
 }
 
 /// The task and run a develop check's host id names (`t575r3670-check-cargo-workspace2`).
@@ -1276,7 +1274,7 @@ fn collect_placed(
     let fired = Arc::new(AtomicBool::new(false));
     let stopped: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     {
-        let (done, fired, sock) = (done.clone(), fired.clone(), dir.join("sock"));
+        let (done, fired, hdir) = (done.clone(), fired.clone(), dir.clone());
         let (stop, stopped) = (spec.stop.clone(), stopped.clone());
         std::thread::spawn(move || loop {
             if done.load(Ordering::SeqCst) {
@@ -1284,16 +1282,12 @@ fn collect_placed(
             }
             if let Some(note) = stop.as_ref().and_then(|f| f()) {
                 *stopped.lock().unwrap_or_else(|e| e.into_inner()) = Some(note);
-                if let Ok(mut h) = HostClient::connect(&sock, PREVIOUS, CURRENT, "daemon") {
-                    let _ = h.stop(1000);
-                }
+                mason_step_host::client::stop_or_reap(&hdir, 1000, "daemon");
                 return;
             }
             if now_ms() >= deadline {
                 fired.store(true, Ordering::SeqCst);
-                if let Ok(mut h) = HostClient::connect(&sock, PREVIOUS, CURRENT, "daemon") {
-                    let _ = h.stop(1000);
-                }
+                mason_step_host::client::stop_or_reap(&hdir, 1000, "daemon");
                 return;
             }
             std::thread::sleep(Duration::from_millis(100));

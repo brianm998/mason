@@ -357,11 +357,7 @@ fn record_time(who: &Who, suite: &str, phase: &str, ran: &Ran) {
 /// Record each test's own time from a finished run, whole or narrowed (s634). Tests whose
 /// output carried no time are left out.
 fn record_test_times(who: &Who, suite: &str, results: &Results) {
-    let times: Vec<(String, u64)> = results
-        .cases
-        .iter()
-        .filter_map(|c| c.ms.map(|ms| (c.name.clone(), ms)))
-        .collect();
+    let times = results.test_times();
     let _ = who
         .d
         .store
@@ -1105,7 +1101,7 @@ fn run_hosted_once(
     let done = Arc::new(AtomicBool::new(false));
     let why = Arc::new(AtomicU8::new(0)); // 0 none, 1 timed out, 2 skipped, 3 gone
     {
-        let (done, why, sock, hdir) = (done.clone(), why.clone(), dir.join("sock"), dir.clone());
+        let (done, why, hdir) = (done.clone(), why.clone(), dir.clone());
         std::thread::spawn(move || {
             let end = Instant::now() + mason_step_host::registry::remaining_limit(limit, &hdir);
             loop {
@@ -1129,9 +1125,7 @@ fn run_hosted_once(
                     }
                 };
                 if stop {
-                    if let Ok(mut h) = HostClient::connect(&sock, PREVIOUS, CURRENT, "daemon") {
-                        let _ = h.stop(1000);
-                    }
+                    mason_step_host::client::stop_or_reap(&hdir, 1000, "daemon");
                     return;
                 }
                 std::thread::sleep(Duration::from_millis(100));
