@@ -7,6 +7,7 @@
 //! captured fixtures. Launching is a thin step on top, so a later stage can
 //! run the same command under a step host.
 
+use crate::skills::{self, Skills};
 use mason_adapter_api::contract::preamble;
 use mason_adapter_api::{
     netguard, AdapterError, AgentAdapter, AgentCaps, AgentEvent, BillingKind, Blocked, BlockedWhy,
@@ -157,6 +158,16 @@ pub fn sanitized_env_for(
     env
 }
 
+/// The owner's Claude configuration directory, as the session will see it.
+fn claude_config_dir(env: &[(String, String)]) -> Option<PathBuf> {
+    let get = |k: &str| {
+        env.iter()
+            .find(|(ek, v)| ek == k && !v.is_empty())
+            .map(|(_, v)| PathBuf::from(v))
+    };
+    get("CLAUDE_CONFIG_DIR").or_else(|| get("HOME").map(|h| h.join(".claude")))
+}
+
 /// The efforts this provider's CLI accepts.
 pub const EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
@@ -188,6 +199,8 @@ pub struct ClaudeAdapter {
     pub host: Option<crate::hosted::HostLaunch>,
     /// Run the CLI under an OS sandbox (off by default).
     pub sandbox: Option<crate::sandbox::SandboxPolicy>,
+    /// The skills a session may use (s1153): the project's, and whether the owner's.
+    pub skills: Skills,
 }
 
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -206,6 +219,7 @@ impl ClaudeAdapter {
             env_file: None,
             host: None,
             sandbox: None,
+            skills: Skills::default(),
         }
     }
 
@@ -272,15 +286,36 @@ impl ClaudeAdapter {
 
         let mcp_path = self.write_mcp_config(spec, sock.as_deref())?;
         args.extend(["--mcp-config".into(), mcp_path.display().to_string()]);
+        // Exported into this session's own directory, from what the daemon read on
+        // the base commit (s1153).
+        let skills = skills::prepare(
+            &self.skills,
+            mcp_path.parent().unwrap_or(&self.state_dir),
+            &spec.workdir,
+            claude_config_dir(&env).as_deref(),
+        )
+        .map_err(AdapterError::Spawn)?;
+        if let Some(dir) = &skills.plugin_dir {
+            args.extend(["--plugin-dir".into(), dir.display().to_string()]);
+        }
         // Added to the project's and the owner's settings, not in place of them.
-        let settings = self.write_settings(&mcp_path)?;
+        let settings = self.write_settings(&mcp_path, &skills)?;
         args.extend(["--settings".into(), settings.display().to_string()]);
 
         // Built-in tools: read-only steps get no way to change the tree.
         let builtins: &[&str] = if spec.step.read_only() {
-            &["Read", "Grep", "Glob", "TodoWrite"]
+            &["Read", "Grep", "Glob", "TodoWrite", "Skill"]
         } else {
-            &["Read", "Grep", "Glob", "Edit", "Write", "Bash", "TodoWrite"]
+            &[
+                "Read",
+                "Grep",
+                "Glob",
+                "Edit",
+                "Write",
+                "Bash",
+                "TodoWrite",
+                "Skill",
+            ]
         };
         args.extend(["--tools".into(), builtins.join(",")]);
         let mut allowed: Vec<String> = builtins.iter().map(|s| s.to_string()).collect();
@@ -349,23 +384,40 @@ impl ClaudeAdapter {
         Ok(path)
     }
 
-    /// The settings file beside `mcp.json` that puts the command guard (`mason hook
-    /// guard`, s1107) in front of every Bash call. `mason` is the binary installed next
-    /// to the MCP bridge. A guard that cannot run refuses the command (exit 2): any
-    /// other failure of a hook lets the command through.
-    fn write_settings(&self, mcp_path: &Path) -> Result<PathBuf, AdapterError> {
-        let mason = self
-            .mcp_bin
-            .with_file_name(format!("mason{}", std::env::consts::EXE_SUFFIX));
-        let command = format!(
-            "'{}' hook guard || {{ echo 'MASON: the command guard could not run, so Bash is \
-             refused' >&2; exit 2; }}",
-            mason.display().to_string().replace('\'', "'\\''")
+    /// The settings file beside `mcp.json`. It puts the command guard (`mason hook
+    /// guard`, s1107) in front of every Bash call and the skill guard (`mason hook
+    /// skill`, s1153) in front of every Skill call, and carries what `skills` turns off.
+    /// `mason` is the binary installed next to the MCP bridge. A guard that cannot run
+    /// refuses the call (exit 2): any other failure of a hook lets it through.
+    fn write_settings(
+        &self,
+        mcp_path: &Path,
+        skills: &skills::Prepared,
+    ) -> Result<PathBuf, AdapterError> {
+        let quote = |p: &Path| format!("'{}'", p.display().to_string().replace('\'', "'\\''"));
+        let mason = quote(
+            &self
+                .mcp_bin
+                .with_file_name(format!("mason{}", std::env::consts::EXE_SUFFIX)),
         );
-        let settings = json!({"hooks": {"PreToolUse": [{
-            "matcher": "Bash",
-            "hooks": [{"type": "command", "command": command}],
-        }]}});
+        let policy = mcp_path.with_file_name("skills.json");
+        std::fs::write(&policy, skills.policy.to_json().to_string())
+            .map_err(AdapterError::Spawn)?;
+        let guard = |args: String, what: &str, tool: &str| {
+            format!(
+                "{mason} hook {args} || {{ echo 'MASON: the {what} guard could not run, so {tool} \
+                 is refused' >&2; exit 2; }}"
+            )
+        };
+        let hook = |matcher: &str, command: String| json!({"matcher": matcher, "hooks": [{"type": "command", "command": command}]});
+        let mut settings = Value::Object(skills.settings.clone());
+        settings["hooks"] = json!({"PreToolUse": [
+            hook("Bash", guard("guard".into(), "command", "Bash")),
+            hook(
+                "Skill",
+                guard(format!("skill --policy {}", quote(&policy)), "skill", "Skill"),
+            ),
+        ]});
         let path = mcp_path.with_file_name("settings.json");
         std::fs::write(&path, settings.to_string()).map_err(AdapterError::Spawn)?;
         Ok(path)
@@ -782,6 +834,13 @@ fn todo_items(input: &Value) -> Option<Vec<PlanItem>> {
     )
 }
 
+/// The skill a `Skill` call names (`{"skill": "mason:review"}`), on one line.
+fn skill_name(input: &Value) -> Option<String> {
+    let s = input["skill"].as_str()?.trim().trim_start_matches('/');
+    let one: String = s.chars().filter(|c| !c.is_control()).collect();
+    (!one.is_empty()).then(|| clip(&one, 100))
+}
+
 /// What a tool call is doing, in one line: "Editing src/lib.rs", "Running cargo test".
 /// Not redacted here; the daemon redacts what it shows.
 fn tool_summary(name: &str, input: &Value) -> String {
@@ -794,6 +853,7 @@ fn tool_summary(name: &str, input: &Value) -> String {
         "Read" => field("file_path").map(|p| format!("Reading {p}")),
         "Grep" | "Glob" => field("pattern").map(|p| format!("Searching for {p}")),
         "TodoWrite" => Some("Updating the todo list".to_string()),
+        "Skill" => skill_name(input).map(|s| format!("Using skill {s}")),
         "mcp__mason__run_check" => field("name").map(|n| format!("Running check {n}")),
         _ => None,
     };
@@ -950,6 +1010,11 @@ pub fn parse_line(line: &str, st: &mut ParseState) -> Vec<AgentEvent> {
                     Some("tool_use") => {
                         let name = block["name"].as_str().unwrap_or("?").to_string();
                         let input = &block["input"];
+                        if name == "Skill" {
+                            if let Some(s) = skill_name(input) {
+                                out.push(AgentEvent::Skill { name: s });
+                            }
+                        }
                         if name == "TodoWrite" {
                             if let Some(items) = todo_items(input) {
                                 out.push(AgentEvent::Plan { items });
@@ -1587,7 +1652,7 @@ mod tests {
         ]);
         let c = a.build_command(&spec(StepKind::Review), None).unwrap();
         let tools_at = c.args.iter().position(|x| x == "--tools").unwrap();
-        assert_eq!(c.args[tools_at + 1], "Read,Grep,Glob,TodoWrite");
+        assert_eq!(c.args[tools_at + 1], "Read,Grep,Glob,TodoWrite,Skill");
         let joined = c.args.join(" ");
         assert!(
             joined.contains("mcp__mason__submit_review")
@@ -1701,6 +1766,111 @@ mod tests {
                 [a.state_dir.display().to_string()]
             );
         }
+    }
+
+    #[test]
+    fn every_step_kind_is_given_the_skill_tool() {
+        let a = adapter(&[("ANTHROPIC_BASE_URL", "http://127.0.0.1:1")]);
+        for kind in [
+            StepKind::Explore,
+            StepKind::Develop,
+            StepKind::Review,
+            StepKind::Diagnose,
+            StepKind::Chat,
+            StepKind::Health,
+        ] {
+            let c = a.build_command(&spec(kind), None).unwrap();
+            let at = |flag: &str| c.args.iter().position(|x| x == flag).unwrap();
+            assert!(c.args[at("--tools") + 1].split(',').any(|t| t == "Skill"));
+            let allowed = &c.args[at("--allowedTools") + 1..at("--disallowedTools")];
+            assert!(allowed.iter().any(|t| t == "Skill"), "{kind:?}");
+        }
+    }
+
+    fn settings_of(c: &AgentCommand) -> Value {
+        let at = c.args.iter().position(|x| x == "--settings").unwrap();
+        serde_json::from_str(&std::fs::read_to_string(&c.args[at + 1]).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn project_skills_are_passed_as_a_plugin_of_the_sessions_own() {
+        let mut a = adapter(&[("ANTHROPIC_BASE_URL", "http://127.0.0.1:1")]);
+        let c = a.build_command(&spec(StepKind::Review), None).unwrap();
+        assert!(
+            !c.args.iter().any(|x| x == "--plugin-dir"),
+            "no skills, no directory"
+        );
+        a.skills.project = vec![crate::skills::SkillFile {
+            path: "review/SKILL.md".into(),
+            data: b"---\nname: review\n---\nbody\n".to_vec(),
+            executable: false,
+        }];
+        let dir_of = |c: &AgentCommand| {
+            let at = c.args.iter().position(|x| x == "--plugin-dir").unwrap();
+            PathBuf::from(&c.args[at + 1])
+        };
+        let first = a.build_command(&spec(StepKind::Review), None).unwrap();
+        let again = a
+            .build_command(&spec(StepKind::Review), Some(("sess-1", "note")))
+            .unwrap();
+        assert_ne!(dir_of(&first), dir_of(&again), "per session");
+        for c in [&first, &again] {
+            let dir = dir_of(c);
+            assert!(dir.starts_with(&a.state_dir));
+            assert!(dir.join("skills/review/SKILL.md").is_file());
+            let hook = &settings_of(c)["hooks"]["PreToolUse"][1];
+            assert_eq!(hook["matcher"], "Skill");
+            let command = hook["hooks"][0]["command"].as_str().unwrap();
+            assert!(command.contains(" hook skill --policy '"), "{command}");
+            assert!(command.contains("exit 2"), "{command}");
+            let policy = dir.with_file_name("skills.json");
+            assert!(command.contains(&policy.display().to_string()));
+            assert!(std::fs::read_to_string(policy)
+                .unwrap()
+                .contains("mason:review"));
+        }
+    }
+
+    #[test]
+    fn user_skills_off_is_written_into_the_sessions_settings() {
+        let home = tempfile::tempdir().unwrap();
+        let md = home.path().join(".claude/skills/owners/SKILL.md");
+        std::fs::create_dir_all(md.parent().unwrap()).unwrap();
+        std::fs::write(md, "x").unwrap();
+        let mut a = adapter(&[
+            ("ANTHROPIC_BASE_URL", "http://127.0.0.1:1"),
+            ("HOME", &home.path().display().to_string()),
+        ]);
+        let c = a.build_command(&spec(StepKind::Develop), None).unwrap();
+        assert!(settings_of(&c)["skillOverrides"]["owners"].is_null());
+        a.skills.user = false;
+        let c = a.build_command(&spec(StepKind::Develop), None).unwrap();
+        assert_eq!(settings_of(&c)["skillOverrides"]["owners"], "off");
+        assert!(
+            !c.args.iter().any(|x| x == "--setting-sources"),
+            "the rest of the owner's settings still apply"
+        );
+    }
+
+    #[test]
+    fn a_skill_call_is_reported_by_name() {
+        let mut st = ParseState::default();
+        let ev = parse_line(
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t","name":"Skill","input":{"skill":"mason:review"}}]}}"#,
+            &mut st,
+        );
+        assert_eq!(
+            ev,
+            [
+                AgentEvent::Skill {
+                    name: "mason:review".into()
+                },
+                AgentEvent::ToolCall {
+                    name: "Skill".into(),
+                    summary: "Using skill mason:review".into()
+                }
+            ]
+        );
     }
 
     #[test]
