@@ -59,7 +59,7 @@ public struct NodeRow: Equatable, Sendable, Identifiable {
     public var running = 0
     public var maxJobs = 0
     /// Where this node's update to the coordinator's runtime stands: "up to date", "building for arm64",
-    /// "installed; waiting for 2 jobs to end", "failed (…)", "will update when it returns". Empty when unknown.
+    /// "installed; taking over now, 2 running jobs carry on", "failed (…)", "will update when it returns". Empty when unknown.
     public var update = ""
     /// A word to key on: `up-to-date`, `building`, `sending`, `sent`, `installing`, `failed`, `pending`, `queued`.
     public var updateState = ""

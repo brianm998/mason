@@ -64,7 +64,7 @@ fn new_start(hunk: &str) -> u32 {
         .unwrap_or(1)
 }
 
-fn cut(text: &str) -> String {
+pub(crate) fn cut(text: &str) -> String {
     let t = text.strip_suffix('\r').unwrap_or(text);
     match t.char_indices().nth(60) {
         Some((i, _)) => format!("{}…", &t[..i]),
@@ -72,9 +72,9 @@ fn cut(text: &str) -> String {
     }
 }
 
-/// The markers among the lines a unified diff adds. The diff may have any amount of context.
-pub fn in_diff(diff: &str) -> Vec<Marker> {
-    let mut found = vec![];
+/// Calls `each` with the file, line number and text of every line a unified diff adds. The
+/// diff may have any amount of context. Shared with `contentscan`.
+pub(crate) fn added_lines(diff: &str, mut each: impl FnMut(&str, u32, &str)) {
     let mut file = String::new();
     let mut in_hunk = false;
     let mut next: u32 = 1;
@@ -98,23 +98,31 @@ pub fn in_diff(diff: &str) -> Vec<Marker> {
         // In a hunk every line has its prefix, so a `+++` here is an added line, not a header.
         match l.as_bytes().first() {
             Some(b'+') => {
-                if is_marker(&l[1..]) {
-                    found.push(Marker {
-                        file: file.clone(),
-                        line: next,
-                        text: cut(&l[1..]),
-                    });
-                }
+                each(&file, next, &l[1..]);
                 next += 1;
             }
             Some(b' ') => next += 1,
             _ => {}
         }
     }
+}
+
+/// The markers among the lines a unified diff adds.
+pub fn in_diff(diff: &str) -> Vec<Marker> {
+    let mut found = vec![];
+    added_lines(diff, |file, line, text| {
+        if is_marker(text) {
+            found.push(Marker {
+                file: file.to_string(),
+                line,
+                text: cut(text),
+            });
+        }
+    });
     found
 }
 
-fn diff_args(range: &str) -> [&str; 6] {
+pub(crate) fn diff_args(range: &str) -> [&str; 6] {
     ["diff", "-U0", "--no-color", "--no-ext-diff", range, "--"]
 }
 
