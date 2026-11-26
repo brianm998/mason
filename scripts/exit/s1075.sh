@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 # s1075 exit test: the runner's no-timeout(1) fallback returns when a script ends and kills
-# a script's whole process group at the limit or when the runner is killed; a narrowed shard runs without --doc.
+# a script's whole process group at the limit or when the runner is killed; a narrowed shard or parallel run passes no --doc.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 if [ -z "${S1075_GUARDED:-}" ]; then S1075_GUARDED=1 exec perl -e 'alarm 120; exec @ARGV' bash "$0"; fi
@@ -50,6 +50,7 @@ printf '#!/bin/sh\n[ "$1" = --list ] && echo "a_t: test" && exit 0\necho "test a
 cat > "$t/cargo.sh" <<X
 #!/bin/sh
 case " \$* " in
+  *" --doc "*" --doc "*|*" --doc --doc "*) echo "--doc given twice" >&2; exit 101 ;;
   *" --doc "*) case " \$* " in *" --test "*|*" --no-run "*) echo "can't mix --doc" >&2; exit 101 ;; esac
     echo "DOC-RUN" >> "$t/docs"; exit 0 ;;
 esac
@@ -63,4 +64,14 @@ echo "$out" | grep -q 'test a_t ... ok' || { echo "narrowed test did not run: $o
 [ ! -e "$t/docs" ] || { echo "doc tests ran for a --test selection"; exit 1; }
 out=$(shard -p a --doc 2>&1) || { echo "doc-only shard failed"; echo "$out"; exit 1; }
 [ -e "$t/docs" ] || { echo "doc-only selection ran no doc tests: $out"; exit 1; }
+
+# (e) test-parallel.py follows the same rule (#1115).
+rm "$t/docs"
+parallel() { python3 -I scripts/test-parallel.py -- "$t/cargo.sh" test "$@"; }
+out=$(parallel -p a --test a 2>&1) || { echo "narrowed parallel run failed"; echo "$out"; exit 1; }
+echo "$out" | grep -q 'test a_t ... ok' || { echo "narrowed parallel test did not run: $out"; exit 1; }
+[ ! -e "$t/docs" ] || { echo "parallel run: doc tests ran for a --test selection"; exit 1; }
+out=$(parallel -p a --doc 2>&1) || { echo "doc-only parallel run failed"; echo "$out"; exit 1; }
+[ "$(grep -c DOC-RUN "$t/docs")" -eq 1 ] || { echo "doc-only parallel run: not one doc pass: $out"; exit 1; }
+if echo "$out" | grep -q 'test a_t'; then echo "doc-only parallel run ran an executable: $out"; exit 1; fi
 echo "s1075 passed"
