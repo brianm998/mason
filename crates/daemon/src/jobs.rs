@@ -4073,7 +4073,11 @@ fn agent_job(c: &Ctx) {
         check_failing: Default::default(),
         replay: Default::default(),
     });
-    let validator = (kind == StepKind::Develop).then(|| {
+    // The analyst's task has no change to prove: it is told to commit nothing, its product is
+    // an uncommitted file, and `finish_agent` reads that and closes the task without landing.
+    let proves_change = kind == StepKind::Develop
+        && !crate::introspect::is_analyst_task(&c.d, c.task, &c.project.id);
+    let validator = proves_change.then(|| {
         change_validator(
             c.wt.clone(),
             c.project.base_ref(),
