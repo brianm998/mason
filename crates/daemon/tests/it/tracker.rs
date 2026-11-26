@@ -1084,16 +1084,13 @@ fn cancel(d: &Arc<Daemon>, task: TaskId) {
 
 #[test]
 fn require_label_off_imports_the_owners_unlabelled_issue_and_on_ignores_it() {
-    // One world at a time: a test holding two can deadlock another on the world slots.
-    let items = {
-        let (_s, d, pid) = world();
-        let o = d.cfg.owner_names[0].clone();
-        let items = vec![item(1, "Owner, unlabelled", &o, &[])];
-        let sum = sync_with_rule(&d, pid, "mason", false, "o/r", &items, None);
-        assert_eq!((sum.imported, sum.ignored), (1, 0), "{sum:?}");
-        assert_eq!(task_for(&d, 1).unwrap().trust, TrustSource::Owner);
-        items
-    };
+    let (_s, d, pid) = world();
+    let o = d.cfg.owner_names[0].clone();
+    let items = vec![item(1, "Owner, unlabelled", &o, &[])];
+    let sum = sync_with_rule(&d, pid, "mason", false, "o/r", &items, None);
+    assert_eq!((sum.imported, sum.ignored), (1, 0), "{sum:?}");
+    assert_eq!(task_for(&d, 1).unwrap().trust, TrustSource::Owner);
+
     let (_s, d, pid) = world();
     let sum = sync_with_rule(&d, pid, "mason", true, "o/r", &items, None);
     assert_eq!((sum.imported, sum.ignored), (0, 1), "{sum:?}");
@@ -1119,30 +1116,26 @@ fn require_label_on_imports_labelled_issues_with_the_trust_of_their_author() {
 
 #[test]
 fn require_label_on_names_an_unlabelled_blocker_and_ignores_what_it_blocks_in_silence() {
-    // One world at a time: a test holding two can deadlock another on the world slots.
-    let o = {
-        let (_s, d, pid) = world();
-        let o = d.cfg.owner_names[0].clone();
-        // A labelled issue blocked by an unlabelled open one waits, and says why.
-        let items = vec![
-            with_body(
-                item(2, "Labelled dependent", &o, &["mason"]),
-                "Blocked by #1",
-            ),
-            item(1, "Unlabelled blocker", &o, &[]),
-        ];
-        let sum = sync_with_rule(&d, pid, "mason", true, "o/r", &items, None);
-        assert_eq!(sum.imported, 0);
-        assert!(task_for(&d, 1).is_none() && task_for(&d, 2).is_none());
-        assert!(
-            alerts(&d)
-                .iter()
-                .any(|t| t.contains("issue #2 is not imported") && t.contains("#1")),
-            "{:?}",
-            alerts(&d)
-        );
-        o
-    };
+    let (_s, d, pid) = world();
+    let o = d.cfg.owner_names[0].clone();
+    // A labelled issue blocked by an unlabelled open one waits, and says why.
+    let items = vec![
+        with_body(
+            item(2, "Labelled dependent", &o, &["mason"]),
+            "Blocked by #1",
+        ),
+        item(1, "Unlabelled blocker", &o, &[]),
+    ];
+    let sum = sync_with_rule(&d, pid, "mason", true, "o/r", &items, None);
+    assert_eq!(sum.imported, 0);
+    assert!(task_for(&d, 1).is_none() && task_for(&d, 2).is_none());
+    assert!(
+        alerts(&d)
+            .iter()
+            .any(|t| t.contains("issue #2 is not imported") && t.contains("#1")),
+        "{:?}",
+        alerts(&d)
+    );
     // The reverse: the unlabelled one is blocked by a labelled one. The blocker comes in,
     // the unlabelled issue is not MASON's, and nothing is said about it.
     let (_s, d, pid) = world();
