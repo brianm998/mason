@@ -171,7 +171,7 @@ command = "sh '"$root"'/triage.sh"
 '
 start_daemon() {
   "$bin/masond" --data-dir "$root/d" --config-dir "$root/c" --heartbeat-ms 100 --sweep-ms 3600000 \
-    --introspect-ms 1500 --schedule-ms 300 --analyst-ms 36000000 --owner "$owner" --port 0 2>>"$root/masond.log" &
+    --introspect-ms 1500 --schedule-ms 300 --analyst-ms 36000000 --owner "$owner" 2>>"$root/masond.log" &
   daemon=$!
   until m status >/dev/null 2>&1; do kill -0 "$daemon" || { cat "$root/masond.log" >&2; exit 1; }; sleep 0.1; done
 }
