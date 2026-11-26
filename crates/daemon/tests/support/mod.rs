@@ -58,7 +58,7 @@ pub struct Scratch {
     pub data_dir: PathBuf,
     pub script: PathBuf,
     /// Held for as long as this scratch world lives (declared last, so released last).
-    _slot: Slot,
+    _slot: Option<Slot>,
     /// The root's `owner.lock`, held while this world lives.
     _owner: Owner,
 }
@@ -112,6 +112,17 @@ impl Slot {
     fn take() -> Slot {
         Slot
     }
+}
+
+static PROCESS_WORLD: std::sync::OnceLock<Slot> = std::sync::OnceLock::new();
+
+/// Take one world slot for the whole test process, once, and let every [`Scratch`] made after
+/// it share it instead of taking its own. For a binary whose tests run one at a time under a
+/// process-wide lock (so one world exists at a time): each test taking its own slot waited up
+/// to 10 minutes for it with the lock held while other binaries held every slot, and the
+/// waits of the tests queued behind added up. Call it with the lock held.
+pub fn hold_world_for_process() {
+    PROCESS_WORLD.get_or_init(Slot::take);
 }
 
 /// What the scripted agent commits. Every task's worktree also gets a file of its
@@ -422,7 +433,11 @@ fn claim(_root: &Path) -> Owner {
 impl Scratch {
     pub fn new(test_cmd: &str, script: Value) -> Scratch {
         sweep_orphans();
-        let slot = Slot::take();
+        let slot = if PROCESS_WORLD.get().is_some() {
+            None
+        } else {
+            Some(Slot::take())
+        };
         let root = tempfile::Builder::new()
             .prefix("ms")
             .tempdir_in("/tmp")
@@ -791,6 +806,50 @@ fn daemon_gone() -> Option<String> {
 /// daemon of this test has exited.
 pub fn wait_for(what: &str, secs: u64, mut f: impl FnMut() -> bool) {
     wait_poll(what, secs, || if f() { Poll::Done } else { Poll::Pending });
+}
+
+/// What task `t` is doing, for a wait that gave up: its state, step, activity, failure,
+/// each step run with its outcome, and the logs of its hosts.
+pub fn describe_task(d: &Arc<Daemon>, t: TaskId) -> String {
+    let w = d.world().unwrap();
+    let k = &w.tasks[&t];
+    let mut runs: Vec<_> = w.step_runs.values().filter(|r| r.task == t).collect();
+    runs.sort_by_key(|r| r.id.0);
+    let runs: Vec<String> = runs
+        .iter()
+        .map(|r| format!("  {} (attempt {}): {:?}", r.name, r.attempt, r.outcome))
+        .collect();
+    let out = format!(
+        "task {t}: state {:?}, step {:?}, activity {:?}, failure {:?} ({:?}), failures {}\nstep runs:\n{}",
+        k.state,
+        k.step,
+        k.activity,
+        k.failure,
+        k.failure_class,
+        k.failures,
+        runs.join("\n")
+    );
+    drop(w);
+    format!("{out}\nlogs:\n{}", mason_daemon::http::render_logs(d, t.0))
+}
+
+/// As [`wait_for`], and when it gives up the failure also carries `report()`.
+pub fn wait_for_reporting(
+    what: &str,
+    secs: u64,
+    mut f: impl FnMut() -> bool,
+    report: impl Fn() -> String,
+) {
+    let r = try_wait(what, secs.max(min_wait_secs()), 50, || {
+        if f() {
+            Poll::Done
+        } else {
+            Poll::Pending
+        }
+    });
+    if let Err(why) = r {
+        panic!("{why}\n{}", report());
+    }
 }
 
 /// As [`wait_for`], and the condition can also say the wait can no longer succeed.
