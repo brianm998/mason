@@ -2,8 +2,8 @@
 
 use crate::explain::{explain, WaitCause};
 use crate::plan::{
-    plan, Capacity, CompilePace, CpuGate, DiskGate, Holder, Kind, Needs, Plan, PolicyGate, Request,
-    StallGate, ThermalGate, World, COMPILE,
+    plan, Capacity, CompilePace, CpuGate, DiskGate, HeatCeiling, Holder, Kind, Needs, Plan,
+    PolicyGate, Request, StallGate, ThermalGate, World, COMPILE,
 };
 use crate::rank::Rank;
 use std::collections::BTreeMap;
@@ -23,7 +23,7 @@ pub struct Ledger {
     stall: Option<StallGate>,
     policy: Option<PolicyGate>,
     thermal: Option<ThermalGate>,
-    heat_ceiling: bool,
+    heat_ceiling: Option<HeatCeiling>,
     /// When each resource last had a grant. Only observed, never consulted by `plan`.
     last_grant: BTreeMap<String, u64>,
     last_any_grant: Option<u64>,
@@ -105,12 +105,12 @@ impl Ledger {
         self.stall = stall;
     }
 
-    /// The caller's latest reading of how busy `syspolicyd` is checking new programs.
-    /// The caller's latest reading of the CPU speed limit.
+    /// The caller's latest reading of the CPU's heat.
     pub fn set_thermal(&mut self, thermal: Option<ThermalGate>) {
         self.thermal = thermal;
     }
 
+    /// The caller's latest reading of how busy `syspolicyd` is checking new programs.
     pub fn set_policy(&mut self, policy: Option<PolicyGate>) {
         self.policy = policy;
     }
@@ -157,8 +157,8 @@ impl Ledger {
     }
 
     /// The caller's latest reading: the die is over the hard heat ceiling.
-    pub fn set_heat_ceiling(&mut self, on: bool) {
-        self.heat_ceiling = on;
+    pub fn set_heat_ceiling(&mut self, ceiling: Option<HeatCeiling>) {
+        self.heat_ceiling = ceiling;
     }
 
     /// How long a waiting request is expected to hold what it asks for (s385).

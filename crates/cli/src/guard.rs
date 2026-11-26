@@ -15,6 +15,7 @@
 
 use crate::resources::split_unquoted;
 use mason_adapter_api::contract::HOOK_EDIT;
+use mason_adapters::skills::Policy;
 use mason_platform::net::UnixStream;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -139,6 +140,37 @@ pub fn hook_edit(input: &str, env: &dyn Fn(&str) -> Option<String>) -> Option<St
             None
         }
     }
+}
+
+/// The `PreToolUse` answer for a `Skill` call the session's policy refuses (s1153);
+/// `None` for everything else. An unreadable policy or input is an error, which the
+/// hook's command turns into a refusal.
+pub fn hook_skill(
+    input: &str,
+    policy: &Path,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<Option<Value>, String> {
+    let v: Value = serde_json::from_str(input).map_err(|e| format!("the hook's input: {e}"))?;
+    if v["tool_name"].as_str() != Some("Skill") {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(policy).map_err(|e| format!("the skill policy: {e}"))?;
+    let policy = serde_json::from_str(&text)
+        .ok()
+        .and_then(|v| Policy::from_json(&v))
+        .ok_or("the skill policy is not readable")?;
+    let skill = v["tool_input"]["skill"].as_str().unwrap_or_default();
+    // Where the CLI was started, which is where it loads a directory's skills from.
+    let worktree = env("MASON_GUARD_WORKTREE")
+        .or_else(|| v["cwd"].as_str().map(String::from))
+        .ok_or("no working directory")?;
+    Ok(policy.refusal(skill, Path::new(&worktree)).map(|reason| {
+        json!({"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }})
+    }))
 }
 
 /// Why `command` is refused, if it is.
@@ -939,6 +971,27 @@ fn stash(args: &[Word]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_skill_hook_denies_what_the_policy_does_and_errs_without_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("skills.json");
+        let policy = Policy {
+            project: vec!["mason:review".into()],
+            ..Policy::default()
+        };
+        std::fs::write(&file, policy.to_json().to_string()).unwrap();
+        let ask = |skill: &str, file: &Path| {
+            let input = json!({"tool_name": "Skill", "cwd": dir.path().display().to_string(),
+                "tool_input": {"skill": skill}});
+            hook_skill(&input.to_string(), file, &|_| None)
+        };
+        assert_eq!(ask("mason:review", &file), Ok(None));
+        let denied = ask("sneaky", &file).unwrap().unwrap();
+        assert_eq!(denied["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert!(ask("mason:review", &dir.path().join("absent")).is_err());
+        assert!(hook_skill("not json", &file, &|_| None).is_err());
+    }
 
     /// A worktree with a subdirectory, a state directory, a temporary directory and a
     /// home, all separate.

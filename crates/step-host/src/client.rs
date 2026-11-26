@@ -138,6 +138,39 @@ fn write_exit(path: &Path, rec: &ExitRecord) -> io::Result<()> {
     )
 }
 
+/// How many times [`stop_or_reap`] tries to reach a host, and how long it waits between tries.
+const STOP_TRIES: u32 = 20;
+const STOP_PAUSE: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Stop the command under the host in `dir` (the host stops its whole process group and every
+/// descendant it can find), so that a job that ends early cannot leave its processes behind.
+///
+/// A stop is one frame on the host's socket. Every caller used to connect once and, if that
+/// failed (the host busy, its socket not yet back after a stall), give up in silence: the
+/// command then ran on, and a cancelled or timed-out job left its test binaries running for
+/// hours. This tries a few times while the host's socket exists, and when the host cannot be
+/// reached at all it kills what is verifiably the recorded command and host instead
+/// ([`registry::reap_dir_by`] signals nothing it cannot match to the registry's record, so a
+/// host that has already gone and a recycled pid are both left alone). `who` names the sender
+/// in the host's `kills` ledger. Returns `true` when the host was asked to stop the command.
+pub fn stop_or_reap(dir: &Path, grace_ms: u32, who: &str) -> bool {
+    let sock = dir.join("sock");
+    for k in 0..STOP_TRIES {
+        if let Ok(mut c) = HostClient::connect(&sock, protocol::PREVIOUS, protocol::CURRENT, who) {
+            if c.stop(grace_ms).is_ok() {
+                return true;
+            }
+        }
+        // No socket: the host is gone (or never came up), and waiting will not bring it back.
+        if !sock.exists() || k + 1 == STOP_TRIES {
+            break;
+        }
+        std::thread::sleep(STOP_PAUSE);
+    }
+    registry::reap_dir_by(dir, who);
+    false
+}
+
 /// Bring `received` up to date with the host's output and report how the
 /// child ended. Resumes from `received`'s current length, so it can be called
 /// again after the controller itself was killed at any point. Writes the exit

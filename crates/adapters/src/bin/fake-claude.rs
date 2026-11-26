@@ -166,6 +166,30 @@ fn hooks(args: &[String], input: &Value) -> Vec<Value> {
     said
 }
 
+/// The skills of the plugin directories named on the command line.
+fn plugin_skills(args: &[String]) -> Vec<String> {
+    let mut found = vec![];
+    for dir in args.windows(2).filter(|w| w[0] == "--plugin-dir") {
+        let dir = std::path::Path::new(&dir[1]);
+        let name = std::fs::read_to_string(dir.join(".claude-plugin/plugin.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+            .and_then(|v| v["name"].as_str().map(String::from))
+            .unwrap_or_default();
+        for e in std::fs::read_dir(dir.join("skills"))
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            if e.path().join("SKILL.md").is_file() {
+                found.push(format!("{name}:{}", e.file_name().to_string_lossy()));
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let resume = args
@@ -226,10 +250,12 @@ fn main() {
     let mut calls = 0u32;
     let partial = args.iter().any(|a| a == "--include-partial-messages");
     let mut msgs = 0u32;
+    // As the real CLI lists them: each skill of each `--plugin-dir`, `<plugin>:<name>`.
+    let skills = plugin_skills(&args);
     let init = |sid: &str| {
         out(
             &json!({"type": "system", "subtype": "init", "cwd": "/scratch", "session_id": sid,
-                    "tools": [], "mcp_servers": [{"name": "mason", "status": "connected"}],
+                    "skills": skills, "tools": [], "mcp_servers": [{"name": "mason", "status": "connected"}],
                     "model": reported, "permissionMode": "dontAsk", "claude_code_version": "0.0.0-fake"}),
         );
     };
