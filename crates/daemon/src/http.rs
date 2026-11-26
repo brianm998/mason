@@ -2826,8 +2826,9 @@ async fn quarantine_remove(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>)
     Ok(Json(json!({"removed": n})))
 }
 
-/// Answer a task's open question. The answer carries the hash of the card the
-/// answerer was looking at, and counts only from the owner's identity.
+/// Answer a task's open question (or a failed task's diagnosis card). The answer
+/// carries the hash of the card the answerer was looking at, and counts only from
+/// the owner's identity. `context` is optional: the owner's added words.
 async fn answer_task(
     Shared(d): Shared<Arc<Daemon>>,
     Path(id): Path<u64>,
@@ -2838,10 +2839,18 @@ async fn answer_task(
         b["hash"].as_str().unwrap_or_default().to_string(),
         b["as"].as_str().unwrap_or_default().to_string(),
     );
+    let context = match &b["context"] {
+        Value::Null => None,
+        Value::String(s) => Some(s.clone()),
+        _ => return Err(fail(StatusCode::BAD_REQUEST, "context is a string")),
+    };
     let d2 = d.clone();
     let r = d
         .pool
-        .run(move || crate::attention::answer(&d2, TaskId(id), &answer, &hash, &who))
+        .run(move || {
+            let context = context.as_deref();
+            crate::attention::answer_with(&d2, TaskId(id), &answer, &hash, &who, context)
+        })
         .await
         .map_err(pool_err)?;
     match r {

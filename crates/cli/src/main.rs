@@ -14,7 +14,7 @@
 //! mason debt list | run <id>
 //! mason quarantine list | add <suite> <test> --owner O --days N [--reason R] | remove <suite> <test>
 //! mason test parse <parser> <file> [--min N]
-//! mason task answer <id> <option number | 1,3 for a multi-select card | text> [--card HASH] [--as NAME]
+//! mason task answer <id> <option number | 1,3 for a multi-select card | text> [--context TEXT] [--card HASH] [--as NAME]
 //! mason task land-now <id> | force <id> [--reason R]
 //! mason task open <id> [--anyway]
 //! mason pause [--project P] [--mode all|claims|landing] --for 2h | mason resume [--project P] [--mode M] | mason pause list
@@ -93,8 +93,9 @@ mason: command-line client for the MASON pipeline
   mason task override <id> <key> <value>
   mason task priority <id> urgent|high|normal|low   owner only; re-ranks its waiting requests
   mason task update-priority <id> urgent|normal   owner only; urgent: its landing takes the daemon's own update over at once
-  mason task answer <id> <option number | 1,3 | text> [--card HASH] [--as NAME]
-                                      answer the open question (a multi-select card takes 1,3); the card's hash guards against a stale one
+  mason task answer <id> <option number | 1,3 | text> [--context TEXT] [--card HASH] [--as NAME]
+                                      answer the open question or a failed task's diagnosis card (a multi-select card takes 1,3);
+                                      --context adds your words to the answer; the card's hash guards against a stale one
   mason task refresh <id>             ask the tracker now (what opening a task does)
   mason task land-now <id> | force <id> [--reason R]   marks the task and records an override and a debt
   mason task open <id> [--anyway]     open an interactive agent in the task's worktree, resuming its session
@@ -3755,6 +3756,7 @@ fn main() {
                         .or_else(|| std::env::var("USER").ok())
                         .unwrap_or_default();
                     let card = a.opt("--card");
+                    let context = a.opt("--context");
                     let answer: Vec<String> = std::mem::take(&mut a.rest);
                     if answer.is_empty() {
                         die("give the answer: an option number, or text for \"Other\"");
@@ -3767,11 +3769,11 @@ fn main() {
                             t["card"]["hash"].as_str().unwrap_or_default().to_string()
                         }
                     };
-                    let r = or_die(d.call(
-                        "POST",
-                        &format!("/tasks/{id}/answer"),
-                        Some(&json!({"answer": answer_text(&answer), "hash": hash, "as": who})),
-                    ));
+                    let mut body = json!({"answer": answer_text(&answer), "hash": hash, "as": who});
+                    if let Some(c) = context {
+                        body["context"] = json!(c);
+                    }
+                    let r = or_die(d.call("POST", &format!("/tasks/{id}/answer"), Some(&body)));
                     println!(
                         "Answered task #{id}: {}",
                         r["answer"].as_str().unwrap_or("")
