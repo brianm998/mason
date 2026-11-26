@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 /// One held slot; dropping it releases the lock and this process's claim on it.
@@ -231,6 +231,31 @@ pub fn take(dir: &Path, limit: usize, patience: Duration) -> Option<Held> {
         }
         std::thread::sleep(Duration::from_millis(250));
     }
+}
+
+thread_local! {
+    /// Cloned into every [`Claim`] this thread makes, so its count says whether one lives.
+    static CLAIMING: Arc<()> = Arc::new(());
+}
+
+/// One scratch world's claim: a slot, or none when it went ahead without one.
+pub struct Claim {
+    pub held: Option<Held>,
+    _mark: Arc<()>,
+}
+
+/// [`take`] for a thread's first live claim. A thread (a test) that already has one takes a
+/// free slot or goes ahead at once: waiting could not end any other way if every slot were
+/// held by tests wanting another, and the machine ends up no more loaded than after the wait.
+pub fn claim(dir: &Path, limit: usize, patience: Duration) -> Claim {
+    let mark = CLAIMING.with(Arc::clone);
+    // The thread's own reference and `mark`; any more belong to live claims.
+    let held = if Arc::strong_count(&mark) > 2 {
+        try_take(dir, limit)
+    } else {
+        take(dir, limit, patience)
+    };
+    Claim { held, _mark: mark }
 }
 
 /// How many of the `limit` slots in `dir` are held right now, by anybody.
