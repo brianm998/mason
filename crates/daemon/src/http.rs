@@ -4304,6 +4304,8 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/nodes/update", post(crate::nodes::update))
         .route("/nodes/remove", post(crate::nodes::remove))
         .route("/nodes/use", post(crate::nodes::use_nodes))
+        .route("/nodes/sync", post(crate::nodes::sync))
+        .route("/nodes/show", post(crate::nodes::show))
         .route("/lan", get(crate::lan::status))
         .route("/pair/codes", post(crate::lan::issue_code))
         .route("/devices", get(crate::lan::devices))

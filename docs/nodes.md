@@ -546,6 +546,31 @@ mode = "remote"      # or "favor-remote", "favor-local", "local"
   still run on the coordinator.
 - A project with `[remote_runs]` keeps using `[remote_runs] mode`, which wins over `[placement]`.
 
+## A node's git state
+
+A node's mirrors (`<data>/node/mirrors/<coordinator>/<project>.git`) have no remote: they only
+get commits as bundles from the coordinator, so a `git fetch` or `git pull` there does nothing.
+MASON keeps them itself. Each job sends the project's base, and the node sets `origin/<base>`
+before the command runs. A finished run says which (`ran on node studio (arm64), 3 min, base: set
+develop@0123456789`).
+
+When the node cannot set it, or the coordinator cannot resolve it, the run is a node failure,
+never a red for the task: `origin/develop not set on node studio (base: failed: ...)`. The run
+goes to the next place; for a project that only runs on nodes it is retried later.
+
+On the coordinator:
+
+```
+mason node show studio                        # each mirror, its path and its origin/<name> commits
+mason node sync studio --project mason        # send the base again and re-set origin/<base>
+mason node sync studio --project mason --base release/1.0
+```
+
+`sync` sends a bundle of the base's whole history, as the coordinator's clone has it (it fetches
+nothing), and prints where `origin/<base>` is in the node's mirror. If git refuses (a `.lock` file
+left in the mirror, a full disk), it prints git's own words. While a job of the project runs on the
+node the ref only moves forward. Both commands need a node on this runtime (`mason node update`).
+
 ## When something goes wrong
 
 - **You turn the switch off.** No new job starts. Jobs already running finish and the iMac collects
