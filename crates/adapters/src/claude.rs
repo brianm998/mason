@@ -1560,7 +1560,11 @@ mod tests {
             let hook = &v["hooks"]["PreToolUse"][0];
             assert_eq!(hook["matcher"], "Bash");
             let command = hook["hooks"][0]["command"].as_str().unwrap();
-            let guard = format!("'/bin/mason{}' hook guard ||", std::env::consts::EXE_SUFFIX);
+            // Joined as `write_settings` joins it: the separator differs on Windows.
+            let mason = a
+                .mcp_bin
+                .with_file_name(format!("mason{}", std::env::consts::EXE_SUFFIX));
+            let guard = format!("'{}' hook guard ||", mason.display());
             assert!(command.starts_with(&guard), "{command}");
             assert!(command.contains("exit 2"), "{command}");
             let env = |k: &str| {
