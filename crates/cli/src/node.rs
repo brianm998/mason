@@ -10,7 +10,7 @@ use crate::client::Daemon;
 use crate::{die, finish, or_die, Args};
 use serde_json::{json, Value};
 
-pub const COMMANDS: &str = "node pair-code | accept on|off | status | doctor | jobs | stop-jobs | coordinators [remove NAME]  (on a node)\n       node list | add [NAME | --host H:PORT --fp FINGERPRINT] [--code C] [--name N] | remove NAME | use on|off | export-runtime --arch ARCH --out DIR  (on the coordinator)";
+pub const COMMANDS: &str = "node pair-code | accept on|off | status | doctor | jobs | stop-jobs | coordinators [remove NAME]  (on a node)\n       node list | add [NAME | --host H:PORT --fp FINGERPRINT] [--code C] [--name N] | remove NAME | use on|off | update NAME|--all | export-runtime --arch ARCH --out DIR  (on the coordinator)";
 
 fn s(v: &Value) -> &str {
     v.as_str().unwrap_or("?")
@@ -227,6 +227,9 @@ pub fn run(a: &mut Args, d: &Daemon, json_out: bool) {
                     format!("{}:{}", s(&n["host"]), n["port"]),
                     s(&n["state"])
                 );
+                if let Some(u) = n["update"].as_str().filter(|_| paired) {
+                    line.push_str(&format!("  [runtime: {u}]"));
+                }
                 if paired && n["cpu_pct"].is_number() {
                     line.push_str(&format!(
                         "  CPU {}  die {}  jobs {}/{}  compile free {}",
@@ -288,6 +291,32 @@ pub fn run(a: &mut Args, d: &Daemon, json_out: bool) {
                 return println!("{r:#}");
             }
             println!("{} is no longer paired", s(&r["removed"]));
+        }
+        "update" => {
+            let all = a.flag("--all");
+            let name = if all { None } else { a.pos() };
+            finish(a);
+            if !all && name.is_none() {
+                die("which node? `mason node update NAME` or `mason node update --all`");
+            }
+            as_owner();
+            let r = or_die(d.call(
+                "POST",
+                "/nodes/update",
+                Some(&json!({"name": name, "all": all})),
+            ));
+            if json_out {
+                return println!("{r:#}");
+            }
+            println!("runtime {}", s(&r["runtime"]));
+            for n in r["nodes"].as_array().into_iter().flatten() {
+                println!(
+                    "{:<16} {}: {}",
+                    s(&n["name"]),
+                    s(&n["state"]),
+                    s(&n["note"])
+                );
+            }
         }
         "use" => {
             let on = on_off(a, "mason node use");

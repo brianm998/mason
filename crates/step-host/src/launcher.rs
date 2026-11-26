@@ -4,7 +4,8 @@
 
 use crate::registry::HostInfo;
 use std::collections::HashMap;
-use std::io;
+use std::fs;
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Command, ExitStatus, Stdio};
@@ -191,11 +192,55 @@ pub fn spawn_host(o: &SpawnOptions) -> io::Result<HostInfo> {
     spawn_host_within(o, START_LIMIT)
 }
 
+/// The file in a host's directory that takes the host's own standard error (not its
+/// command's, which goes to the journal).
+pub const HOST_ERR: &str = "host.err";
+
+/// How much of [`HOST_ERR`] a failed launch carries back: this many bytes from its end,
+/// and of those this many lines.
+const ERR_TAIL_BYTES: u64 = 2000;
+const ERR_TAIL_LINES: usize = 5;
+
+/// The last lines this launch's host wrote to `path` (from byte `from` on), joined into one.
+fn err_tail(path: &Path, from: u64) -> String {
+    let Ok(mut f) = fs::File::open(path) else {
+        return String::new();
+    };
+    let len = f.metadata().map_or(0, |m| m.len());
+    let at = from.max(len.saturating_sub(ERR_TAIL_BYTES));
+    let mut buf = vec![];
+    if f.seek(SeekFrom::Start(at)).is_err() || f.read_to_end(&mut buf).is_err() {
+        return String::new();
+    }
+    let text = String::from_utf8_lossy(&buf);
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    lines[lines.len().saturating_sub(ERR_TAIL_LINES)..].join(" | ")
+}
+
+/// Take away what a launch that came to nothing left behind when there is nothing in it to
+/// read: an empty [`HOST_ERR`], and the directory if this launch made it and it is empty.
+fn discard_unused(dir: &Path, made: bool) {
+    let err = dir.join(HOST_ERR);
+    if fs::metadata(&err).is_ok_and(|m| m.len() == 0) {
+        let _ = fs::remove_file(&err);
+    }
+    if made {
+        let _ = fs::remove_dir(dir);
+    }
+}
+
 /// [`spawn_host`] with its own limit. A host that is not up by then is killed, so
 /// that a launch reported as failed cannot come up later and run its command for a
 /// step that has already been closed.
 pub fn spawn_host_within(o: &SpawnOptions, limit: Duration) -> io::Result<HostInfo> {
     let dir = o.root.join(&o.id);
+    // The host would refuse it too, but could only say so after it was started.
+    crate::host::check_sock_path(&dir.join("sock"))
+        .inspect_err(|e| eprintln!("step host {} cannot start: {e}", o.id))?;
     let mut cmd = Command::new(&o.host_bin);
     cmd.arg("--dir").arg(&dir).arg("--id").arg(&o.id);
     cmd.arg("--linger-ms").arg(o.linger.as_millis().to_string());
@@ -213,11 +258,22 @@ pub fn spawn_host_within(o: &SpawnOptions, limit: Duration) -> io::Result<HostIn
         cmd.arg("--env").arg(format!("{k}={v}"));
     }
     cmd.arg("--").args(&o.cmd);
+    let made = !dir.exists();
+    fs::create_dir_all(&dir)?;
+    let err_path = dir.join(HOST_ERR);
+    let err_file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&err_path)?;
+    // A second launch into the same directory reports only what its own host wrote.
+    let err_from = err_file.metadata().map_or(0, |m| m.len());
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(Stdio::from(err_file));
     mason_platform::process::detached(&mut cmd);
-    let mut child = cmd.spawn()?;
+    let spawned = cmd.spawn();
+    drop(cmd); // closes our handle on the error file
+    let mut child = spawned.inspect_err(|_| discard_unused(&dir, made))?;
     let _listed = LaunchGuard::new(&o.id, &o.root);
 
     let started = Instant::now();
@@ -231,12 +287,24 @@ pub fn spawn_host_within(o: &SpawnOptions, limit: Duration) -> io::Result<HostIn
         match child.try_wait() {
             Ok(None) => {}
             exited => {
-                if let Ok(Some(st)) = exited {
-                    note_exit(&dir, st);
-                }
+                let status = match exited {
+                    Ok(Some(st)) => {
+                        note_exit(&dir, st);
+                        st.to_string()
+                    }
+                    Ok(None) => "exit status unknown".to_string(),
+                    Err(e) => format!("exit status unknown: {e}"),
+                };
                 // It may have written its record and finished very quickly.
-                return HostInfo::read(&dir)
-                    .map_err(|_| io::Error::other("step host exited before it was up"));
+                return HostInfo::read(&dir).map_err(|_| {
+                    let said = match err_tail(&err_path, err_from) {
+                        t if t.is_empty() => "it wrote no error".to_string(),
+                        t => t,
+                    };
+                    let msg = format!("step host exited before it was up ({status}): {said}");
+                    eprintln!("step host {} in {}: {msg}", o.id, dir.display());
+                    io::Error::other(msg)
+                });
             }
         }
         let waited = started.elapsed();
@@ -244,6 +312,7 @@ pub fn spawn_host_within(o: &SpawnOptions, limit: Duration) -> io::Result<HostIn
             // Goes through `Child`, so it cannot reach a recycled pid. A process
             // frozen in its launch dies as soon as the launch lets go of it.
             let _ = child.kill();
+            discard_unused(&dir, made);
             break Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 format!(
