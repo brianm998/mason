@@ -555,7 +555,7 @@ pub fn run_with(
     // A `favor-local` placement stood for this run only (#832).
     if let (Some((t, s)), Some(project)) = (
         spec.place.as_ref(),
-        crate::remote::any_remote(d)
+        may_leave(d)
             .then(|| crate::remote::project_of(d, &spec.cwd))
             .flatten(),
     ) {
@@ -655,7 +655,7 @@ pub fn stop_unwanted(d: &Arc<Daemon>) -> usize {
 pub fn where_ran(d: &Arc<Daemon>, spec: &CheckSpec) -> String {
     use crate::remote as rm;
     let local = || "on this Mac".to_string();
-    if !rm::any_remote(d) {
+    if !may_leave(d) {
         return local();
     }
     let Some(project) = rm::project_of(d, &spec.cwd) else {
@@ -668,9 +668,20 @@ pub fn where_ran(d: &Arc<Daemon>, spec: &CheckSpec) -> String {
     };
     match exec {
         rm::Executor::GitHub { .. } => "on GitHub Actions".to_string(),
+        rm::Executor::Node { name, .. } if name.is_empty() => "on a node".to_string(),
         rm::Executor::Node { name, .. } => format!("on node {name}"),
         rm::Executor::Local => local(),
     }
+}
+
+/// Can any run leave this machine at all: a project has `[remote_runs]`, or nodes are on or a
+/// project is nodes only? Cheap: lets a seam skip finding its project.
+fn may_leave(d: &Daemon) -> bool {
+    crate::remote::any_remote(d)
+        || d.projects()
+            .values()
+            .any(|p| p.services.placement.is_some())
+        || d.nodes.cfg(&d.cfg.config_dir).enabled
 }
 
 /// Where `spec` goes when it leaves this machine, decided before anything is queued (#759).
@@ -693,8 +704,7 @@ fn runs_on_github(d: &Arc<Daemon>, spec: &CheckSpec) -> Option<String> {
     }
     match executor_of(d, spec)? {
         rm::Executor::GitHub { runs_on } => Some(runs_on),
-        // A node run takes none of this Mac's slots either; `goes_remote` learns that in phase 2
-        // when placement can produce one.
+        // A node run is `node_for`'s.
         rm::Executor::Node { .. } | rm::Executor::Local => None,
     }
 }
@@ -702,9 +712,11 @@ fn runs_on_github(d: &Arc<Daemon>, spec: &CheckSpec) -> Option<String> {
 /// The node `spec` goes to, when `[nodes]` is on and placement says so.
 fn node_for(d: &Arc<Daemon>, spec: &CheckSpec) -> Option<(String, String)> {
     use crate::remote as rm;
-    if !d.nodes.cfg(&d.cfg.config_dir).enabled {
+    if !may_leave(d) {
         return None;
     }
+    // A node is named only with `[nodes] enabled`; a nodes-only run waiting for one is a node run
+    // even while nodes are off.
     match executor_of(d, spec)? {
         rm::Executor::Node { nid, name } => Some((nid, name)),
         _ => None,
@@ -723,6 +735,16 @@ pub fn pool_units(
         &runs_on,
         crate::remote::jobs_of(suite, &spec.cmd),
     ))
+}
+
+/// What `spec` holds when it goes to a node: one unit of that node, and nothing of this machine.
+/// `None`: it does not go to a node (it runs here or on GitHub).
+pub fn node_units(
+    d: &Arc<Daemon>,
+    spec: &CheckSpec,
+) -> Option<std::collections::BTreeMap<String, u32>> {
+    let (nid, _) = node_for(d, spec)?;
+    Some(crate::remote::node_units_of(&nid))
 }
 
 /// Does `spec` leave this machine, for GitHub or a node? Then it needs no local `compile` or
@@ -976,6 +998,10 @@ fn node_check(
                 return None;
             }
             Err(rm::Fail::Error(e)) => Err(e),
+            // A wait for a node ends with the daemon: that is no verdict on the check.
+            Ok(rm::Outcome::Stopped(rm::StopWhy::Gone)) if d.is_shutting_down() => {
+                Err("the daemon is stopping; run the check again".into())
+            }
             Ok(rm::Outcome::Stopped(_)) => Ok(CheckOutcome {
                 passed: false,
                 timed_out: false,
@@ -1033,15 +1059,20 @@ fn collect(
     }
     // Meant for GitHub but sent here (`fallback = "local"`): it skipped this machine's queue,
     // so it takes the slots it holds when placed here before it starts, under the same limits
-    // and CPU and thermal holds as any local run. Held until the command ends.
+    // and CPU and thermal holds as any local run. What the caller's lease already holds is not
+    // asked for again (#1149). Held until the command ends.
     let _fallback = if bound_remote && !dir_has_host(d, id) {
         match crate::remote::project_of(d, &spec.cwd) {
-            Some(project) => match crate::remote::fallback_lease_until(
+            Some(project) => match crate::remote::fallback_lease_under(
                 d,
                 &project,
-                spec.place.as_ref().and_then(|(t, _)| *t),
+                spec.place
+                    .as_ref()
+                    .and_then(|(t, _)| *t)
+                    .or_else(|| check_owner(id).map(|(t, _)| mason_core::TaskId(t))),
                 &spec.holds,
                 &format!("{} (no GitHub runner, run here)", spec.label),
+                grant,
                 // A skip ends the wait for this machine's slots too (#873).
                 &|| spec.stop.as_ref().is_some_and(|f| f().is_some()),
             ) {

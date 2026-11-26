@@ -474,6 +474,11 @@ struct State {
     by_task: HashMap<TaskId, u64>,
     /// The task a `mason run` lease was opened for, when it names one.
     lease_tasks: HashMap<u64, TaskId>,
+    /// Requests that keep a lease their own caller holds from being released until they end
+    /// (#1149): the request's id to that lease's.
+    self_waits: BTreeMap<u64, u64>,
+    /// The self-deadlocks already logged, by resource, so each is logged once while it lasts.
+    deadlocks_logged: BTreeSet<String>,
     /// Where a `mason run` lease came from (`--origin`, else the caller's working directory),
     /// by lease id (s527).
     origins: HashMap<u64, String>,
@@ -608,6 +613,58 @@ pub struct WaitAlert {
 /// After this long on a kernel lock the task's wait says what it waits for.
 const KERNEL_WAIT_SAYS_AFTER: Duration = Duration::from_secs(60);
 
+/// Each self-deadlock in the ledger as it is: the resource and what to tell the owner.
+fn deadlocks_in(st: &State) -> Vec<(String, String)> {
+    if st.self_waits.is_empty() {
+        return vec![];
+    }
+    mason_scheduler::self_deadlocks(&st.ledger.snapshot(), &st.self_waits)
+        .into_iter()
+        .map(|d| {
+            let text = format!(
+                "Deadlock on {r}: every unit is held by {who}, and each waits for another {r} \
+                 unit for its own check, which cannot come free until that check ends. Raise the \
+                 limit: mason resources limit {r} {n}",
+                r = d.resource,
+                who = d.holders.join(", "),
+                n = d.unblocking_limit,
+            );
+            (d.resource, text)
+        })
+        .collect()
+}
+
+/// Why `r` waits, when it is for a unit its own caller holds (#1149): the resources it asks for
+/// that are full and that the lease it keeps from being released has units of.
+fn own_slot_wait(
+    st: &State,
+    snap: &mason_scheduler::Snapshot,
+    r: &mason_scheduler::Request,
+    task: Option<&u64>,
+) -> Option<String> {
+    let held = st.self_waits.get(&r.id)?;
+    let own = snap.holders.iter().find(|h| h.id == *held)?;
+    let full: Vec<&str> = r
+        .needs
+        .amounts
+        .iter()
+        .filter(|(name, n)| {
+            own.needs.amounts.get(*name).copied().unwrap_or(0) > 0
+                && snap.used.get(*name).copied().unwrap_or(0) + **n
+                    > snap.capacity.get(*name).map_or(0, |c| c.units)
+        })
+        .map(|(name, _)| name.as_str())
+        .collect();
+    if full.is_empty() {
+        return None;
+    }
+    let who = task.map_or_else(|| own.label.clone(), |t| format!("#{t}"));
+    Some(format!(
+        "Waiting for a slot its own agent holds ({who}): {}",
+        full.join(", ")
+    ))
+}
+
 /// Per waiting task: its holders' grant times and the waiting count of its class.
 pub type WaitHolders = BTreeMap<TaskId, (Vec<u64>, u32, u32)>;
 
@@ -686,6 +743,12 @@ pub struct CompileHolderInfo {
     pub pid: u32,
 }
 
+/// Is `name` a resource of this machine (not an LLM session, a node's units or a GitHub runner
+/// pool)?
+fn is_local_slot(name: &str) -> bool {
+    !name.starts_with("llm:") && !name.starts_with("node:") && !mason_scheduler::is_gha_pool(name)
+}
+
 /// What a granted resource set looks like to the holder. Dropping it releases
 /// the kernel locks and the lease, and wakes the next waiter.
 pub struct Lease {
@@ -701,6 +764,8 @@ pub struct Lease {
     label: String,
     /// The request was flexible: `amounts` is what it was given, not what it asked for.
     flex: bool,
+    /// The lease holds the whole machine.
+    exclusive: bool,
 }
 
 impl Lease {
@@ -715,6 +780,33 @@ impl Lease {
     pub fn granted_runners(&self) -> Option<u32> {
         self.flex
             .then(|| self.amounts.get(GHA).copied().unwrap_or(1).max(1))
+    }
+
+    /// What of `uses` this lease does not already hold (#1149): a run whose caller holds this
+    /// lease while it runs asks the broker for that much only. An exclusive lease covers every
+    /// slot of this machine.
+    pub fn shortfall(&self, uses: &BTreeMap<String, u32>) -> BTreeMap<String, u32> {
+        uses.iter()
+            .filter_map(|(name, n)| {
+                let short = if name == EXCLUSIVE {
+                    if self.exclusive {
+                        0
+                    } else {
+                        *n
+                    }
+                } else if self.exclusive && is_local_slot(name) {
+                    0
+                } else {
+                    n.saturating_sub(self.amounts.get(name).copied().unwrap_or(0))
+                };
+                (short > 0).then(|| (name.clone(), short))
+            })
+            .collect()
+    }
+
+    /// Does this lease hold any slot of this machine?
+    pub fn holds_local_slot(&self) -> bool {
+        self.exclusive || self.amounts.iter().any(|(k, n)| *n > 0 && is_local_slot(k))
     }
 
     /// The runner units (`gha`, `gha-macos`) this lease holds.
@@ -803,6 +895,7 @@ impl Giver {
             None,
             false,
             Some((self.rank, self.asked_ms)),
+            None,
         )
     }
 }
@@ -1013,6 +1106,8 @@ impl Broker {
                 cpu_busy: None,
                 priority_first: cfg.priority_first,
                 lease_tasks: HashMap::new(),
+                self_waits: BTreeMap::new(),
+                deadlocks_logged: BTreeSet::new(),
                 origins: HashMap::new(),
                 wait_credit: HashMap::new(),
                 idle: HashMap::new(),
@@ -1833,6 +1928,13 @@ impl Broker {
         if changed || !p.grants.is_empty() {
             self.cv.notify_all();
         }
+        let stuck = deadlocks_in(st);
+        for (resource, text) in &stuck {
+            if !st.deadlocks_logged.contains(resource) {
+                tracing::error!(%resource, "{text}");
+            }
+        }
+        st.deadlocks_logged = stuck.into_iter().map(|(r, _)| r).collect();
         self.publish_waits(st, now, free, floor, gate);
     }
 
@@ -2251,7 +2353,9 @@ impl Broker {
         alive: &dyn Fn() -> bool,
         on_wait: &mut dyn FnMut(&str),
     ) -> Result<Lease, Cancelled> {
-        self.acquire_as(task, label, rank, needs, alive, on_wait, false, None, false)
+        self.acquire_as(
+            task, label, rank, needs, alive, on_wait, false, None, false, None,
+        )
     }
 
     /// [`Broker::acquire`] with how long the work is expected to hold it (s385), so it may
@@ -2279,6 +2383,7 @@ impl Broker {
             beside,
             expected_ms,
             false,
+            None,
         )
     }
 
@@ -2294,7 +2399,36 @@ impl Broker {
         alive: &dyn Fn() -> bool,
         on_wait: &mut dyn FnMut(&str),
     ) -> Result<Lease, Cancelled> {
-        self.acquire_as(task, label, rank, needs, alive, on_wait, true, None, false)
+        self.acquire_as(
+            task, label, rank, needs, alive, on_wait, true, None, false, None,
+        )
+    }
+
+    /// [`Broker::acquire_beside`] for a check whose caller holds the lease `blocks`, a slot of
+    /// this machine, until the check ends (#1149). The request is ranked ahead of all other
+    /// pipeline work but a landing ([`Rank::holding`]), so it does not wait behind other tasks'
+    /// step starts, and is recorded so that a self-deadlock is seen and explained.
+    pub fn acquire_for_check(
+        self: &Arc<Self>,
+        task: TaskId,
+        label: &str,
+        rank: Rank,
+        needs: Needs,
+        blocks: u64,
+        alive: &dyn Fn() -> bool,
+    ) -> Result<Lease, Cancelled> {
+        self.acquire_as(
+            task,
+            label,
+            rank,
+            needs,
+            alive,
+            &mut |_| {},
+            true,
+            None,
+            false,
+            Some(blocks),
+        )
     }
 
     /// [`Broker::acquire_beside`] that never queues (#1025): the lease when it is granted at once,
@@ -2317,6 +2451,7 @@ impl Broker {
             true,
             None,
             true,
+            None,
         )
     }
 
@@ -2332,6 +2467,7 @@ impl Broker {
         beside: bool,
         expected_ms: Option<u64>,
         nowait: bool,
+        blocks: Option<u64>,
     ) -> Result<Lease, Cancelled> {
         self.acquire_at(
             task,
@@ -2344,6 +2480,7 @@ impl Broker {
             expected_ms,
             nowait,
             None,
+            blocks,
         )
     }
 
@@ -2363,12 +2500,21 @@ impl Broker {
         expected_ms: Option<u64>,
         nowait: bool,
         again: Option<(Rank, u64)>,
+        blocks: Option<u64>,
     ) -> Result<Lease, Cancelled> {
         let (rank, asked_ms) = {
             let st = lock(&self.st);
             match again {
                 Some((r, since)) => (r, since),
-                None => (order(&st, rank), crate::daemon::now_ms()),
+                None => {
+                    // A check whose caller holds a slot until it ends goes ahead of other
+                    // pipeline work (#1149).
+                    let rank = match blocks {
+                        Some(_) => rank.holding(),
+                        None => rank,
+                    };
+                    (order(&st, rank), crate::daemon::now_ms())
+                }
             }
         };
         let id = {
@@ -2376,6 +2522,9 @@ impl Broker {
             let id = st.ledger.submit(rank, needs.clone(), label, asked_ms);
             st.ledger.set_expected(id, expected_ms);
             st.meta.insert(id, Meta::Task);
+            if let Some(held) = blocks {
+                st.self_waits.insert(id, held);
+            }
             if beside {
                 st.lease_tasks.insert(id, task);
             } else {
@@ -2407,6 +2556,7 @@ impl Broker {
             if !st.ledger.is_waiting(id) {
                 st.meta.remove(&id);
                 st.lease_tasks.remove(&id);
+                st.self_waits.remove(&id);
                 if st.by_task.get(&task) == Some(&id) {
                     st.by_task.remove(&task);
                 }
@@ -2527,7 +2677,11 @@ impl Broker {
                 return Err(Cancelled);
             }
         };
-        lock(&self.st).kernel_waits.remove(&id);
+        {
+            let mut st = lock(&self.st);
+            st.kernel_waits.remove(&id);
+            st.self_waits.remove(&id);
+        }
         Ok(Lease {
             b: self.clone(),
             id,
@@ -2538,6 +2692,7 @@ impl Broker {
             asked_ms,
             label: label.to_string(),
             flex: needs.flex,
+            exclusive: needs.exclusive,
         })
     }
 
@@ -2660,6 +2815,11 @@ impl Broker {
         out
     }
 
+    /// The resources stuck in a self-deadlock now (#1149), each with the alert's text.
+    pub fn deadlock_alerts(&self) -> Vec<(String, String)> {
+        deadlocks_in(&lock(&self.st))
+    }
+
     /// Test seam: how long a grant waits for kernel locks before it says so.
     pub fn set_kernel_says_after(&self, after: Duration) {
         *self
@@ -2678,6 +2838,7 @@ impl Broker {
         st.ledger.release(id);
         st.meta.remove(&id);
         st.lease_tasks.remove(&id);
+        st.self_waits.remove(&id);
         if let Some(t) = task {
             if st.by_task.get(&t) == Some(&id) {
                 st.by_task.remove(&t);
@@ -3176,6 +3337,7 @@ impl Broker {
         let had = st.ledger.release(id);
         st.meta.remove(&id);
         st.lease_tasks.remove(&id);
+        st.self_waits.remove(&id);
         st.update_leases.remove(&id);
         st = self.pass(st);
         drop(st);
@@ -3547,6 +3709,7 @@ impl Broker {
                     (_, w) => w.map(|w| explain(w, now)),
                 };
                 let (label, command) = mason_scheduler::label_parts(&r.label);
+                let explain = own_slot_wait(&st, &snap, r, task_of.get(&r.id)).or(explain);
                 json!({
                     "label": label,
                     "command": command,
