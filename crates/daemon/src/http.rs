@@ -236,6 +236,7 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
                 "started_at": r.started_at.0,
                 "outcome": r.outcome.map(|o| format!("{o:?}").to_lowercase()),
                 "launches": crate::launchview::history(d, r.id.0).iter().map(crate::launchview::json_of).collect::<Vec<_>>(),
+                "skills": crate::skills::invoked(&d.task_dir(t.id), r.id.0),
             }))
             .collect::<Vec<_>>());
         // What each run said it tried and gave up (task 1128), newest first.

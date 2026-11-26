@@ -98,8 +98,8 @@ pub enum Fleet {
     Sending,
     /// Sent; the node has not reported it yet.
     Sent,
-    /// Installed on the node, which takes over when its `n` jobs have ended.
-    WaitingForJobs(u32),
+    /// Installed on the node, which takes over now; its `n` running jobs carry on through it.
+    Installed(u32),
     Failed(String),
     /// Off, or not answering: it is sent the runtime when it next answers.
     WillUpdateWhenBack,
@@ -115,7 +115,7 @@ impl Fleet {
             Fleet::Building(_) => "building",
             Fleet::Sending => "sending",
             Fleet::Sent => "sent",
-            Fleet::WaitingForJobs(_) => "installing",
+            Fleet::Installed(_) => "installing",
             Fleet::Failed(_) => "failed",
             Fleet::WillUpdateWhenBack => "pending",
             Fleet::Queued => "queued",
@@ -129,10 +129,10 @@ impl Fleet {
             Fleet::Building(arch) => format!("building for {arch}"),
             Fleet::Sending => "sending the new runtime".into(),
             Fleet::Sent => "sent; installing".into(),
-            Fleet::WaitingForJobs(0) => "installed; taking over now".into(),
-            Fleet::WaitingForJobs(n) => format!(
-                "installed; waiting for {n} job{} to end",
-                if *n == 1 { "" } else { "s" }
+            Fleet::Installed(0) => "installed; taking over now".into(),
+            Fleet::Installed(n) => format!(
+                "installed; taking over now, {n} running job{}",
+                if *n == 1 { " carries on" } else { "s carry on" }
             ),
             Fleet::Failed(why) => format!("failed ({why})"),
             Fleet::WillUpdateWhenBack => "will update when it returns".into(),
@@ -161,7 +161,7 @@ pub fn fleet_state(
                 .as_array()
                 .is_some_and(|a| a.iter().any(|x| x.as_str() == Some(goal)));
         if held {
-            return Fleet::WaitingForJobs(s["jobs"]["running"].as_u64().unwrap_or(0) as u32);
+            return Fleet::Installed(s["jobs"]["running"].as_u64().unwrap_or(0) as u32);
         }
     }
     match rec.filter(|r| r.sha == goal).map(|r| &r.phase) {
@@ -599,7 +599,7 @@ pub fn deliver(
     }
     let mut sent = 0;
     for (_, name, f) in states_for(d, target) {
-        if matches!(f, Fleet::Sent | Fleet::WaitingForJobs(_)) {
+        if matches!(f, Fleet::Sent | Fleet::Installed(_)) {
             sent += 1;
         }
         log(d, format!("node {name}: {} ({})", f.text(), short(target)));
@@ -636,14 +636,11 @@ mod tests {
         );
         assert_eq!(go(Some(&old), Some(rec(Phase::Sending))), Fleet::Sending);
         assert_eq!(go(Some(&old), Some(rec(Phase::Sent))), Fleet::Sent);
-        // Installed: the node lists it and waits for its jobs.
+        // Installed: the node lists it and takes over, its jobs carrying on.
         let held = status(Some("b"), &["b", SHA], 2);
-        assert_eq!(
-            go(Some(&held), Some(rec(Phase::Sent))),
-            Fleet::WaitingForJobs(2)
-        );
+        assert_eq!(go(Some(&held), Some(rec(Phase::Sent))), Fleet::Installed(2));
         let pending = json!({"runtime_sha": "b", "runtimes": [], "pending_runtime": SHA, "jobs": {"running": 1}});
-        assert_eq!(go(Some(&pending), None), Fleet::WaitingForJobs(1));
+        assert_eq!(go(Some(&pending), None), Fleet::Installed(1));
         let now = status(Some(SHA), &[SHA], 0);
         assert_eq!(go(Some(&now), Some(rec(Phase::Sent))), Fleet::UpToDate);
     }
@@ -677,12 +674,12 @@ mod tests {
             (Fleet::Building("arm64".into()), "building for arm64"),
             (Fleet::UpToDate, "up to date"),
             (
-                Fleet::WaitingForJobs(3),
-                "installed; waiting for 3 jobs to end",
+                Fleet::Installed(3),
+                "installed; taking over now, 3 running jobs carry on",
             ),
             (
-                Fleet::WaitingForJobs(1),
-                "installed; waiting for 1 job to end",
+                Fleet::Installed(1),
+                "installed; taking over now, 1 running job carries on",
             ),
             (Fleet::Failed("x".into()), "failed (x)"),
         ] {

@@ -3912,6 +3912,11 @@ pub(crate) fn adapter_for(
                 .with_host(host);
             a.env_file = Some(d.cfg.config_dir.join("claude.env"));
             a.sandbox = sandbox;
+            // From the base commit, never the worktree (s1153).
+            a.skills = mason_adapters::skills::Skills {
+                project: crate::skills::load(project),
+                user: !agent.user_skills_off,
+            };
             Box::new(a)
         }
         Provider::Codex => {
@@ -4469,8 +4474,12 @@ fn agent_job(c: &Ctx) {
         contract.set_on_progress(Arc::new(move |r| d.progress_agent_report(run, r)));
         let (d, run) = (c.d.clone(), c.run);
         let seen = seen.clone();
+        let task_dir = dir.clone();
         spec.on_agent_event = Some(Arc::new(move |ev| {
             seen.touch();
+            if let mason_adapter_api::AgentEvent::Skill { name } = ev {
+                crate::skills::record(&task_dir, run.0, name);
+            }
             d.progress_agent_event(run, ev)
         }));
     }
