@@ -92,6 +92,7 @@ mod row_bodies;
 mod selfguard;
 mod settings;
 mod single;
+mod skills;
 mod stall;
 mod stop;
 mod stuck;
