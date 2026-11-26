@@ -256,13 +256,16 @@ fn overage_hold_holds_at_the_plan_limit_and_allow_carries_on() {
         ..Default::default()
     };
     // The default is hold.
-    let s = Scratch::new("true", happy_script());
-    let d = s.start();
-    mason_daemon::usage::record_snapshot(&d, "claude", &in_use(now() + 3600));
-    let h = holds::hold_of(&d, "claude").expect("held at the plan's own limit");
-    assert_eq!(h.kind, "overage");
-    assert!(matches!(holds::gate(&d, "claude", 1), holds::Gate::Wait(_)));
-    assert!(alerts(&d).iter().any(|a| a.1 == "provider_overage"));
+    // One world at a time: a test holding two can deadlock another on the world slots.
+    {
+        let s = Scratch::new("true", happy_script());
+        let d = s.start();
+        mason_daemon::usage::record_snapshot(&d, "claude", &in_use(now() + 3600));
+        let h = holds::hold_of(&d, "claude").expect("held at the plan's own limit");
+        assert_eq!(h.kind, "overage");
+        assert!(matches!(holds::gate(&d, "claude", 1), holds::Gate::Wait(_)));
+        assert!(alerts(&d).iter().any(|a| a.1 == "provider_overage"));
+    }
 
     // `allow`: work carries on and the monitors show extra billing and its cost.
     let s = Scratch::new("true", happy_script());
@@ -289,9 +292,6 @@ fn overage_hold_holds_at_the_plan_limit_and_allow_carries_on() {
 
 #[test]
 fn warn_at_warns_once_per_window_per_reset_and_projects_only_with_two_readings() {
-    let s = Scratch::new("true", happy_script());
-    let d = s.start();
-    let t0 = now() - 1200;
     let reset = now() + 10_000;
     let snap = |u: f64, at: u64, reset: u64| UsageSnapshot {
         windows: vec![Window {
@@ -305,40 +305,46 @@ fn warn_at_warns_once_per_window_per_reset_and_projects_only_with_two_readings()
         observed_at: Some(at),
         ..Default::default()
     };
-    let warns = |d: &Arc<Daemon>| -> Vec<(String, String, String)> {
-        alerts(d)
-            .into_iter()
-            .filter(|a| a.1 == "provider_warning")
-            .collect()
-    };
-    let rec = |u, at, r| mason_daemon::usage::record_snapshot(&d, "claude", &snap(u, at, r));
-    rec(0.5, t0, reset);
-    assert!(warns(&d).is_empty(), "below warn_at");
-    rec(0.82, t0 + 600, reset);
-    let w = warns(&d);
-    assert_eq!(w.len(), 1);
-    assert!(
-        w[0].2.contains("82%") && w[0].2.contains("resets"),
-        "{}",
-        w[0].2
-    );
-    rec(0.84, t0 + 1200, reset);
-    assert_eq!(warns(&d).len(), 1, "once per window per reset");
-    assert!(warns(&d)[0].2.contains("recent rate"), "{}", warns(&d)[0].2);
-    assert!(
-        holds::hold_of(&d, "claude").is_none(),
-        "a warning holds nothing"
-    );
-    // Another reset is another window, and warns again.
-    rec(0.9, t0 + 1300, reset + 7 * 86400);
-    assert_eq!(d.store.warnings().unwrap().len(), 2);
-    let w = warns(&d);
-    assert_eq!(w.len(), 1, "the earlier window is over");
-    assert!(
-        w[0].0.ends_with(&(reset + 7 * 86400).to_string()),
-        "{}",
-        w[0].0
-    );
+    // One world at a time: a test holding two can deadlock another on the world slots.
+    {
+        let s = Scratch::new("true", happy_script());
+        let d = s.start();
+        let t0 = now() - 1200;
+        let warns = |d: &Arc<Daemon>| -> Vec<(String, String, String)> {
+            alerts(d)
+                .into_iter()
+                .filter(|a| a.1 == "provider_warning")
+                .collect()
+        };
+        let rec = |u, at, r| mason_daemon::usage::record_snapshot(&d, "claude", &snap(u, at, r));
+        rec(0.5, t0, reset);
+        assert!(warns(&d).is_empty(), "below warn_at");
+        rec(0.82, t0 + 600, reset);
+        let w = warns(&d);
+        assert_eq!(w.len(), 1);
+        assert!(
+            w[0].2.contains("82%") && w[0].2.contains("resets"),
+            "{}",
+            w[0].2
+        );
+        rec(0.84, t0 + 1200, reset);
+        assert_eq!(warns(&d).len(), 1, "once per window per reset");
+        assert!(warns(&d)[0].2.contains("recent rate"), "{}", warns(&d)[0].2);
+        assert!(
+            holds::hold_of(&d, "claude").is_none(),
+            "a warning holds nothing"
+        );
+        // Another reset is another window, and warns again.
+        rec(0.9, t0 + 1300, reset + 7 * 86400);
+        assert_eq!(d.store.warnings().unwrap().len(), 2);
+        let w = warns(&d);
+        assert_eq!(w.len(), 1, "the earlier window is over");
+        assert!(
+            w[0].0.ends_with(&(reset + 7 * 86400).to_string()),
+            "{}",
+            w[0].0
+        );
+    }
 
     // The first warning of a fresh window carries no projection.
     let s = Scratch::new("true", happy_script());

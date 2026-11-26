@@ -209,37 +209,40 @@ fn a_task_may_file_three_and_a_project_twenty_a_day() {
 
 #[test]
 fn policy_by_source_and_severity_decides_proposed_or_queued() {
-    let p = setup("", "", false);
-    let (d, c) = (&p.w.d, pid(&p.w.d, CLIENT));
     let ev = format!("{CLIENT_FILE}:7 the thing that was noticed");
-    let a = proposals::file(
-        d,
-        &filing(p.client, c, "noticed something minor", &ev, false),
-    )
-    .unwrap();
-    let b = proposals::file(
-        d,
-        &filing(p.client, c, "cannot finish without a fix", &ev, true),
-    )
-    .unwrap();
-    assert!(a.proposed && !b.proposed);
-    assert_eq!(state_of(d, a.task), State::Proposed);
-    assert!(
-        matches!(
-            state_of(d, b.task),
-            State::Queued | State::Exploring | State::Developing
-        ),
-        "{:?}",
-        state_of(d, b.task)
-    );
-    assert_eq!(
-        d.store.proposal(a.task.0).unwrap().unwrap().severity,
-        "normal"
-    );
-    assert_eq!(
-        d.store.proposal(b.task.0).unwrap().unwrap().severity,
-        "blocks"
-    );
+    // One world at a time: a test holding two can deadlock another on the world slots.
+    {
+        let p = setup("", "", false);
+        let (d, c) = (&p.w.d, pid(&p.w.d, CLIENT));
+        let a = proposals::file(
+            d,
+            &filing(p.client, c, "noticed something minor", &ev, false),
+        )
+        .unwrap();
+        let b = proposals::file(
+            d,
+            &filing(p.client, c, "cannot finish without a fix", &ev, true),
+        )
+        .unwrap();
+        assert!(a.proposed && !b.proposed);
+        assert_eq!(state_of(d, a.task), State::Proposed);
+        assert!(
+            matches!(
+                state_of(d, b.task),
+                State::Queued | State::Exploring | State::Developing
+            ),
+            "{:?}",
+            state_of(d, b.task)
+        );
+        assert_eq!(
+            d.store.proposal(a.task.0).unwrap().unwrap().severity,
+            "normal"
+        );
+        assert_eq!(
+            d.store.proposal(b.task.0).unwrap().unwrap().severity,
+            "blocks"
+        );
+    }
 
     // The owner's table: everything an agent files runs, but what blocks still goes to the owner.
     let p = setup(

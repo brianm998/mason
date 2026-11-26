@@ -220,14 +220,17 @@ fn front_matter_and_the_flag_reach_the_task_through_the_filing_helpers() {
 fn explore_anyway_before_a_task_starts_and_after_it_skipped_exploring() {
     // Before it starts: pause it so it cannot be claimed, ask, resume.
     let unique = json!({"steps": {"explore": [explore_turn()], "develop": [[{"sh": UNIQUE_COMMIT}, {"call": {"tool": "submit_change", "args": {"summary": "x", "head": "$HEAD"}}}]]}});
-    let s = scratch_with(Some(DEF_SKIP), unique);
-    let d = s.start();
-    let t = flagged(&d, "Wants exploring after all");
-    // The task may already have been admitted; use a second, held task for the "before" case.
-    wait_state(&d, t, State::Landed, 90);
-    let held = flagged(&d, "Held, then explore anyway");
-    // (Race-free: pause before admission is not possible here, so check the reducer path below instead.)
-    wait_state(&d, held, State::Landed, 90);
+    // One world at a time: a test holding two can deadlock another on the world slots.
+    {
+        let s = scratch_with(Some(DEF_SKIP), unique);
+        let d = s.start();
+        let t = flagged(&d, "Wants exploring after all");
+        // The task may already have been admitted; use a second, held task for the "before" case.
+        wait_state(&d, t, State::Landed, 90);
+        let held = flagged(&d, "Held, then explore anyway");
+        // (Race-free: pause before admission is not possible here, so check the reducer path below instead.)
+        wait_state(&d, held, State::Landed, 90);
+    }
 
     // After a skip: a long-running develop, interrupted by "Explore anyway".
     let develop = json!([
@@ -321,12 +324,15 @@ fn request_exploration_sends_a_skipped_task_back_and_charges_no_failure() {
 #[test]
 fn two_different_definitions_run_through_the_same_daemon() {
     // Project one: the built-in-shaped graph. Project two: no exploring, an extra lint step.
-    let s = scratch_with(Some(DEF_SKIP), happy_script());
-    let d = s.start();
-    let t = file_task_as(&d, "A", "Make it so.", false, TrustSource::Owner, false);
-    wait_state(&d, t, State::Landed, 90);
-    assert_eq!(steps_run(&d, t), vec!["explore", "develop", "test", "land"]);
-
+    // One world at a time: a test holding two can deadlock another on the world slots.
+    let first = {
+        let s = scratch_with(Some(DEF_SKIP), happy_script());
+        let d = s.start();
+        let t = file_task_as(&d, "A", "Make it so.", false, TrustSource::Owner, false);
+        wait_state(&d, t, State::Landed, 90);
+        assert_eq!(steps_run(&d, t), vec!["explore", "develop", "test", "land"]);
+        task_of(&d, t).def
+    };
     let s2 = scratch_with(
         Some(DEF_LINT),
         json!({"steps": {"develop": [develop_turn()]}}),
@@ -335,7 +341,7 @@ fn two_different_definitions_run_through_the_same_daemon() {
     let u = file_task_as(&d2, "B", "Make it so.", false, TrustSource::Owner, false);
     wait_state(&d2, u, State::Landed, 90);
     assert_eq!(steps_run(&d2, u), vec!["develop", "lint", "test", "land"]);
-    assert_ne!(task_of(&d, t).def, task_of(&d2, u).def);
+    assert_ne!(first, task_of(&d2, u).def);
     // The lint step really ran its own command, and its output is in the logs.
     assert!(mason_daemon::http::render_logs(&d2, u.0).contains("(test)"));
 }

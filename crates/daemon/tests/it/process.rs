@@ -157,25 +157,28 @@ fn http_post(port: u16, path: &str) -> String {
 
 #[test]
 fn the_watchdog_notices_when_the_event_loop_is_blocked() {
-    let s = Scratch::new("true", happy_script());
-    let mut m = s.masond(&["--debug"], &[]);
-    s.wait_daemon(&mut m);
-    let before: Value = serde_json::from_str(&s.mason_ok(&["status", "--json"])).unwrap();
-    assert_eq!(before["event_loop_stalls"], 0);
+    // One world at a time: a test holding two can deadlock another on the world slots.
+    {
+        let s = Scratch::new("true", happy_script());
+        let mut m = s.masond(&["--debug"], &[]);
+        s.wait_daemon(&mut m);
+        let before: Value = serde_json::from_str(&s.mason_ok(&["status", "--json"])).unwrap();
+        assert_eq!(before["event_loop_stalls"], 0);
 
-    let info: Value =
-        serde_json::from_str(&std::fs::read_to_string(s.data_dir.join("daemon.json")).unwrap())
-            .unwrap();
-    let reply = http_post(
-        info["port"].as_u64().unwrap() as u16,
-        "/debug/stall?ms=1200",
-    ); // blocks the loop on purpose
-    assert!(reply.contains("blocked_ms"), "{reply}");
-    wait_for("the watchdog to report", 10, || {
-        let v: Value = serde_json::from_str(&s.mason_ok(&["status", "--json"])).unwrap();
-        v["event_loop_stalls"].as_u64().unwrap_or(0) >= 1
-            && v["worst_stall_ms"].as_u64().unwrap_or(0) >= 500
-    });
+        let info: Value =
+            serde_json::from_str(&std::fs::read_to_string(s.data_dir.join("daemon.json")).unwrap())
+                .unwrap();
+        let reply = http_post(
+            info["port"].as_u64().unwrap() as u16,
+            "/debug/stall?ms=1200",
+        ); // blocks the loop on purpose
+        assert!(reply.contains("blocked_ms"), "{reply}");
+        wait_for("the watchdog to report", 10, || {
+            let v: Value = serde_json::from_str(&s.mason_ok(&["status", "--json"])).unwrap();
+            v["event_loop_stalls"].as_u64().unwrap_or(0) >= 1
+                && v["worst_stall_ms"].as_u64().unwrap_or(0) >= 500
+        });
+    }
     // Without --debug the endpoint does not exist.
     let s2 = Scratch::new("true", happy_script());
     let mut m2 = s2.masond(&[], &[]);
