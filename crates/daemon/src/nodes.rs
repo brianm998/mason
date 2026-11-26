@@ -674,6 +674,12 @@ pub fn resource(nid: &str) -> String {
     format!("node:{nid}")
 }
 
+/// The node whose units `resource` names (the inverse of [`resource`]); `None` for any other
+/// resource.
+pub fn nid_of_resource(resource: &str) -> Option<&str> {
+    resource.strip_prefix("node:").filter(|n| !n.is_empty())
+}
+
 /// The units this coordinator may hold on a node: what the node has free plus what this
 /// coordinator holds there already, so the limit means the node's real capacity. A node that is
 /// not taking work keeps what is held and grants one more at most, so a step that queued for it
