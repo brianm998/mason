@@ -42,7 +42,7 @@ private fun until(what: String, seconds: Int = 15, cond: () -> Boolean) {
 /** The view kinds the monitor subscribes to; a dump is not taken before each has been applied. */
 private val SUBSCRIBED = setOf("sidebar", "home", "header")
 
-/** Consecutive round trips that must agree before the screen counts as settled. */
+/** Consecutive round trips that must agree before a live daemon's screen counts as settled. */
 private const val AGREEING_ROUND_TRIPS = 3
 
 private fun daemonSeq(model: MonitorModel, id: String): Long? {
@@ -51,12 +51,12 @@ private fun daemonSeq(model: MonitorModel, id: String): Long? {
 }
 
 /**
- * Settled is a signal, not a quiet window: every subscribed kind has been applied, and the
- * daemon's seq (asked over the same ordered connection, so views sent before the answer have
- * arrived) is either covered by an applied view or has not moved across several round trips
- * with nothing new arriving. The daemon sends no view whose content did not change, so the
- * applied view seq may legitimately stay below the daemon's. A timeout fails, naming what
- * was awaited; it never decides.
+ * Settled is a signal, not a quiet window: every subscribed kind has been applied, and an applied
+ * view covers the daemon's seq. The demo daemon resends every view at each new seq, so there
+ * nothing else settles (decision 1025). A live daemon sends no view whose content did not change,
+ * so there the seq may instead stay unmoved across several round trips (asked over the same
+ * ordered connection, so views sent before each answer have arrived) with nothing new arriving.
+ * A timeout fails, naming what was awaited; it never decides.
  */
 private fun settle(model: MonitorModel) {
     val end = System.currentTimeMillis() + 60_000
@@ -67,8 +67,10 @@ private fun settle(model: MonitorModel) {
         val seq = daemonSeq(model, "settle") ?: fail("the daemon's /status gave no seq")
         val missing = SUBSCRIBED - model.appliedKinds()
         val covered = model.lastViewSeq >= seq
-        if (missing.isEmpty() && (covered || (seq == prev && model.lastSeq == prevLast))) agreed++ else agreed = 0
-        if (missing.isEmpty() && covered && agreed >= 1) return
+        val unmoved = !model.demo && seq == prev && model.lastSeq == prevLast
+        if (missing.isEmpty() && (covered || unmoved)) agreed++ else agreed = 0
+        // Covered: one more round trip, so the rest of that batch of views has arrived.
+        if (covered && agreed >= 2) return
         if (agreed >= AGREEING_ROUND_TRIPS) {
             if (model.lastViewSeq < seq) System.err.println("settle: quiet exit, views at ${model.lastViewSeq}, daemon seq $seq")
             return

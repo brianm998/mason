@@ -179,7 +179,11 @@ fn wait_status(s: &Scratch, what: &str, secs: u64, f: impl Fn(&Value) -> bool) -
                 return v;
             }
         }
-        assert!(Instant::now() < end, "timed out waiting for {what}");
+        assert!(
+            Instant::now() < end,
+            "timed out waiting for {what}; the last status: {}",
+            String::from_utf8_lossy(&o.stdout)
+        );
         std::thread::sleep(Duration::from_millis(200));
     }
 }
@@ -634,4 +638,254 @@ fn a_daemon_with_no_update_toml_says_nothing() {
         (v["outdated"].as_bool(), v["latest"].as_str()),
         (Some(false), Some(""))
     );
+}
+
+// ---- the daemon's own updates (#1082) -----------------------------------------------------------
+
+/// Let the daemon look at the channel every second and give `[auto]` its settings.
+fn auto_cfg(s: &Scratch, auto: &str) {
+    // Automatic updates are off unless asked for; these tests ask, unless they say otherwise.
+    let on = if auto.contains("enabled") {
+        ""
+    } else {
+        "enabled = true\n"
+    };
+    write_auto(s, &format!("[auto]\n{on}{auto}\n"));
+}
+
+fn write_auto(s: &Scratch, auto_table: &str) {
+    let p = s.config_dir.join("update.toml");
+    let t = std::fs::read_to_string(&p).unwrap();
+    std::fs::write(
+        &p,
+        format!("check_interval_s = 1\nupdate_wait_max_s = 0\n{t}\n{auto_table}"),
+    )
+    .unwrap();
+}
+
+/// A new commit on the channel, with `msg` as its message.
+fn push(s: &Scratch, files: &[(&str, &str)], msg: &str) -> String {
+    let repo = s.root.path().join("source");
+    for (p, t) in files {
+        if let Some(dir) = Path::new(p).parent() {
+            std::fs::create_dir_all(repo.join(dir)).unwrap();
+        }
+        std::fs::write(repo.join(p), t).unwrap();
+    }
+    sh(&repo, &["add", "-A"]);
+    sh(
+        &repo,
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-qm",
+            msg,
+        ],
+    );
+    sh(&repo, &["rev-parse", "HEAD"])
+}
+
+fn plan_text(v: &Value) -> String {
+    v["plan"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|l| l.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default()
+}
+
+/// A scripted agent whose `run_check` (no call id) blocks until `gate/release` exists.
+fn check_script(gate: &Path) -> (String, Value) {
+    let cmd = format!(
+        "case ${{MASON_STEP+set}} in set) ;; *) touch '{0}/started'; while [ ! -e '{0}/release' ] && [ -d '{0}' ]; do sleep 0.1; done;; esac; test -f hello.txt",
+        gate.display()
+    );
+    let script = json!({"steps": {"explore": [explore_turn()], "develop": [[
+        {"sh": TASK_SCRIPT_COMMIT},
+        {"call": {"tool": "run_check", "args": {"name": "tests"}}},
+        {"call": {"tool": "submit_change", "args": {"summary": "ok", "head": "$HEAD"}}}
+    ]]}});
+    (cmd, script)
+}
+
+#[test]
+fn a_docs_only_commit_causes_no_takeover_and_the_status_says_none() {
+    let s = Scratch::new("true", json!({"steps": {}}));
+    let src = source(&s, &[&[]]);
+    auto_cfg(&s, "normal_max_wait_s = 0\ncost_max = 100");
+    let mut m = start(&s);
+    s.mason_ok(&["update", "--sha", &src.shas[0]]);
+    wait_status(&s, "c1 to run", 600, |v| {
+        v["running"] == src.shas[0].as_str()
+    });
+    let pid = daemon_pid(&s);
+    let docs = push(&s, &[("docs/note.md", "hello")], "docs only");
+    let v = wait_status(&s, "the status to say none", 600, |v| {
+        plan_text(v).contains("none:")
+    });
+    assert_eq!(v["running"], src.shas[0].as_str(), "{v:#}");
+    assert_eq!(v["latest"], docs.as_str(), "{v:#}");
+    assert_eq!(daemon_pid(&s), pid);
+    assert_eq!(status(&s)["running"], src.shas[0].as_str());
+    drop(m.child.kill());
+    kill_hosts(&s.data_dir);
+}
+
+#[test]
+fn a_daemon_change_waits_for_a_check_without_a_call_id_and_an_urgent_one_does_not() {
+    let gate = tempfile::Builder::new()
+        .prefix("msgate")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let (cmd, script) = check_script(gate.path());
+    let s = Scratch::new(&cmd, script);
+    let src = source(&s, &[&[]]);
+    auto_cfg(&s, "normal_max_wait_s = 100000");
+    let mut m = start(&s);
+    s.mason_ok(&["update", "--sha", &src.shas[0]]);
+    wait_status(&s, "c1 to run", 600, |v| {
+        v["running"] == src.shas[0].as_str()
+    });
+    s.mason_ok(&[
+        "task",
+        "add",
+        "Checks its work",
+        "--body",
+        "Create hello.txt.",
+    ]);
+    wait_for("the check to start", 600, || {
+        gate.path().join("started").exists()
+    });
+
+    // A change to the daemon's code: it waits, and says for what.
+    let normal = push(
+        &s,
+        &[("crates/daemon/src/x.rs", "// x")],
+        "change the daemon",
+    );
+    let v = wait_status(&s, "the update to wait", 600, |v| {
+        plan_text(v).contains("would start over")
+    });
+    assert_eq!(v["running"], src.shas[0].as_str(), "{v:#}");
+    assert!(plan_text(&v).contains("normal"), "{v:#}");
+    assert!(
+        v["cost_now"].as_str().unwrap().contains("would start over"),
+        "{v:#}"
+    );
+
+    // An urgent one replaces it, keeps the priority and goes without waiting for the check.
+    let urgent = push(
+        &s,
+        &[("crates/daemon/src/y.rs", "// y")],
+        "fix the updater\n\nUpdate-Urgent: checks never returned",
+    );
+    assert_ne!(normal, urgent);
+    wait_status(&s, "the urgent build to take over", 600, |v| {
+        v["running"] == urgent.as_str()
+    });
+    assert!(!gate.path().join("release").exists());
+    std::fs::write(gate.path().join("release"), "").unwrap();
+    drop(m.child.kill());
+    kill_hosts(&s.data_dir);
+}
+
+#[test]
+fn a_normal_update_goes_when_the_check_ends() {
+    let gate = tempfile::Builder::new()
+        .prefix("msgate")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let (cmd, script) = check_script(gate.path());
+    let s = Scratch::new(&cmd, script);
+    let src = source(&s, &[&[]]);
+    auto_cfg(&s, "normal_max_wait_s = 100000");
+    let mut m = start(&s);
+    s.mason_ok(&["update", "--sha", &src.shas[0]]);
+    wait_status(&s, "c1 to run", 600, |v| {
+        v["running"] == src.shas[0].as_str()
+    });
+    s.mason_ok(&[
+        "task",
+        "add",
+        "Checks its work",
+        "--body",
+        "Create hello.txt.",
+    ]);
+    wait_for("the check to start", 600, || {
+        gate.path().join("started").exists()
+    });
+    let next = push(
+        &s,
+        &[("crates/daemon/src/x.rs", "// x")],
+        "change the daemon",
+    );
+    wait_status(&s, "the update to wait", 600, |v| {
+        plan_text(v).contains("would start over")
+    });
+    assert_eq!(status(&s)["running"], src.shas[0].as_str());
+    std::fs::write(gate.path().join("release"), "").unwrap();
+    wait_status(
+        &s,
+        "the update to take over once the check ended",
+        600,
+        |v| v["running"] == next.as_str(),
+    );
+    drop(m.child.kill());
+    kill_hosts(&s.data_dir);
+}
+
+#[test]
+fn auto_disabled_starts_no_update() {
+    let s = Scratch::new("true", json!({"steps": {}}));
+    let src = source(&s, &[&[]]);
+    auto_cfg(&s, "enabled = false");
+    let mut m = start(&s);
+    s.mason_ok(&["update", "--sha", &src.shas[0]]);
+    wait_status(&s, "c1 to run", 600, |v| {
+        v["running"] == src.shas[0].as_str()
+    });
+    let next = push(
+        &s,
+        &[("crates/daemon/src/x.rs", "// x")],
+        "change the daemon",
+    );
+    wait_status(&s, "the check to see it", 600, |v| {
+        v["latest"] == next.as_str()
+    });
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(status(&s)["running"], src.shas[0].as_str());
+    assert_eq!(plan_text(&status(&s)), "");
+    drop(m.child.kill());
+    kill_hosts(&s.data_dir);
+}
+
+#[test]
+fn without_an_auto_table_the_daemon_starts_no_update() {
+    let s = Scratch::new("true", json!({"steps": {}}));
+    let src = source(&s, &[&[]]);
+    write_auto(&s, "");
+    let mut m = start(&s);
+    s.mason_ok(&["update", "--sha", &src.shas[0]]);
+    wait_status(&s, "c1 to run", 600, |v| {
+        v["running"] == src.shas[0].as_str()
+    });
+    let next = push(
+        &s,
+        &[("crates/daemon/src/x.rs", "// x")],
+        "change the daemon",
+    );
+    wait_status(&s, "the check to see it", 600, |v| {
+        v["latest"] == next.as_str()
+    });
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(status(&s)["running"], src.shas[0].as_str());
+    assert_eq!(plan_text(&status(&s)), "");
+    drop(m.child.kill());
+    kill_hosts(&s.data_dir);
 }
