@@ -52,9 +52,7 @@ fn review(args: Value) -> Value {
 #[test]
 fn a_new_blocking_finding_on_an_untouched_line_is_accepted_only_as_minor() {
     let rec = tempfile::tempdir().unwrap();
-    let blocking = |issue: &str, line: u64| {
-        json!({"issue": issue, "file": "a.txt", "line": line, "quote": "q", "severity": "blocking"})
-    };
+    let blocking = |issue: &str, line: u64| json!({"issue": issue, "file": "a.txt", "line": line, "quote": "q", "severity": "blocking"});
     let round1 = json!([review(json!({
         "verdict": "changes", "summary": "FIRST",
         "findings": [blocking("ONE", 1), blocking("TWO", 1)]}))]);
