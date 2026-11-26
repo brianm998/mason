@@ -793,6 +793,50 @@ pub fn wait_for(what: &str, secs: u64, mut f: impl FnMut() -> bool) {
     wait_poll(what, secs, || if f() { Poll::Done } else { Poll::Pending });
 }
 
+/// What task `t` is doing, for a wait that gave up: its state, step, activity, failure,
+/// each step run with its outcome, and the logs of its hosts.
+pub fn describe_task(d: &Arc<Daemon>, t: TaskId) -> String {
+    let w = d.world().unwrap();
+    let k = &w.tasks[&t];
+    let mut runs: Vec<_> = w.step_runs.values().filter(|r| r.task == t).collect();
+    runs.sort_by_key(|r| r.id.0);
+    let runs: Vec<String> = runs
+        .iter()
+        .map(|r| format!("  {} (attempt {}): {:?}", r.name, r.attempt, r.outcome))
+        .collect();
+    let out = format!(
+        "task {t}: state {:?}, step {:?}, activity {:?}, failure {:?} ({:?}), failures {}\nstep runs:\n{}",
+        k.state,
+        k.step,
+        k.activity,
+        k.failure,
+        k.failure_class,
+        k.failures,
+        runs.join("\n")
+    );
+    drop(w);
+    format!("{out}\nlogs:\n{}", mason_daemon::http::render_logs(d, t.0))
+}
+
+/// As [`wait_for`], and when it gives up the failure also carries `report()`.
+pub fn wait_for_reporting(
+    what: &str,
+    secs: u64,
+    mut f: impl FnMut() -> bool,
+    report: impl Fn() -> String,
+) {
+    let r = try_wait(what, secs.max(min_wait_secs()), 50, || {
+        if f() {
+            Poll::Done
+        } else {
+            Poll::Pending
+        }
+    });
+    if let Err(why) = r {
+        panic!("{why}\n{}", report());
+    }
+}
+
 /// As [`wait_for`], and the condition can also say the wait can no longer succeed.
 pub fn wait_poll(what: &str, secs: u64, poll: impl FnMut() -> Poll) {
     real_wait(what, secs.max(min_wait_secs()), 50, poll);
