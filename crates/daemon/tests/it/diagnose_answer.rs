@@ -216,18 +216,18 @@ fn a_failed_task_holds_the_card_until_it_is_dismissed_or_retried() {
     let w = world("diagnose = false", json!({}));
     let d = w.s.start();
     let t = failed(&d, "Holds a card");
-    let (card, options, actions) = shown(&d, t);
+    let (card, options, _) = shown(&d, t);
     assert_eq!((card, options), (Value::Null, 0));
-    assert_eq!(
-        actions,
-        [
-            "retry",
-            "cancel",
-            "open_session",
-            "diagnose",
-            "skip_all_tests"
-        ]
-    );
+    // The running mark is one list per process, keyed by task number, and the other tests in
+    // this binary have daemons of their own: wait out a diagnosis of theirs.
+    let offered = [
+        "retry",
+        "cancel",
+        "open_session",
+        "diagnose",
+        "skip_all_tests",
+    ];
+    wait_for("diagnose to be offered", 600, || shown(&d, t).2 == offered);
 
     let hash = diagnose(&d, t);
     let (card, options, actions) = shown(&d, t);
