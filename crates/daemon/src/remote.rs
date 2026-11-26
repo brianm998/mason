@@ -2911,6 +2911,9 @@ struct GrantInner {
     held: std::collections::BTreeMap<String, u32>,
     /// Where the run's hold is recorded, rewritten as units go back.
     hold: Option<(PathBuf, String)>,
+    /// The runner units were given back while the lease behind `giver` goes on holding other
+    /// things (a landing batch's local slots): the next run asks for them again.
+    given_up: bool,
 }
 
 impl std::fmt::Debug for Grant {
@@ -2931,6 +2934,7 @@ impl Grant {
                 giver: Some(lease.giver()),
                 owned: Some(lease),
                 hold: None,
+                given_up: false,
             })),
         }
     }
@@ -2957,6 +2961,36 @@ impl Grant {
                 ..Default::default()
             })),
         }
+    }
+    /// Like [`Grant::borrowed`], for a lease whose runner units were already given back: the run
+    /// asks for them before it pushes anything (a landing batch's, which goes on holding its
+    /// local slots between GitHub runs).
+    pub fn borrowed_given_up(giver: Option<crate::sched::Giver>) -> Self {
+        Grant {
+            inner: Arc::new(std::sync::Mutex::new(GrantInner {
+                giver,
+                given_up: true,
+                ..Default::default()
+            })),
+        }
+    }
+    /// Give back every runner unit the grant holds: the run is not on GitHub (it went to a node,
+    /// or comes back here), so the units must not stay held while it runs. Returns whether it
+    /// held any. A later run through the same grant asks again ([`Grant::regain`]).
+    pub fn give_runners(&self) -> bool {
+        let runners: std::collections::BTreeMap<String, u32> = self
+            .units()
+            .into_iter()
+            .filter(|(k, _)| mason_scheduler::is_gha_pool(k))
+            .collect();
+        self.give(&runners);
+        if runners.is_empty() {
+            return false;
+        }
+        // The lease may still hold something else (a local slot), so it does not read as given
+        // back: say so, or the next run through GitHub would push holding no runner unit.
+        self.lock().given_up = true;
+        true
     }
     /// Say where the run's hold is recorded, so units given back are written there.
     pub fn note_hold(&self, dir: &Path, id: &str) {
@@ -3008,6 +3042,7 @@ impl Grant {
         match giver.ask_again(units.clone(), &|| stop().is_none(), &mut |_| {}) {
             Ok(lease) => {
                 let mut g = self.lock();
+                g.given_up = false;
                 g.giver = Some(lease.giver());
                 g.held = lease.units();
                 g.owned = Some(lease);
@@ -3026,7 +3061,10 @@ impl Grant {
         units: std::collections::BTreeMap<String, u32>,
         stop: &dyn Fn() -> Option<StopWhy>,
     ) -> bool {
-        let released = self.lock().giver.as_ref().is_some_and(|g| !g.is_held());
+        let released = {
+            let g = self.lock();
+            g.given_up || g.giver.as_ref().is_some_and(|g| !g.is_held())
+        };
         !released || self.ask_again(units, stop)
     }
     /// How many runner units the lease was given when it asked for 1 to N, if it was flexible.
@@ -6909,6 +6947,97 @@ mod tests {
             younger.try_recv().is_err(),
             "the rerun went before the younger request"
         );
+    }
+
+    /// A check queued for GitHub that is run on a node uses no runner: its unit goes back when
+    /// the node takes it, and the one waiting is granted while the node still runs.
+    #[test]
+    fn a_check_sent_to_a_node_gives_its_runner_unit_to_the_next_in_line_while_it_runs() {
+        use crate::sched::tests::{is_held, queue_gha, runner_broker};
+        let bdir = tempfile::tempdir().unwrap();
+        let b = runner_broker(bdir.path(), 1, 1, 0);
+        let lease = b
+            .acquire(
+                mason_core::TaskId(1),
+                "#1 check",
+                mason_scheduler::Rank::new(false, 3, 0, 1, 1, false),
+                mason_scheduler::Needs::of(&[("gha", 1)]),
+                &|| true,
+                &mut |_| {},
+            )
+            .unwrap();
+        let grant = Grant::of(lease);
+        let waiting = queue_gha(&b, 2);
+        assert_eq!(b.used("gha"), 1);
+        assert!(!is_held(&b, waiting), "the pool is full");
+        // The node takes the check: nothing of GitHub is used from here on.
+        assert!(grant.give_runners());
+        assert!(grant.units().is_empty());
+        assert!(is_held(&b, waiting), "the waiting check got the unit");
+        assert_eq!(b.used("gha"), 1, "only the other check holds it");
+        assert!(!grant.give_runners(), "nothing more to give");
+    }
+
+    /// A node hands a check back after its runner units were given back: the check goes on to
+    /// GitHub, and its lease (which still holds a local unit) asks for them again first.
+    #[test]
+    fn a_check_a_node_hands_back_asks_for_its_runner_units_again_though_its_lease_holds_a_local_unit(
+    ) {
+        let bdir = tempfile::tempdir().unwrap();
+        let b = crate::sched::tests::runner_broker(bdir.path(), 2, 1, 0);
+        let lease = b
+            .acquire(
+                mason_core::TaskId(1),
+                "#1 check",
+                mason_scheduler::Rank::new(false, 3, 0, 1, 1, false),
+                mason_scheduler::Needs::of(&[("compile", 1), ("gha", 1)]),
+                &|| true,
+                &mut |_| {},
+            )
+            .unwrap();
+        let grant = Grant::of(lease);
+        assert!(grant.give_runners());
+        assert_eq!((b.used("gha"), b.used("compile")), (0, 1));
+        assert!(grant.regain(units_of(1), &|| None));
+        assert_eq!(grant.units(), units_of(1));
+        assert_eq!(b.used("gha"), 1, "it holds a runner unit again");
+        // The grant owns the lease, and the new lease replaces it: a run that goes to GitHub
+        // needs no slot of this machine.
+        assert_eq!(b.used("compile"), 0);
+    }
+
+    /// A batch's lease goes on holding this machine's slots when its runner units are given back;
+    /// the next run on GitHub through that lease asks for units again before it pushes.
+    #[test]
+    fn a_given_up_grant_asks_again_though_its_lease_still_holds_a_local_slot() {
+        let bdir = tempfile::tempdir().unwrap();
+        let b = crate::sched::tests::runner_broker(bdir.path(), 2, 1, 0);
+        let lease = b
+            .acquire(
+                mason_core::TaskId(1),
+                "batch #1",
+                mason_scheduler::Rank::new(false, 3, 0, 1, 1, false),
+                mason_scheduler::Needs::of(&[("compile", 1), ("gha", 2)]),
+                &|| true,
+                &mut |_| {},
+            )
+            .unwrap();
+        let giver = lease.giver();
+        giver.shrink(&units_of(2));
+        assert_eq!((b.used("gha"), b.used("compile")), (0, 1));
+        // A grant that says its units are held does not ask: the lease is still held.
+        let held = Grant::borrowed(Some(giver.clone()), units_of(2));
+        assert!(held.regain(units_of(2), &|| None));
+        assert_eq!(b.used("gha"), 0, "nothing was asked");
+        // One that says they were given back asks, and holds them until it is dropped.
+        let again = Grant::borrowed_given_up(Some(giver));
+        assert!(again.regain(units_of(2), &|| None));
+        assert_eq!(again.units(), units_of(2));
+        assert_eq!(b.used("gha"), 2);
+        drop(again);
+        assert_eq!(b.used("gha"), 0, "the units go with the run");
+        assert_eq!(b.used("compile"), 1, "the lease keeps its slot");
+        drop(lease);
     }
 
     #[test]
