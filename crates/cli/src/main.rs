@@ -89,6 +89,7 @@ mason: command-line client for the MASON pipeline
   mason task explore-anyway <id>      explore after all, even if it skipped exploring
   mason task override <id> <key> <value>
   mason task priority <id> urgent|high|normal|low   owner only; re-ranks its waiting requests
+  mason task update-priority <id> urgent|normal   owner only; urgent: its landing takes the daemon's own update over at once
   mason task answer <id> <option number | 1,3 | text> [--card HASH] [--as NAME]
                                       answer the open question (a multi-select card takes 1,3); the card's hash guards against a stale one
   mason task refresh <id>             ask the tracker now (what opening a task does)
@@ -173,6 +174,7 @@ mason: command-line client for the MASON pipeline
   mason node pair-code | accept on|off | status | doctor | jobs | stop-jobs | coordinators [remove NAME]
                                       this Mac as a node, taking compile and test runs from a coordinator
   mason node list | add [NAME | --host H:PORT --fp F] [--code C] | remove NAME | use on|off
+  mason node update NAME | --all      send a node the runtime this coordinator runs, now (`mason update` does it for every node)
   mason node export-runtime --arch arm64|x86_64 --out DIR   the signed runtime and MASON Daemon.app for a node
                                       the coordinator's nodes: found, paired, whether each takes work
   mason lan status                    whether LAN access is on, its port and certificate fingerprint
@@ -806,6 +808,10 @@ fn main() {
                         "{} (from {}; GitHub runner {r})",
                         p["mode"].as_str().unwrap_or("?"),
                         p["source"].as_str().unwrap_or("?")
+                    ),
+                    None if p["nodes_only"].as_bool() == Some(true) => format!(
+                        "{} (nodes only: no GitHub setup)",
+                        p["mode"].as_str().unwrap_or("?")
                     ),
                     None => "local (no [remote_runs]: always runs here)".to_string(),
                 }
@@ -2250,6 +2256,24 @@ fn main() {
                             "held      update waiting since {} (next window {})",
                             local_clock(since),
                             local_clock(next)
+                        );
+                    }
+                    for l in r["plan"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|l| l.as_str())
+                    {
+                        println!("auto      {l}");
+                    }
+                    if let Some(l) = r["cost_now"].as_str() {
+                        println!("cost      {l}");
+                    }
+                    for n in r["nodes"].as_array().into_iter().flatten() {
+                        println!(
+                            "node      {:<16} {}",
+                            n["name"].as_str().unwrap_or("?"),
+                            n["text"].as_str().unwrap_or("?")
                         );
                     }
                     if let Some(w) = r["waiting"].as_str().filter(|w| !w.is_empty()) {
@@ -3948,6 +3972,31 @@ fn main() {
                     println!(
                         "Task #{id}: priority {level} ({} waiting request(s) re-ranked)",
                         r["reranked"]
+                    );
+                }
+                "update-priority" => {
+                    let id = task_id(&mut a);
+                    let level = a
+                        .pos()
+                        .unwrap_or_else(|| die("which update priority? urgent or normal"));
+                    finish(&a);
+                    if !matches!(level.as_str(), "urgent" | "normal") {
+                        die("which update priority? urgent or normal");
+                    }
+                    // Owner only, as `priority` is.
+                    if std::env::var("MASON_AS").is_err() {
+                        if let Ok(u) = std::env::var("USER") {
+                            std::env::set_var("MASON_AS", u);
+                        }
+                    }
+                    or_die(d.call(
+                        "POST",
+                        &format!("/tasks/{id}/update-priority"),
+                        Some(&json!({"priority": level})),
+                    ));
+                    println!(
+                        "Task #{id}: update priority {level} (the daemon's own update {} when it lands)",
+                        if level == "urgent" { "goes at once" } else { "waits for a cheap moment" }
                     );
                 }
                 "run-on" => {

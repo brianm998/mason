@@ -93,10 +93,16 @@ pub struct UpdateCfg {
     /// A real identity gives the binaries a stable designated requirement (team + identifier),
     /// so permissions granted to MASON survive self-updates.
     pub sign_identity: Option<String>,
+    /// The directory on the internal disk that holds the coordinator's app bundle (macOS,
+    /// `stable_app.rs`); `"off"` for none. Unset: `~/Applications`, for the owner's own signed
+    /// coordinator only.
+    pub app_dir: Option<String>,
     /// The release API of the `release` channel; tests point it at a fake (`file://` or http).
     pub release_api: String,
     /// The page that offers the installers; what a packaged monitor's button opens.
     pub download_page: String,
+    /// `[auto]`: MASON's own updates (#1082).
+    pub auto: crate::update_plan::AutoCfg,
 }
 
 /// Half an hour (s868).
@@ -161,9 +167,11 @@ impl UpdateCfg {
                 .and_then(|v| v.as_integer())
                 .map_or(DEFAULT_TAKEOVER_WAIT_S, |n| n.max(0) as u64),
             sign_identity: s("sign_identity").filter(|v| !v.trim().is_empty()),
+            app_dir: s("app_dir").filter(|v| !v.trim().is_empty()),
             release_api: s("release_api").unwrap_or_else(|| crate::release::DEFAULT_API.into()),
             download_page: s("download_page")
                 .unwrap_or_else(|| crate::release::DEFAULT_PAGE.into()),
+            auto: crate::update_plan::AutoCfg::from_doc(&doc),
         })
     }
 
@@ -499,10 +507,22 @@ pub const SIGN_TIMEOUT: Duration = Duration::from_secs(120);
 /// designated requirement; without one it is signed ad hoc. Either way the identifier is
 /// `com.brianm998.mason.<name>`, the same across builds.
 pub fn codesign_args(path: &Path, identity: Option<&str>) -> Vec<std::ffi::OsString> {
+    codesign_args_as(path, &identifier_of(path), identity)
+}
+
+fn identifier_of(path: &Path) -> String {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
+    format!("com.brianm998.mason.{name}")
+}
+
+fn codesign_args_as(
+    path: &Path,
+    identifier: &str,
+    identity: Option<&str>,
+) -> Vec<std::ffi::OsString> {
     let mut a: Vec<std::ffi::OsString> = vec!["--sign".into()];
     match identity {
         Some(id) => {
@@ -514,7 +534,7 @@ pub fn codesign_args(path: &Path, identity: Option<&str>) -> Vec<std::ffi::OsStr
     }
     a.push("--force".into());
     a.push("--identifier".into());
-    a.push(format!("com.brianm998.mason.{name}").into());
+    a.push(identifier.into());
     a.push(path.into());
     a
 }
@@ -527,11 +547,16 @@ pub fn codesign_args(path: &Path, identity: Option<&str>) -> Vec<std::ffi::OsStr
 /// (2026-11-12). x86_64 linkers do not sign. A signing failure fails the build rather than
 /// installing an unsigned runtime.
 pub fn sign_installed(path: &Path, identity: Option<&str>) -> Result<(), String> {
+    sign_as(path, &identifier_of(path), identity)
+}
+
+/// [`sign_installed`] with the identifier named: an app bundle's is not its file name.
+pub fn sign_as(path: &Path, identifier: &str, identity: Option<&str>) -> Result<(), String> {
     if !cfg!(target_os = "macos") {
         return Ok(());
     }
     let mut child = Command::new("/usr/bin/codesign")
-        .args(codesign_args(path, identity))
+        .args(codesign_args_as(path, identifier, identity))
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -998,6 +1023,11 @@ pub struct Request {
     pub now: bool,
     /// Asked by a follower, not the owner: the gap between updates applies (s473).
     pub auto: bool,
+    /// Started by the daemon's own planner (#1082), which has decided the moment: the gap
+    /// between updates does not apply.
+    pub planned: bool,
+    /// A planned update of urgent priority: its build is not held behind task work.
+    pub urgent: bool,
 }
 
 fn say(d: &Daemon, phase: &str, line: &str) {
@@ -1040,6 +1070,8 @@ pub fn run(d: &Arc<Daemon>, req: &Request) -> Result<String, String> {
         let cfg = UpdateCfg::load(&d.cfg.config_dir)?;
         let rt = Runtimes::new(&d.cfg.data_dir);
         let channel = req.channel.clone().unwrap_or_else(|| cfg.channel.clone());
+        // The cross-builds for the nodes, started beside the coordinator's own build.
+        let mut fleet: Option<crate::node_fleet::Handle> = None;
         let (target, running) = if channel == Channel::Release {
             prepare_release(d, req, &cfg, &rt)?
         } else {
@@ -1074,7 +1106,7 @@ pub fn run(d: &Arc<Daemon>, req: &Request) -> Result<String, String> {
             if mv == Move::Same && !req.rollback {
                 return Err(format!("already running {target}"));
             }
-            if req.auto && !req.check_only && !req.rollback {
+            if req.auto && !req.planned && !req.check_only && !req.rollback {
                 let urgent = is_urgent(&rt.mirror(), running.as_deref(), &target);
                 match gap_decision(&gap_input(d, &cfg, urgent)) {
                     Gap::Take(why) => {
@@ -1096,7 +1128,12 @@ pub fn run(d: &Arc<Daemon>, req: &Request) -> Result<String, String> {
                 "building",
                 &format!("building {target} into runtimes/{target}/"),
             );
-            build_leased(d, &cfg, &rt, &target, !req.auto)?;
+            // An urgent planned update goes ahead of task work, as the owner's does (#1082).
+            let promoted = !req.auto || req.urgent;
+            if !req.check_only && !req.rollback {
+                fleet = Some(crate::node_fleet::begin(d, &cfg, &target, promoted));
+            }
+            build_leased(d, &cfg, &rt, &target, promoted)?;
             (target, running)
         };
         // Prove it on a copy of the real database, in a sandbox, before it is allowed near the real one.
@@ -1143,6 +1180,13 @@ pub fn run(d: &Arc<Daemon>, req: &Request) -> Result<String, String> {
                 .phase = "idle".into();
             d.poke();
             return Ok(target);
+        }
+        // The nodes get the same commit before this daemon takes over, so the fleet changes
+        // version together. Nothing here can fail the update: a node that cannot be reached is
+        // sent its runtime when it returns.
+        if let Some(h) = &fleet {
+            let wait = Duration::from_secs(cfg.update_wait_max_s);
+            crate::node_fleet::deliver(d, &cfg, &target, h, wait);
         }
         say(
             d,
@@ -1454,7 +1498,14 @@ pub fn check_once(d: &Arc<Daemon>) -> std::time::Duration {
             }
         }
     };
+    // Ahead of the running build by any commit, not only by one the banner counts: a range that
+    // changed nothing the daemon runs is still filed, as priority none, so the status says so
+    // (#1082). `behind` is set only for a forward move.
+    let newer = (next.behind > 0 && cfg.channel != Channel::Release).then(|| next.latest.clone());
     set_check(d, next);
+    if let Some(target) = newer {
+        crate::update_plan::found_newer(d, &cfg, &target);
+    }
     std::time::Duration::from_secs(cfg.check_interval_s)
 }
 
@@ -1484,6 +1535,7 @@ pub fn spawn_checker(d: &Arc<Daemon>) {
         std::thread::sleep(wait);
         true
     });
+    crate::update_plan::spawn_planner(d);
 }
 
 /// What the header says. Text is made here so that the two monitors say the same thing.
@@ -1501,8 +1553,18 @@ pub fn info(d: &Daemon) -> Option<mason_protocol::UpdateInfo> {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
-    let (daemon_text, daemon_can_update) =
+    let (mut daemon_text, daemon_can_update) =
         daemon_banner(&c, d.cfg.runtime_sha.as_deref().unwrap_or_default(), &s);
+    // What the daemon's own updater found: a waiting update with why and for what, or that
+    // the newest build needs no takeover (#1082).
+    let plan = crate::update_plan::status_lines(d, now_ms());
+    if !plan.is_empty() {
+        if !daemon_text.is_empty() {
+            daemon_text.push(' ');
+        }
+        daemon_text.push_str(&plan.join("; "));
+        daemon_text.push('.');
+    }
     let builds = d
         .monitor_builds
         .lock()
@@ -1934,7 +1996,7 @@ pub fn drain_within(d: &Arc<Daemon>, cap: Duration) {
             .wait = None;
     };
     loop {
-        if d.landing.busy_projects().is_empty() {
+        if d.landing.busy_projects().is_empty() || d.update_replace.load(Ordering::SeqCst) {
             done(d);
             return;
         }
@@ -2072,6 +2134,9 @@ pub fn drain_and_take_over(d: &Arc<Daemon>, sha: &str, now: bool) -> String {
 /// would after any restart. Only returns if the exec fails.
 pub fn take_over(d: &Arc<Daemon>, sha: &str) -> String {
     let rt = Runtimes::new(&d.cfg.data_dir);
+    // The bundle is built and signed first (it takes a while), and swapped in only once nothing
+    // more can start from the old one: just before the exec.
+    let staged = crate::stable_app::stage(&d.cfg, &rt, sha);
     if let Err(e) = rt.set_current(sha) {
         return fail(d, format!("could not record the new runtime: {e}"));
     }
@@ -2093,8 +2158,12 @@ pub fn take_over(d: &Arc<Daemon>, sha: &str) -> String {
         args.extend(["--port".into(), port.to_string()]);
     }
     args.extend(["--runtime-sha".into(), sha.into()]);
-    let err = mason_platform::process::replace_process(Command::new(rt.masond(sha)).args(&args));
+    let exe = crate::stable_app::executable(staged.as_ref(), &rt, sha);
+    let err = mason_platform::process::replace_process(Command::new(exe).args(&args));
     // Still here: the exec failed. Put things back.
+    if let Some(s) = &staged {
+        s.revert();
+    }
     let _ = d.store.add_health("cancelled", "", None, sha, now_ms());
     if let Some(prev) = d.cfg.runtime_sha.as_deref() {
         let _ = rt.set_current(prev);

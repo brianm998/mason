@@ -748,6 +748,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s998**: masons_own_impact_map_selects_suites_by_path now expects the eight unit-level suites bound to run_check and the test step, instead of six.
 - **s1000**: The diagnosis session runs on `diagnose_model`/`diagnose_effort` from the project registration, else the provider file's `[diagnose]` table, else Opus at medium (Codex: its CLI's model at medium), and each diagnosis and `mason task show` print what it ran on.
 - **s1001**: The daemon folds three or more waiting speech announcements into one summary line ("25 mason issues have failed; come have a look."), for both monitors and daemon speech, controlled by `[speech] summarize_from`.
+- **s1007**: `mason task skip --step` now refuses any step that is not the Test step, instead of recording a debt nothing reads.
 - **s1012**: a replayed run_check carries its call id, takes the suites that finished before a masond takeover instead of running them again, and no longer folds the base on the replay.
 - **s1014**: RemotePlacementTest now composes RemotePlacementBody inside a Column, as the settings page does, so the project row no longer covers the global row's buttons.
 - **s1015**: Unit-test narrowing no longer pushes a line into `Group.notes`, which is per directory target, so `the_note_says_how_the_modules_were_picked` passes again.
@@ -770,6 +771,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s1043**: a pending CI run whose job states do not change for `[ci] stuck_after` (default 30 minutes, 0 = off) raises a `landing` alert naming the batch, run and jobs, cleared when the run moves or ends.
 - **s1044**: The `retrying` test helper in remote.rs now sets the hook's executable bit only under `#[cfg(unix)]`, so the Windows CI build compiles again.
 - **s1045**: The exit-script runner repeats each failed script's first panic or failing line as a `cause` line before the closing `FAILED scripts:` line.
+- **s1048**: a diagnosis of any failed task ends in a decision card of 2 to 4 options with one recommended, stored on the diagnosis row, with one diagnosis per failure (six per task) and `POST /v1/tasks/{id}/diagnose` / `mason task diagnose` to ask for one.
 - **s1052**: The macOS monitor has File > Add Project… (⇧⌘N) and a + under the project picker that open a five-step wizard (Repository, Detected, Questions, Review, Apply) over the daemon's `/onboarding` endpoints; iOS shows neither.
 - **s1053**: The Compose desktop monitor gains File > Add Project… (Cmd/Ctrl+Shift+N) and a + under the project filter, opening a five-step wizard (Repository, Detected, Questions, Review, Apply) over the daemon's /onboarding endpoints; the Android app has neither.
 - **s1054**: `Executor::Node` and `Place::Node` exist and every match site handles them, and `decide` asks "may this run leave this machine" and "where off it" as two questions; nothing produces a node placement yet, so no decision changes.
@@ -784,6 +786,8 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s1066**: s43 now expects the daemon's real ceiling (9999) and s49 picks the highest-numbered checkpoint, fixing two of the exit scripts red on shard 6.
 - **s1067**: `mason project rename` now sets MASON_AS from USER, LOGNAME or "owner" like the daemon's default owner, so s965 passes where USER is unset or differs.
 - **s1068**: The Compose conformance settle now waits until the model's last applied view reaches the daemon's seq (as step() and the Rust capturer do), and both capturers print a stderr line when they leave on the quiet fallback.
+- **s1069**: a remote run now gives each `gha` (and `gha-macos`) unit back to the broker when its `run` job completes, rewrites its hold file with what is left, and asks again, at its own rank, for the shards it runs again.
+- **s1070**: GitHub runner units (`gha`, `gha-macos`) are granted landing first, then agents' checks, then test steps, then debt payments (urgent first, then the longest wait), and debt payments together hold at most `[remote_runs] debt_units` (default 4) units.
 - **s1072**: Windows clippy red on develop is fixed by compiling the unix-only CAFFEINATE and XCODEBUILD shim constants only under cfg(unix).
 - **s1073**: The Swift monitor-tool's settle now waits on `lastViewSeq` (moved only by views and snapshots) instead of `lastSeq`, which events also move, as Compose already does.
 - **s1074**: run-exit-scripts.sh runs each exit script in its own process group and ends the group when the script ends, so a leftover child or watcher `sleep` can no longer hold the output pipe and stall a shard.
@@ -797,7 +801,17 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s1082**: daemon:restarts counts only unplanned starts, so a takeover from `mason update` no longer counts as a restart.
 - **s1083**: A step host queued for a lease is no longer reported as silent (stuck:host); the wait is left to overloaded:slots and stuck:wait.
 - **s1086**: s101 now starts its ad-hoc range at 9960 and expects the daemon's real ceiling (9999), so it raises the `numbers` alert again.
+- **s1096**: scripts/test-parallel.py no longer runs doc tests when the cargo command selects targets, and a `--doc` command runs only them, as scripts/test-shard.py does.
 - **s1098**: The red CI/monitor-compose run 45581279465 names no failing step in the supplied log tail, so no code changed and decision 1087 records how to classify it from the full log.
 - **s1099**: `s798` passes its scripted agent a `src` directory to write into, fixing its red on CI, and a red `s798` now puts the task state and the last log line on its first failure line.
 - **s1100**: The s1026 and s1068 exit scripts now check the signal-based Compose settle instead of the removed quiet-window text, so exit-scripts shard 6 no longer fails on it.
+- **s1102**: The exit script s70 now accepts a suite "minimum" total after a task's green, because only runs at the base size a suite, so it no longer fails on a stale expectation.
+- **s1104**: The Compose conformance settle keeps the signal-based wait and again prints a quiet-exit line when it returns with its views behind the daemon's seq, which its exit test checks along with the s1068 and s1026 exit tests.
+- **s1110**: Every GitHub Action in MASON's workflows is pinned to a full commit SHA, Dependabot proposes the moves weekly, and CI's lint job refuses an unpinned `uses:`.
+- **s1118**: On macOS the coordinator now execs masond from one signed bundle on the internal disk (`~/Applications/MASON Coordinator.app`) whose path never changes, so a Local Network rule can apply, and a rule macOS cannot apply is named as such.
+- **s1119**: A node names each step host's folder by a 16-character key, so job ids no longer lengthen the socket path; a socket path over 100 characters is refused before a host is started, with its length; the host's own errors go to `host.err` and come back in "step host exited before it was up"; and `mason node doctor` and `mason doctor` check the socket length.
+- **s1120**: A check that a node or GitHub gives back now runs under the slots its own lease already holds instead of queueing for a second one, which at low limits deadlocked the local queue; what it still lacks goes ahead of other step starts, and a remaining self-deadlock is raised as an alert and explained in `mason resources`.
+- **s1122**: `mason update` now builds the nodes' runtimes beside the coordinator's own, sends each reachable node its runtime after the coordinator's self-test and before the takeover (also to a node on another protocol), shows each node's update state in `mason update status`, `mason node list`, the alerts and the monitor model, and `mason node update NAME|--all` sends now.
+- **s1123**: a project with no `[remote_runs]` can be given a placement mode (`[placement] mode`, or `mason remote mode <m> --project P`) and then runs on nodes only; in `remote` mode its runs wait for a node and never run on the coordinator.
+- **s1127**: Exit script s724 now expects the workflow line `mason doctor` prints today, and the causes of the s723 and s727 failures are recorded as races in those scripts.
 <!-- status:end -->
