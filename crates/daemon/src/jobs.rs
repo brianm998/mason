@@ -3701,6 +3701,7 @@ type IsAnalyst = Box<dyn Fn() -> bool + Send + Sync>;
 /// The analyst's task is told to commit nothing and to leave its findings in
 /// [`crate::introspect::ANALYST_FILE`], and its branch is never merged: for it alone, that
 /// untracked file does not make the tree dirty and a branch with no commits is accepted.
+#[allow(clippy::too_many_arguments)]
 fn change_validator(
     wt: PathBuf,
     base_ref: String,
