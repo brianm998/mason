@@ -49,6 +49,13 @@ impl SpawnOptions {
     }
 }
 
+/// Whether a variable's value must stay off the host's command line.
+fn is_secret(name: &str) -> bool {
+    ["_TOKEN", "_API_KEY", "_SECRET"]
+        .iter()
+        .any(|end| name.ends_with(end))
+}
+
 type Seen = Mutex<HashMap<PathBuf, (Option<i32>, u64)>>;
 
 fn seen() -> &'static Seen {
@@ -255,7 +262,13 @@ pub fn spawn_host_within(o: &SpawnOptions, limit: Duration) -> io::Result<HostIn
         cmd.arg("--stdin").arg(p);
     }
     for (k, v) in &o.env {
-        cmd.arg("--env").arg(format!("{k}={v}"));
+        // `ps` shows every user a process's arguments but not its environment, so a
+        // secret travels in the host's environment and only its name is an argument.
+        if is_secret(k) {
+            cmd.env(k, v).arg("--env-pass").arg(k);
+        } else {
+            cmd.arg("--env").arg(format!("{k}={v}"));
+        }
     }
     cmd.arg("--").args(&o.cmd);
     let made = !dir.exists();
