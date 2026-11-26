@@ -849,7 +849,7 @@ fn runs_wrapped(command: &str) -> bool {
 
 /// The parts of a command line between `& | ; ( ) { }` and newlines, leaving
 /// whatever is inside quotes (or escaped) in the word it belongs to.
-fn split_unquoted(command: &str) -> Vec<String> {
+pub(crate) fn split_unquoted(command: &str) -> Vec<String> {
     let (mut parts, mut cur) = (vec![], String::new());
     let (mut single, mut double, mut escaped) = (false, false, false);
     for c in command.chars() {
