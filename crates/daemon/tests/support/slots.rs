@@ -35,6 +35,39 @@ impl Drop for Held {
     }
 }
 
+/// Open a lock file for `flock`, which needs no write access: another user's file (the
+/// pipeline's node jobs and an interactive session share this directory on one machine under
+/// different accounts) opens read-only. A file that does not exist yet is created writable
+/// by everybody, so whoever comes first does not lock the rest out.
+fn open_lock(path: &Path) -> Option<File> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    if let Ok(f) = OpenOptions::new().read(true).open(path) {
+        return Some(f);
+    }
+    let f = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .mode(0o666)
+        .open(path)
+        .ok()?;
+    // The creating process's umask may have narrowed the mode.
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o666));
+    Some(f)
+}
+
+/// Create `dir` (and parents) open to every user, for the same reason.
+fn make_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let fresh = !dir.exists();
+    std::fs::create_dir_all(dir)?;
+    if fresh {
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o777));
+    }
+    Ok(())
+}
+
 /// This process's standing in one slot directory.
 #[derive(Default)]
 struct DirState {
@@ -109,16 +142,10 @@ fn presence_path(dir: &Path) -> PathBuf {
 /// we locked; otherwise open it again. `None` only if the directory is unusable, and then
 /// this process is not counted: it still gets slots, others just keep no share for it.
 fn take_presence(dir: &Path) -> Option<Flock<File>> {
-    std::fs::create_dir_all(procs_dir(dir)).ok()?;
+    make_dir(&procs_dir(dir)).ok()?;
     let path = presence_path(dir);
     for _ in 0..8 {
-        let file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(&path)
-            .ok()?;
+        let file = open_lock(&path)?;
         let lock = Flock::lock(file, FlockArg::LockExclusiveNonblock).ok()?;
         let ours = lock.metadata().ok().map(|m| m.ino());
         let named = std::fs::metadata(&path).ok().map(|m| m.ino());
@@ -141,7 +168,7 @@ pub fn present(dir: &Path) -> usize {
         if path.extension().and_then(|x| x.to_str()) != Some("lock") {
             continue;
         }
-        let Ok(f) = OpenOptions::new().read(true).write(true).open(&path) else {
+        let Ok(f) = OpenOptions::new().read(true).open(&path) else {
             continue;
         };
         // flock locks belong to the open file, so this process's own presence is busy to
@@ -171,7 +198,7 @@ pub fn shared_dir() -> PathBuf {
 /// Take a free slot of `limit` in `dir` without waiting, or `None` when all are held or
 /// this process already holds its share.
 pub fn try_take(dir: &Path, limit: usize) -> Option<Held> {
-    std::fs::create_dir_all(dir).ok()?;
+    make_dir(dir).ok()?;
     enter(dir);
     let procs = present(dir);
     let mut st = state();
@@ -200,13 +227,7 @@ pub fn try_take(dir: &Path, limit: usize) -> Option<Held> {
 
 fn lock_free_slot(dir: &Path, limit: usize) -> Option<Flock<File>> {
     for i in 0..limit {
-        let Ok(file) = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(dir.join(format!("slot-{i}.lock")))
-        else {
+        let Some(file) = open_lock(&dir.join(format!("slot-{i}.lock"))) else {
             continue;
         };
         if let Ok(lock) = Flock::lock(file, FlockArg::LockExclusiveNonblock) {
@@ -264,7 +285,6 @@ pub fn held_count(dir: &Path, limit: usize) -> usize {
         .filter(|i| {
             let Ok(f) = OpenOptions::new()
                 .read(true)
-                .write(true)
                 .open(dir.join(format!("slot-{i}.lock")))
             else {
                 return false;

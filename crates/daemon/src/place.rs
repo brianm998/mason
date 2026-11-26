@@ -721,6 +721,23 @@ fn shared_stay(f: &Facts) -> Option<String> {
     }
 }
 
+/// The node with room for a run of `suite` of `project`, if the suite may go to a node at all
+/// (the shared stay rules: `remote = false`, a device, `exclusive`), whatever the placement mode
+/// and wherever the run was placed. For a run queued for GitHub that could take a node's free
+/// unit instead. `None`: no node has room, or the suite must stay on this machine.
+pub fn node_room_for(
+    d: &Daemon,
+    project: &str,
+    task: Option<u64>,
+    suite: &mason_testing::Suite,
+) -> Option<NodeRoom> {
+    let f = facts_for(d, project, task, suite);
+    if shared_stay(&f).is_some() {
+        return None;
+    }
+    best_node(&f.nodes).cloned()
+}
+
 /// The decision when at least one node has room. A project need not have a `[remote_runs]`: a
 /// node is a target by itself. The modes keep their meaning, with "remote" read as "off this
 /// machine": `remote` is a node, else GitHub; `favor-local` stays here until this machine is

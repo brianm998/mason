@@ -58,7 +58,7 @@ pub struct Scratch {
     pub data_dir: PathBuf,
     pub script: PathBuf,
     /// Held for as long as this scratch world lives (declared last, so released last).
-    _slot: Slot,
+    _slot: Option<Slot>,
     /// The root's `owner.lock`, held while this world lives.
     _owner: Owner,
 }
@@ -112,6 +112,17 @@ impl Slot {
     fn take() -> Slot {
         Slot
     }
+}
+
+static PROCESS_WORLD: std::sync::OnceLock<Slot> = std::sync::OnceLock::new();
+
+/// Take one world slot for the whole test process, once, and let every [`Scratch`] made after
+/// it share it instead of taking its own. For a binary whose tests run one at a time under a
+/// process-wide lock (so one world exists at a time): each test taking its own slot waited up
+/// to 10 minutes for it with the lock held while other binaries held every slot, and the
+/// waits of the tests queued behind added up. Call it with the lock held.
+pub fn hold_world_for_process() {
+    PROCESS_WORLD.get_or_init(Slot::take);
 }
 
 /// What the scripted agent commits. Every task's worktree also gets a file of its
@@ -422,7 +433,11 @@ fn claim(_root: &Path) -> Owner {
 impl Scratch {
     pub fn new(test_cmd: &str, script: Value) -> Scratch {
         sweep_orphans();
-        let slot = Slot::take();
+        let slot = if PROCESS_WORLD.get().is_some() {
+            None
+        } else {
+            Some(Slot::take())
+        };
         let root = tempfile::Builder::new()
             .prefix("ms")
             .tempdir_in("/tmp")
