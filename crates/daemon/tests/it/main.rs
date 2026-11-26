@@ -58,6 +58,7 @@ mod landing_yield;
 mod lease_pid;
 mod limits;
 mod live_tokens;
+mod log_plain;
 mod net_outage;
 mod notify;
 mod onboarding;
