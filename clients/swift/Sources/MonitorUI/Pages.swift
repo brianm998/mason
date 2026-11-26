@@ -186,6 +186,8 @@ struct HomePage: View {
 
                 NodesSection(model: model)
 
+                HostsSection(model: model, compact: compact)
+
                 if let h = model.home, h.hasCompilation {
                     CompilationSection(model: model, c: h.compilation, open: { model.go(.section("compilation")) })
                 }
@@ -498,6 +500,9 @@ struct TaskDetailPage: View {
                 }
                 Text(Format.cpuTaskLine(permille: d.cpuPermille)).font(theme.body()).foregroundStyle(theme.muted)
                     .accessibilityIdentifier("cpu")
+                if let on = Hosts.runningOn(d.runningOn, now: model.daemonNow(), known: !(model.home?.hosts.isEmpty ?? true)) {
+                    RunningOnLine(model: model, text: on, runs: d.runningOn)
+                }
                 PlacementControl(model: model, scope: .task(r.id))
                 if r.testImmune {
                     Text("Immune to testing: no tests run for it through landing (lint and the build still do). The full run is owed.")
@@ -1331,5 +1336,26 @@ struct StageRows: View {
     @ViewBuilder func detail(_ r: TaskRow) -> some View {
         LinkedText(model: model, text: detailText(r), font: theme.small(),
                    color: r.slow ? theme.slow : theme.muted).lineLimit(2)
+    }
+}
+
+
+/// The task page's "Running on" line (#1156): where the task runs now, with the GitHub run's link.
+struct RunningOnLine: View {
+    @Environment(\.theme) var theme
+    let model: MonitorModel
+    let text: String
+    let runs: [HostRun]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(text).font(theme.body()).foregroundStyle(theme.muted)
+                .accessibilityIdentifier("running-on")
+            ForEach(Array(runs.enumerated()), id: \.offset) { _, r in
+                if let u = URL(string: r.url), Linkify.isWebURL(r.url) {
+                    WebLink(title: "\(Hosts.hostName(r.host)): open on GitHub", url: u, font: theme.small())
+                }
+            }
+        }
     }
 }
