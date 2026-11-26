@@ -196,9 +196,20 @@ fn an_outside_failure_with_an_automatic_retry_coming_is_not_diagnosed() {
         w.tasks.get(&t).unwrap()
     ));
     drop(w);
+    // #1044's own start still refuses while a retry is coming. A landing failure, as this one is,
+    // is the cause diagnosis' business now (s1176): it holds the retry and ends in a card of its
+    // own, so the task may well have a row; what must not happen is a second, per-failure session.
     let why = mason_daemon::diagnose::start(&d, t, StepRunId(0), false).unwrap_err();
-    assert!(why.contains("automatic retry"), "{why}");
-    assert!(d.store.diagnoses(Some(t.0)).unwrap().is_empty());
+    assert!(
+        why.contains("automatic retry") || why.contains("already running"),
+        "{why}"
+    );
+    assert!(d
+        .store
+        .diagnoses(Some(t.0))
+        .unwrap()
+        .iter()
+        .all(mason_daemon::diagnose::is_cause));
 }
 
 #[test]

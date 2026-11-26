@@ -440,6 +440,9 @@ impl Ctx {
                 });
                 // Every failure gets one look from a diagnosis session (s250, s1048), unless a
                 // retry is already coming.
+                // A landing failure, or the same outside failure again, is looked at as a cause
+                // (s1176) first: it takes the task's diagnosis mark, so #1044's does not also run.
+                crate::diagcause::on_step_failed(&self.d, self.task, self.run, self.state);
                 crate::diagnose::on_failed(&self.d, self.task, self.run);
             }
         }

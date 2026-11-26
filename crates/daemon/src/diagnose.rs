@@ -125,10 +125,17 @@ pub fn running(d: &Daemon, task: u64) -> Option<(u64, String)> {
         .iter()
         .find(|r| r.0 == scope && r.1 == task)
         .map(|r| (r.2, r.3.clone()))
+        // A cause's session speaks for every task it lists.
+        .or_else(|| crate::diagcause::live_for(d, task))
+}
+
+/// The running mark of `task`, for a session another module runs.
+pub(crate) fn take_mark(d: &Daemon, task: u64) -> Option<RunMark> {
+    RunMark::take(&scope(d), task)
 }
 
 /// Takes a task's running mark, and gives it back when dropped.
-struct RunMark(String, u64);
+pub(crate) struct RunMark(String, u64);
 
 impl RunMark {
     fn take(scope: &str, task: u64) -> Option<RunMark> {
@@ -156,9 +163,50 @@ impl Drop for RunMark {
     }
 }
 
-/// The recommended option of a submission, as the verdict (its action) and the arguments to carry
-/// it out (the option, with the submission's `summary` and `no_code_change`). An older submission
-/// is its own verdict and arguments.
+/// The keys an option's action carries.
+const ACTION_KEYS: [&str; 15] = [
+    "action",
+    "step",
+    "note",
+    "reason",
+    "kind",
+    "duplicate_of",
+    "evidence",
+    "project",
+    "title",
+    "body",
+    "priority",
+    "after",
+    "task",
+    "where",
+    "brief",
+];
+
+fn pick_keys(o: &Value) -> Value {
+    let mut act = serde_json::Map::new();
+    for k in ACTION_KEYS {
+        if !o[k].is_null() {
+            act.insert(k.into(), o[k].clone());
+        }
+    }
+    Value::Object(act)
+}
+
+/// What choosing an option does: its single action with the fields it needs, or for `actions`
+/// of several `{"action": "compound", "actions": [...]}` (one is that action itself).
+pub fn option_action(o: &Value) -> Value {
+    if let Some(list) = o["actions"].as_array().filter(|l| !l.is_empty()) {
+        if list.len() == 1 {
+            return pick_keys(&list[0]);
+        }
+        return json!({"action": "compound", "actions": list.iter().map(pick_keys).collect::<Vec<_>>()});
+    }
+    pick_keys(o)
+}
+
+/// The recommended option of a submission, as the verdict (its action, `compound` for several)
+/// and the arguments to carry it out (the option, with the submission's `summary` and
+/// `no_code_change`). An older submission is its own verdict and arguments.
 pub fn recommended(a: &Value) -> (String, Value) {
     let Some(opts) = a["options"].as_array() else {
         return (
@@ -172,11 +220,35 @@ pub fn recommended(a: &Value) -> (String, Value) {
     else {
         return ("none".into(), a.clone());
     };
+    let act = option_action(o);
     let mut args = o.clone();
+    if let Some(m) = act.as_object() {
+        for (k, v) in m {
+            args[k] = v.clone();
+        }
+    }
     for k in ["summary", "no_code_change"] {
         args[k] = a[k].clone();
     }
-    (o["action"].as_str().unwrap_or("none").to_string(), args)
+    (act["action"].as_str().unwrap_or("none").to_string(), args)
+}
+
+/// What a card asks: for a cause that speaks for several tasks, all of them.
+fn card_ask(task: u64, a: &Value) -> String {
+    let tasks: Vec<u64> = a["tasks"]
+        .as_array()
+        .map(|l| l.iter().filter_map(Value::as_u64).collect())
+        .unwrap_or_default();
+    match tasks.as_slice() {
+        [] | [_] => format!("Task #{task} failed: what should happen next?"),
+        many => format!(
+            "Tasks {} are held by one cause: what should happen next?",
+            many.iter()
+                .map(|t| format!("#{t}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
 }
 
 /// The decision card of a submission with options: `Card::to_json`, each option carrying its
@@ -187,7 +259,7 @@ pub fn build_card(id: u64, task: u64, a: &Value) -> Option<Value> {
     };
     let opts = a["options"].as_array()?;
     let card = Card {
-        ask: format!("Task #{task} failed: what should happen next?"),
+        ask: card_ask(task, a),
         why: truncate(a["summary"].as_str().unwrap_or("").trim(), WHY_MAX),
         options: opts
             .iter()
@@ -212,21 +284,7 @@ pub fn build_card(id: u64, task: u64, a: &Value) -> Option<Value> {
     };
     let mut v = card.to_json();
     for (i, o) in opts.iter().enumerate() {
-        let mut act = serde_json::Map::new();
-        for k in [
-            "action",
-            "step",
-            "note",
-            "reason",
-            "kind",
-            "duplicate_of",
-            "evidence",
-        ] {
-            if !o[k].is_null() {
-                act.insert(k.into(), o[k].clone());
-            }
-        }
-        v["options"][i]["action"] = Value::Object(act);
+        v["options"][i]["action"] = option_action(o);
     }
     Some(v)
 }
@@ -301,10 +359,19 @@ pub fn row_text(r: &DiagnosisRow) -> String {
     let card = serde_json::from_str::<Value>(&r.card)
         .ok()
         .and_then(|v| Card::from_json(&v));
+    let who = match crate::diagcause::tasks_of(r).as_slice() {
+        [one] => format!("Task #{one} failed"),
+        many => format!(
+            "Tasks {} are held by one cause",
+            many.iter()
+                .map(|t| format!("#{t}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    };
     match card {
         Some(c) => format!(
-            "Task #{} failed. Diagnosis #{}: {}. Options: {}",
-            r.task,
+            "{who}. Diagnosis #{}: {}. Options: {}",
             r.id,
             c.why,
             c.options
@@ -685,6 +752,23 @@ pub fn apply_args(
             .map_err(|e| e.to_string())?;
             Ok("canceled".into())
         }
+        // Several actions of one option, in order; the first that fails stops the rest.
+        "compound" => {
+            let mut said = vec![];
+            for act in a["actions"].as_array().into_iter().flatten() {
+                let name = act["action"].as_str().unwrap_or("none");
+                let mut act = act.clone();
+                if act["diagnosis"].is_null() {
+                    act["diagnosis"] = a["diagnosis"].clone();
+                }
+                said.push(apply_args(d, task, name, &act, auto)?);
+            }
+            Ok(said.join(" | "))
+        }
+        "file_task" => crate::diagcause::file_task(d, task, a),
+        "land_now" => crate::diagcause::land_now(d, task, a),
+        "wait_for" => crate::diagcause::wait_for(d, task, a),
+        "open_session" => crate::diagcause::open_session(d, task, a),
         _ => Err("this diagnosis has nothing to apply: decide yourself, or dismiss it".into()),
     }
 }
@@ -713,11 +797,25 @@ fn still_pending(d: &Daemon, row: &DiagnosisRow) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether a row is a cause diagnosis (s1176): one card for the tasks it lists.
+pub fn is_cause(r: &DiagnosisRow) -> bool {
+    r.args.contains("\"kind\":\"cause\"")
+}
+
 /// The newest pending diagnosis among a task's `rows` that speaks of the failure it is in now.
+/// A cause's card is served by [`crate::diagcause::open_card_of`], to every task it lists.
 pub fn pending_in<'a>(rows: &'a [DiagnosisRow], t: &Task) -> Option<&'a DiagnosisRow> {
     rows.iter()
         .rev()
-        .find(|r| r.status == "pending" && still_needs_you(Some(t), r.at_ms))
+        .find(|r| r.status == "pending" && !is_cause(r) && still_needs_you(Some(t), r.at_ms))
+}
+
+/// The pending card a task holds: its own diagnosis', or the cause card that lists it.
+pub fn pending_for(d: &Daemon, t: &Task) -> Option<DiagnosisRow> {
+    let rows = d.store.diagnoses(Some(t.id.0)).ok()?;
+    pending_in(&rows, t)
+        .cloned()
+        .or_else(|| crate::diagcause::open_card_of(d, t))
 }
 
 /// The decision card a diagnosis stored, with its hash. The hash covers the diagnosis id, so an
@@ -731,13 +829,10 @@ pub fn row_card(r: &DiagnosisRow) -> Option<(Card, String)> {
 
 /// The pending diagnosis whose card a failed task holds.
 pub fn pending_card(d: &Daemon, t: &Task) -> Option<DiagnosisRow> {
-    if t.state != State::Failed {
+    if !crate::diagcause::serves(t) {
         return None;
     }
-    let rows = d.store.diagnoses(Some(t.id.0)).ok()?;
-    pending_in(&rows, t)
-        .filter(|r| row_card(r).is_some())
-        .cloned()
+    pending_for(d, t).filter(|r| row_card(r).is_some())
 }
 
 /// Carry out the owner's answer to a diagnosis card and mark the row. `picked` is an option's
@@ -777,12 +872,28 @@ pub fn answer_card(
             "answered",
         ),
     };
-    apply_args(d, row.task, &verdict, &args, false)?;
+    carry_out(d, row, &verdict, args)?;
     d.store
         .set_diagnosis_status(row.id, status, now_ms())
         .map_err(|e| e.to_string())?;
     d.poke();
     Ok(())
+}
+
+/// Carry out what the owner chose: a cause's card acts on every task it lists, any other on its
+/// task.
+fn carry_out(
+    d: &Arc<Daemon>,
+    row: &DiagnosisRow,
+    verdict: &str,
+    mut args: Value,
+) -> Result<String, String> {
+    args["diagnosis"] = json!(row.id);
+    if is_cause(row) {
+        let tasks = crate::diagcause::tasks_of(row);
+        return crate::diagcause::apply_all(d, row, &tasks, verdict, &args, false);
+    }
+    apply_args(d, row.task, verdict, &args, false)
 }
 
 /// Apply a pending diagnosis the owner chose.
@@ -791,7 +902,7 @@ pub fn apply(d: &Arc<Daemon>, row: &DiagnosisRow) -> Result<String, String> {
     still_pending(d, row)?;
     let a: Value = serde_json::from_str(&row.args).unwrap_or(json!({}));
     let (verdict, args) = recommended(&a);
-    let r = apply_args(d, row.task, &verdict, &args, false)?;
+    let r = carry_out(d, row, &verdict, args)?;
     let _ = d.store.set_diagnosis_status(row.id, "applied", now_ms());
     Ok(r)
 }
@@ -823,7 +934,7 @@ pub fn alerts(d: &Daemon) -> Vec<(String, String, String)> {
         .diagnoses(None)
         .unwrap_or_default()
         .into_iter()
-        .filter(|r| r.status == "pending")
+        .filter(|r| r.status == "pending" && !is_cause(r))
         .filter(|r| still_needs_you(w.tasks.get(&TaskId(r.task)), r.at_ms))
         .map(|r| {
             (
@@ -832,6 +943,7 @@ pub fn alerts(d: &Daemon) -> Vec<(String, String, String)> {
                 pending_notice(&r),
             )
         })
+        .chain(crate::diagcause::alerts(d))
         .chain(applied_alerts(d))
         .collect()
 }
