@@ -58,12 +58,13 @@ class SettingsModelTest {
         assertEquals(3, r.projects.size)
         assertEquals(RemoteSettings.Project("web", true, "macos-latest", "remote", "project"), r.project("web"))
         assertEquals("set for this project", r.project("web")?.sourceText)
-        assertTrue(r.project("web")!!.canChange)
         assertEquals("follows the global mode", r.project("api")?.sourceText)
         val none = r.project("local-only")!!
         assertFalse(none.remote)
-        assertEquals("always runs here: the project file has no [remote_runs]", none.sourceText)
-        assertFalse(none.canChange)
+        assertEquals("always runs here: the project file has no [remote_runs]; a mode chosen here sends its runs to nodes", none.sourceText)
+        assertFalse(none.nodesOnly)
+        val only = RemoteSettings.parse("""{"projects":[{"project":"app","remote":false,"nodes_only":true,"runs_on":null,"mode":"remote","source":"project"}]}""").project("app")!!
+        assertEquals("remote (nodes only: no GitHub setup)", only.sourceText)
         assertEquals(RemoteSettings(), RemoteSettings.parse("not json"))
     }
 

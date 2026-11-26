@@ -3,8 +3,9 @@
 # Live progress for test and command steps (s70) exit test, against a real masond.
 #  1. A test step running a TAP suite of 40 tests: after a first green run (40 tests), a second
 #     run on a new commit that prints a test every 0.15 s shows its passed count RISING over the
-#     WebSocket, against a total of 40 from the last green run (source "expected"). The final
-#     verdict is the full parse (the task goes on to land).
+#     WebSocket, ending at 40 of 40. The final verdict is the full parse (the task goes on to land).
+#     Only a green run at the base itself sizes a suite (#959; suites.rs, put_suite_size), so after
+#     a task's green the total may be the suite's "minimum", raised with the count, or "expected".
 #  2. A suite that appends to its `progress` file shows those counts and messages.
 #  3. A command step writing MASON_PROGRESS_FILE shows its counts and message.
 # (The plugin protocol 2 and the CI check counts are covered by cargo tests, not here.)
@@ -130,7 +131,7 @@ add() { m task add "$1" --project web --body "$1" | sed -n 's/^Filed task #\([0-
 state_of() { m task show "$1" --json | sed -n 's/^  "state": "\(.*\)",$/\1/p'; }
 finished() { case "$(state_of "$1")" in done|landed|merged|failed|stopped) return 0 ;; *) return 1 ;; esac; }
 
-echo "== first: a quick green run records 40 tests for this base"
+echo "== first: a quick green run"
 t1=$(add "first change")
 wait_for 120 "task $t1 to finish" finished "$t1"
 echo "   task $t1: $(state_of "$t1")"
@@ -153,11 +154,13 @@ assert t, "no StepProgress for the test step"
 dones = [r["done"] for r in t if r["unit"] == "tests"]
 rising = sorted(set(dones))
 assert len(rising) >= 4 and rising == sorted(rising) and rising[-1] == 40, "the passed count did not rise: %r" % dones
-assert all(r["total"] == 40 and r["total_source"] == "expected" for r in t if r["unit"] == "tests"), t[-1]
+counts = [r for r in t if r["unit"] == "tests"]
+assert all(r["total_source"] in ("minimum", "expected") for r in counts), counts
+assert counts[-1]["total"] == 40, counts[-1]
 mid = [r for r in t if 0 < r["done"] < 40]
 assert mid, "no push between 0 and 40 tests"
-assert mid[0]["subs"][0]["name"] == "tap40" and mid[0]["subs"][0]["total"] == 40 and mid[0]["subs"][0]["done_source"] == "counted", mid[0]
-print("   test step: passed rose through %d distinct counts to %d of %d (%s)" % (len(rising), rising[-1], t[-1]["total"], t[-1]["total_source"]))
+assert mid[0]["subs"][0]["name"] == "tap40" and mid[0]["subs"][0]["done_source"] == "counted", mid[0]
+print("   test step: passed rose through %d distinct counts to %d of %d (%s)" % (len(rising), rising[-1], counts[-1]["total"], counts[-1]["total_source"]))
 p = of("ptest")
 msgs = [r["message"] for r in p]
 assert any("warming up" in x for x in msgs) and any("plain words, not json" in x for x in msgs), msgs
