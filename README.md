@@ -823,6 +823,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s1138**: Exit scripts s723 and s727 no longer race the daemon: s723 waits for the run lookup, and s727 sets its held task to local while the task ahead of it cannot land.
 - **s1139**: A thermal wait now names the condition that holds work and what releases it (die temperature against `thermal_max_c`, speed against `thermal_min_pct`, or SMC power limiting) in the waiting line, the stored wait event, the queue and home-page lines and `mason resources`, instead of "work starts at 101% or more".
 - **s1149**: `pages/deploy` fails because GitHub Pages is not enabled for the repository with GitHub Actions as its source, which is an owner setting, so no code changed and the check stays red until the owner enables it.
+- **s1153**: A project's Agent Skills in `.mason/skills/` on its base commit are given to every Claude session as a `mason` plugin; the worktree cannot add or change them, `[agent] user_skills = false` keeps the owner's out, and `mason task show` lists the ones a run called.
 - **s1154**: the adapter's command-guard test now builds its expected hook path per platform, so it passes on Windows.
 - **s1156**: A red exit-script run now names the failing line as the cause, not a `== ` heading or prose that contains the word "error".
 - **s1158**: A red s914 or s1035 now names the failing sub-script, its exit code and its last 12 lines.
