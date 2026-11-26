@@ -13,9 +13,8 @@
 use crate::config::NodeSettings;
 use crate::daemon::{now_ms, Daemon};
 use mason_landing::git;
-use mason_step_host::client::{collect_to_file, ClientError, HostClient};
+use mason_step_host::client::{collect_to_file, ClientError};
 use mason_step_host::launcher::{spawn_host, SpawnOptions};
-use mason_step_host::protocol::{CURRENT, PREVIOUS};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -1191,6 +1190,7 @@ for a in "$@"; do
 done
 exec "$real" "$@"
 "#;
+
 /// Scratch worlds a node allows its daemon tests at once: two thirds of its cores, at least 2 and
 /// at most 16. A world is a real daemon with step hosts and git, mostly idle between a test's
 /// steps, so a node's cores can carry more worlds than a quarter of them; the iMac Pro that sets
@@ -1199,7 +1199,6 @@ exec "$real" "$@"
 pub fn node_test_worlds(cores: usize) -> usize {
     (cores * 2 / 3).clamp(2, 16)
 }
-
 
 /// The environment a job's commands run in: built here, from nothing. The node's own base (its
 /// `PATH` with the shims first, `HOME`, `TMPDIR` and the toolchain homes), then the coordinator's
@@ -1271,6 +1270,7 @@ pub fn job_env(
         }
     }
     put("MASON_WORKTREE", slot.to_string_lossy().into_owned());
+    put("MASON_NODE", "1".into());
     // How many scratch worlds the daemon tests may run at once on this node. The test slots are
     // counted across every process on the machine, so this is a limit for the whole node, not
     // for one job; the default (a quarter of the cores) is 4 on an 18-core node that runs up to
@@ -1287,7 +1287,6 @@ pub fn job_env(
             own.unwrap_or_else(|| node_test_worlds(cores)).to_string(),
         );
     }
-    put("MASON_NODE", "1".into());
     // The `mason` on a job's PATH finds no daemon and no configuration of this node: the commands
     // that need one say masond is not running, while `mason definition check` (which reads files)
     // works. The directories are named and never made.
@@ -1381,7 +1380,7 @@ fn run_phase(
     let done = Arc::new(AtomicBool::new(false));
     let why = Arc::new(std::sync::atomic::AtomicU8::new(0)); // 1 timed out, 2 cancelled
     {
-        let (done, why, h, sock) = (done.clone(), why.clone(), h.clone(), dir.join("sock"));
+        let (done, why, h, hdir) = (done.clone(), why.clone(), h.clone(), dir.clone());
         std::thread::spawn(move || loop {
             if done.load(Ordering::SeqCst) {
                 return;
@@ -1395,9 +1394,9 @@ fn run_phase(
             };
             if code != 0 {
                 why.store(code, Ordering::SeqCst);
-                if let Ok(mut c) = HostClient::connect(&sock, PREVIOUS, CURRENT, "node") {
-                    let _ = c.stop(1000);
-                }
+                // Retried, and the command killed outright if the host cannot be reached: a
+                // cancelled or timed-out job must not leave its test binaries running.
+                mason_step_host::client::stop_or_reap(&hdir, 1000, "node");
                 return;
             }
             std::thread::sleep(Duration::from_millis(100));
@@ -1408,6 +1407,14 @@ fn run_phase(
     let exit = jdir.join(format!("{name}.exit"));
     let rec = collect_to_file(&dir, &log, &exit);
     done.store(true, Ordering::SeqCst);
+    // A phase that ends early (cancelled, timed out, its host lost or its output uncollectable)
+    // must leave nothing of its command running. The stop above is a request the host carries
+    // out; this is the backstop for a host that never got it or died with the command alive.
+    // It signals only the processes the host's record verifiably names, so after an orderly
+    // end it finds nothing.
+    if rec.is_err() || why.load(Ordering::SeqCst) != 0 {
+        mason_step_host::registry::reap_dir_by(&dir, "node job ended early");
+    }
     let rec = match rec {
         Ok(r) => r,
         Err(ClientError::HostLost { .. }) => {
@@ -1931,20 +1938,13 @@ mod tests {
         assert_eq!(get("MASON_NODE"), Some("1"));
         assert_eq!(get("NO_COLOR"), Some("1"));
         assert_eq!(get("HOME"), Some("/Users/masonnode"));
+        // Daemon tests on the node get a world limit fitting it (a number, whatever the cores).
+        assert!(get("MASON_TEST_WORLDS").is_some_and(|v| v.parse::<usize>().is_ok_and(|n| n >= 2)));
         assert_eq!(
             get("SECRET_TOKEN"),
             None,
             "nothing else of the node's own is passed on"
         );
-        // Without a task number a job is still marked as a run of the pipeline.
-        let mut j2 = job.clone();
-        // Daemon tests on the node get a world limit fitting it (a number, whatever the cores).
-        assert!(get("MASON_TEST_WORLDS").is_some_and(|v| v.parse::<usize>().is_ok_and(|n| n >= 2)));
-        j2.env.retain(|(k, _)| k != "MASON_TASK");
-        let env = job_env(&j2, Path::new("/n/s"), Path::new("/n/shims"), &base);
-        assert_eq!(
-            env.iter()
-                .find(|(n, _)| n == "MASON_TASK")
         // The node daemon's own setting wins over the share of cores, and the coordinator's over
         // both.
         let own = |k: &str| match k {
@@ -1962,18 +1962,18 @@ mod tests {
         j3.env.push(("MASON_TEST_WORLDS".into(), "3".into()));
         let env = job_env(&j3, Path::new("/n/s"), Path::new("/n/shims"), &own);
         assert_eq!(worlds(&env).as_deref(), Some("3"));
+        // Without a task number a job is still marked as a run of the pipeline.
+        let mut j2 = job.clone();
+        j2.env.retain(|(k, _)| k != "MASON_TASK");
+        let env = job_env(&j2, Path::new("/n/s"), Path::new("/n/shims"), &base);
+        assert_eq!(
+            env.iter()
+                .find(|(n, _)| n == "MASON_TASK")
                 .map(|(_, v)| v.as_str()),
             Some("node")
         );
     }
 
-    #[test]
-    fn base64_round_trips() {
-        for s in ["", "a", "ab", "abc", "abcd", "hello, world\n\u{0}\u{ff}"] {
-            let e = base64_encode(s.as_bytes());
-            assert_eq!(base64_decode(&e).unwrap(), s.as_bytes(), "{s:?}");
-        }
-        assert_eq!(base64_encode(b"Man"), "TWFu");
     #[test]
     fn the_nodes_world_limit_is_a_share_of_its_cores_and_can_be_set() {
         assert_eq!(node_test_worlds(1), 2, "never below the floor of 2");
@@ -1986,6 +1986,13 @@ mod tests {
         assert_eq!(node_test_worlds(128), 16, "capped");
     }
 
+    #[test]
+    fn base64_round_trips() {
+        for s in ["", "a", "ab", "abc", "abcd", "hello, world\n\u{0}\u{ff}"] {
+            let e = base64_encode(s.as_bytes());
+            assert_eq!(base64_decode(&e).unwrap(), s.as_bytes(), "{s:?}");
+        }
+        assert_eq!(base64_encode(b"Man"), "TWFu");
         assert_eq!(base64_encode(b"Ma"), "TWE=");
         assert!(base64_decode("!!!!").is_none());
     }

@@ -1105,7 +1105,7 @@ fn run_hosted_once(
     let done = Arc::new(AtomicBool::new(false));
     let why = Arc::new(AtomicU8::new(0)); // 0 none, 1 timed out, 2 skipped, 3 gone
     {
-        let (done, why, sock, hdir) = (done.clone(), why.clone(), dir.join("sock"), dir.clone());
+        let (done, why, hdir) = (done.clone(), why.clone(), dir.clone());
         std::thread::spawn(move || {
             let end = Instant::now() + mason_step_host::registry::remaining_limit(limit, &hdir);
             loop {
@@ -1129,9 +1129,7 @@ fn run_hosted_once(
                     }
                 };
                 if stop {
-                    if let Ok(mut h) = HostClient::connect(&sock, PREVIOUS, CURRENT, "daemon") {
-                        let _ = h.stop(1000);
-                    }
+                    mason_step_host::client::stop_or_reap(&hdir, 1000, "daemon");
                     return;
                 }
                 std::thread::sleep(Duration::from_millis(100));
