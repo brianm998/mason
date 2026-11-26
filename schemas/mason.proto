@@ -1094,6 +1094,21 @@ message DiskHistory {
   // Every volume seen in the span, in a stable order, even one with a gap.
   repeated DiskVolume volumes = 3;
   repeated DiskPoint points = 4;
+  // What the pipeline's worktrees take, by kind and task state, as last measured (empty
+  // until the first measurement).
+  repeated WorktreeUsage worktrees = 5;
+}
+
+// The pipeline's worktree directories of one kind in one state.
+message WorktreeUsage {
+  // "task worktree" (without its build output), "build output" or "landing scratch".
+  string kind = 1;
+  // The task's state ("unknown": no task owns it); "idle" or "running" for landing scratch.
+  string state = 2;
+  uint32 count = 3;
+  uint64 bytes = 4;
+  // What the next sweep would free.
+  uint64 free_next_bytes = 5;
 }
 
 // Who holds a `compile` slot.

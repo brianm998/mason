@@ -3144,6 +3144,34 @@ public nonisolated struct Mason_V1_DiskHistory: Sendable {
 
   public var points: [Mason_V1_DiskPoint] = []
 
+  /// What the pipeline's worktrees take, by kind and task state, as last measured (empty
+  /// until the first measurement).
+  public var worktrees: [Mason_V1_WorktreeUsage] = []
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// The pipeline's worktree directories of one kind in one state.
+public nonisolated struct Mason_V1_WorktreeUsage: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  /// "task worktree" (without its build output), "build output" or "landing scratch".
+  public var kind: String = String()
+
+  /// The task's state ("unknown": no task owns it); "idle" or "running" for landing scratch.
+  public var state: String = String()
+
+  public var count: UInt32 = 0
+
+  public var bytes: UInt64 = 0
+
+  /// What the next sweep would free.
+  public var freeNextBytes: UInt64 = 0
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -9806,7 +9834,7 @@ nonisolated extension Mason_V1_DiskPoint: SwiftProtobuf.Message, SwiftProtobuf._
 
 nonisolated extension Mason_V1_DiskHistory: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DiskHistory"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}span_ms\0\u{3}step_ms\0\u{1}volumes\0\u{1}points\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}span_ms\0\u{3}step_ms\0\u{1}volumes\0\u{1}points\0\u{1}worktrees\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -9818,6 +9846,7 @@ nonisolated extension Mason_V1_DiskHistory: SwiftProtobuf.Message, SwiftProtobuf
       case 2: try { try decoder.decodeSingularUInt64Field(value: &self.stepMs) }()
       case 3: try { try decoder.decodeRepeatedMessageField(value: &self.volumes) }()
       case 4: try { try decoder.decodeRepeatedMessageField(value: &self.points) }()
+      case 5: try { try decoder.decodeRepeatedMessageField(value: &self.worktrees) }()
       default: break
       }
     }
@@ -9836,6 +9865,9 @@ nonisolated extension Mason_V1_DiskHistory: SwiftProtobuf.Message, SwiftProtobuf
     if !self.points.isEmpty {
       try visitor.visitRepeatedMessageField(value: self.points, fieldNumber: 4)
     }
+    if !self.worktrees.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.worktrees, fieldNumber: 5)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -9844,6 +9876,57 @@ nonisolated extension Mason_V1_DiskHistory: SwiftProtobuf.Message, SwiftProtobuf
     if lhs.stepMs != rhs.stepMs {return false}
     if lhs.volumes != rhs.volumes {return false}
     if lhs.points != rhs.points {return false}
+    if lhs.worktrees != rhs.worktrees {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Mason_V1_WorktreeUsage: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".WorktreeUsage"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}kind\0\u{1}state\0\u{1}count\0\u{1}bytes\0\u{3}free_next_bytes\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.kind) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.state) }()
+      case 3: try { try decoder.decodeSingularUInt32Field(value: &self.count) }()
+      case 4: try { try decoder.decodeSingularUInt64Field(value: &self.bytes) }()
+      case 5: try { try decoder.decodeSingularUInt64Field(value: &self.freeNextBytes) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.kind.isEmpty {
+      try visitor.visitSingularStringField(value: self.kind, fieldNumber: 1)
+    }
+    if !self.state.isEmpty {
+      try visitor.visitSingularStringField(value: self.state, fieldNumber: 2)
+    }
+    if self.count != 0 {
+      try visitor.visitSingularUInt32Field(value: self.count, fieldNumber: 3)
+    }
+    if self.bytes != 0 {
+      try visitor.visitSingularUInt64Field(value: self.bytes, fieldNumber: 4)
+    }
+    if self.freeNextBytes != 0 {
+      try visitor.visitSingularUInt64Field(value: self.freeNextBytes, fieldNumber: 5)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Mason_V1_WorktreeUsage, rhs: Mason_V1_WorktreeUsage) -> Bool {
+    if lhs.kind != rhs.kind {return false}
+    if lhs.state != rhs.state {return false}
+    if lhs.count != rhs.count {return false}
+    if lhs.bytes != rhs.bytes {return false}
+    if lhs.freeNextBytes != rhs.freeNextBytes {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

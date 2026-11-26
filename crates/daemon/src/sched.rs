@@ -1501,6 +1501,18 @@ impl Broker {
             .filter(|g| g.free_mb < g.floor_mb)
     }
 
+    /// Megabytes free on the volume holding `path`, read now, and the floor; `None` when there
+    /// is no reading or no floor.
+    pub fn disk_free_and_floor(&self, path: &std::path::Path) -> Option<(u64, u64)> {
+        let (source, floor) = {
+            let st = lock(&self.st);
+            let c = st.disk.as_ref()?;
+            (c.source.clone(), c.floor_mb)
+        };
+        let free = source.free_mb(&crate::disk::nearest_existing(path)?)?;
+        Some((free, floor))
+    }
+
     /// How many requests the disk gate is holding right now (zero while disk is fine).
     pub fn disk_held(&self) -> usize {
         let mut st = lock(&self.st);

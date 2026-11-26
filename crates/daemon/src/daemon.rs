@@ -39,6 +39,8 @@ pub struct Daemon {
     /// Millisecond time of the last store write refused for want of disk; 0 if none since.
     store_full: AtomicU64,
     pub disk_sizes: Arc<crate::disk::Sizes>,
+    /// The measured sizes of the pipeline's worktrees (s1145).
+    pub worktree_sizes: crate::worktrees::Sizes,
     /// By numeric id; the project's string id is `ProjectCfg::id`. Each entry is
     /// leaked (a reload of a registration file replaces it with a new one), so a
     /// borrow stays valid while a later reload swaps the entry: the few KB left
@@ -327,6 +329,7 @@ impl Daemon {
             silent: Mutex::default(),
             store_full: AtomicU64::new(0),
             disk_sizes: Default::default(),
+            worktree_sizes: Default::default(),
             worst_stall_ms: AtomicU64::new(0),
             last_big_stall_at: AtomicU64::new(0),
             last_big_stall_ms: AtomicU64::new(0),
@@ -483,12 +486,25 @@ impl Daemon {
         ring.save(&self.cfg.data_dir.join(crate::diskhistory::FILE));
     }
 
-    /// The free space in the `span_ms` before `now_ms`, oldest first.
+    /// The free space in the `span_ms` before `now_ms`, oldest first, with what the
+    /// pipeline's worktrees take.
     pub fn disk_history(&self, now_ms: u64, span_ms: u64) -> mason_protocol::DiskHistory {
-        self.disk_history
+        let mut h = self
+            .disk_history
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .query(now_ms, span_ms)
+            .query(now_ms, span_ms);
+        h.worktrees = crate::worktrees::totals(self)
+            .into_iter()
+            .map(|t| mason_protocol::WorktreeUsage {
+                kind: t.kind,
+                state: t.state,
+                count: t.count,
+                bytes: t.bytes,
+                free_next_bytes: t.free_next_bytes,
+            })
+            .collect();
+        h
     }
 
     pub fn poke(&self) {
@@ -961,6 +977,8 @@ impl Daemon {
                     );
                 }
                 d.progress_finish(run);
+                // Its worktree was in use until now (s1145).
+                crate::worktrees::note_job_ended(&d, task);
                 d.jobs
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())

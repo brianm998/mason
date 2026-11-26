@@ -1186,6 +1186,8 @@ pub struct ProjectCfg {
     /// Clone the landing area's warm build into a new task's directory when it is of the commit
     /// the task starts from (`task_cache_seed`; default off, decision 0552).
     pub task_cache_seed: bool,
+    /// How long the pipeline's worktrees and their build output are kept (s1145).
+    pub keep: crate::worktrees::KeepCfg,
     /// A command that reads a task body on stdin and prints `clear` or
     /// `unclear`. Optional, and only consulted when the deterministic check is
     /// unsure. Anything but `clear`, or a failure, means explore.
@@ -2081,6 +2083,7 @@ pub fn parse_project(id: &str, text: &str) -> Result<ProjectCfg, String> {
             .get("task_cache_seed")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
+        keep: crate::worktrees::KeepCfg::parse(id, &doc)?,
         task_cache: match s("task_cache").filter(|t| !t.trim().is_empty()) {
             Some(t) => {
                 crate::taskcache::check_template(&t).map_err(|e| format!("{id}: {e}"))?;

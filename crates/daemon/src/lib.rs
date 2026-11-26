@@ -121,6 +121,7 @@ pub mod views;
 pub mod waitview;
 pub mod watch;
 pub mod watchdog;
+pub mod worktrees;
 pub mod ws;
 
 pub use daemon::Daemon;

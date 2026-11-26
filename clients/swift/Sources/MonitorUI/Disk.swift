@@ -65,6 +65,11 @@ struct DiskSectionBody: View {
                     .accessibilityIdentifier("disk-collecting")
             }
             ForEach(volumes, id: \.id) { v in legend(v, Self.hasCheckboxes(volumeCount: volumes.count)) }
+            let worktrees = history.map(diskWorktreeLines) ?? []
+            ForEach(Array(worktrees.enumerated()), id: \.offset) { i, line in
+                Text(line).font(theme.small()).foregroundStyle(i == 0 ? theme.text : theme.muted)
+                    .accessibilityIdentifier(i == 0 ? "disk-worktrees" : "disk-worktrees-\(i)")
+            }
         }
     }
 
