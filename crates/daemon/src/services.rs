@@ -122,10 +122,12 @@ pub fn ci(p: &ProjectCfg) -> Result<Option<Ci>, String> {
                 CiKind::Command {
                     trigger,
                     status,
+                    cancel,
                     cwd,
                 } => Arc::new(CommandCi {
                     trigger: trigger.clone(),
                     status: status.clone(),
+                    cancel: cancel.clone(),
                     cwd: cwd.clone(),
                 }),
             };

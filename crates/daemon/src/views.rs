@@ -680,6 +680,21 @@ impl<'a> Ctx<'a> {
                 ..Default::default()
             });
         }
+        // A pause that has just gone says who lifted it, for ten minutes.
+        if let Some(l) = crate::http::last_lift(self.d, self.now) {
+            let text = format!(
+                "Pause lifted {} by {} via {}",
+                crate::update::clock_at(l.at),
+                l.who,
+                l.via
+            );
+            banners.push(Banner {
+                kind: "pause_lifted".into(),
+                detail: format!("{text}: {}", l.what),
+                text,
+                ..Default::default()
+            });
+        }
         for (_, _, text) in crate::ssh_keys::alerts(self.d) {
             banners.push(Banner {
                 kind: "push_auth".into(),
