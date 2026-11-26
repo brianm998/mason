@@ -4017,6 +4017,8 @@ fn agent_job(c: &Ctx) {
     let mut feedback = std::fs::read_to_string(dir.join("feedback.txt")).ok();
     let one_shot = take_retry_note(&dir);
     let note_shown = one_shot.is_some();
+    // The default explore prompt has no place for feedback, so it takes the note by itself.
+    let explore_note = with_retry_note(None, one_shot.clone());
     feedback = with_retry_note(feedback, one_shot);
     if let Some(files) = &conflicts {
         if kind == StepKind::Develop {
@@ -4121,7 +4123,13 @@ fn agent_job(c: &Ctx) {
                 plan.as_ref(),
             ),
             StepKind::Explore => {
-                crate::prompts::explore_prompt(c.task.0, &c.title, &c.body, c.trust, &c.project)
+                let p = crate::prompts::explore_prompt(
+                    c.task.0, &c.title, &c.body, c.trust, &c.project,
+                );
+                match &explore_note {
+                    Some(n) => format!("{p}\n\n{n}"),
+                    None => p,
+                }
             }
             StepKind::Diagnose | StepKind::Chat | StepKind::Health => String::new(),
         }
