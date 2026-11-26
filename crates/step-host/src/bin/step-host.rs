@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! `step-host --dir DIR --id ID [--linger-ms N] [--hb-ms N] [--cwd D] [--stdin FILE] [--clear-env] [--env K=V]... -- CMD ARGS...`
+//! `step-host --dir DIR --id ID [--linger-ms N] [--hb-ms N] [--cwd D] [--stdin FILE] [--clear-env] [--env K=V]... [--env-pass NAME]... -- CMD ARGS...`
 
 use mason_step_host::host::{run, HostConfig};
 use std::time::Duration;
@@ -42,6 +42,11 @@ fn main() {
                 let (k, v) = kv.split_once('=').unwrap_or_else(|| usage());
                 cfg.env.push((k.into(), v.into()));
             }
+            "--env-pass" => {
+                let k = next(&mut i);
+                let v = std::env::var(&k).unwrap_or_else(|_| usage());
+                cfg.env.push((k, v));
+            }
             "--" => {
                 cfg.cmd = args[i + 1..].to_vec();
                 break;
@@ -60,6 +65,6 @@ fn main() {
 }
 
 fn usage() -> ! {
-    eprintln!("usage: step-host --dir DIR --id ID [--linger-ms N] [--hb-ms N] [--cwd D] [--stdin FILE] [--clear-env] [--env K=V]... -- CMD ARGS...");
+    eprintln!("usage: step-host --dir DIR --id ID [--linger-ms N] [--hb-ms N] [--cwd D] [--stdin FILE] [--clear-env] [--env K=V]... [--env-pass NAME]... -- CMD ARGS...");
     std::process::exit(2);
 }
