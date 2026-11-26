@@ -39,6 +39,10 @@ fn main() {
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .with_writer(std::io::stderr)
+        .with_ansi(mason_daemon::logfmt::log_ansi(
+            std::io::IsTerminal::is_terminal(&std::io::stderr()),
+            std::env::var_os("NO_COLOR").as_deref(),
+        ))
         .init();
     mason_daemon::fdlimit::raise();
     let exe = std::env::current_exe().unwrap_or_default();

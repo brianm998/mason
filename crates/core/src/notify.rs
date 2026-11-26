@@ -616,7 +616,7 @@ pub fn sentence(kind: &str, subject: &str, detail: &str, reminder: bool) -> Stri
         "review" if !detail.is_empty() => detail,
         "daemon_down" => "MASON has lost its daemon; check that mason D is running".into(),
         "credentials" => {
-            format!("{subject}, the agent is not logged in; log in again (`claude /login`); work resumes at the next check, or `mason account release <name>` resumes it now")
+            format!("{subject}, the agent is not logged in; renew the token in claude.env or log in again (`claude /login`); work resumes at the next check, or `mason account release <name>` resumes it now")
         }
         "provider_outage" => format!("{subject}, the provider is down; work resumes by itself"),
         _ if detail.is_empty() => format!("{subject}, needs a look"),
