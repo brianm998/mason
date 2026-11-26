@@ -4463,16 +4463,50 @@ impl Runner {
             .store
             .add_ref(batch, &self.project().id, kind, name, None, now_ms())
             .map_err(|e| e.to_string())?;
-        git::run(
-            wt,
-            &[
-                "push",
-                "--porcelain",
-                &remote,
-                &format!("{sha}:refs/heads/{name}"),
-            ],
-        )
-        .map_err(|e| format!("could not push {name}: {e}"))?;
+        // A push that cannot reach GitHub at all (no DNS, no route) is the network's fault, not
+        // the code's: wait it out like any other outage before failing the landing.
+        let key = self.alert_key("service");
+        let pushed = retry_outage(
+            || {
+                git::run(
+                    wt,
+                    &[
+                        "push",
+                        "--porcelain",
+                        &remote,
+                        &format!("{sha}:refs/heads/{name}"),
+                    ],
+                )
+                .map_err(|e| {
+                    let e = e.to_string();
+                    if is_network_unreachable(&e) {
+                        format!("{}{e}", crate::hostedcheck::OUTAGE_PREFIX)
+                    } else {
+                        e
+                    }
+                })
+            },
+            |waited, why| {
+                self.d.landing.raise(
+                    self.pid,
+                    &key,
+                    "landing",
+                    &format!(
+                        "{}: waiting for the network to push {name}: {why} (waited {waited} s)",
+                        self.project().id
+                    ),
+                );
+                self.alive(OUTAGE_STEP_S);
+            },
+            |s| self.nap(s),
+        );
+        self.d.landing.clear(self.pid, &key);
+        pushed.map_err(|e| {
+            let e = e
+                .strip_prefix(crate::hostedcheck::OUTAGE_PREFIX)
+                .unwrap_or(&e);
+            format!("could not push {name}: {e}")
+        })?;
         self.point(&format!("{kind}_pushed"));
         Ok((sha, id))
     }
@@ -5829,6 +5863,25 @@ fn lint_places(output: &str) -> String {
     }
 }
 
+/// Is this git error "the remote could not be reached" (DNS, route, timeout), as opposed to a
+/// refusal?
+fn is_network_unreachable(e: &str) -> bool {
+    let l = e.to_ascii_lowercase();
+    [
+        "could not resolve hostname",
+        "could not resolve host",
+        "network is unreachable",
+        "no route to host",
+        "connection timed out",
+        "operation timed out",
+        "connection refused",
+        "connection reset",
+        "temporary failure in name resolution",
+    ]
+    .iter()
+    .any(|p| l.contains(p))
+}
+
 /// How long a landing waits out a GitHub outage, and the first and longest pause between tries.
 const OUTAGE_LIMIT_S: u64 = 30 * 60;
 const OUTAGE_STEP_S: u64 = 30;
@@ -5862,6 +5915,16 @@ fn retry_outage<T>(
 #[cfg(test)]
 mod outage_tests {
     use super::*;
+
+    #[test]
+    fn a_dns_failure_is_unreachable_and_a_refusal_is_not() {
+        assert!(is_network_unreachable(
+            "ssh: Could not resolve hostname github.com: nodename nor servname provided, or not known"
+        ));
+        assert!(!is_network_unreachable(
+            "Permission denied (publickey). [remote rejected]"
+        ));
+    }
 
     fn outage() -> String {
         format!(
