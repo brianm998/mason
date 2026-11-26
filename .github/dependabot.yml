@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Actions are pinned by commit SHA (scripts/check-action-pins.sh); this moves the pins by
+# reviewed pull request. The directory "/" covers .github/workflows; composite actions under
+# .github/actions are listed by their own directories.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directories: ["/", "/.github/actions/*"]
+    schedule:
+      interval: weekly
