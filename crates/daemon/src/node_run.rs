@@ -398,6 +398,26 @@ impl Jobs {
             .count() as u32
     }
 
+    /// Running jobs that are not yet in their step host's hands: still being checked out, or
+    /// between one phase's host and the next. A restart now would have to start them over, so a
+    /// takeover waits for these (a few seconds) and for nothing else: a job whose command runs
+    /// under a step host is found again by [`Jobs::resume`] and does not notice the new daemon.
+    pub fn settling(&self) -> u32 {
+        let live: Vec<Arc<Handle>> = self.lock_live().values().cloned().collect();
+        live.iter()
+            .filter(|h| {
+                h.job.lock().is_ok_and(|j| {
+                    j.state == JobState::Running
+                        && (!j.prepared
+                            || !self
+                                .host_dir(&j.coord, &j.id, &j.phase)
+                                .join("host.kv")
+                                .exists())
+                })
+            })
+            .count() as u32
+    }
+
     /// The jobs the node knows, for `mason node jobs`.
     pub fn list(&self) -> Vec<Value> {
         self.lock_live()
