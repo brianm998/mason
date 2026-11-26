@@ -5,7 +5,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertIsEnabled
-import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.runComposeUiTest
@@ -43,9 +42,9 @@ class RemotePlacementTest {
         ui("api", mutableListOf()) { onNodeWithTag("settings:remote:project:local").assertIsEnabled() }
     }
 
-    @Test fun theChoiceIsDisabledWhenTheProjectFileHasNoRemoteRuns() {
+    @Test fun aProjectWithNoRemoteRunsCanBeSentToNodes() {
         ui("local-only", mutableListOf()) {
-            onNodeWithTag("settings:remote:project:remote").assertIsNotEnabled()
+            onNodeWithTag("settings:remote:project:remote").assertIsEnabled()
             onNodeWithTag("settings:remote:global:remote").assertIsEnabled()
         }
     }

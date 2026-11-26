@@ -7,7 +7,8 @@
 #  1. alpha is local with source `project`; beta is local because it has no `[remote_runs]`;
 #  2. another task of alpha is local (from the project); the chosen task is remote (from the task);
 #  3. the old values still read (`mason remote on` is `remote`, `run-on github` is `remote`);
-#  4. a project without `[remote_runs]` refuses a mode, and a bad mode is refused.
+#  4. a bad mode is refused. (A project without `[remote_runs]` took none until #1150; it now
+#     takes one and is nodes only, which s1123 covers.)
 set -euo pipefail
 trap 'rc=$?; [ "$rc" -eq 0 ] || echo "FAILED (exit $rc) at line $LINENO: $BASH_COMMAND" >&2' ERR
 cd "$(git rev-parse --show-toplevel)"
@@ -189,6 +190,6 @@ m task run-on 1 default >/dev/null
 [ "$(runon 1 from)" = project ] || fail "run-on default did not fall through to the project"
 
 echo "== 4. refusals"
-m remote mode favor-local --project beta >/dev/null 2>&1 && fail "a project with no [remote_runs] took a mode"
+m remote mode sometimes --project beta >/dev/null 2>&1 && fail "a bad mode was accepted for a project"
 m remote mode sometimes >/dev/null 2>&1 && fail "a bad mode was accepted"
 echo "s816 passed"

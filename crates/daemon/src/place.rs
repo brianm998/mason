@@ -4,9 +4,13 @@
 //!
 //! One decision, [`decide`], from plain facts, so a table test can cover every row. The facts
 //! come from [`facts_for`]: the global switch (`remote.toml`, read live on every call, so a
-//! change needs no restart and no `project reload`), the task's own choice (#699, its `run_on` override), the project's `[remote_runs]`, and the suite's `remote`, `runs_on`, environment and
+//! change needs no restart and no `project reload`), the task's own choice (#699, its `run_on` override), the project's `[remote_runs]` or `[placement]`, and the suite's `remote`, `runs_on`, environment and
 //! `uses`. Moving a run changes no gate: the same command is judged by the same parser and
 //! minimum.
+//!
+//! A project with no `[remote_runs]` but a `[placement] mode` (#1150) is **nodes only**: GitHub
+//! is not one of its targets. In `remote` mode its runs never run here; with no node that has
+//! room the placement is a [`Place::Node`] that waits for one ([`wait_nid`]).
 //!
 //! The switch lives in `<config>/remote.toml`:
 //!
@@ -26,7 +30,7 @@ use std::sync::Mutex;
 use toml_edit::{value, DocumentMut};
 
 /// The placement mode (#831): where runs go. Set for all of MASON (`remote.toml`), per project
-/// (`[remote_runs] mode`) and per task (`run_on`); the most specific level that is set wins.
+/// (`[remote_runs] mode` or `[placement] mode`) and per task (`run_on`); the most specific level that is set wins.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     /// Everything on this machine.
@@ -104,7 +108,8 @@ pub struct Facts {
     /// The task's own mode (its `run_on` override); `None` for a task that has none and for a run
     /// no task owns.
     pub task: Option<Mode>,
-    /// The project's `[remote_runs]` mode (`mode`, or the old `fallback`); `None`: follows global.
+    /// The project's own mode ([`project_mode`]); `None`: it follows global (with
+    /// `[remote_runs]`) or always runs here (without).
     pub project: Option<Mode>,
     pub global: Mode,
     /// The project's `[remote_runs] runs_on`; `None` when the project has no `[remote_runs]`.
@@ -448,8 +453,9 @@ pub enum Place {
         /// For a balancing mode: why GitHub ("favor-remote, GitHub had room"). Empty otherwise.
         why: String,
     },
-    /// On another Mac running `masond` as a node (the multi-machine plan). Nothing produces it
-    /// yet: `decide` reaches GitHub or here only.
+    /// On another Mac running `masond` as a node (the multi-machine plan). For a nodes-only
+    /// project in `remote` mode the `nid` is a [`wait_nid`]: the run waits for a node with room
+    /// and never comes back here.
     Node {
         nid: String,
         name: String,
@@ -461,6 +467,11 @@ pub enum Place {
 impl Place {
     pub fn is_github(&self) -> bool {
         matches!(self, Place::GitHub { .. })
+    }
+
+    /// Is this a nodes-only run that waits until some node has room (no node is named yet)?
+    pub fn waits_for_node(&self) -> bool {
+        matches!(self, Place::Node { nid, .. } if wait_for(nid) == Some(""))
     }
 
     /// Does the run leave this machine (GitHub or a node)? What decides that a run needs none
@@ -479,6 +490,12 @@ impl Place {
             Place::GitHub { runs_on, from, why } => {
                 format!("on GitHub ({runs_on}), from the {}: {why}", from.label())
             }
+            Place::Node { from, why, .. } if self.waits_for_node() => {
+                format!(
+                    "on a node, once one has room, from the {}: {why}",
+                    from.label()
+                )
+            }
             Place::Node {
                 name, from, why, ..
             } if why.is_empty() => {
@@ -496,6 +513,65 @@ impl Place {
                 *from
             }
         }
+    }
+}
+
+/// What marks the node id of a run that must not come back to this machine (#1150).
+const WAIT: &str = "wait:";
+
+/// The node id of a nodes-only run in `remote` mode: `nid` is the node chosen now, empty when
+/// none has room yet. The node executor (`node_exec::execute`) waits for a node for such a run
+/// instead of handing it back to be run here.
+pub fn wait_nid(nid: &str) -> String {
+    format!("{WAIT}{nid}")
+}
+
+/// The node chosen for a run marked by [`wait_nid`] (empty: none yet); `None` for any other id.
+pub fn wait_for(nid: &str) -> Option<&str> {
+    nid.strip_prefix(WAIT)
+}
+
+/// What every reason of a nodes-only run that found no node ends in.
+const NO_GITHUB: &str = "this project has no GitHub setup";
+
+/// The decision for a nodes-only project (#1150): no `[remote_runs]`, but a mode of its own.
+/// The shared stay rules hold; GitHub is never a target. With a node that has room the modes mean
+/// what they mean elsewhere. With none, `remote` waits for one and the balancing modes run here
+/// under the usual limits.
+fn decide_nodes_only(f: &Facts, mode: Mode, from: Source) -> Place {
+    if let Some(why) = shared_stay(f) {
+        return Place::Local {
+            why,
+            from: Source::Suite,
+        };
+    }
+    if f.nodes.is_empty() {
+        return match mode {
+            Mode::Remote => Place::Node {
+                nid: wait_nid(""),
+                name: String::new(),
+                from,
+                why: format!("no node has room yet; {NO_GITHUB}"),
+            },
+            _ => Place::Local {
+                why: format!("{}, no node had room; {NO_GITHUB}", mode.name()),
+                from,
+            },
+        };
+    }
+    match decide_with_nodes(f, mode, from) {
+        Place::Node {
+            nid,
+            name,
+            from,
+            why,
+        } if mode == Mode::Remote => Place::Node {
+            nid: wait_nid(&nid),
+            name,
+            from,
+            why,
+        },
+        other => other,
     }
 }
 
@@ -616,6 +692,9 @@ pub fn decide(f: &Facts) -> Place {
             },
             from,
         };
+    }
+    if f.project_runs_on.is_none() && f.project.is_some() {
+        return decide_nodes_only(f, mode, from);
     }
     if !f.nodes.is_empty() {
         return decide_with_nodes(f, mode, from);
@@ -792,32 +871,32 @@ pub fn set_global(d: &Daemon, to: Mode, who: &str) -> Result<Value, (u16, String
     )
 }
 
-/// The project's own mode, from its `[remote_runs]`: `mode`, else the old `fallback` (`local` is
-/// `favor-remote`, `none` is `remote`). `None`: it follows the global mode, or has no
-/// `[remote_runs]` at all.
+/// The project's own mode: `[remote_runs] mode`, else the old `fallback` (`local` is
+/// `favor-remote`, `none` is `remote`), else `[placement] mode` (#1150). `None`: none is set.
 pub fn project_mode(d: &Daemon, project: &str) -> Option<Mode> {
-    let r = d
+    let s = &d
         .project_id_by_name(project)
         .and_then(|p| d.project(p))?
-        .services
-        .remote
-        .as_ref()?;
-    r.mode.as_deref().and_then(Mode::parse)
+        .services;
+    s.remote
+        .as_ref()
+        .and_then(|r| r.mode.as_deref())
+        .or(s.placement.as_deref())
+        .and_then(Mode::parse)
+}
+
+/// Is `project` nodes only (#1150): no `[remote_runs]`, but a `[placement] mode`?
+pub fn nodes_only(d: &Daemon, project: &str) -> bool {
+    !has_remote(d, project) && project_mode(d, project).is_some()
 }
 
 /// The project's effective mode and where it came from, before any task's choice: for
-/// `mason remote status`. A project with no `[remote_runs]` is always local.
+/// `mason remote status`. A project with neither `[remote_runs]` nor `[placement]` is local.
 pub fn project_effective(d: &Daemon, project: &str) -> (Mode, &'static str) {
-    let has = d
-        .project_id_by_name(project)
-        .and_then(|p| d.project(p))
-        .is_some_and(|p| p.services.remote.is_some());
-    if !has {
-        return (Mode::Local, "no [remote_runs]");
-    }
     match project_mode(d, project) {
         Some(m) => (m, "project"),
-        None => (read_global(d).0, "global"),
+        None if has_remote(d, project) => (read_global(d).0, "global"),
+        None => (Mode::Local, "no [remote_runs]"),
     }
 }
 
@@ -842,6 +921,7 @@ pub fn status(d: &Daemon) -> Value {
         .map(|p| {
             let (mode, source) = project_effective(d, &p.id);
             json!({"project": p.id, "remote": p.services.remote.is_some(),
+                   "nodes_only": nodes_only(d, &p.id),
                    "runs_on": p.services.remote.as_ref().map(|r| r.runs_on.clone()),
                    "mode": mode.name(), "source": source})
         })
@@ -850,15 +930,16 @@ pub fn status(d: &Daemon) -> Value {
            "problem": problem, "changed_by": by, "changed_at": at, "projects": projects})
 }
 
-/// Set `[remote_runs] mode` in a project's registration file and re-read it (like `project
-/// reload`). The file's comments and other keys stay. A project with no `[remote_runs]` is
-/// always local, so there is nothing to set and the answer says so.
+/// Set the project's mode in its registration file and re-read it (like `project reload`):
+/// `[remote_runs] mode`, or `[placement] mode` for a project with no `[remote_runs]` (#1150).
+/// The file's comments and other keys stay.
 pub fn set_project_mode(d: &Daemon, project: &str, to: Mode) -> Result<Value, (u16, String)> {
     write_project_mode(d, project, Some(to))
 }
 
-/// Remove `[remote_runs] mode` (and the old `fallback`), so the project follows the global mode
-/// again ("Follow MASON" in the monitors).
+/// Remove the project's own mode (`[remote_runs] mode` and the old `fallback`, and `[placement]
+/// mode`). With `[remote_runs]` it follows the global mode again ("Follow MASON" in the
+/// monitors); without, it always runs here again.
 pub fn clear_project_mode(d: &Daemon, project: &str) -> Result<Value, (u16, String)> {
     write_project_mode(d, project, None)
 }
@@ -878,24 +959,7 @@ fn write_project_mode(d: &Daemon, project: &str, to: Option<Mode>) -> Result<Val
     let mut doc: DocumentMut = old
         .parse()
         .map_err(|e| (400, format!("{}: {e}", path.display())))?;
-    let Some(t) = doc
-        .get_mut("remote_runs")
-        .and_then(|i| i.as_table_like_mut())
-    else {
-        return Err((
-            400,
-            format!("{project} has no [remote_runs], so it always runs here; add one first"),
-        ));
-    };
-    match to {
-        Some(m) => {
-            t.insert("mode", value(m.name()));
-        }
-        None => {
-            t.remove("mode");
-            t.remove("fallback");
-        }
-    }
+    edit_project_mode(&mut doc, to).map_err(|e| (400, format!("{}: {e}", path.display())))?;
     let tmp = path.with_extension("toml.tmp");
     std::fs::write(&tmp, doc.to_string()).map_err(|e| (500, format!("{}: {e}", tmp.display())))?;
     std::fs::rename(&tmp, &path).map_err(|e| {
@@ -909,14 +973,54 @@ fn write_project_mode(d: &Daemon, project: &str, to: Option<Mode>) -> Result<Val
     Ok(json!({"project": project, "mode": mode.name(), "source": source, "changed": changed}))
 }
 
+/// The edit [`write_project_mode`] makes to a registration file. Pure.
+fn edit_project_mode(doc: &mut DocumentMut, to: Option<Mode>) -> Result<(), String> {
+    if let Some(t) = doc
+        .get_mut("remote_runs")
+        .and_then(|i| i.as_table_like_mut())
+    {
+        match to {
+            Some(m) => {
+                t.insert("mode", value(m.name()));
+            }
+            None => {
+                t.remove("mode");
+                t.remove("fallback");
+                drop_placement_mode(doc);
+            }
+        }
+        return Ok(());
+    }
+    let Some(m) = to else {
+        drop_placement_mode(doc);
+        return Ok(());
+    };
+    doc.entry("placement")
+        .or_insert_with(toml_edit::table)
+        .as_table_like_mut()
+        .ok_or("`placement` is not a table")?
+        .insert("mode", value(m.name()));
+    Ok(())
+}
+
+/// Remove `[placement] mode`, and the table when nothing else is in it.
+fn drop_placement_mode(doc: &mut DocumentMut) {
+    let Some(t) = doc.get_mut("placement").and_then(|i| i.as_table_like_mut()) else {
+        return;
+    };
+    t.remove("mode");
+    if t.is_empty() {
+        doc.remove("placement");
+    }
+}
+
 /// The placement of a task as the views carry it: the mode in force and the level that set it.
 /// `project` is the task's project name; `None` for no task.
 pub fn task_placement(d: &Daemon, project: &str, task: u64) -> mason_protocol::Placement {
     let mut f = Facts::plain(read_global(d).0);
     f.task = task_choice(d, Some(task));
     f.project = project_mode(d, project);
-    let has = has_remote(d, project);
-    let (m, s) = if has {
+    let (m, s) = if has_remote(d, project) || nodes_only(d, project) {
         f.effective()
     } else {
         (Mode::Local, Source::Project)
@@ -929,21 +1033,20 @@ pub fn task_placement(d: &Daemon, project: &str, task: u64) -> mason_protocol::P
     }
 }
 
-/// A project's placement: its own mode, else the global one. A project with no `[remote_runs]`
-/// always runs here and cannot be set.
+/// A project's placement: its own mode, else the global one (with `[remote_runs]`) or local
+/// (without). Every project can be set.
 pub fn project_placement(d: &Daemon, project: &str) -> mason_protocol::Placement {
     let own = project_mode(d, project);
     let (m, s) = project_effective(d, project);
-    let settable = has_remote(d, project);
     mason_protocol::Placement {
         mode: m.name().into(),
-        source: if settable {
-            s.to_string()
-        } else {
+        source: if own.is_none() && !has_remote(d, project) {
             "project".into()
+        } else {
+            s.to_string()
         },
         own: own.is_some(),
-        settable,
+        settable: true,
     }
 }
 
@@ -1012,29 +1115,16 @@ pub fn effective_line(d: &Daemon, task: u64) -> Value {
         .and_then(|p| d.project(p))
         .map(|p| p.id.clone());
     let choice = task_choice(d, Some(task));
-    let (mode, from, has_remote) = match &project {
-        Some(p) => {
-            let has = d
-                .project_id_by_name(p)
-                .and_then(|i| d.project(i))
-                .is_some_and(|p| p.services.remote.is_some());
-            let mut f = Facts::plain(read_global(d).0);
-            f.task = choice;
-            f.project = project_mode(d, p);
-            let (m, s) = f.effective();
-            (m, s, has)
-        }
-        None => {
-            let mut f = Facts::plain(read_global(d).0);
-            f.task = choice;
-            let (m, s) = f.effective();
-            (m, s, true)
-        }
-    };
-    let (mode, from, why) = if has_remote {
-        (mode, from, None)
-    } else {
+    let mut f = Facts::plain(read_global(d).0);
+    f.task = choice;
+    f.project = project.as_deref().and_then(|p| project_mode(d, p));
+    let (m, s) = f.effective();
+    let only = project.as_deref().is_some_and(|p| nodes_only(d, p));
+    let here_only = !only && project.as_deref().is_some_and(|p| !has_remote(d, p));
+    let (mode, from, why) = if here_only {
         (Mode::Local, Source::Project, Some("no [remote_runs]"))
+    } else {
+        (m, s, None)
     };
     let label = match (from, why) {
         (_, Some(w)) => w.to_string(),
@@ -1043,6 +1133,13 @@ pub fn effective_line(d: &Daemon, task: u64) -> Value {
     };
     let line = match mode {
         Mode::Local => format!("runs on: this Mac ({label})"),
+        Mode::Remote if only => format!("runs on: a node ({label}; no GitHub setup)"),
+        Mode::FavorLocal if only => {
+            format!("runs on: favor-local, this Mac first, then a node ({label})")
+        }
+        Mode::FavorRemote if only => {
+            format!("runs on: favor-remote, a node first ({label})")
+        }
         Mode::Remote => format!("runs on: GitHub ({label})"),
         Mode::FavorLocal => format!("runs on: favor-local, this Mac first ({label})"),
         Mode::FavorRemote => format!("runs on: favor-remote, GitHub first ({label})"),
@@ -1050,6 +1147,7 @@ pub fn effective_line(d: &Daemon, task: u64) -> Value {
     json!({
         "mode": mode.name(),
         "where": match mode {
+            Mode::Remote | Mode::FavorRemote if only => "node",
             Mode::Remote | Mode::FavorRemote => "github",
             _ => "local",
         },
@@ -1932,6 +2030,122 @@ mod tests {
             ..favor_local(load(Some("held for heat (die 99 °C)"), 2, 0, 0), false)
         };
         assert_eq!(node_name(&decide(&only)), Some("studio"));
+    }
+
+    /// #1150: no `[remote_runs]` and a mode of its own: nodes are the only place off this
+    /// machine, and `remote` never runs here.
+    #[test]
+    fn a_nodes_only_project_goes_to_a_node_or_waits_and_never_to_github() {
+        let only = |mode: Mode, nodes: Vec<NodeRoom>| Facts {
+            project: Some(mode),
+            project_runs_on: None,
+            nodes,
+            ..Facts::plain(Mode::Local)
+        };
+        let studio = || vec![room("studio", 2, false, None)];
+        // `remote` with room: that node, marked so that a refusal waits instead of running here.
+        let p = decide(&only(Mode::Remote, studio()));
+        assert_eq!(node_name(&p), Some("studio"), "{p:?}");
+        assert!(
+            matches!(&p, Place::Node { nid, .. } if wait_for(nid) == Some("id-studio")),
+            "{p:?}"
+        );
+        assert!(!p.waits_for_node());
+        assert_eq!(p.text(), "on node studio, from the project");
+        // `remote` with none: waits, and GitHub is not a target even when it is preferred.
+        let p = decide(&Facts {
+            prefer_github: true,
+            ..only(Mode::Remote, vec![])
+        });
+        assert!(
+            p.waits_for_node() && p.is_off_machine() && !p.is_github(),
+            "{p:?}"
+        );
+        assert_eq!(
+            p.text(),
+            "on a node, once one has room, from the project: no node has room yet; this project has no GitHub setup"
+        );
+        // The balancing modes with no node run here and say why.
+        for mode in [Mode::FavorRemote, Mode::FavorLocal] {
+            let p = decide(&only(mode, vec![]));
+            assert!(!p.is_off_machine(), "{p:?}");
+            assert!(
+                p.text()
+                    .contains("no node had room; this project has no GitHub setup"),
+                "{}",
+                p.text()
+            );
+        }
+        // With a node, `favor-remote` takes it (and may come back: not marked to wait).
+        let p = decide(&only(Mode::FavorRemote, studio()));
+        assert!(
+            matches!(&p, Place::Node { nid, .. } if nid == "id-studio"),
+            "{p:?}"
+        );
+        // What keeps a run here keeps it here whatever the mode and the nodes.
+        for mode in Mode::ALL {
+            for nodes in [vec![], studio()] {
+                let p = decide(&Facts {
+                    device: true,
+                    ..only(mode, nodes)
+                });
+                assert!(!p.is_off_machine(), "{mode:?}: {p:?}");
+                if mode != Mode::Local {
+                    assert!(p.text().contains("leases a device"), "{}", p.text());
+                }
+            }
+        }
+        // A task's own choice wins over the project's mode, either way.
+        let p = decide(&Facts {
+            task: Some(Mode::Remote),
+            ..only(Mode::Local, vec![])
+        });
+        assert!(p.waits_for_node(), "{p:?}");
+        let p = decide(&Facts {
+            task: Some(Mode::Local),
+            ..only(Mode::Remote, studio())
+        });
+        assert!(!p.is_off_machine(), "{p:?}");
+        // No mode of its own: the global switch alone never makes it wait.
+        let p = decide(&Facts {
+            project_runs_on: None,
+            ..Facts::plain(Mode::Remote)
+        });
+        assert_eq!(
+            p.text(),
+            "on this Mac: the project has no [remote_runs] section"
+        );
+    }
+
+    /// #1150: where the mode is written, with and without `[remote_runs]`.
+    #[test]
+    fn a_project_mode_is_written_to_remote_runs_or_to_placement() {
+        let edit = |text: &str, to: Option<Mode>| {
+            let mut doc: DocumentMut = text.parse().unwrap();
+            edit_project_mode(&mut doc, to).unwrap();
+            doc.to_string()
+        };
+        let t = edit("# mine\npath = \"/r\"\n", Some(Mode::Remote));
+        assert!(
+            t.contains("# mine") && t.contains("[placement]\nmode = \"remote\""),
+            "{t}"
+        );
+        let t = edit(&t, None);
+        assert!(!t.contains("placement") && t.contains("# mine"), "{t}");
+        let t = edit(
+            "[remote_runs]\nkind = \"github-actions\"\n",
+            Some(Mode::Local),
+        );
+        assert!(
+            t.contains("mode = \"local\"") && !t.contains("placement"),
+            "{t}"
+        );
+        // "Follow MASON" leaves no mode behind in either place.
+        let t = edit(
+            "[remote_runs]\nfallback = \"local\"\n[placement]\nmode = \"remote\"\n",
+            None,
+        );
+        assert!(!t.contains("mode") && !t.contains("fallback"), "{t}");
     }
 
     #[test]
