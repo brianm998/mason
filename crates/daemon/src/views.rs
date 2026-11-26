@@ -316,7 +316,7 @@ impl<'a> Ctx<'a> {
         }
         a.extend(["retry", "cancel", "open_session"]);
         if pending.is_none()
-            && crate::diagnose::running(t.id.0).is_none()
+            && crate::diagnose::running(self.d, t.id.0).is_none()
             && crate::diagnose::budget(&rows, t.state_entered_at.0).is_ok()
         {
             a.push("diagnose");
