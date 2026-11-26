@@ -134,11 +134,46 @@ fn recorded(dir: &Path, name: &str) -> String {
     std::fs::read_to_string(dir.join(format!("{name}.txt"))).unwrap_or_default()
 }
 
+/// What the diagnosis session left behind, for a wait on it that gave up.
+fn diagnosis_state(d: &mason_daemon::Daemon, t: TaskId, rec: &Path) -> String {
+    fn walk(dir: &Path, out: &mut String) {
+        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.to_string_lossy().contains("diag") {
+                let text = std::fs::read(&p).unwrap_or_default();
+                let tail = &text[text.len().saturating_sub(1500)..];
+                out.push_str(&format!(
+                    "\n--- {} ({} bytes)\n{}",
+                    p.display(),
+                    text.len(),
+                    String::from_utf8_lossy(tail)
+                ));
+            }
+        }
+    }
+    let k = d.world().unwrap().tasks[&t].clone();
+    let mut out = format!(
+        "state {:?}, class {:?}, failure {:?}, running {:?}, prompt recorded {}",
+        k.state,
+        k.failure_class,
+        k.failure,
+        mason_daemon::diagnose::running(t.0),
+        rec.join("diagnosis.txt").exists()
+    );
+    walk(&d.cfg.data_dir, &mut out);
+    out
+}
+
 /// The diagnosis runs after the task shows as failed.
 fn diagnosis_prompt(d: &Arc<mason_daemon::Daemon>, t: TaskId, rec: &Path) -> String {
-    wait_for("the diagnosis", 180, || {
+    let waited = try_wait_for_exact("the diagnosis", 300, 100, || {
         !d.store.diagnoses(Some(t.0)).unwrap().is_empty()
     });
+    if let Err(why) = waited {
+        panic!("{why}: {}", diagnosis_state(d, t, rec));
+    }
     let row = &d.store.diagnoses(Some(t.0)).unwrap()[0];
     assert_eq!(
         row.status, "pending",
