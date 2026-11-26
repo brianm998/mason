@@ -9,6 +9,8 @@ use mason_core::introspect::CATEGORIES;
 use mason_core::*;
 use mason_daemon::daemon::now_ms;
 use mason_daemon::{attention, holds, introspect, proposals, review, Daemon};
+use mason_definition::layers::resolve;
+use mason_definition::tiers::{launch, Mapping};
 use mason_store::{ProposalRow, Store};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -281,6 +283,16 @@ fn one_review_covers_every_included_project_and_asks_the_six_questions_on_opus()
             ("step.develop.model".to_string(), "opus".to_string()),
         ]
     );
+    // What the session is launched with: `medium` is also an abstract level, which must not
+    // leave the CLI without an effort.
+    let def = d.current_def(pid(d));
+    let step = def.first_in(State::Developing).unwrap().clone();
+    let overrides = d.store.task_overrides(task.0).unwrap();
+    let resolved = resolve(&def, &step, &d.overlay(pid(d)), &[], &overrides, now_ms()).unwrap();
+    let mut launched = launch(&resolved, &Mapping::builtin("claude"), &[]);
+    review::pin_effort(d, task, &step.name, &mut launched);
+    assert_eq!(launched.model.as_deref(), Some("opus"));
+    assert_eq!(launched.effort.as_deref(), Some("medium"));
     assert!(introspect::is_analyst_task(d, task, "scratch"));
     assert!(d.store.schedule("analyst:web").unwrap().is_none());
     assert!(

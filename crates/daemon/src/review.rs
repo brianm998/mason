@@ -17,7 +17,7 @@ use crate::config::ProjectCfg;
 use crate::daemon::{now_ms, Daemon};
 use mason_core::ci_schedule::{parse_at, Daily};
 use mason_core::*;
-use mason_definition::tiers::Entry;
+use mason_definition::tiers::{Entry, Launch};
 use mason_store::ScheduleRow;
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -274,6 +274,24 @@ pub fn model_and_effort(d: &Daemon, s: &Settings) -> Entry {
         },
     )
     .0
+}
+
+/// Make the effort the review task carries the one its session gets. As an override, `low`,
+/// `medium` and `high` are abstract levels, which pick a row of the tier's mapping and so may
+/// launch another effort or none; the review's settings name the real one.
+pub fn pin_effort(d: &Daemon, task: TaskId, step: &str, launched: &mut Launch) {
+    let key = format!("step.{step}.effort");
+    let carried = d
+        .store
+        .task_overrides(task.0)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|(k, _)| *k == key);
+    if let Some((_, effort)) = carried {
+        launched.effort = Some(effort);
+        launched.effort_from = "the review's settings".into();
+        launched.overridden = true;
+    }
 }
 
 // ---- the record --------------------------------------------------------------------------

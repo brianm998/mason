@@ -4168,7 +4168,10 @@ fn agent_job(c: &Ctx) {
     for p in &eff.problems {
         tracing::warn!(project = %c.project.id, "{p}");
     }
-    let launched = mason_definition::tiers::launch(&c.res, &eff.mapping, &agent.ladder);
+    let mut launched = mason_definition::tiers::launch(&c.res, &eff.mapping, &agent.ladder);
+    if review_task {
+        crate::review::pin_effort(&c.d, c.task, &c.step.name, &mut launched);
+    }
     let rec = LaunchRec {
         launched: &launched,
         provider: crate::tiermap::name(agent.provider),
