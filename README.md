@@ -103,7 +103,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s00**: Stage 0: Repository and ground rules
 - **s01**: Stage 1: Spikes
 - **s02**: Stage 2: Core domain and reducer
-- **s03**: Stage 3: Event store
+- **s03**: Stage 3: Event store. Later (#1194): the analyst task can submit its uncommitted result with no commit, so its findings are filed again.
 - **s04**: Stage 4: Step host
 - **s05**: Stage 5: Agent runner and step contract
 - **s06**: Stage 6: Walking skeleton
@@ -821,6 +821,14 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s1123**: a project with no `[remote_runs]` can be given a placement mode (`[placement] mode`, or `mason remote mode <m> --project P`) and then runs on nodes only; in `remote` mode its runs wait for a node and never run on the coordinator.
 - **s1127**: Exit script s724 now expects the workflow line `mason doctor` prints today, and the causes of the s723 and s727 failures are recorded as races in those scripts.
 - **s1138**: Exit scripts s723 and s727 no longer race the daemon: s723 waits for the run lookup, and s727 sets its held task to local while the task ahead of it cannot land.
+- **s1139**: A thermal wait now names the condition that holds work and what releases it (die temperature against `thermal_max_c`, speed against `thermal_min_pct`, or SMC power limiting) in the waiting line, the stored wait event, the queue and home-page lines and `mason resources`, instead of "work starts at 101% or more".
 - **s1149**: `pages/deploy` fails because GitHub Pages is not enabled for the repository with GitHub Actions as its source, which is an owner setting, so no code changed and the check stays red until the owner enables it.
+- **s1153**: A project's Agent Skills in `.mason/skills/` on its base commit are given to every Claude session as a `mason` plugin; the worktree cannot add or change them, `[agent] user_skills = false` keeps the owner's out, and `mason task show` lists the ones a run called.
 - **s1154**: the adapter's command-guard test now builds its expected hook path per platform, so it passes on Windows.
+- **s1156**: A red exit-script run now names the failing line as the cause, not a `== ` heading or prose that contains the word "error".
+- **s1158**: A red s914 or s1035 now names the failing sub-script, its exit code and its last 12 lines.
+- **s1159**: the node-goes-away test waits until the coordinator lists the run as running on node b before it stops the node's listener.
+- **s1160**: A node now reports whether it set a job's `origin/<base>`, a failed or missing base is a node failure rather than a red for the task, and `mason node sync` and `mason node show` repair and show node mirrors from the coordinator.
+- **s1161**: the step-host launch-listing tests now stop waiting when the launch ends and show its error, and they retry the ETXTBSY spawn race that most likely turned s594 red on ubuntu.
+- **s1163**: the file hold no longer reads the standard "How to work in this repository" footer or the Trust section of a task body as files the task changes, so unrelated tasks no longer wait on each other for them.
 <!-- status:end -->
