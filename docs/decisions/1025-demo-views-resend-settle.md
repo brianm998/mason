@@ -23,3 +23,7 @@ The Swift tool's settle is unchanged (outside this task).
 
 Rejected: a longer quiet window (still a race, slower); loosening `compare` (hides real
 differences).
+
+Merged with [1093](1093-compose-settle-signal-with-quiet-exit-line.md): a live daemon's agreed
+round-trip exit in Compose keeps 1093's `settle: quiet exit, views at N, daemon seq M` line. A
+demo never takes that exit, so it never prints the line.
