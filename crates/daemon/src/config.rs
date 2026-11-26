@@ -1540,6 +1540,8 @@ pub enum CiKind {
     Command {
         trigger: String,
         status: String,
+        /// Cancels a run MASON stops waiting on; optional.
+        cancel: Option<String>,
         cwd: PathBuf,
     },
     /// Jenkins: a parameterised job taking `REF` and `SHA`.
@@ -1663,6 +1665,7 @@ fn parse_services(id: &str, doc: &DocumentMut) -> Result<ServicesCfg, String> {
             "command" => CiKind::Command {
                 trigger: need(t, "ci", "trigger")?,
                 status: need(t, "ci", "status")?,
+                cancel: get(t, "cancel"),
                 cwd: get(t, "cwd").map_or_else(|| PathBuf::from("."), PathBuf::from),
             },
             "jenkins" => CiKind::Jenkins {

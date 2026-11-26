@@ -150,6 +150,11 @@ jobs:
           out="$RUNNER_TEMP/mason-out"
           mkdir -p "$out/results"
           : > "$out/output.log"
+          # A runner runs this one job, so its scratch-world slots are shared with nothing: let
+          # the daemon tests run as many worlds as the runner has cores. Left to itself the
+          # limit is cores/4 (2 on a 4-vCPU runner) and tests queued for a slot until their
+          # patience ran out. Set before the eval below, so run.json's env can still override.
+          export MASON_TEST_WORLDS="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
           # The environment MASON sets for the command.
           eval "$(jq -r '.env | to_entries[] | "export \(.key)=\(.value | @sh)"' .mason/run.json)"
           build="$(jq -r '.build // empty' .mason/run.json)"

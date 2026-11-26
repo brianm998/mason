@@ -629,4 +629,17 @@ mod report_time {
         let got: Vec<_> = r.cases.iter().map(|c| (c.name.as_str(), c.ms)).collect();
         assert_eq!(got, [("a::b", Some(500)), ("a::c", Some(1000))]);
     }
+
+    #[test]
+    fn the_times_to_store_leave_out_a_tests_world_wait() {
+        // What the daemon records after a run: a test that queued 600 s for a slot and worked
+        // for half a second is stored as half a second, and a test with no time is not stored.
+        let log = "mason-world-wait 600000 a::b\ntest a::b ... ok <600.500s>\n\
+                   mason-world-wait 120 a::b\ntest a::c ... ok <1.000s>\ntest a::d ... ok\n";
+        let r = parse(ParserKind::Regex, log, &suite()).unwrap();
+        assert_eq!(
+            r.test_times(),
+            [("a::b".to_string(), 380), ("a::c".to_string(), 1000)]
+        );
+    }
 }

@@ -357,11 +357,7 @@ fn record_time(who: &Who, suite: &str, phase: &str, ran: &Ran) {
 /// Record each test's own time from a finished run, whole or narrowed (s634). Tests whose
 /// output carried no time are left out.
 fn record_test_times(who: &Who, suite: &str, results: &Results) {
-    let times: Vec<(String, u64)> = results
-        .cases
-        .iter()
-        .filter_map(|c| c.ms.map(|ms| (c.name.clone(), ms)))
-        .collect();
+    let times = results.test_times();
     let _ = who
         .d
         .store
@@ -1105,7 +1101,7 @@ fn run_hosted_once(
     let done = Arc::new(AtomicBool::new(false));
     let why = Arc::new(AtomicU8::new(0)); // 0 none, 1 timed out, 2 skipped, 3 gone
     {
-        let (done, why, sock, hdir) = (done.clone(), why.clone(), dir.join("sock"), dir.clone());
+        let (done, why, hdir) = (done.clone(), why.clone(), dir.clone());
         std::thread::spawn(move || {
             let end = Instant::now() + mason_step_host::registry::remaining_limit(limit, &hdir);
             loop {
@@ -1129,9 +1125,7 @@ fn run_hosted_once(
                     }
                 };
                 if stop {
-                    if let Ok(mut h) = HostClient::connect(&sock, PREVIOUS, CURRENT, "daemon") {
-                        let _ = h.stop(1000);
-                    }
+                    mason_step_host::client::stop_or_reap(&hdir, 1000, "daemon");
                     return;
                 }
                 std::thread::sleep(Duration::from_millis(100));
@@ -2398,7 +2392,19 @@ fn run_suite(
     let mut remote_env_fails = 0u32;
     let mut network_reds = 0usize;
     let mut waiting = false;
+    // The lease whose runner units a run gives back when GitHub fails it, and asks for again at
+    // its place in line (#822). It holds what was asked again until this function returns.
+    let mut own = who.clone();
+    let parked = crate::remote::Grant::borrowed(
+        who.cover.giver.clone(),
+        who.cover
+            .giver
+            .as_ref()
+            .map(|g| g.held())
+            .unwrap_or_default(),
+    );
     loop {
+        let who = &own;
         // A skip may arrive at any time, even before the suite starts.
         let check = who.check(&suite.name);
         match check() {
@@ -2524,13 +2530,28 @@ fn run_suite(
                 );
                 waiting = true;
                 attempt += 1;
-                // A runner that fails the same way again and again is not helped by trying at
-                // once: wait twice as long each time.
+                // The run keeps its place in line and holds nothing while it waits. A runner
+                // that fails the same way again and again is not helped by trying at once:
+                // from the second failure in a row, wait twice as long each time (#822).
                 remote_env_fails += 1;
-                std::thread::sleep(crate::remote::env_backoff(
+                let units = requeue_units(d, who, suite, &run_cmd);
+                let check = who.check(&suite.name);
+                let stop = || match check() {
+                    Stop::No => None,
+                    Stop::Skipped => Some(crate::remote::StopWhy::Skipped),
+                    Stop::Gone => Some(crate::remote::StopWhy::Gone),
+                };
+                if crate::remote::wait_again(
+                    &crate::remote::SystemClock,
                     d.cfg.env_retry,
-                    remote_env_fails - 1,
-                ));
+                    &parked,
+                    units,
+                    remote_env_fails,
+                    &stop,
+                ) {
+                    own.cover.giver = parked.giver();
+                }
+                // Told to stop while it waited: the top of the loop says which.
                 continue;
             }
             Err(e) => {
@@ -2542,6 +2563,7 @@ fn run_suite(
                 };
             }
         };
+        remote_env_fails = 0;
         let ran = Ran {
             narrowed: suite.narrowed || ran.resumed.is_some(),
             ..ran
@@ -2991,6 +3013,29 @@ fn run_suite(
             (other, _) => other,
         };
         return result;
+    }
+}
+
+/// The runner units a run of `cmd` asks for again after GitHub failed it (#822): those of the
+/// jobs it starts, and no more of any pool than the run's flexible lease was given.
+fn requeue_units(
+    d: &Daemon,
+    who: &Who,
+    suite: &Suite,
+    cmd: &str,
+) -> std::collections::BTreeMap<String, u32> {
+    use crate::remote as rm;
+    let task = who.task.map(|(t, _)| t);
+    match rm::run_place(d, &who.project, task, Some(suite), cmd, rm::Kind::Suite) {
+        rm::RunPlace::GitHub { mut units, .. } => {
+            if let Some(n) = who.cover.runners {
+                units.values_mut().for_each(|u| *u = (*u).min(n.max(1)));
+            }
+            units
+        }
+        // No runner units: a node's own unit is not given back by a run, and a run placed
+        // here takes its slots when it starts.
+        rm::RunPlace::Node { .. } | rm::RunPlace::Local => Default::default(),
     }
 }
 
@@ -5595,7 +5640,11 @@ fn pay_with(d: &Arc<Daemon>, debt: u64, only: Option<&str>) -> Result<String, St
         trust_base: true,
         members: Members::default(),
         reuse: None,
-        cover: Cover::default(),
+        cover: Cover {
+            giver: _lease.as_ref().map(|l| l.giver()),
+            runners: _lease.as_ref().and_then(|l| l.granted_runners()),
+            ..Cover::default()
+        },
     };
     let tree_hash = git::run(&wt, &["rev-parse", "HEAD^{tree}"])
         .map(|s| s.trim().to_string())
@@ -6025,8 +6074,11 @@ fn pay_ci(
     )
     .map_err(|e| format!("could not push {name}: {e}"))?;
     let started = Instant::now();
+    // The commit until the trigger names the run.
+    let mut run_id = tip.clone();
     let state = (|| -> Result<mason_adapter_api::service::CiState, String> {
         let run = ci.trigger(&name, &tip).map_err(|e| e.to_string())?;
+        run_id.clone_from(&run);
         loop {
             match ci.status(&run).map_err(|e| e.to_string())? {
                 mason_adapter_api::service::CiState::Pending => {
@@ -6039,6 +6091,11 @@ fn pay_ci(
             }
         }
     })();
+    // No verdict (timeout, an error): cancel the run, best effort, before its ref goes
+    // (task 1108). The debt's outcome does not depend on it.
+    if state.is_err() {
+        crate::landing::cancel_runs(ci.as_ref(), &run_id, &name);
+    }
     let _ = git::run(
         &p.path,
         &["push", &remote, "--delete", &format!("refs/heads/{name}")],

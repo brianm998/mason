@@ -492,6 +492,12 @@ pub trait BuildSystemAdapter: Send + Sync {
     fn progress(&self, _run: &str) -> Result<CiProgress, ApiError> {
         Ok(CiProgress::default())
     }
+    /// Cancel the unfinished runs of `run` (the id `trigger` gave) on `git_ref`, which MASON
+    /// stops waiting on without a verdict. An empty `run` means every run on `git_ref`.
+    /// Returns how many were cancelled. A system that cannot cancel does nothing.
+    fn cancel(&self, _run: &str, _git_ref: &str) -> Result<usize, ApiError> {
+        Ok(0)
+    }
     /// Does the repository at `repo` let CI run on a candidate ref?
     /// (`mason doctor` and, later, `mason init` use this.)
     fn doctor(&self, repo: &Path) -> Vec<Problem>;
