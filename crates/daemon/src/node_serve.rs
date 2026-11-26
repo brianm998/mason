@@ -195,6 +195,7 @@ impl NodeState {
 
     /// Stop trusting the coordinator called `name`. `false`: there is none.
     pub fn remove_coordinator(&self, name: &str) -> Result<bool, String> {
+        let name = coordinator_key(name);
         let mut list = self.coordinators();
         let Some(gone) = list.iter().find(|c| c.name == name).cloned() else {
             return Ok(false);
@@ -938,6 +939,28 @@ async fn guard(
     next.run(req).await
 }
 
+/// The longest coordinator name a node keeps, in characters.
+const COORDINATOR_NAME_MAX: usize = 60;
+
+/// The name a node files a coordinator under: trimmed, and when longer than
+/// `COORDINATOR_NAME_MAX` characters cut at a character boundary with a short hash of the whole
+/// name at the end, so two long names that share a prefix stay distinct. Pairing and every lookup
+/// by name go through this, so the name a coordinator sends always finds the entry it made.
+pub fn coordinator_key(name: &str) -> String {
+    let name = name.trim();
+    if name.chars().count() <= COORDINATOR_NAME_MAX {
+        return name.to_string();
+    }
+    // FNV-1a: stable across runs and platforms, which `DefaultHasher` does not promise.
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in name.bytes() {
+        h ^= u64::from(byte);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    let head: String = name.chars().take(COORDINATOR_NAME_MAX - 9).collect();
+    format!("{head}-{:08x}", h & 0xffff_ffff)
+}
+
 /// `POST /node-pair {code, name}`: a coordinator that has the code. Its certificate, which the
 /// handshake gave us, is what gets trusted.
 async fn pair(
@@ -949,13 +972,7 @@ async fn pair(
         return Err(fail(400, "no client certificate"));
     }
     let code = b["code"].as_str().unwrap_or_default().to_string();
-    let name: String = b["name"]
-        .as_str()
-        .unwrap_or_default()
-        .trim()
-        .chars()
-        .take(60)
-        .collect();
+    let name = coordinator_key(b["name"].as_str().unwrap_or_default());
     if name.is_empty() {
         return Err(fail(400, "the coordinator needs a name"));
     }
@@ -1464,7 +1481,7 @@ pub async fn coordinators(State(d): State<Arc<Daemon>>) -> Res {
 
 /// `POST /node/coordinators/remove {name}`.
 pub async fn coordinator_remove(State(d): State<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
-    let name = b["name"].as_str().unwrap_or_default().to_string();
+    let name = coordinator_key(b["name"].as_str().unwrap_or_default());
     match d.node.remove_coordinator(&name) {
         Ok(true) => Ok(Json(json!({"removed": name}))),
         Ok(false) => Err(fail(404, format!("no coordinator called {name:?}"))),
@@ -1724,6 +1741,30 @@ mod tests {
         assert_eq!(xcode_from_app_name("Xcode.app"), None);
         assert_eq!(xcode_from_app_name("Xcode_beta.app"), None);
         assert_eq!(xcode_from_app_name("Safari.app"), None);
+    }
+
+    #[test]
+    fn a_coordinator_name_over_sixty_characters_is_found_again_by_the_name_it_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let long_a = format!("{}-A2C80B34A8C3", "x".repeat(49));
+        let long_b = format!("{}-B2C80B34A8C3", "x".repeat(49));
+        assert_eq!(long_a.chars().count(), 62);
+        assert_eq!(coordinator_key(&long_a).chars().count(), 60);
+        assert_ne!(coordinator_key(&long_a), coordinator_key(&long_b));
+        assert_eq!(
+            coordinator_key(&format!(" {long_a} ")),
+            coordinator_key(&long_a)
+        );
+        assert_eq!(coordinator_key("imac"), "imac");
+        let n = NodeState::new(dir.path());
+        n.add_coordinator("aa", &coordinator_key(&long_a), 1, None)
+            .unwrap();
+        n.add_coordinator("bb", &coordinator_key(&long_b), 2, None)
+            .unwrap();
+        assert!(n.remove_coordinator(&long_a).unwrap());
+        assert_eq!(n.coordinators().len(), 1);
+        assert!(!n.remove_coordinator(&long_a).unwrap());
+        assert!(n.remove_coordinator(&long_b).unwrap());
     }
 
     #[test]

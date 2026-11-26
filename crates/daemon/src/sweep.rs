@@ -88,24 +88,34 @@ const ZOMBIE_AGE: Duration = Duration::from_secs(60);
 /// wait for is left to it. `seen` is updated: first-seen times of the zombies still there.
 pub fn reap_stale_zombies(seen: &mut std::collections::HashMap<u32, Instant>, age: Duration) {
     #[cfg(unix)]
-    {
-        let now = Instant::now();
-        let current = zombie_children(std::process::id());
-        seen.retain(|pid, _| current.contains(pid));
-        for pid in current {
-            let first = *seen.entry(pid).or_insert(now);
-            if now.duration_since(first) >= age {
-                let _ = nix::sys::wait::waitpid(
-                    nix::unistd::Pid::from_raw(pid as i32),
-                    Some(nix::sys::wait::WaitPidFlag::WNOHANG),
-                );
-                seen.remove(&pid);
-            }
-        }
-    }
+    reap_stale_among(seen, age, zombie_children(std::process::id()));
     #[cfg(not(unix))]
     {
         let _ = (seen, age);
+    }
+}
+
+/// [`reap_stale_zombies`] over the zombies `current` names. The split lets a test hand it only
+/// its own child: reaping every zombie of the test process (age zero) would take a child that a
+/// concurrent test, such as a `codesign` it is waiting for, has yet to collect, and that wait
+/// then fails with ECHILD.
+#[cfg(unix)]
+fn reap_stale_among(
+    seen: &mut std::collections::HashMap<u32, Instant>,
+    age: Duration,
+    current: HashSet<u32>,
+) {
+    let now = Instant::now();
+    seen.retain(|pid, _| current.contains(pid));
+    for pid in current {
+        let first = *seen.entry(pid).or_insert(now);
+        if now.duration_since(first) >= age {
+            let _ = nix::sys::wait::waitpid(
+                nix::unistd::Pid::from_raw(pid as i32),
+                Some(nix::sys::wait::WaitPidFlag::WNOHANG),
+            );
+            seen.remove(&pid);
+        }
     }
 }
 
@@ -323,10 +333,18 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         let mut seen = std::collections::HashMap::new();
-        super::reap_stale_zombies(&mut seen, Duration::from_secs(3600));
+        super::reap_stale_among(
+            &mut seen,
+            Duration::from_secs(3600),
+            std::collections::HashSet::from([pid]),
+        );
         assert!(seen.contains_key(&pid));
         assert!(stat().starts_with('Z'), "reaped before its age");
-        super::reap_stale_zombies(&mut seen, Duration::ZERO);
+        super::reap_stale_among(
+            &mut seen,
+            Duration::ZERO,
+            std::collections::HashSet::from([pid]),
+        );
         assert!(!seen.contains_key(&pid));
         assert!(stat().is_empty(), "still there: {}", stat());
         drop(child);
