@@ -809,6 +809,15 @@ impl Lease {
         self.exclusive || self.amounts.iter().any(|(k, n)| *n > 0 && is_local_slot(k))
     }
 
+    /// The node whose unit this lease holds, if it holds one: the run it was granted for goes
+    /// there.
+    pub fn node(&self) -> Option<String> {
+        self.amounts
+            .iter()
+            .filter(|(_, n)| **n > 0)
+            .find_map(|(k, _)| crate::nodes::nid_of_resource(k).map(str::to_string))
+    }
+
     /// The runner units (`gha`, `gha-macos`) this lease holds.
     pub fn units(&self) -> BTreeMap<String, u32> {
         self.amounts
@@ -2383,6 +2392,32 @@ impl Broker {
             beside,
             expected_ms,
             false,
+            None,
+        )
+    }
+
+    /// [`Broker::acquire_expecting`] that never queues: the lease when it is granted at once,
+    /// else the request is withdrawn and `Err(Cancelled)` comes back. For a request that has a
+    /// better place to wait and is only taking a unit that has just come free (a check that left
+    /// the runner queue for a node): it is a step's own request, not one made beside it.
+    pub fn try_acquire_expecting(
+        self: &Arc<Self>,
+        task: TaskId,
+        label: &str,
+        rank: Rank,
+        needs: Needs,
+        expected_ms: Option<u64>,
+    ) -> Result<Lease, Cancelled> {
+        self.acquire_as(
+            task,
+            label,
+            rank,
+            needs,
+            &|| true,
+            &mut |_| {},
+            false,
+            expected_ms,
+            true,
             None,
         )
     }

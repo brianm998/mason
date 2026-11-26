@@ -43,6 +43,43 @@ pub fn paths_in_body(body: &str) -> Vec<String> {
     out
 }
 
+/// The part of a task body that says what the task changes: without the **Trust** section
+/// (up to the next `**…**` heading), which names files only to say they are protected, and
+/// without the standard footer and whatever follows it (s1163).
+fn changing_text(body: &str) -> String {
+    let mut out = String::new();
+    let mut in_trust = false;
+    for line in body.lines() {
+        if line.starts_with("How to work in this repository") {
+            break;
+        }
+        if line.starts_with("**Trust**") {
+            in_trust = true;
+        } else if line
+            .strip_prefix("**")
+            .is_some_and(|rest| rest.contains("**"))
+        {
+            in_trust = false;
+        }
+        if !in_trust {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// The files a queued task names: its plan's, or, with none and `explored`, those its body
+/// says it changes.
+fn named_files(plan_json: Option<&str>, body: &str, explored: bool) -> Vec<String> {
+    let mine = plan_json.map(plan_files).unwrap_or_default();
+    if mine.is_empty() && explored {
+        paths_in_body(&changing_text(body))
+    } else {
+        mine
+    }
+}
+
 /// The files a plan lists (`files`, strings), as written by the explorer.
 pub fn plan_files(plan_json: &str) -> Vec<String> {
     let v: serde_json::Value = serde_json::from_str(plan_json).unwrap_or_default();
@@ -97,12 +134,8 @@ impl Daemon {
                 .iter()
                 .any(|g| crate::protect::glob(g, f))
         };
-        let mut mine = std::fs::read_to_string(self.task_dir(t.id).join("plan.json"))
-            .map(|s| plan_files(&s))
-            .unwrap_or_default();
-        if mine.is_empty() && t.explored_counts() {
-            mine = paths_in_body(&t.body);
-        }
+        let plan = std::fs::read_to_string(self.task_dir(t.id).join("plan.json")).ok();
+        let mut mine = named_files(plan.as_deref(), &t.body, t.explored_counts());
         mine.retain(|f| !ignored(f));
         if mine.is_empty() {
             return None;
@@ -180,6 +213,63 @@ mod tests {
         assert_eq!(
             decide(&s(&["b/y.rs"]), &[], &[], Duration::ZERO, 7200),
             None
+        );
+    }
+
+    const FOOTER: &str = "How to work in this repository (the same as every earlier stage):\n\
+        - Write a record in docs/decisions/0001-x.md; see docs/self-hosting.md.\n\
+        - `bash scripts/run-exit-scripts.sh` and scripts/check-pure.sh must pass.\n";
+
+    #[test]
+    fn the_footer_names_no_files() {
+        let b = format!("**Change**\nEdit `crates/a/x.rs`.\n\n{FOOTER}");
+        assert_eq!(named_files(None, &b, true), s(&["crates/a/x.rs"]));
+    }
+
+    #[test]
+    fn the_trust_section_names_no_files() {
+        let b = "**Cause**\n`crates/a/cause.rs:3` is wrong.\n\n\
+                 **Trust**\n`crates/daemon/src/protect.rs:46` lists it.\n\n\
+                 Nor `crates/daemon/src/other.rs`.\n\n\
+                 **Change**\nEdit crates/a/change.rs.\n";
+        assert_eq!(
+            named_files(None, b, true),
+            s(&["crates/a/cause.rs", "crates/a/change.rs"])
+        );
+        // The heading and its text may share a line, and a heading may carry a note.
+        let b = "**Trust** crates/daemon/src/protect.rs is untouched.\n\
+                 **After landing (owner)**\nEdit docs/a.md.\n";
+        assert_eq!(named_files(None, b, true), s(&["docs/a.md"]));
+    }
+
+    #[test]
+    fn a_plan_is_read_whole_and_an_unexplored_body_is_not_read() {
+        let plan = r#"{"files":["docs/self-hosting.md"]}"#;
+        assert_eq!(
+            named_files(Some(plan), "Edit a/b.rs.", true),
+            s(&["docs/self-hosting.md"])
+        );
+        assert!(named_files(None, "Edit a/b.rs.", false).is_empty());
+    }
+
+    #[test]
+    fn a_footer_overlap_does_not_hold_and_a_changed_file_still_does() {
+        let fl = vec![(
+            TaskId(7),
+            s(&[
+                "docs/self-hosting.md",
+                "scripts/run-exit-scripts.sh",
+                "crates/a/x.rs",
+            ]),
+        )];
+        let d = |change: &str| {
+            let b = format!("**Change**\nEdit {change}.\n\n{FOOTER}");
+            decide(&named_files(None, &b, true), &fl, &[], Duration::ZERO, 7200)
+        };
+        assert_eq!(d("crates/b/y.rs"), None);
+        assert_eq!(
+            d("crates/a/x.rs"),
+            Some((TaskId(7), "crates/a/x.rs".into()))
         );
     }
 

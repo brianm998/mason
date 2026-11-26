@@ -132,26 +132,31 @@ fn run(point: &str, mode: &str) -> Result<(), String> {
     }
     // The culprit goes back for rework and, with a script that has one turn, ends failed
     // or waiting; what matters is that it never landed.
+    // A task the red ladder parks is sent back at the top of the next round, before the batch
+    // finishes and records who it parked. So "the culprit left landing" says nothing about what
+    // the batch shows yet (a task also passes through other states while the restarted daemon
+    // picks its work up again): wait for the batch itself to show the clean task landed and the
+    // culprit parked, which is the property under test, and fail at once if the culprit landed.
     let end = Instant::now() + Duration::from_secs(180);
     loop {
         let v: Value = serde_json::from_slice(&s.mason(&["task", "show", "1", "--json"]).stdout)
             .unwrap_or(Value::Null);
-        if v["state"].as_str() != Some("landing") && v["state"].as_str() != Some("testing") {
-            if v["state"].as_str() == Some("landed") {
-                return Err("the culprit landed".into());
-            }
+        if v["state"].as_str() == Some("landed") {
+            return Err("the culprit landed".into());
+        }
+        // The command line shows the batches: the clean task landed, the culprit was parked.
+        let shown = s.mason_ok(&["landing"]);
+        if shown.contains("batch #") && shown.contains("landed [0]") && shown.contains("parked [1]")
+        {
             break;
         }
         if Instant::now() > end {
-            return Err(format!("the culprit stayed in landing: {v:#}"));
+            return Err(format!(
+                "`mason landing` does not show the batch (the culprit is {}):\n{shown}",
+                v["state"]
+            ));
         }
         std::thread::sleep(Duration::from_millis(100));
-    }
-    // The command line shows the batches: the clean task landed, the culprit was parked.
-    let shown = s.mason_ok(&["landing"]);
-    if !shown.contains("batch #") || !shown.contains("landed [0]") || !shown.contains("parked [1]")
-    {
-        return Err(format!("`mason landing` does not show the batch:\n{shown}"));
     }
     drop(second);
     kill_hosts(&s.data_dir);
@@ -216,11 +221,25 @@ fn run(point: &str, mode: &str) -> Result<(), String> {
     if !sent_back {
         return Err("the culprit was not sent back".into());
     }
-    // No integration branch is left behind once a batch is over.
-    let left = sh(&s.repo, &["branch", "--list", "mason/int/*"]);
-    let batches = store.batches(None, 50).map_err(|e| e.to_string())?;
-    if batches.iter().all(|b| b.finished_at.is_some()) && !left.trim().is_empty() {
-        return Err(format!("integration branches left behind: {left}"));
+    // No integration branch is left behind once a batch is over. The batch row is finished
+    // before the landing code deletes the batch's disposable integration branch (landing.rs,
+    // `record(.., true)` and then `branch -D`), so one read can see a finished batch whose
+    // branch is about to go: poll until no branch is left, and fail only if one stays while
+    // every batch is finished.
+    let end = Instant::now() + Duration::from_secs(120);
+    loop {
+        let left = sh(&s.repo, &["branch", "--list", "mason/int/*"]);
+        if left.trim().is_empty() {
+            break;
+        }
+        let batches = store.batches(None, 50).map_err(|e| e.to_string())?;
+        if batches.iter().any(|b| b.finished_at.is_none()) {
+            break;
+        }
+        if Instant::now() > end {
+            return Err(format!("integration branches left behind: {left}"));
+        }
+        std::thread::sleep(Duration::from_millis(100));
     }
     Ok(())
 }

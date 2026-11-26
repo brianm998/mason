@@ -637,15 +637,23 @@ fn run_hosted_resuming(
                 covered,
                 cover.giver.clone(),
                 cover.runners,
+                cover.units_held(),
             )?,
-            crate::remote::Executor::Node { nid, .. } => run_on_node(
-                d, project, id, build, cmd, cwd, limit, log_dir, &check, run, watch, &env, nid,
-            )?,
+            crate::remote::Executor::Node { nid, .. } => {
+                // A batch's runner units are not what a node run uses.
+                cover.release_units();
+                run_on_node(
+                    d, project, id, build, cmd, cwd, limit, log_dir, &check, run, watch, &env, nid,
+                )?
+            }
             crate::remote::Executor::Local => None,
         };
         if let Some(ran) = ran {
             return Ok(ran);
         }
+        // Not on GitHub after all: a batch's runner units go back before a node or this machine
+        // takes the run.
+        cover.release_units();
         // GitHub gave a run back that waited too long for a runner (`favor-remote`): a node with
         // room takes it before this machine does.
         if matches!(exec, crate::remote::Executor::GitHub { .. }) {
@@ -683,6 +691,7 @@ fn run_hosted_resuming(
             };
         }
     } else if let (Some((owner, needs)), false) = (&cover.batch, covered) {
+        cover.release_units();
         // Placed here, though the batch's lease holds nothing for this suite (it was bound for
         // GitHub when the batch took its slots, or the run is a baseline or a build that never
         // goes there): it takes its slots as the batch before it starts (s943).
@@ -800,6 +809,7 @@ fn run_remote(
     covered: bool,
     giver: Option<crate::sched::Giver>,
     runners: Option<u32>,
+    units_held: bool,
 ) -> Result<Option<Ran>, String> {
     use crate::remote as rm;
     let task = run.and_then(|r| d.world().ok().and_then(|w| w.task_of_open_run(r)));
@@ -848,7 +858,12 @@ fn run_remote(
         Some(t) => (format!("task {}", t.0), format!("#{}", t.0)),
         None => (id.to_string(), id.to_string()),
     };
-    let grant = rm::Grant::borrowed(giver, rm::units_for(&spec.runs_on, spec.shards.max(1)));
+    // A landing batch that gave its units back asks for them before it pushes anything.
+    let grant = if units_held {
+        rm::Grant::borrowed(giver, rm::units_for(&spec.runs_on, spec.shards.max(1)))
+    } else {
+        rm::Grant::borrowed_given_up(giver)
+    };
     grant.note_hold(&rm::holds_dir(&d.cfg.hosts_dir()), &spec.id);
     let _hold = rm::HoldGuard::new(
         &d.cfg.hosts_dir(),
@@ -1412,6 +1427,72 @@ pub struct Cover {
     /// The runner units the run's own flexible lease was given: it splits into that many shards
     /// (see [`crate::remote::shards_granted`]). `None`: no flexible lease, all its shards.
     runners: Option<u32>,
+    /// A landing batch's runner units, which it gives back between GitHub runs.
+    pool: Option<Arc<BatchPool>>,
+}
+
+impl Cover {
+    /// Does the lease still hold the runner units for this run? `false` for a landing batch that
+    /// gave them back; every other caller holds them as it was granted.
+    fn units_held(&self) -> bool {
+        self.pool.as_ref().is_none_or(|p| p.out())
+    }
+    /// A run that is not on GitHub (a node, this machine) or has come back from it: a batch's
+    /// runner units go back now, not when its last suite ends.
+    fn release_units(&self) {
+        if let Some(p) = &self.pool {
+            p.release();
+        }
+    }
+}
+
+/// Is `suite` placed on GitHub now? A batch holds runner units only for such a suite.
+fn bound_for_github(d: &Daemon, project: &str, suite: &Suite) -> bool {
+    matches!(
+        crate::remote::run_place(
+            d,
+            project,
+            None,
+            Some(suite),
+            &suite.command,
+            crate::remote::Kind::Suite
+        ),
+        crate::remote::RunPlace::GitHub { .. }
+    )
+}
+
+/// The runner units of a landing batch's lease, which the batch holds only while it has runs on
+/// GitHub: the lease also holds this machine's slots for the suites that run here, and those it
+/// keeps for the whole batch. The units are given back when a suite is not going to GitHub and
+/// after each suite that did, and a later suite on GitHub asks for its own again.
+pub struct BatchPool {
+    giver: crate::sched::Giver,
+    /// What the lease was granted of the pool.
+    units: std::collections::BTreeMap<String, u32>,
+    out: std::sync::atomic::AtomicBool,
+}
+
+impl BatchPool {
+    pub fn new(lease: &crate::sched::Lease) -> Option<Arc<BatchPool>> {
+        let units = lease.units();
+        (!units.is_empty()).then(|| {
+            Arc::new(BatchPool {
+                giver: lease.giver(),
+                units,
+                out: std::sync::atomic::AtomicBool::new(true),
+            })
+        })
+    }
+    fn out(&self) -> bool {
+        self.out.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    /// Give back whatever of the units the lease still holds (a run on GitHub gave back the
+    /// units of its jobs as they ended; the rest goes now). The next in line is granted at once.
+    pub fn release(&self) {
+        if self.out.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            self.giver.shrink(&self.units);
+        }
+    }
 }
 
 /// What a landing batch holds, for the suites it runs: the batch (to rank what its runs take
@@ -1421,12 +1502,18 @@ pub struct BatchCover {
     pub owner: Option<Arc<crate::remote::BatchOwner>>,
     /// What the batch's lease holds; `None` when it holds nothing.
     pub held: Option<Needs>,
-    /// The lease itself, for a suite on GitHub to give its runner units back and ask again at
-    /// the batch's rank (#820, #822).
-    pub giver: Option<crate::sched::Giver>,
+    /// The lease's runner units, when it holds any.
+    pub pool: Option<Arc<BatchPool>>,
 }
 
 impl BatchCover {
+    /// Give back the batch's runner units, if it still holds any.
+    pub fn release(&self) {
+        if let Some(p) = &self.pool {
+            p.release();
+        }
+    }
+
     /// `needs` is within what the lease holds, so a run of it needs nothing more of this
     /// machine. Never true without a lease.
     pub fn holds(&self, needs: &Needs) -> bool {
@@ -1446,8 +1533,9 @@ impl BatchCover {
         Cover {
             covered,
             batch: self.owner.clone().map(|o| (o, needs)),
-            giver: self.giver.clone(),
+            giver: self.pool.as_ref().map(|p| p.giver.clone()),
             runners: None,
+            pool: self.pool.clone(),
         }
     }
 }
@@ -3160,9 +3248,21 @@ pub fn run_alone(
         failing: Default::default(),
         unfinished: Default::default(),
     };
+    let mut ran_before = false;
     for (name, tests) in failing {
         let mut who = who.clone();
         who.cover = cover.of(def, name);
+        // The batch's runner units are for a run on GitHub only: a suite that goes elsewhere does
+        // not hold them, and what an earlier suite left goes back before the next one asks again.
+        let after_one = std::mem::replace(&mut ran_before, true);
+        if after_one
+            || def
+                .testing
+                .suite(name)
+                .is_none_or(|su| !bound_for_github(d, &p.id, su))
+        {
+            who.cover.release_units();
+        }
         let who = &who;
         let red = |out: &mut OverRun, note: String| {
             out.green = false;
@@ -3211,6 +3311,7 @@ pub fn run_alone(
             None => red(&mut out, format!("{name}: the rerun could not tell")),
         }
     }
+    cover.release();
     out
 }
 
@@ -6360,6 +6461,10 @@ pub fn run_over(
         // checks the keys (s707).
         let mut who = who.clone();
         who.cover = cover.of(def, name);
+        // A suite that does not go to GitHub is not run under the batch's runner units.
+        if !bound_for_github(d, &p.id, suite) {
+            who.cover.release_units();
+        }
         let mut left_out: Option<Suite> = None;
         let full = reuse && p.reuse_green && full_run_due(&p.id, p.reuse_full_hours);
         if reuse && p.reuse_green {
@@ -6368,6 +6473,7 @@ pub fn run_over(
                     out.notes.push(note);
                 }
                 if plan.all_reused() {
+                    who.cover.release_units();
                     continue;
                 }
                 if !plan.reused.is_empty() {
@@ -6378,6 +6484,9 @@ pub fn run_over(
         }
         let suite = left_out.as_ref().unwrap_or(suite);
         let res = run_suite(&who, &p.path, &lock, def, suite, wt, &tree, &mut |_| {});
+        // Whatever the run did not give back as its jobs ended goes now: the next suite takes
+        // its own units when it goes to GitHub.
+        who.cover.release_units();
         if full && !matches!(res, SuiteRun::Gone) {
             note_full_run(&p.id);
         }
@@ -6452,6 +6561,7 @@ pub fn run_over(
             }
         }
     }
+    cover.release();
     out
 }
 
@@ -7233,6 +7343,7 @@ mod batch_cover_tests {
             giver: None,
             owner: None,
             held: Some(needs(&[("test-suite", 2), ("compile", 1)])),
+            pool: None,
         };
         assert!(lease.holds(&needs(&[("test-suite", 1)])));
         assert!(lease.holds(&needs(&[("test-suite", 2), ("compile", 1)])));
@@ -7242,6 +7353,76 @@ mod batch_cover_tests {
             exclusive: true,
             ..Default::default()
         }));
+    }
+}
+
+#[cfg(test)]
+mod batch_pool_tests {
+    use super::*;
+
+    fn lease_of(b: &Arc<crate::sched::Broker>) -> crate::sched::Lease {
+        b.acquire(
+            TaskId(1),
+            "batch #1",
+            mason_scheduler::Rank::new(false, 3, 0, 1, 1, false),
+            Needs::of(&[("compile", 1), ("gha", 2)]),
+            &|| true,
+            &mut |_| {},
+        )
+        .unwrap()
+    }
+
+    /// A batch holds runner units while its suites are on GitHub: when one is not, the units go
+    /// back (and the next in line gets them) while the lease keeps its slots of this machine.
+    #[test]
+    fn a_batch_gives_its_runner_units_back_when_a_suite_runs_elsewhere_and_only_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = crate::sched::tests::runner_broker(dir.path(), 2, 1, 0);
+        let lease = lease_of(&b);
+        let pool = BatchPool::new(&lease).expect("the lease holds runner units");
+        let cover = BatchCover {
+            owner: None,
+            held: Some(Needs::of(&[("compile", 1)])),
+            pool: Some(pool),
+        };
+        let run = cover.of(&Definition::empty(), "unit");
+        assert!(run.units_held(), "a run just after the hold has its units");
+        assert_eq!(b.used("gha"), 2);
+        let waiting = crate::sched::tests::queue_gha(&b, 7);
+        assert!(!crate::sched::tests::is_held(&b, waiting));
+        // A node or this machine takes the suite: the units are not its.
+        run.release_units();
+        assert!(!run.units_held());
+        assert!(crate::sched::tests::is_held(&b, waiting));
+        assert_eq!(b.used("gha"), 1, "only the waiter holds one");
+        assert_eq!(b.used("compile"), 1, "the batch keeps its local slot");
+        // The next suite sees that its units are gone.
+        assert!(!cover.of(&Definition::empty(), "next").units_held());
+        // Again gives nothing back twice.
+        cover.release();
+        assert_eq!(b.used("gha"), 1);
+        drop(lease);
+        assert_eq!(b.used("compile"), 0);
+    }
+
+    /// A lease without runner units has no pool, and a cover without one holds as it was granted.
+    #[test]
+    fn a_batch_without_runner_units_has_nothing_to_give_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = crate::sched::tests::runner_broker(dir.path(), 2, 1, 0);
+        let lease = b
+            .acquire(
+                TaskId(1),
+                "batch #1",
+                mason_scheduler::Rank::new(false, 3, 0, 1, 1, false),
+                Needs::of(&[("compile", 1)]),
+                &|| true,
+                &mut |_| {},
+            )
+            .unwrap();
+        assert!(BatchPool::new(&lease).is_none());
+        assert!(Cover::default().units_held());
+        Cover::default().release_units();
     }
 }
 
