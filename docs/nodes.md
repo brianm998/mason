@@ -26,6 +26,16 @@ and Nodes section.
 - A node also reports why it is not taking work: too hot, the CPU busy with your own work, no
   free slot, low disk. It never queues a job: if it cannot start one at once, it says so and the
   coordinator tries another place (GitHub, or here).
+- **What a job's checkout holds.** The snapshot's files, and `origin/<base>` (for example
+  `origin/develop`) at the coordinator's base tip, so `git merge-base HEAD origin/develop` and
+  `git diff origin/develop...` work as they do on the coordinator. There is no `origin` remote
+  to fetch from and no other branch. The slots of a project share one mirror, so the ref is
+  shared: a job running alone gets exactly its own base tip, and while jobs of the project
+  overlap the ref only moves forward (a job may then see a newer base than its own). `mason`
+  from the node's own runtime is first on `PATH` (so `mason definition check` works); it finds
+  no daemon or configuration of the node, so commands that need `masond` report that it is not
+  running. A coordinator or node from before this was added behaves as it did: no
+  `origin/<base>`, and `mason` only if the node's own `PATH` has one.
 - **Each project has one landing queue, on its coordinator.** A node never merges or pushes and
   holds no push credentials. Registering the same project on two coordinators is not supported.
 
