@@ -906,6 +906,12 @@ pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
     out.extend(d.landing().attention());
     out.extend(freeze_alerts(d, &w));
     out.extend(wait_alerts(d));
+    out.extend(
+        d.broker
+            .deadlock_alerts()
+            .into_iter()
+            .map(|(resource, text)| (format!("deadlock:{resource}"), "stalled".into(), text)),
+    );
     if let Some((ms, source)) = d.broker.cpu_missing_ms() {
         out.push((
             "cpu-reading".into(),
