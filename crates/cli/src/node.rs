@@ -2,7 +2,7 @@
 
 //! `mason node ...`: the commands of running work on other Macs (`docs/nodes.md`). On the node:
 //! `pair-code`, `accept on|off`, `status`, `jobs`, `stop-jobs`, `coordinators [remove NAME]`.
-//! On the coordinator: `list`, `add`, `remove`, `use on|off`. Each is one call to the daemon of
+//! On the coordinator: `list`, `show`, `sync`, `add`, `remove`, `use on|off`. Each is one call to the daemon of
 //! the data directory in use, so on a node that runs as another macOS user, run them as that
 //! user (`sudo -u masonnode mason node ...`, see docs/nodes.md).
 
@@ -10,7 +10,7 @@ use crate::client::Daemon;
 use crate::{die, finish, or_die, Args};
 use serde_json::{json, Value};
 
-pub const COMMANDS: &str = "node pair-code | accept on|off | status | doctor | jobs | stop-jobs | coordinators [remove NAME]  (on a node)\n       node list | add [NAME | --host H:PORT --fp FINGERPRINT] [--code C] [--name N] | remove NAME | use on|off | update NAME|--all | export-runtime --arch ARCH --out DIR  (on the coordinator)";
+pub const COMMANDS: &str = "node pair-code | accept on|off | status | doctor | jobs | stop-jobs | coordinators [remove NAME]  (on a node)\n       node list | show NAME | sync NAME --project P [--base BRANCH] | add [NAME | --host H:PORT --fp FINGERPRINT] [--code C] [--name N] | remove NAME | use on|off | update NAME|--all | export-runtime --arch ARCH --out DIR  (on the coordinator)";
 
 fn s(v: &Value) -> &str {
     v.as_str().unwrap_or("?")
@@ -245,6 +245,62 @@ pub fn run(a: &mut Args, d: &Daemon, json_out: bool) {
                 println!("{line}");
             }
         }
+        "show" => {
+            let name = a
+                .pos()
+                .unwrap_or_else(|| die("which node? `mason node show NAME`"));
+            finish(a);
+            let r = or_die(d.call("POST", "/nodes/show", Some(&json!({"name": name}))));
+            if json_out {
+                return println!("{r:#}");
+            }
+            println!(
+                "{} ({}:{}): {}",
+                s(&r["name"]),
+                s(&r["host"]),
+                r["port"],
+                s(&r["state"])
+            );
+            if let Some(e) = r["mirrors_error"].as_str() {
+                println!("mirrors: not known: {e}");
+                std::process::exit(1);
+            }
+            for line in mirror_lines(&r["mirrors"]) {
+                println!("{line}");
+            }
+        }
+        "sync" => {
+            let project = a.opt("--project");
+            let base = a.opt("--base");
+            let name = a.pos();
+            finish(a);
+            let (Some(name), Some(project)) = (name, project) else {
+                die("`mason node sync NAME --project P [--base BRANCH]`");
+            };
+            as_owner();
+            let r = or_die(d.call(
+                "POST",
+                "/nodes/sync",
+                Some(&json!({"name": name, "project": project, "base": base})),
+            ));
+            if json_out {
+                return println!("{r:#}");
+            }
+            println!(
+                "{} {}: origin/{} = {}",
+                s(&r["node"]),
+                s(&r["path"]),
+                s(&r["base"]),
+                s(&r["sha"])
+            );
+            if r["sha"] != r["tip"] {
+                println!(
+                    "not moved to {}: a job of the project is running there; sync again when it has ended",
+                    s(&r["tip"])
+                );
+                std::process::exit(1);
+            }
+        }
         "add" => {
             let host = a.opt("--host");
             let fp = a.opt("--fp");
@@ -335,6 +391,32 @@ pub fn run(a: &mut Args, d: &Daemon, json_out: bool) {
             "unknown node command {other:?}\n       {COMMANDS}"
         )),
     }
+}
+
+/// The lines of `mason node show` for a node's mirrors: each path, then each `origin/<name>` and
+/// its commit, saying so when the project's own base is not among them.
+fn mirror_lines(mirrors: &Value) -> Vec<String> {
+    let mirrors = mirrors.as_array().cloned().unwrap_or_default();
+    if mirrors.is_empty() {
+        return vec!["it keeps no mirror for this coordinator yet".into()];
+    }
+    let mut out = vec![];
+    for m in mirrors {
+        out.push(format!("mirror {}  {}", s(&m["project"]), s(&m["path"])));
+        if let Some(e) = m["error"].as_str() {
+            out.push(format!("  cannot be read: {e}"));
+            continue;
+        }
+        for (name, sha) in m["origin"].as_object().into_iter().flatten() {
+            out.push(format!("  origin/{name} {}", s(sha)));
+        }
+        if let Some(base) = m["base"].as_str() {
+            if m["origin"][base].is_null() {
+                out.push(format!("  origin/{base} not set"));
+            }
+        }
+    }
+    out
 }
 
 /// `mason node export-runtime --arch ARCH --out DIR`: the signed runtime, "MASON Daemon.app" and

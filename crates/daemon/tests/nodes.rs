@@ -2465,6 +2465,123 @@ fn a_node_jobs_path_has_a_mason_that_runs_and_finds_no_daemon() {
     assert!(f.output.contains("not running"), "{}", f.output);
 }
 
+/// Serve `d`'s loopback API, as `masond` does, so that the `mason` command line finds it.
+fn serve_api(d: &Arc<Daemon>) {
+    let d2 = d.clone();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let _ = rt.block_on(mason_daemon::http::serve(d2));
+    });
+    let info = d.cfg.info_path();
+    support::wait_for("the API to be served", 60, || {
+        std::fs::read_to_string(&info)
+            .ok()
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+            .is_some_and(|v| v["port"].is_u64())
+    });
+}
+
+/// #1197: a node whose mirror cannot take `origin/<base>` says so, and the run is a node failure
+/// that names the cause; `mason node sync` puts the ref back and `mason node show` lists it.
+#[test]
+fn a_node_without_origin_base_is_a_node_failure_and_node_sync_restores_it() {
+    use mason_daemon::hostedcheck;
+    use mason_daemon::place::{self, Mode};
+    let p = working_pair(2);
+    let tip = sh(&p.sa.repo, &["rev-parse", "origin/main"])
+        .trim()
+        .to_string();
+    std::fs::write(p.sa.repo.join("t.sh"), "git rev-parse origin/main\n").unwrap();
+    // A first run makes the mirror, and says the base it set.
+    let f = done(run_on_b(&p, &spec("run-first", None, "sh t.sh"), &|| None));
+    assert!(
+        f.ran_on
+            .ends_with(&format!("base: set main@{}", &tip[..10])),
+        "{}",
+        f.ran_on
+    );
+    let mirror =
+        p.sb.data_dir
+            .join("node/mirrors")
+            .join(coord_of_a(&p))
+            .join("scratch.git");
+    // The ref is gone, and a lock left behind keeps any job from setting it again.
+    sh(&mirror, &["update-ref", "-d", "refs/remotes/origin/main"]);
+    let lock = mirror.join("refs/remotes/origin/main.lock");
+    std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
+    std::fs::write(&lock, "").unwrap();
+
+    match run_on_b(&p, &spec("run-locked", None, "sh t.sh"), &|| None) {
+        Err(Fail::Environmental(why)) => {
+            assert!(why.starts_with("origin/main not set on node b"), "{why}");
+            assert!(why.contains("base: failed: "), "{why}");
+            assert!(why.contains("mason node sync b --project scratch"), "{why}");
+        }
+        other => panic!("expected a node failure, got {other:?}"),
+    }
+    // A check that can run here does, and its result says why it left the node.
+    place::set_global(&p.a, Mode::Remote, "test").unwrap();
+    let logs = tempfile::tempdir().unwrap();
+    let out = hostedcheck::run(
+        &p.a,
+        &check_spec(&p, "t7r1-back", "echo ran-here", logs.path()),
+        &remote::Grant::attached(),
+    )
+    .unwrap();
+    assert!(out.passed && out.full.contains("ran-here"), "{}", out.full);
+    assert!(
+        out.output.contains("origin/main not set on node b"),
+        "{}",
+        out.output
+    );
+    // A nodes-only project has nowhere else: no result, as an outage, not a red.
+    place::set_project_mode(&p.a, "scratch", Mode::Remote).unwrap();
+    let why = hostedcheck::run(
+        &p.a,
+        &check_spec(&p, "t7r2-only", "echo never", logs.path()),
+        &remote::Grant::attached(),
+    )
+    .map(|o| o.output)
+    .unwrap_err();
+    assert!(hostedcheck::is_outage(&why), "{why}");
+    assert!(why.contains("origin/main not set on node b"), "{why}");
+
+    serve_api(&p.a);
+    let sync = ["node", "sync", "b", "--project", "scratch"];
+    // While the cause is there, the sync says what it is.
+    let o = p.sa.mason(&sync);
+    assert!(!o.status.success());
+    assert!(
+        String::from_utf8_lossy(&o.stderr).contains("main.lock"),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    let shown = p.sa.mason_ok(&["node", "show", "b"]);
+    assert!(shown.contains("origin/main not set"), "{shown}");
+    std::fs::remove_file(&lock).unwrap();
+    let said = p.sa.mason_ok(&sync);
+    assert!(said.contains(&format!("origin/main = {tip}")), "{said}");
+    assert_eq!(
+        sh(&mirror, &["rev-parse", "refs/remotes/origin/main"]).trim(),
+        tip
+    );
+    let shown = p.sa.mason_ok(&["node", "show", "b"]);
+    assert!(shown.contains("scratch.git"), "{shown}");
+    assert!(shown.contains(&format!("origin/main {tip}")), "{shown}");
+    let f = done(run_on_b(&p, &spec("run-after", None, "sh t.sh"), &|| None));
+    assert_eq!(f.output, format!("{tip}\n"));
+    // A project nobody registered is refused.
+    assert!(!p
+        .sa
+        .mason(&["node", "sync", "b", "--project", "nope"])
+        .status
+        .success());
+}
+
 const SPILL_REMOTE_RUNS: &str =
     "[remote_runs]\nkind = \"github-actions\"\nrepo = \"o/r\"\ntoken = \"env:MASON_NODE_SPILL_TOKEN\"\n";
 

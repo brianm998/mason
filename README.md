@@ -824,6 +824,8 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s1149**: `pages/deploy` fails because GitHub Pages is not enabled for the repository with GitHub Actions as its source, which is an owner setting, so no code changed and the check stays red until the owner enables it.
 - **s1154**: the adapter's command-guard test now builds its expected hook path per platform, so it passes on Windows.
 - **s1156**: A red exit-script run now names the failing line as the cause, not a `== ` heading or prose that contains the word "error".
+- **s1158**: A red s914 or s1035 now names the failing sub-script, its exit code and its last 12 lines.
+- **s1160**: A node now reports whether it set a job's `origin/<base>`, a failed or missing base is a node failure rather than a red for the task, and `mason node sync` and `mason node show` repair and show node mirrors from the coordinator.
 - **s1161**: the step-host launch-listing tests now stop waiting when the launch ends and show its error, and they retry the ETXTBSY spawn race that most likely turned s594 red on ubuntu.
 - **s1163**: the file hold no longer reads the standard "How to work in this repository" footer or the Trust section of a task body as files the task changes, so unrelated tasks no longer wait on each other for them.
 <!-- status:end -->
