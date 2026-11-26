@@ -2,8 +2,9 @@
 #![cfg(unix)] // Unix-only: signals, permission bits or unix sockets. Windows coverage comes with the later port tasks.
 
 use mason_step_host::client::{collect_to_file, ClientError, Event, HostClient};
+use mason_step_host::host::MAX_SOCK_PATH;
 use mason_step_host::launcher::{
-    exit_signal, launching, launching_under, spawn_host, spawn_host_within, SpawnOptions,
+    exit_signal, launching, launching_under, spawn_host, spawn_host_within, SpawnOptions, HOST_ERR,
     START_LIMIT,
 };
 use mason_step_host::protocol::{self, Frame};
@@ -803,4 +804,36 @@ fn a_launch_is_listed_only_under_the_root_it_started_in() {
     assert!(launching_under(&r2).iter().all(|l| l.id != "t578-scoped"));
     h.join().unwrap().unwrap();
     assert!(launching_under(&r).is_empty());
+}
+
+#[test]
+fn a_host_that_exits_before_it_is_up_says_why() {
+    let (d, r) = root();
+    let mut o = opts(&r, "a", "echo never");
+    // The host opens its command's standard input before it is up, and cannot.
+    o.stdin = Some(d.path().join("no-such-input"));
+    let e = spawn_host(&o).unwrap_err().to_string();
+    assert!(e.contains("exited before it was up"), "{e}");
+    assert!(e.contains("cannot open stdin"), "{e}");
+    assert!(e.contains("no-such-input"), "{e}");
+    assert!(e.contains("exit status: 1"), "{e}");
+    let kept = std::fs::read_to_string(r.join("a").join(HOST_ERR)).unwrap();
+    assert!(kept.contains("step-host: cannot open stdin"), "{kept}");
+}
+
+#[test]
+fn a_socket_path_over_the_limit_is_refused_before_a_host_is_started() {
+    let (d, _) = root();
+    // `<root>/a/sock` is the root and 7 more characters.
+    let used = d.path().as_os_str().len() + 1;
+    let r = d.path().join("r".repeat(MAX_SOCK_PATH + 1 - 7 - used));
+    let sock = r.join("a").join("sock");
+    assert_eq!(sock.as_os_str().len(), MAX_SOCK_PATH + 1);
+    let marker = d.path().join("reached");
+    let mut o = opts(&r, "a", "echo never");
+    o.host_bin = freezing_host(d.path(), 0, &marker);
+    let e = spawn_host(&o).unwrap_err().to_string();
+    assert!(e.contains("101 characters"), "{e}");
+    assert!(e.contains(&sock.display().to_string()), "{e}");
+    assert!(!marker.exists() && !r.exists(), "nothing was started");
 }

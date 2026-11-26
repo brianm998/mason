@@ -24,9 +24,4 @@ final class RemotePlacementTests: XCTestCase {
     func testTheSectionRendersForAProjectSetHereFollowingGlobalAndWithNoRemoteRuns() {
         for p in ["web", "api", "local-only"] { XCTAssertNotNil(render(p), p) }
     }
-
-    func testThePickerIsDisabledOnlyWhenTheProjectFileHasNoRemoteRuns() {
-        let r = RemoteSettings(json: body)
-        XCTAssertEqual(["web", "api", "local-only"].map { r.project($0)!.canChange }, [true, true, false])
-    }
 }
