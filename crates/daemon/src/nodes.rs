@@ -969,7 +969,7 @@ pub async fn add(
         .map_err(|e| fail(500, format!("no certificate: {e}")))?;
     let client =
         NodeClient::new(identity, &host, port, &fp).map_err(|e| fail(500, e.to_string()))?;
-    let me = crate::node_serve::coordinator_name(&crate::lan::hostname());
+    let me = crate::lan::hostname();
     let r = client
         .request(
             "POST",
