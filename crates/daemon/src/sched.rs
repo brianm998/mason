@@ -474,6 +474,11 @@ struct State {
     by_task: HashMap<TaskId, u64>,
     /// The task a `mason run` lease was opened for, when it names one.
     lease_tasks: HashMap<u64, TaskId>,
+    /// Requests that keep a lease their own caller holds from being released until they end
+    /// (#1149): the request's id to that lease's.
+    self_waits: BTreeMap<u64, u64>,
+    /// The self-deadlocks already logged, by resource, so each is logged once while it lasts.
+    deadlocks_logged: BTreeSet<String>,
     /// Where a `mason run` lease came from (`--origin`, else the caller's working directory),
     /// by lease id (s527).
     origins: HashMap<u64, String>,
@@ -608,6 +613,58 @@ pub struct WaitAlert {
 /// After this long on a kernel lock the task's wait says what it waits for.
 const KERNEL_WAIT_SAYS_AFTER: Duration = Duration::from_secs(60);
 
+/// Each self-deadlock in the ledger as it is: the resource and what to tell the owner.
+fn deadlocks_in(st: &State) -> Vec<(String, String)> {
+    if st.self_waits.is_empty() {
+        return vec![];
+    }
+    mason_scheduler::self_deadlocks(&st.ledger.snapshot(), &st.self_waits)
+        .into_iter()
+        .map(|d| {
+            let text = format!(
+                "Deadlock on {r}: every unit is held by {who}, and each waits for another {r} \
+                 unit for its own check, which cannot come free until that check ends. Raise the \
+                 limit: mason resources limit {r} {n}",
+                r = d.resource,
+                who = d.holders.join(", "),
+                n = d.unblocking_limit,
+            );
+            (d.resource, text)
+        })
+        .collect()
+}
+
+/// Why `r` waits, when it is for a unit its own caller holds (#1149): the resources it asks for
+/// that are full and that the lease it keeps from being released has units of.
+fn own_slot_wait(
+    st: &State,
+    snap: &mason_scheduler::Snapshot,
+    r: &mason_scheduler::Request,
+    task: Option<&u64>,
+) -> Option<String> {
+    let held = st.self_waits.get(&r.id)?;
+    let own = snap.holders.iter().find(|h| h.id == *held)?;
+    let full: Vec<&str> = r
+        .needs
+        .amounts
+        .iter()
+        .filter(|(name, n)| {
+            own.needs.amounts.get(*name).copied().unwrap_or(0) > 0
+                && snap.used.get(*name).copied().unwrap_or(0) + **n
+                    > snap.capacity.get(*name).map_or(0, |c| c.units)
+        })
+        .map(|(name, _)| name.as_str())
+        .collect();
+    if full.is_empty() {
+        return None;
+    }
+    let who = task.map_or_else(|| own.label.clone(), |t| format!("#{t}"));
+    Some(format!(
+        "Waiting for a slot its own agent holds ({who}): {}",
+        full.join(", ")
+    ))
+}
+
 /// Per waiting task: its holders' grant times and the waiting count of its class.
 pub type WaitHolders = BTreeMap<TaskId, (Vec<u64>, u32, u32)>;
 
@@ -686,6 +743,12 @@ pub struct CompileHolderInfo {
     pub pid: u32,
 }
 
+/// Is `name` a resource of this machine (not an LLM session, a node's units or a GitHub runner
+/// pool)?
+fn is_local_slot(name: &str) -> bool {
+    !name.starts_with("llm:") && !name.starts_with("node:") && !mason_scheduler::is_gha_pool(name)
+}
+
 /// What a granted resource set looks like to the holder. Dropping it releases
 /// the kernel locks and the lease, and wakes the next waiter.
 pub struct Lease {
@@ -695,8 +758,14 @@ pub struct Lease {
     held: Option<Held>,
     /// What the lease was asked for, so a remote run can name the units it holds (#818).
     amounts: BTreeMap<String, u32>,
+    /// Where its request stood in line, so a request made again keeps its place (#820).
+    rank: Rank,
+    asked_ms: u64,
+    label: String,
     /// The request was flexible: `amounts` is what it was given, not what it asked for.
     flex: bool,
+    /// The lease holds the whole machine.
+    exclusive: bool,
 }
 
 impl Lease {
@@ -713,6 +782,33 @@ impl Lease {
             .then(|| self.amounts.get(GHA).copied().unwrap_or(1).max(1))
     }
 
+    /// What of `uses` this lease does not already hold (#1149): a run whose caller holds this
+    /// lease while it runs asks the broker for that much only. An exclusive lease covers every
+    /// slot of this machine.
+    pub fn shortfall(&self, uses: &BTreeMap<String, u32>) -> BTreeMap<String, u32> {
+        uses.iter()
+            .filter_map(|(name, n)| {
+                let short = if name == EXCLUSIVE {
+                    if self.exclusive {
+                        0
+                    } else {
+                        *n
+                    }
+                } else if self.exclusive && is_local_slot(name) {
+                    0
+                } else {
+                    n.saturating_sub(self.amounts.get(name).copied().unwrap_or(0))
+                };
+                (short > 0).then(|| (name.clone(), short))
+            })
+            .collect()
+    }
+
+    /// Does this lease hold any slot of this machine?
+    pub fn holds_local_slot(&self) -> bool {
+        self.exclusive || self.amounts.iter().any(|(k, n)| *n > 0 && is_local_slot(k))
+    }
+
     /// The runner units (`gha`, `gha-macos`) this lease holds.
     pub fn units(&self) -> BTreeMap<String, u32> {
         self.amounts
@@ -720,6 +816,83 @@ impl Lease {
             .filter(|(k, n)| **n > 0 && mason_scheduler::is_gha_pool(k))
             .map(|(k, n)| (k.clone(), *n))
             .collect()
+    }
+}
+
+/// What can give a lease's runner units back and ask for them again, without owning the lease
+/// (#820): the test step's lease is kept by the step, and the run that uses it only gives back
+/// the units of its jobs as they finish.
+#[derive(Clone)]
+pub struct Giver {
+    b: Arc<Broker>,
+    id: u64,
+    task: TaskId,
+    /// Where the lease's request stood in line, so a request made again keeps its place.
+    rank: Rank,
+    asked_ms: u64,
+    label: String,
+}
+
+impl Giver {
+    /// Give back `give` units; the next in line is granted at once.
+    pub fn shrink(&self, give: &BTreeMap<String, u32>) {
+        self.b.shrink(self.id, &self.with_debt_cap(give));
+    }
+
+    /// A debt payment holds its `gha` units against the `gha-debt` cap too (#821): units given
+    /// back or asked for again move the cap's share with them, or the cap would leak, or the
+    /// lease would never read as given back.
+    fn with_debt_cap(&self, units: &BTreeMap<String, u32>) -> BTreeMap<String, u32> {
+        let mut u = units.clone();
+        if let (true, Some(n)) = (self.rank.is_debt(), units.get(GHA)) {
+            u.insert(mason_scheduler::GHA_DEBT.to_string(), *n);
+        }
+        u
+    }
+
+    /// Whether the lease still holds anything.
+    pub fn is_held(&self) -> bool {
+        self.b.lease_holds(self.id)
+    }
+
+    /// Ask again for `units`, at the lease's rank and from when it first began to wait.
+    /// Waits as [`Broker::acquire`] does.
+    pub fn ask_again(
+        &self,
+        units: BTreeMap<String, u32>,
+        alive: &dyn Fn() -> bool,
+        on_wait: &mut dyn FnMut(&str),
+    ) -> Result<Lease, Cancelled> {
+        self.b.acquire_at(
+            self.task,
+            &self.label,
+            self.rank,
+            Needs {
+                exclusive: false,
+                amounts: self.with_debt_cap(&units),
+                flex: false,
+            },
+            alive,
+            on_wait,
+            true,
+            None,
+            false,
+            Some((self.rank, self.asked_ms)),
+            None,
+        )
+    }
+}
+
+impl Lease {
+    pub fn giver(&self) -> Giver {
+        Giver {
+            b: self.b.clone(),
+            id: self.id,
+            task: self.task.unwrap_or(TaskId(0)),
+            rank: self.rank,
+            asked_ms: self.asked_ms,
+            label: self.label.clone(),
+        }
     }
 }
 
@@ -915,6 +1088,8 @@ impl Broker {
                 cpu_busy: None,
                 priority_first: cfg.priority_first,
                 lease_tasks: HashMap::new(),
+                self_waits: BTreeMap::new(),
+                deadlocks_logged: BTreeSet::new(),
                 origins: HashMap::new(),
                 wait_credit: HashMap::new(),
                 idle: HashMap::new(),
@@ -1735,6 +1910,13 @@ impl Broker {
         if changed || !p.grants.is_empty() {
             self.cv.notify_all();
         }
+        let stuck = deadlocks_in(st);
+        for (resource, text) in &stuck {
+            if !st.deadlocks_logged.contains(resource) {
+                tracing::error!(%resource, "{text}");
+            }
+        }
+        st.deadlocks_logged = stuck.into_iter().map(|(r, _)| r).collect();
         self.publish_waits(st, now, free, floor, gate);
     }
 
@@ -2153,7 +2335,9 @@ impl Broker {
         alive: &dyn Fn() -> bool,
         on_wait: &mut dyn FnMut(&str),
     ) -> Result<Lease, Cancelled> {
-        self.acquire_as(task, label, rank, needs, alive, on_wait, false, None, false)
+        self.acquire_as(
+            task, label, rank, needs, alive, on_wait, false, None, false, None,
+        )
     }
 
     /// [`Broker::acquire`] with how long the work is expected to hold it (s385), so it may
@@ -2181,6 +2365,7 @@ impl Broker {
             beside,
             expected_ms,
             false,
+            None,
         )
     }
 
@@ -2196,7 +2381,36 @@ impl Broker {
         alive: &dyn Fn() -> bool,
         on_wait: &mut dyn FnMut(&str),
     ) -> Result<Lease, Cancelled> {
-        self.acquire_as(task, label, rank, needs, alive, on_wait, true, None, false)
+        self.acquire_as(
+            task, label, rank, needs, alive, on_wait, true, None, false, None,
+        )
+    }
+
+    /// [`Broker::acquire_beside`] for a check whose caller holds the lease `blocks`, a slot of
+    /// this machine, until the check ends (#1149). The request is ranked ahead of all other
+    /// pipeline work but a landing ([`Rank::holding`]), so it does not wait behind other tasks'
+    /// step starts, and is recorded so that a self-deadlock is seen and explained.
+    pub fn acquire_for_check(
+        self: &Arc<Self>,
+        task: TaskId,
+        label: &str,
+        rank: Rank,
+        needs: Needs,
+        blocks: u64,
+        alive: &dyn Fn() -> bool,
+    ) -> Result<Lease, Cancelled> {
+        self.acquire_as(
+            task,
+            label,
+            rank,
+            needs,
+            alive,
+            &mut |_| {},
+            true,
+            None,
+            false,
+            Some(blocks),
+        )
     }
 
     /// [`Broker::acquire_beside`] that never queues (#1025): the lease when it is granted at once,
@@ -2219,6 +2433,7 @@ impl Broker {
             true,
             None,
             true,
+            None,
         )
     }
 
@@ -2234,15 +2449,64 @@ impl Broker {
         beside: bool,
         expected_ms: Option<u64>,
         nowait: bool,
+        blocks: Option<u64>,
     ) -> Result<Lease, Cancelled> {
+        self.acquire_at(
+            task,
+            label,
+            rank,
+            needs,
+            alive,
+            on_wait,
+            beside,
+            expected_ms,
+            nowait,
+            None,
+            blocks,
+        )
+    }
+
+    /// [`Broker::acquire_as`]. `again`: a request made again for a lease that gave its units
+    /// back (#820): its rank as the first request had it, and when that began waiting, so it
+    /// keeps its place in line.
+    #[allow(clippy::too_many_arguments)]
+    fn acquire_at(
+        self: &Arc<Self>,
+        task: TaskId,
+        label: &str,
+        rank: Rank,
+        needs: Needs,
+        alive: &dyn Fn() -> bool,
+        on_wait: &mut dyn FnMut(&str),
+        beside: bool,
+        expected_ms: Option<u64>,
+        nowait: bool,
+        again: Option<(Rank, u64)>,
+        blocks: Option<u64>,
+    ) -> Result<Lease, Cancelled> {
+        let (rank, asked_ms) = {
+            let st = lock(&self.st);
+            match again {
+                Some((r, since)) => (r, since),
+                None => {
+                    // A check whose caller holds a slot until it ends goes ahead of other
+                    // pipeline work (#1149).
+                    let rank = match blocks {
+                        Some(_) => rank.holding(),
+                        None => rank,
+                    };
+                    (order(&st, rank), crate::daemon::now_ms())
+                }
+            }
+        };
         let id = {
             let mut st = lock(&self.st);
-            let rank = order(&st, rank);
-            let id = st
-                .ledger
-                .submit(rank, needs.clone(), label, crate::daemon::now_ms());
+            let id = st.ledger.submit(rank, needs.clone(), label, asked_ms);
             st.ledger.set_expected(id, expected_ms);
             st.meta.insert(id, Meta::Task);
+            if let Some(held) = blocks {
+                st.self_waits.insert(id, held);
+            }
             if beside {
                 st.lease_tasks.insert(id, task);
             } else {
@@ -2274,6 +2538,7 @@ impl Broker {
             if !st.ledger.is_waiting(id) {
                 st.meta.remove(&id);
                 st.lease_tasks.remove(&id);
+                st.self_waits.remove(&id);
                 if st.by_task.get(&task) == Some(&id) {
                     st.by_task.remove(&task);
                 }
@@ -2394,14 +2659,22 @@ impl Broker {
                 return Err(Cancelled);
             }
         };
-        lock(&self.st).kernel_waits.remove(&id);
+        {
+            let mut st = lock(&self.st);
+            st.kernel_waits.remove(&id);
+            st.self_waits.remove(&id);
+        }
         Ok(Lease {
             b: self.clone(),
             id,
             task: Some(task),
             held: Some(held),
             amounts: granted,
+            rank,
+            asked_ms,
+            label: label.to_string(),
             flex: needs.flex,
+            exclusive: needs.exclusive,
         })
     }
 
@@ -2524,6 +2797,11 @@ impl Broker {
         out
     }
 
+    /// The resources stuck in a self-deadlock now (#1149), each with the alert's text.
+    pub fn deadlock_alerts(&self) -> Vec<(String, String)> {
+        deadlocks_in(&lock(&self.st))
+    }
+
     /// Test seam: how long a grant waits for kernel locks before it says so.
     pub fn set_kernel_says_after(&self, after: Duration) {
         *self
@@ -2532,11 +2810,17 @@ impl Broker {
             .unwrap_or_else(|e| e.into_inner()) = after;
     }
 
+    #[cfg(test)]
+    pub(crate) fn release_for_test(&self, id: u64, task: TaskId) {
+        self.release(id, Some(task));
+    }
+
     fn release(&self, id: u64, task: Option<TaskId>) {
         let mut st = lock(&self.st);
         st.ledger.release(id);
         st.meta.remove(&id);
         st.lease_tasks.remove(&id);
+        st.self_waits.remove(&id);
         if let Some(t) = task {
             if st.by_task.get(&t) == Some(&id) {
                 st.by_task.remove(&t);
@@ -3019,11 +3303,23 @@ impl Broker {
         }
     }
 
+    /// Give back `give` units of what lease `id` holds, and grant the next in line at once
+    /// (#820). Left with nothing, the lease is released whole.
+    pub fn shrink(&self, id: u64, give: &BTreeMap<String, u32>) -> bool {
+        let mut st = lock(&self.st);
+        let had = st.ledger.shrink(id, give);
+        st = self.pass(st);
+        drop(st);
+        self.cv.notify_all();
+        had
+    }
+
     pub fn lease_close(&self, id: u64) -> bool {
         let mut st = lock(&self.st);
         let had = st.ledger.release(id);
         st.meta.remove(&id);
         st.lease_tasks.remove(&id);
+        st.self_waits.remove(&id);
         st.update_leases.remove(&id);
         st = self.pass(st);
         drop(st);
@@ -3145,6 +3441,14 @@ impl Broker {
             }
         }
         (n, oldest)
+    }
+
+    /// An exclusive request holds the machine now.
+    pub fn exclusive_running(&self) -> bool {
+        let st = lock(&self.st);
+        let snap = st.ledger.snapshot();
+        let r = snap.holders.iter().any(|h| h.needs.exclusive);
+        r
     }
 
     /// The `compile` count in force now.
@@ -3379,6 +3683,7 @@ impl Broker {
                     (_, w) => w.map(|w| explain(w, now)),
                 };
                 let (label, command) = mason_scheduler::label_parts(&r.label);
+                let explain = own_slot_wait(&st, &snap, r, task_of.get(&r.id)).or(explain);
                 json!({
                     "label": label,
                     "command": command,
@@ -4903,7 +5208,11 @@ pub(crate) mod tests {
     fn queue_ranked(b: &Broker, t: u64, landing: bool, uses: &BTreeMap<String, u32>) -> u64 {
         let mut st = lock(&b.st);
         st.rank_seq += 1;
-        let rank = order(&st, Rank::new(false, 3, 0, t, st.rank_seq, landing));
+        let mut rank = Rank::new(false, 3, 0, t, st.rank_seq, false);
+        if landing {
+            rank = rank.landing();
+        }
+        let rank = order(&st, rank);
         let id = st
             .ledger
             .submit(rank, needs_of(uses, None), &format!("#{t}"), t);
@@ -4911,6 +5220,149 @@ pub(crate) mod tests {
         st.by_task.insert(TaskId(t), id);
         drop(b.pass(st));
         id
+    }
+
+    /// Ask for runner units on a thread; the lease is sent back once granted.
+    fn ask_on_thread(
+        b: &Arc<Broker>,
+        name: &'static str,
+        task: u64,
+        rank: Rank,
+        tx: std::sync::mpsc::Sender<(&'static str, Lease)>,
+    ) {
+        let b = b.clone();
+        std::thread::spawn(move || {
+            let lease = b
+                .acquire(
+                    TaskId(task),
+                    name,
+                    rank,
+                    Needs::of(&[("gha", 1)]),
+                    &|| true,
+                    &mut |_| {},
+                )
+                .unwrap();
+            let _ = tx.send((name, lease));
+        });
+    }
+
+    fn wait_for_waiting(b: &Broker, n: usize) {
+        let began = Instant::now();
+        while b.gha_waiting() < n {
+            assert!(began.elapsed().as_secs() < 60, "{n} never queued");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// A check that gave its unit back and asks again keeps its kind (a check goes before a
+    /// test step even when the test step is more urgent and older) and the time it first began
+    /// to wait (it goes before a check that arrived after that but before it asked again).
+    #[test]
+    fn a_runner_request_made_again_keeps_its_kind_rank_and_its_wait_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = runner_broker(dir.path(), 1, 1, 0);
+        let check_rank = |id: u64| Rank::new(false, 3, 2, id, id, false).check();
+        let first = b
+            .acquire(
+                TaskId(1),
+                "#1 check",
+                check_rank(1),
+                Needs::of(&[("gha", 1)]),
+                &|| true,
+                &mut |_| {},
+            )
+            .unwrap();
+        let giver = first.giver();
+        giver.shrink(&gha(1));
+        assert!(!giver.is_held());
+        // The freed unit is taken, so everything after this queues.
+        let blocker = b
+            .acquire(
+                TaskId(9),
+                "#9 blocker",
+                Rank::new(false, 3, 2, 9, 9, false),
+                Needs::of(&[("gha", 1)]),
+                &|| true,
+                &mut |_| {},
+            )
+            .unwrap();
+        // Made later than the first check's request, so its wait start is later.
+        std::thread::sleep(Duration::from_millis(3));
+        let (tx, rx) = std::sync::mpsc::channel();
+        // An urgent test step that arrived before the first check began to wait.
+        ask_on_thread(
+            &b,
+            "test step",
+            2,
+            Rank::new(false, 1, 0, 0, 2, false),
+            tx.clone(),
+        );
+        wait_for_waiting(&b, 1);
+        ask_on_thread(&b, "later check", 3, check_rank(3), tx.clone());
+        wait_for_waiting(&b, 2);
+        let g = giver.clone();
+        let again_tx = tx.clone();
+        std::thread::spawn(move || {
+            let lease = g.ask_again(gha(1), &|| true, &mut |_| {}).unwrap();
+            let _ = again_tx.send(("again", lease));
+        });
+        wait_for_waiting(&b, 3);
+        let mut order = vec![];
+        drop(blocker);
+        for _ in 0..3 {
+            let (name, lease) = rx.recv_timeout(Duration::from_secs(60)).unwrap();
+            order.push(name);
+            // One unit: the next in line is granted when this one is dropped.
+            drop(lease);
+        }
+        assert_eq!(order, ["again", "later check", "test step"]);
+        drop(first);
+    }
+
+    /// A debt payment holds its `gha` units against the `gha-debt` cap: units it gives back
+    /// free the cap, and asking again takes the cap's share again, so a second debt that took
+    /// the freed share makes it wait.
+    #[test]
+    fn a_debt_asking_again_asks_the_debt_cap_again_and_gives_it_back_with_its_units() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = runner_broker(dir.path(), 8, 1, 0);
+        b.set_pool_units(mason_scheduler::GHA_DEBT, 4);
+        let debt_rank = |id: u64| Rank::new(false, 0, 0, id, id, false).debt();
+        let both = |n: u32| Needs::of(&[("gha", n), (mason_scheduler::GHA_DEBT, n)]);
+        let a = b
+            .acquire(
+                TaskId(1),
+                "debt a",
+                debt_rank(1),
+                both(4),
+                &|| true,
+                &mut |_| {},
+            )
+            .unwrap();
+        let giver = a.giver();
+        giver.shrink(&gha(4));
+        assert!(!giver.is_held(), "the cap's share goes back with the units");
+        let second = b
+            .acquire(
+                TaskId(2),
+                "debt b",
+                debt_rank(2),
+                both(4),
+                &|| true,
+                &mut |_| {},
+            )
+            .unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let g = giver.clone();
+        std::thread::spawn(move || {
+            let lease = g.ask_again(gha(1), &|| true, &mut |_| {}).unwrap();
+            let _ = tx.send(lease);
+        });
+        wait_for_waiting(&b, 1);
+        assert!(rx.try_recv().is_err(), "the cap is full: the rerun waits");
+        drop(second);
+        let again = rx.recv_timeout(Duration::from_secs(60)).unwrap();
+        assert_eq!(again.units(), gha(1));
     }
 
     #[test]

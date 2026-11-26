@@ -10,6 +10,7 @@
 //! <root>/<id>/exit.kv     written once, when the child has exited
 //! <root>/<id>/hb          last heartbeat time in ms, rewritten atomically
 //! <root>/<id>/sock        unix socket while the host is running
+//! <root>/<id>/host.err    the host's own standard error, written by the launcher
 //! ```
 
 use std::collections::HashMap;

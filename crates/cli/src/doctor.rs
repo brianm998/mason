@@ -175,14 +175,32 @@ fn on_path(name: &str) -> Option<PathBuf> {
     })
 }
 
-/// The longest socket path a step host could need under `data_dir`.
-fn longest_socket(data_dir: &Path) -> usize {
-    data_dir
-        .join("h")
-        .join("t999999r999999-99")
-        .join("sock")
-        .as_os_str()
-        .len()
+/// A short step host id: what every install must have room for.
+const SHORT_HOST_ID: &str = "t999999r999999-99";
+
+/// A long step host id: a check's build, run again on a fresh host. Suite names are the
+/// project's own, so longer ids are possible.
+const LONG_HOST_ID: &str = "t999999r999999-check-cargo-workspace-build99-host1";
+
+/// The socket path of the step host `id` under `data_dir`.
+fn host_socket_len(data_dir: &Path, id: &str) -> usize {
+    data_dir.join("h").join(id).join("sock").as_os_str().len()
+}
+
+/// Whether step host sockets fit under `data_dir`: a failure when not even a short id
+/// does, a warning when a long one does not.
+fn check_sockets(data_dir: &Path, out: &mut Vec<Finding>) {
+    use mason_step_host::host::MAX_SOCK_PATH as MAX;
+    let short = host_socket_len(data_dir, SHORT_HOST_ID);
+    let long = host_socket_len(data_dir, LONG_HOST_ID);
+    if short > MAX {
+        out.push(fail(format!("the data directory path is too long: step host sockets would need {short} characters, and the limit is {MAX}. Use a shorter --data-dir")));
+    } else if long > MAX {
+        let room = MAX.saturating_sub(long - LONG_HOST_ID.len());
+        out.push(warn(format!("the data directory path is long: a step host whose id is over {room} characters cannot start (its socket path would be over {MAX}), and a check with a long suite name needs {}. Use a shorter --data-dir", LONG_HOST_ID.len())));
+    } else {
+        out.push(ok(format!("socket paths fit ({long} of {MAX} characters)")));
+    }
 }
 
 pub use mason_daemon::ssh_keys::github_repo;
@@ -721,14 +739,7 @@ pub fn run(data_dir: &Path, config_dir: &Path) -> Vec<Finding> {
             data_dir.display()
         )));
     }
-    let longest = longest_socket(data_dir);
-    if longest > 100 {
-        out.push(fail(format!("the data directory path is too long: step host sockets would need {longest} bytes, and the limit is about 100. Use a shorter --data-dir")));
-    } else {
-        out.push(ok(format!(
-            "socket paths fit ({longest} of about 100 bytes)"
-        )));
-    }
+    check_sockets(data_dir, &mut out);
 
     check_path_command(&mut out);
     check_shell(mason_platform::shell::describe(), &mut out);
@@ -1256,12 +1267,29 @@ mod tests {
 
     #[test]
     fn long_data_directories_are_caught() {
-        assert!(longest_socket(Path::new("/tmp/x")) < 100);
+        assert!(host_socket_len(Path::new("/tmp/x"), SHORT_HOST_ID) < 100);
         let long = format!("/tmp/{}", "a".repeat(90));
-        assert!(longest_socket(Path::new(&long)) > 100);
+        assert!(host_socket_len(Path::new(&long), SHORT_HOST_ID) > 100);
         let f = run(Path::new(&long), Path::new("/nonexistent"));
         assert!(f
             .iter()
             .any(|f| matches!(f.level, Level::Fail) && f.text.contains("too long")));
+    }
+
+    #[test]
+    fn local_host_sockets_are_judged_for_short_and_long_ids() {
+        let judged = |dir: &str| {
+            let mut out = vec![];
+            check_sockets(Path::new(dir), &mut out);
+            assert_eq!(out.len(), 1);
+            out.remove(0)
+        };
+        assert!(matches!(judged("/tmp/x").level, Level::Ok));
+        // Room for a short id, not for a long one.
+        let f = judged(&format!("/tmp/{}", "a".repeat(50)));
+        assert!(matches!(f.level, Level::Warn), "{}", f.text);
+        assert!(f.text.contains("over 37 characters"), "{}", f.text);
+        let f = judged(&format!("/tmp/{}", "a".repeat(90)));
+        assert!(matches!(f.level, Level::Fail), "{}", f.text);
     }
 }

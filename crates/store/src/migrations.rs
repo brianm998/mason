@@ -915,6 +915,12 @@ const STEPS: &[&str] = &[
          at_ms    INTEGER NOT NULL,
          PRIMARY KEY (project, suite, base)
      );",
+    // The decision card a diagnosis ends in (s1048, decision 1041): `card` is the card's JSON with
+    // each option's action next to it (empty for a row of the older single-verdict shape), and
+    // `failed_at` the `state_entered_at` of the failure it diagnosed, so one failure is diagnosed
+    // once. Additive.
+    "ALTER TABLE diagnoses ADD COLUMN card TEXT NOT NULL DEFAULT '';
+     ALTER TABLE diagnoses ADD COLUMN failed_at INTEGER NOT NULL DEFAULT 0;",
     // How full each agent session's context window got (s1108), in tokens: one row per
     // (attempt key, session). Kept beside `usage_runs`; an adapter that reports nothing
     // leaves no row. `at_ms` is when the row was last written. Additive.
