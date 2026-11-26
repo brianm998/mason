@@ -71,7 +71,10 @@ private fun settle(model: MonitorModel) {
         if (missing.isEmpty() && (covered || unmoved)) agreed++ else agreed = 0
         // Covered: one more round trip, so the rest of that batch of views has arrived.
         if (covered && agreed >= 2) return
-        if (agreed >= AGREEING_ROUND_TRIPS) return
+        if (agreed >= AGREEING_ROUND_TRIPS) {
+            if (model.lastViewSeq < seq) System.err.println("settle: quiet exit, views at ${model.lastViewSeq}, daemon seq $seq")
+            return
+        }
         prev = seq
         prevLast = model.lastSeq
         if (System.currentTimeMillis() > end) {
