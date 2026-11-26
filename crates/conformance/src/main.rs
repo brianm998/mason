@@ -129,25 +129,25 @@ fn trailing_done(quiet: Duration) -> bool {
     quiet >= TRAILING_QUIET
 }
 
-/// How long without a new view seq before settle may give up on the target.
-const QUIET_WINDOW_MS: u64 = 5000;
-
-/// Whether settle may stop waiting: the target is reached, or the screen has been quiet for
-/// the whole window with enough views held.
-fn should_leave(screen_seq: u64, views: usize, target: u64, quiet_for_ms: u64) -> bool {
-    reached(screen_seq, views, target) || (views >= 3 && quiet_for_ms >= QUIET_WINDOW_MS)
+/// Whether settle may stop waiting. Once the target is reached, only the trailing views are
+/// awaited. Short of it, a demo never leaves; a live daemon may after three agreeing round trips.
+fn may_leave(reached: bool, heard: Duration, demo: bool, views: usize, agreed: u32) -> bool {
+    if reached {
+        trailing_done(heard)
+    } else {
+        !demo && views >= 3 && agreed >= 3
+    }
 }
 
 /// Wait until the screen has reached the daemon's current seq and `after` (the seq a step
-/// reported). Once reached, 300 ms must also pass with no message (trailing views of the same
-/// step). The daemon sends no view whose content did not change, so the screen's seq may
-/// stay below the target; then a quiet window alone never decides: it must have passed, and
-/// three `/status` round trips in a row (the same ordered connection, so views sent before each
-/// answer have arrived) must agree on the seq with nothing new shown. The 60 s limit only fails,
+/// reported), then until 300 ms pass with no message (trailing views of the same step). The demo
+/// daemon resends every view at each new seq, so there it waits for the seq and nothing else
+/// (decision 1025). A live daemon (`demo` false) never resends an unchanged view, so there three
+/// `/status` round trips in a row (the same ordered connection, so views sent before each answer
+/// have arrived) may instead agree on the seq with nothing new shown. The 60 s limit only fails,
 /// naming what was awaited.
-fn settle(c: &mut Client, screen: &mut Screen, after: u64) {
+fn settle(c: &mut Client, screen: &mut Screen, after: u64, demo: bool) {
     let hard = std::time::Instant::now() + Duration::from_secs(60);
-    let mut quiet = std::time::Instant::now();
     let mut heard = std::time::Instant::now();
     let mut agreed = 0;
     let mut prev = (u64::MAX, u64::MAX);
@@ -170,24 +170,11 @@ fn settle(c: &mut Client, screen: &mut Screen, after: u64) {
             agreed = 0;
         }
         if screen.seq != prev.1 {
-            quiet = std::time::Instant::now();
-            heard = quiet;
+            heard = std::time::Instant::now();
         }
         prev = (target, screen.seq);
-        let reached = reached(screen.seq, screen.views.len(), target);
-        let q = quiet.elapsed().as_millis() as u64;
-        let settled = if reached {
-            trailing_done(heard.elapsed())
-        } else {
-            agreed >= 3
-        };
-        if should_leave(screen.seq, screen.views.len(), target, q) && settled {
-            if !reached {
-                eprintln!(
-                    "settle: quiet exit, screen at #{}, daemon seq #{target}",
-                    screen.seq
-                );
-            }
+        let got = reached(screen.seq, screen.views.len(), target);
+        if may_leave(got, heard.elapsed(), demo, screen.views.len(), agreed) {
             return;
         }
         if std::time::Instant::now() > hard {
@@ -316,7 +303,8 @@ fn main() {
             let now_only = flag(&mut args, "--now");
             let mut c = Client::connect(port, Encoding::Json).unwrap_or_else(|e| die(&e));
             c.acting_as(&actor);
-            let owner = c.hello(0, false).unwrap_or_else(|e| die(&e)).owner;
+            let welcome = c.hello(0, false).unwrap_or_else(|e| die(&e));
+            let owner = welcome.owner;
             // Checkpoint 0 is the state before the script; then one per step.
             let mut k = 0;
             let mut after = 0;
@@ -328,7 +316,7 @@ fn main() {
             )
             .unwrap_or_else(|e| die(&e));
             loop {
-                settle(&mut c, &mut screen, after);
+                settle(&mut c, &mut screen, after, welcome.demo);
                 let items: Vec<serde_json::Value> = conformance::visible(&screen.views(), owner)
                     .iter()
                     .map(|i| i.to_json())
@@ -678,7 +666,7 @@ fn latency(args: &mut Vec<String>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{reached, should_leave, trailing_done, QUIET_WINDOW_MS};
+    use super::{may_leave, reached, trailing_done};
     use std::time::Duration;
 
     #[test]
@@ -690,12 +678,16 @@ mod tests {
     }
 
     #[test]
-    fn should_leave_waits_for_the_target_until_the_quiet_window() {
-        assert!(!should_leave(9, 3, 10, 1500));
-        assert!(!should_leave(9, 3, 10, QUIET_WINDOW_MS - 1));
-        assert!(should_leave(9, 3, 10, QUIET_WINDOW_MS));
-        assert!(should_leave(10, 3, 10, 0));
-        assert!(!should_leave(9, 2, 10, QUIET_WINDOW_MS));
+    fn a_demo_wait_leaves_only_once_the_target_is_reached() {
+        let long = Duration::from_secs(59);
+        assert!(!may_leave(false, long, true, 3, 3));
+        assert!(!may_leave(false, long, true, 3, u32::MAX));
+        assert!(!may_leave(true, Duration::ZERO, true, 3, 3));
+        assert!(may_leave(true, long, true, 3, 0));
+        // A live daemon never resends an unchanged view.
+        assert!(!may_leave(false, long, false, 3, 2));
+        assert!(!may_leave(false, long, false, 2, 3));
+        assert!(may_leave(false, long, false, 3, 3));
     }
 
     #[test]
