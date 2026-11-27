@@ -20,6 +20,18 @@ final class MascotTests: XCTestCase {
         XCTAssertEqual(Mascot.imageLoads, after + 1, "only the first icon call builds an image")
     }
 
+    func testTheArtFolderIsFoundInBothBundleLayouts() throws {
+        let fm = FileManager.default
+        for sub in ["Art", "Contents/Resources/Art"] {
+            let root = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? fm.removeItem(at: root) }
+            let art = root.appendingPathComponent(Mascot.resourceBundleName).appendingPathComponent(sub)
+            try fm.createDirectory(at: art, withIntermediateDirectories: true)
+            XCTAssertEqual(Mascot.artFolder(in: [root])?.standardizedFileURL.path, art.standardizedFileURL.path, sub)
+        }
+        XCTAssertNil(Mascot.artFolder(in: [fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)]))
+    }
+
     func testTheArtIsFound() {
         XCTAssertNotNil(Mascot.artRoot)
     }
