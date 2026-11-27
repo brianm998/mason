@@ -211,6 +211,7 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
         v["failure"] = t.failure.as_ref().map_or(Value::Null, |f| json!(f));
         v["failure_class"] = t.failure_class.map_or(Value::Null, |c| json!(c.name()));
         v["excused"] = json!(crate::basecheck::recorded(&d.task_dir(t.id)));
+        v["rule_hits"] = json!(crate::rules::hits(&d.task_dir(t.id)));
         v["host_losses"] = json!(d
             .store
             .host_losses_for_task(t.id.0)
@@ -4252,7 +4253,16 @@ pub fn render_logs(d: &Daemon, task: u64) -> String {
         .collect();
     hosts.sort_by(|a, b| (a.0, &a.1.info.id).cmp(&(b.0, &b.1.info.id)));
     let mut out = String::new();
+    let mut ruled = None;
     for (run, h) in hosts {
+        // Rules that could not be applied (s1152): once, ahead of the run's first host.
+        if ruled != Some(run) {
+            ruled = Some(run);
+            let file = crate::rules::log_file(&d.cfg.task_dir(task), run);
+            if let Ok(lines) = std::fs::read_to_string(file) {
+                out.push_str(&format!("=== step run {run} (rules) ===\n{lines}"));
+            }
+        }
         // `t<task>r<run>-test`, `-cmd`, a red test run again (`-test-again<k>`),
         // and the build a test step with `build` runs first (`-build`).
         let what = h.info.id.split_once('-').map_or("", |(_, w)| w);
