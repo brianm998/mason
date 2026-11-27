@@ -121,17 +121,21 @@ pub fn is_last_round(c: &Ctx) -> bool {
     c.step.on_red.is_some() && c.round() >= limit
 }
 
-fn round_file(c: &Ctx, round: u32) -> std::path::PathBuf {
-    c.task_dir().join(format!("red-round-{round}.txt"))
+fn round_file(c: &Ctx, run: u64) -> std::path::PathBuf {
+    c.task_dir().join(format!("red-run-{run}.txt"))
 }
 
-/// Keep what failed on every run of this round, for the last round to read.
+/// Keep what failed on every run of this run's round, for the last round to read. Keyed by
+/// run id, so a round number reused after a green run or a retry never reads an old file.
 pub fn record_round(c: &Ctx, persistent: &[String]) {
-    let _ = std::fs::write(round_file(c, c.round()), persistent.join("\n"));
+    let _ = std::fs::write(round_file(c, c.run.0), persistent.join("\n"));
 }
 
+/// What failed in each counted run ([`Ctx::round_runs`]); a missing file is unknown.
 fn rounds_so_far(c: &Ctx) -> Vec<Option<Vec<String>>> {
-    (1..=c.round())
+    c.round_runs()
+        .unwrap_or_else(|| vec![c.run.0])
+        .into_iter()
         .map(|r| {
             std::fs::read_to_string(round_file(c, r))
                 .ok()

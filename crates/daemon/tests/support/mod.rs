@@ -341,10 +341,35 @@ pub mod orphans {
         }
     }
 
+    /// Held for a whole sweep. A sweep probes each `owner.lock` with a non-blocking flock, so
+    /// a second sweep probing at the same moment reads a dead root as held and skips it.
+    /// Sweeps of this process queue on a mutex, those of other test binaries on a lock file.
+    struct SweepGuard(
+        #[allow(dead_code)] std::sync::MutexGuard<'static, ()>,
+        #[allow(dead_code)] Option<Flock<File>>,
+    );
+
+    impl SweepGuard {
+        fn take() -> SweepGuard {
+            static M: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            let m = M.lock().unwrap_or_else(|e| e.into_inner());
+            let file = OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open("/tmp/.mason-test-sweep.lock")
+                .ok()
+                .and_then(|f| Flock::lock(f, FlockArg::LockExclusive).ok());
+            SweepGuard(m, file)
+        }
+    }
+
     /// Stop what runs under dead roots, as `sweep_now`, and return the roots to remove.
     fn sweep_processes() -> Vec<PathBuf> {
         use nix::sys::signal::{kill, killpg, Signal};
         use nix::unistd::{getpgrp, getpid, Pid};
+        let _one_sweep = SweepGuard::take();
         let table = process_table();
         let (me, my_group) = (getpid().as_raw(), getpgrp().as_raw());
         let mut dead: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
