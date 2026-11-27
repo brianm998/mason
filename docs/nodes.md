@@ -209,12 +209,14 @@ on this page, `/Users/masonnode/Library/Application Support/mason`, is 51. `maso
 checks it. A node running an older MASON put the job's whole id in the path, and could run no job
 under that directory: update it, or until then give it a short one (`/Users/masonnode/m`).
 
-**Keep the node's data on the Studio's internal disk** (the default: everything is under
+**Keep the node's data on the Studio's internal disk** unless it is small (the default: everything is under
 `/Users/masonnode`: mirrors, slots, `~/.cache/mason-target`, cargo). Then no volume permission is
 needed, there are no external-disk stalls, and it is the fastest. Do not put slots or target
 directories on a network share: a share you mount in your own session is yours and vanishes when
 you log out, and cargo's file locking is slow and unreliable over SMB. If you really need another
-volume, see "Privacy grants".
+volume, see "Privacy grants". A node whose data and build cache are on an external disk still
+writes to the internal one (home, Rust, `/tmp`), which is watched with its own, lower limit
+(`min_other_disk_free_gb`, section 3).
 
 ### 1.5 Start it at boot, as that user
 
@@ -539,13 +541,22 @@ enabled = true
 [nodes.default]           # every node
 max_jobs = 4
 max_other_cpu_pct = 50    # takes no job while your own work uses more of its CPU than this
-min_disk_free_gb = 50
+min_disk_free_gb = 50     # free space the data folder's and the build cache's volumes must keep
+min_other_disk_free_gb = 10  # the same for the volumes of home, cargo home and the temporary folder
 on_switch_off = "drain"   # or "cancel"
 lease_s = 300
 
 [nodes.studio]            # one node, by the name in `mason node list`
 max_jobs = 6
 ```
+
+A node measures every volume its jobs write to, once per volume, and refuses new jobs below a
+limit, saying which path, how much is free and what is needed. The data folder and the build cache
+(followed through links) keep `min_disk_free_gb`, because they grow. The home, cargo home and
+temporary folders get `min_other_disk_free_gb`, default 10 GB: they hold the toolchain and short-lived
+files, and a node healthy at 48 GB free on its internal disk (data and caches on an external one)
+must keep working. A volume that cannot be read does not stop the node; `mason node status` lists
+it. `mason node list`/`show`, the alerts and the monitors show the reason as "not accepting".
 
 The node keeps what it was sent in memory only. When several coordinators are paired, the
 strictest value of each setting applies.

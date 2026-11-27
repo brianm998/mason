@@ -26,6 +26,8 @@ pub struct DirectLanding<'a> {
     pub landing_wt: &'a Path,
     pub base: &'a str,
     pub remote: Option<&'a str>,
+    /// Waits between tries of a push the remote rejects transiently (#1247).
+    pub push_backoff: &'a [std::time::Duration],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,6 +142,7 @@ impl DirectLanding<'_> {
                 self.base,
                 &base_ref,
                 &commit,
+                self.push_backoff,
             ) {
                 Ok(()) => {
                     point("land_after_push");
