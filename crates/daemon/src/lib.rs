@@ -62,6 +62,7 @@ pub mod launchview;
 pub mod logfmt;
 pub mod markers;
 pub mod monitor_inplace;
+pub mod net;
 pub mod newtests;
 pub mod node_client;
 pub mod node_doctor;
