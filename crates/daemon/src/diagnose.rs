@@ -3,10 +3,10 @@
 //! A diagnosis for a failed task (s250, decision 0245; s1048, decision 1041).
 //!
 //! When a task enters Failed, one read-only agent session (tier `light`) looks at it in the task's
-//! worktree: the title and body, the plan, why it failed and what each round was told, the tails of
-//! the last test logs and `git diff <base>...HEAD --stat`. It ends with one call,
-//! `submit_diagnosis`: a decision card of 2 to 4 options, exactly one recommended, each with an
-//! action the owner's choice carries out:
+//! worktree: the title and body, the plan, why it failed and what each round was told, what earlier
+//! rounds tried and gave up, the tails of the last test logs and `git diff <base>...HEAD --stat`.
+//! It ends with one call, `submit_diagnosis`: a decision card of 2 to 4 options, exactly one
+//! recommended, each with an action the owner's choice carries out:
 //!
 //! * `retry`: run again from a step, with a note the next round's prompt shows once;
 //! * `explore`: the plan does not hold, back to exploring with the reason;
@@ -434,6 +434,7 @@ pub fn prompt(
     plan: Option<&Value>,
     reason: &str,
     history: &str,
+    tried: Option<&str>,
     logs: &str,
     diffstat: &str,
     steps: &[String],
@@ -456,11 +457,12 @@ pub fn prompt(
          # The task\n{title}\n\n{body}\n\n\
          # The plan\n{plan}\n\n\
          # Why it failed\n{reason}\n\n\
-         # What each round was told\n{history}\n\n\
+         # What each round was told\n{history}\n\n{tried}\
          # The end of the last test logs\n{logs}\n\n\
          # git diff --stat against the base\n{diffstat}\n",
         steps = steps.join(", "),
         plan = plan.map_or("(none)".to_string(), |p| p.to_string()),
+        tried = tried.map_or(String::new(), |t| format!("{t}\n\n")),
         history = if history.trim().is_empty() {
             "(nothing was recorded)"
         } else {
@@ -560,6 +562,7 @@ fn diagnose(d: &Arc<Daemon>, task: TaskId, run: StepRunId, failed_at: u64, mark:
         plan.as_ref(),
         &reason,
         &history,
+        crate::prompts::tried_block(&crate::tried::rounds(&dir)).as_deref(),
         &log_tails(&dir, 3, 40),
         &diffstat,
         &steps,
@@ -1252,6 +1255,7 @@ mod tests {
             Some(&json!({"summary": "plan"})),
             "still red after 3 rounds",
             "## round 1\nfeedback one",
+            Some("=== Earlier rounds tried ===\n- a dead end"),
             "--- t.log\nFAILED",
             " src/a.rs | 2 +-",
             &["explore".into(), "develop".into()],
@@ -1262,6 +1266,7 @@ mod tests {
             "\"summary\":\"plan\"",
             "still red after 3 rounds",
             "feedback one",
+            "=== Earlier rounds tried ===\n- a dead end\n\n# The end of the last test logs",
             "FAILED",
             "src/a.rs",
             "explore, develop",
