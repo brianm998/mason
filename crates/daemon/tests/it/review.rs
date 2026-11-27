@@ -603,3 +603,122 @@ fn the_facts_are_written_into_the_worktree_and_the_submission_needs_the_result()
     let dirty = mason_landing::git::run(wt.path(), &["status", "--porcelain"]).unwrap();
     assert!(dirty.trim().is_empty(), "{dirty}");
 }
+
+const NOTE: &str = "No timing assertions, use a hang guard";
+
+/// Write the facts of a fresh review and read `corrections.json`.
+fn corrections_of(d: &Arc<Daemon>) -> (TaskId, Value) {
+    let task = review::file(d, now_ms()).unwrap();
+    let wt = tempfile::tempdir().unwrap();
+    sh(wt.path(), &["init", "-q", "-b", "main"]);
+    review::write_facts(d, task, wt.path()).unwrap();
+    let text = std::fs::read_to_string(wt.path().join(review::FACTS_DIR).join("corrections.json"))
+        .unwrap();
+    (task, serde_json::from_str(&text).unwrap())
+}
+
+fn lesson(title: &str, project: &str) -> Value {
+    let mut f = finding(title, introspect::LESSON);
+    f["project"] = json!(project);
+    f
+}
+
+#[test]
+fn a_correction_on_two_tasks_is_grouped_and_one_on_a_single_task_is_not() {
+    let w = world();
+    let d = &w.d;
+    let (a, b, c) = (
+        finished_task(&d.store, pid(d), "First", false, now_ms()),
+        finished_task(&d.store, pid(d), "Second", false, now_ms()),
+        finished_task(&d.store, pid(d), "Third", false, now_ms()),
+    );
+    for t in [a, b] {
+        mason_daemon::ownernotes::append(&d.task_dir(t), now_ms(), "develop", NOTE);
+    }
+    mason_daemon::ownernotes::append(&d.task_dir(c), now_ms(), "develop", "Rename the flag");
+    // Twice on one task is still one task.
+    mason_daemon::ownernotes::append(&d.task_dir(c), now_ms(), "test", "Rename the flag");
+    let (_, facts) = corrections_of(d);
+    let repeated = facts["repeated"].as_array().unwrap();
+    assert_eq!(repeated.len(), 1, "{facts}");
+    assert_eq!(repeated[0]["tasks"], json!([a.0, b.0]));
+    assert_eq!(repeated[0]["items"].as_array().unwrap().len(), 2);
+    assert_eq!(facts["items"].as_array().unwrap().len(), 4);
+}
+
+#[test]
+fn a_lesson_is_filed_once_citing_both_tasks_and_not_again() {
+    let w = world();
+    let d = &w.d;
+    let task = review::file(d, now_ms()).unwrap();
+    let mut f = lesson(
+        "CLAUDE.md: no timing assertions, use a hang guard",
+        "scratch",
+    );
+    f["body"] = json!(format!(
+        "Add to CLAUDE.md: \"{NOTE}\". Task #11: \"{NOTE}\". Task #12: \"{NOTE}\"."
+    ));
+    let result = json!({"findings": [f.clone()], "nothing_found": nothing(&[])});
+    answer(d, task, &result);
+    let world_now = d.world().unwrap();
+    let proposed: Vec<_> = world_now
+        .tasks
+        .values()
+        .filter(|t| t.title.starts_with("CLAUDE.md: no timing"))
+        .collect();
+    assert_eq!(proposed.len(), 1);
+    assert_eq!(proposed[0].state, State::Proposed);
+    assert!(proposed[0].body.contains("Task #11") && proposed[0].body.contains("Task #12"));
+    // The same proposal the next night is a duplicate of the first.
+    cancel(d, task);
+    let again = review::file(d, now_ms()).unwrap();
+    answer(d, again, &result);
+    let n = d
+        .world()
+        .unwrap()
+        .tasks
+        .values()
+        .filter(|t| t.title.starts_with("CLAUDE.md: no timing"))
+        .count();
+    assert_eq!(n, 1);
+}
+
+#[test]
+fn at_most_three_lessons_are_filed_a_night() {
+    let w = world();
+    let d = &w.d;
+    let task = review::file(d, now_ms()).unwrap();
+    let findings: Vec<Value> = [
+        "Alpha line about fixtures",
+        "Bravo line about signing",
+        "Charlie line about hangs",
+        "Delta line about clippy",
+    ]
+    .iter()
+    .map(|t| lesson(t, "scratch"))
+    .collect();
+    let dir = answer(
+        d,
+        task,
+        &json!({"findings": findings, "nothing_found": nothing(&[])}),
+    );
+    let filed = d
+        .world()
+        .unwrap()
+        .tasks
+        .values()
+        .filter(|t| t.state == State::Proposed || t.state == State::Queued)
+        .count();
+    assert_eq!(filed, introspect::MAX_LESSONS);
+    let refused = std::fs::read_to_string(dir.path().join("analyst-refused.txt")).unwrap();
+    assert!(refused.contains("Delta line about clippy"), "{refused}");
+}
+
+#[test]
+fn the_review_prompt_has_the_seventh_part() {
+    let w = world();
+    let t = review::file(&w.d, now_ms()).unwrap();
+    let body = w.d.world().unwrap().tasks[&t].body.clone();
+    assert!(body.contains("corrections.json"), "{body}");
+    assert!(body.contains("two or more tasks"));
+}

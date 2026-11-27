@@ -345,7 +345,7 @@ impl Finding {
         }
         evidence_ok(&self.evidence)?;
         let review = self.rule == "review";
-        if review && !CATEGORIES.contains(&self.category.as_str()) {
+        if review && !CATEGORIES.contains(&self.category.as_str()) && self.category != "lesson" {
             return Err(format!(
                 "unknown category {:?}: name one of {}",
                 self.category,
