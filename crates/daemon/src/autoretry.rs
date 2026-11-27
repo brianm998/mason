@@ -158,6 +158,8 @@ pub fn pending(d: &Daemon, t: &Task) -> bool {
 
 /// One pass: retry what is due.
 pub fn pass(d: &Arc<Daemon>) {
+    // Stuck batches, bursts and tasks told to wait are looked after first (s1176).
+    crate::diagcause::pass(d);
     let Ok(w) = d.world() else { return };
     let now = now_ms();
     let cands = candidates(d, &w);
@@ -178,6 +180,10 @@ pub fn pass(d: &Arc<Daemon>) {
     let since = now.saturating_sub(d.cfg.auto_retry_window.as_millis() as u64);
     for (f, on) in cands {
         if !on || held.contains(&f.task) {
+            continue;
+        }
+        // A diagnosis of the cause is running or its card is open: it decides what happens next.
+        if crate::diagcause::held(d, f.task) {
             continue;
         }
         let done = d
