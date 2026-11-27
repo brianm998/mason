@@ -46,8 +46,9 @@ pub enum Transition {
     Fail(String),
 }
 
-/// What follows `step` given how it ended. `attempt` is how many times this
-/// step has run for the task; `rounds` is its effective `max_rounds` after the
+/// What follows `step` given how it ended. `attempt` is the step's round: 1 for
+/// the current run plus the earlier runs that were sent back in the same stretch
+/// (green runs do not count); `rounds` is its effective `max_rounds` after the
 /// configuration layers (the definition's own value if `None`).
 pub fn after(
     def: &Definition,

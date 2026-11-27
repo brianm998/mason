@@ -38,6 +38,7 @@ pub mod diagcause;
 pub mod diagnose;
 pub mod disk;
 pub mod diskhistory;
+pub mod dnssd;
 pub mod editor;
 pub mod exhausted;
 pub mod fdlimit;
