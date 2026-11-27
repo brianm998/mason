@@ -169,7 +169,11 @@ fn changes_with_only_minor_findings_is_refused_and_a_blocking_one_sends_back_mar
                 ])
             )
         ]),
-        json!([review("approve", "fine", json!([]))]),
+        // Round 2 answers the earlier blocking finding (task 1135).
+        json!([{"call": {"tool": "submit_review", "args": {
+            "verdict": "approve", "summary": "fine", "findings": [],
+            "earlier": [{"round": 1, "index": 0, "status": "fixed", "note": "done"}]
+        }}}]),
     ];
     let (_s, v) = run(1, &[1, 2], reviews, rec.path());
     let again = std::fs::read_to_string(rec.path().join("dev2.txt")).unwrap();
