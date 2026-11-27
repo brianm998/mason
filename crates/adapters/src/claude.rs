@@ -1756,10 +1756,7 @@ mod tests {
             let edit = &v["hooks"]["PreToolUse"][2];
             assert_eq!(edit["matcher"], "Edit|Write|MultiEdit");
             let command = edit["hooks"][0]["command"].as_str().unwrap();
-            assert_eq!(
-                command,
-                format!("'/bin/mason{}' hook edit", std::env::consts::EXE_SUFFIX)
-            );
+            assert_eq!(command, format!("'{}' hook edit", mason.display()));
             let env = |k: &str| {
                 let all: Vec<&str> = c
                     .env
