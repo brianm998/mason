@@ -2729,6 +2729,57 @@ impl Store {
         })
     }
 
+    /// `task` waits for `blocker` to land (a diagnosis' `wait_for`).
+    pub fn add_diagnosis_wait(
+        &self,
+        task: u64,
+        blocker: u64,
+        diagnosis: u64,
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        self.write(move |c| {
+            c.execute(
+                "INSERT OR REPLACE INTO diagnosis_waits(task, blocker, diagnosis, at_ms) VALUES (?1,?2,?3,?4)",
+                params![task as i64, blocker as i64, diagnosis as i64, now_ms as i64],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// Every wait: `(task, blocker)`, oldest first.
+    pub fn diagnosis_waits(&self) -> Result<Vec<(u64, u64)>, StoreError> {
+        self.read(|c| {
+            let mut st =
+                c.prepare("SELECT task, blocker FROM diagnosis_waits ORDER BY at_ms, task")?;
+            let rows = st.query_map([], |r| {
+                Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64))
+            })?;
+            rows.collect()
+        })
+    }
+
+    pub fn clear_diagnosis_wait(&self, task: u64) -> Result<(), StoreError> {
+        self.write(move |c| {
+            c.execute(
+                "DELETE FROM diagnosis_waits WHERE task = ?1",
+                params![task as i64],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// Replace the arguments a diagnosis keeps (a cause's list of tasks grows while it is open).
+    pub fn set_diagnosis_args(&self, id: u64, args: &str) -> Result<(), StoreError> {
+        let args = args.to_string();
+        self.write(move |c| {
+            c.execute(
+                "UPDATE diagnoses SET args = ?2 WHERE id = ?1",
+                params![id as i64, args],
+            )
+            .map(|_| ())
+        })
+    }
+
     pub fn set_diagnosis_status(
         &self,
         id: u64,
@@ -2754,6 +2805,21 @@ impl Store {
                 params![task as i64, at_ms as i64, r],
             )
             .map(|_| ())
+        })
+    }
+
+    /// The reasons of the failures the daemon retried `task` for since `since_ms`, oldest first.
+    pub fn auto_retry_reasons_since(
+        &self,
+        task: u64,
+        since_ms: u64,
+    ) -> Result<Vec<String>, StoreError> {
+        self.read(move |c| {
+            let mut st = c.prepare(
+                "SELECT reason FROM auto_retries WHERE task = ?1 AND at_ms >= ?2 ORDER BY at_ms",
+            )?;
+            let rows = st.query_map(params![task as i64, since_ms as i64], |r| r.get(0))?;
+            rows.collect()
         })
     }
 
@@ -2892,6 +2958,22 @@ impl Store {
             )?;
             let rows = st.query_map(params![s, t, since_ms as i64], |r| {
                 Ok(r.get::<_, i64>(0)? as u64)
+            })?;
+            rows.collect()
+        })
+    }
+
+    /// `(suite, test, at_ms)` for every persistent red since `since_ms`, newest first.
+    pub fn persistent_reds_since(
+        &self,
+        since_ms: u64,
+    ) -> Result<Vec<(String, String, u64)>, StoreError> {
+        self.read(move |c| {
+            let mut st = c.prepare(
+                "SELECT suite, test, MAX(at) FROM persistent_red WHERE at >= ?1 GROUP BY suite, test ORDER BY MAX(at) DESC LIMIT 20",
+            )?;
+            let rows = st.query_map(params![since_ms as i64], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? as u64))
             })?;
             rows.collect()
         })

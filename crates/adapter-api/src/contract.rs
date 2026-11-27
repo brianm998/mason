@@ -275,14 +275,30 @@ pub fn tool_spec(tool: &str) -> Option<(String, Value)> {
              recommended, each complete enough to carry out without further questions. An option's \
              action is 'retry' (run again from a step, with a note for the next agent), 'explore' \
              (the plan does not hold: back to exploring, with the reason), 'close' (the work is \
-             already done or a duplicate, with evidence) or 'cancel'. Splitting, landing a part or \
-             re-scoping are notes on a retry or explore. You may not change files.",
+             already done or a duplicate, with evidence) or 'cancel'. When the cause is outside the code \
+             an option may also 'file_task' (a ticket for the cause), 'land_now' (the owner's Land \
+             now, with its debt), 'wait_for' (hold behind an open task) or 'open_session' (an owner \
+             session seeded with your findings), and carries several as `actions`, applied in order. \
+             Splitting, landing a part or re-scoping are notes on a retry or explore. You may not \
+             change files.",
             json!({
                 "summary": {"type": "string", "description": "What went wrong and why, and why the recommended option beats the others; up to 2000 characters"},
                 "options": {"type": "array", "minItems": 2, "maxItems": 4, "items": {"type": "object", "properties": {
                     "label": {"type": "string", "description": "What choosing it does, up to 160 characters"},
                     "recommended": {"type": "boolean", "description": "true on exactly one option"},
-                    "action": {"type": "string", "enum": ["retry", "explore", "close", "cancel"]},
+                    "action": {"type": "string", "enum": ["retry", "explore", "close", "cancel", "file_task", "land_now", "wait_for", "open_session"]},
+                    "actions": {"type": "array", "minItems": 1, "maxItems": 4, "description": "Instead of `action`: several actions applied in order, each an object with its own `action` and fields, e.g. file_task then land_now", "items": {"type": "object", "properties": {
+                        "action": {"type": "string", "enum": ["retry", "explore", "close", "cancel", "file_task", "land_now", "wait_for", "open_session"]},
+                        "step": {"type": "string"}, "note": {"type": "string"}, "reason": {"type": "string"},
+                        "kind": {"type": "string"}, "duplicate_of": {"type": "integer"}, "evidence": {"type": "string"},
+                        "project": {"type": "string", "description": "file_task: the project the ticket goes to (MASON's own for a pipeline defect)"},
+                        "title": {"type": "string"}, "body": {"type": "string", "description": "file_task: the ticket's body in the target project's own format"},
+                        "priority": {"type": "string", "enum": ["low", "normal", "high"]},
+                        "after": {"type": "array", "items": {"type": "integer"}},
+                        "task": {"type": "integer", "description": "wait_for: the open task to wait for"},
+                        "where": {"type": "string", "enum": ["task", "base"], "description": "open_session: in the task's worktree or in a fresh worktree at the base"},
+                        "brief": {"type": "string"}},
+                        "required": ["action"]}},
                     "step": {"type": "string", "description": "retry: the step to run again from (default: the step that failed)"},
                     "note": {"type": "string", "description": "retry: what the next agent must know, up to 2000 characters"},
                     "reason": {"type": "string", "description": "explore: why the plan does not hold, and what to do instead"},
@@ -290,6 +306,7 @@ pub fn tool_spec(tool: &str) -> Option<(String, Value)> {
                     "duplicate_of": {"type": "integer", "description": "close, duplicate: the other task's number"},
                     "evidence": {"type": "string", "description": "close: what shows it (commit, file, test, task)"}},
                     "required": ["label", "recommended", "action"]}},
+                "cause": {"type": "string", "enum": ["code", "outside", "base", "pipeline"], "description": "Whose fault it is: the task's own code, or something outside it (outside), the base branch (base) or MASON (pipeline). When it is not the code, the recommended option must contain a fix-later action (file_task, or wait_for on an open task) and a fix-now action (land_now, retry, wait_for or open_session). land_now is allowed only when every one of the task's own suites is green, or red the same way on the base"},
                 "no_code_change": {"type": "boolean", "description": "true only if the task's code needs no change and running it again is expected to pass (a flaky or environment failure); a recommended retry is then applied by itself"},
                 "evidence_lines": {"type": "array", "maxItems": 10, "items": {"type": "string"}, "description": "The decisive lines, at most 10"}
             }),
@@ -471,45 +488,158 @@ fn diagnosis_problems(a: &Value, p: &mut Vec<String>) {
             "options: {recommended} are recommended, exactly one must be"
         ));
     }
+    // The action names of the recommended option.
+    let mut option_names: Vec<Vec<String>> = vec![];
     for (i, o) in opts.iter().enumerate() {
         let mut q: Vec<String> = vec![];
         text(o, "label", crate::card::OPTION_MAX, &mut q);
         if o.get("recommended").is_some_and(|r| !r.is_boolean()) {
             q.push("recommended: must be true or false".into());
         }
-        match o.get("action").and_then(Value::as_str) {
-            Some("retry") => {
-                text(o, "note", 2000, &mut q);
-                if o.get("step").is_some_and(|s| !s.is_string()) {
-                    q.push("step: must be a string".into());
+        let mut names: Vec<String> = vec![];
+        match o.get("actions") {
+            None => names.extend(one_action(o, &mut q)),
+            Some(Value::Array(list)) if (1..=MAX_ACTIONS).contains(&list.len()) => {
+                for (j, act) in list.iter().enumerate() {
+                    let mut r: Vec<String> = vec![];
+                    names.extend(one_action(act, &mut r));
+                    q.extend(r.into_iter().map(|m| format!("actions[{j}].{m}")));
                 }
             }
-            Some("explore") => {
-                text(o, "reason", 2000, &mut q);
-            }
-            Some("close") => {
-                text(o, "evidence", 2000, &mut q);
-                match o.get("kind").and_then(Value::as_str) {
-                    Some("already_done") => {}
-                    Some("duplicate") => {
-                        if o.get("duplicate_of").and_then(Value::as_u64).is_none() {
-                            q.push(
-                                "duplicate_of: the other task's number is required for a duplicate"
-                                    .into(),
-                            );
-                        }
-                    }
-                    _ => q.push("kind: required, 'already_done' or 'duplicate'".into()),
-                }
-            }
-            Some("cancel") => {}
-            Some(v) => q.push(format!(
-                "action: {v:?} must be 'retry', 'explore', 'close' or 'cancel'"
+            Some(_) => q.push(format!(
+                "actions: must be a list of 1 to {MAX_ACTIONS} actions, applied in order"
             )),
-            None => q.push("action: required, 'retry', 'explore', 'close' or 'cancel'".into()),
+        }
+        if recommended_at(opts, i) {
+            option_names.push(names.clone());
         }
         p.extend(q.into_iter().map(|m| format!("options[{i}].{m}")));
     }
+    match a.get("cause") {
+        None => {}
+        Some(c) => match c.as_str() {
+            Some(c) if DIAGNOSIS_CAUSES.contains(&c) => {
+                // A cause that is not the task's own code is put right later, and the task is
+                // moved now: the recommended option does both.
+                if c != "code" && p.is_empty() {
+                    let names = option_names.first().cloned().unwrap_or_default();
+                    let has = |set: &[&str]| names.iter().any(|n| set.contains(&n.as_str()));
+                    if !has(&FIX_LATER) {
+                        p.push(format!(
+                            "cause {c:?} is not the task's code: the recommended option must put the cause right later (a `file_task`, or a `wait_for` on an open task that covers it)"
+                        ));
+                    }
+                    if !has(&FIX_NOW) {
+                        p.push(format!(
+                            "cause {c:?} is not the task's code: the recommended option must also move the task now (`land_now`, `retry`, `wait_for` or `open_session`)"
+                        ));
+                    }
+                }
+            }
+            _ => p.push(format!(
+                "cause: must be one of {}",
+                DIAGNOSIS_CAUSES.join(", ")
+            )),
+        },
+    }
+}
+
+/// Most actions one option may carry out, in order.
+pub const MAX_ACTIONS: usize = 4;
+
+/// What a diagnosis may say the cause was. `code` is the task's own work; the others are not.
+pub const DIAGNOSIS_CAUSES: [&str; 4] = ["code", "outside", "base", "pipeline"];
+
+/// Actions that put the cause right later: a ticket, or waiting on one that exists.
+pub const FIX_LATER: [&str; 2] = ["file_task", "wait_for"];
+
+/// Actions that get the task moving now.
+pub const FIX_NOW: [&str; 4] = ["land_now", "retry", "wait_for", "open_session"];
+
+/// One action of an option: its name, or `None` when it has problems (pushed to `q`).
+fn one_action(o: &Value, q: &mut Vec<String>) -> Option<String> {
+    let before = q.len();
+    let name = match o.get("action").and_then(Value::as_str) {
+        Some("retry") => {
+            text(o, "note", 2000, q);
+            if o.get("step").is_some_and(|s| !s.is_string()) {
+                q.push("step: must be a string".into());
+            }
+            "retry"
+        }
+        Some("explore") => {
+            text(o, "reason", 2000, q);
+            "explore"
+        }
+        Some("close") => {
+            text(o, "evidence", 2000, q);
+            match o.get("kind").and_then(Value::as_str) {
+                Some("already_done") => {}
+                Some("duplicate") => {
+                    if o.get("duplicate_of").and_then(Value::as_u64).is_none() {
+                        q.push(
+                            "duplicate_of: the other task's number is required for a duplicate"
+                                .into(),
+                        );
+                    }
+                }
+                _ => q.push("kind: required, 'already_done' or 'duplicate'".into()),
+            }
+            "close"
+        }
+        Some("cancel") => "cancel",
+        Some("file_task") => {
+            text(o, "project", 120, q);
+            text(o, "title", 120, q);
+            text(o, "body", 8000, q);
+            if let Some(p) = o.get("priority") {
+                if !matches!(p.as_str(), Some("low" | "normal" | "high")) {
+                    q.push("priority: must be 'low', 'normal' or 'high'".into());
+                }
+            }
+            match o.get("after") {
+                None => {}
+                Some(Value::Array(l)) if l.iter().all(|n| n.as_u64().is_some()) => {}
+                Some(_) => q.push("after: must be a list of task numbers".into()),
+            }
+            "file_task"
+        }
+        Some("land_now") => {
+            text(o, "reason", 2000, q);
+            "land_now"
+        }
+        Some("wait_for") => {
+            if o.get("task").and_then(Value::as_u64).is_none() {
+                q.push("task: the number of the open task to wait for is required".into());
+            }
+            "wait_for"
+        }
+        Some("open_session") => {
+            text(o, "brief", 4000, q);
+            if !matches!(
+                o.get("where").and_then(Value::as_str),
+                Some("task" | "base")
+            ) {
+                q.push("where: required, 'task' or 'base'".into());
+            }
+            "open_session"
+        }
+        Some(v) => {
+            q.push(format!(
+                "action: {v:?} must be one of retry, explore, close, cancel, file_task, land_now, wait_for, open_session"
+            ));
+            return None;
+        }
+        None => {
+            q.push("action: required (retry, explore, close, cancel, file_task, land_now, wait_for or open_session), or `actions`: a list of them".into());
+            return None;
+        }
+    };
+    (q.len() == before).then(|| name.to_string())
+}
+
+fn recommended_at(opts: &[Value], i: usize) -> bool {
+    opts[i].get("recommended").and_then(Value::as_bool) == Some(true)
 }
 
 fn text<'a>(a: &'a Value, key: &str, max: usize, out: &mut Vec<String>) -> Option<&'a str> {
@@ -1430,6 +1560,61 @@ mod tests {
         assert!(StepKind::Explore.terminal_tools().contains(&"submit_close"));
         assert!(StepKind::Explore.tools().contains(&"submit_close"));
         assert!(!StepKind::Develop.tools().contains(&"submit_close"));
+    }
+
+    #[test]
+    fn a_cause_outside_the_code_needs_a_fix_later_and_a_fix_now_in_the_recommended_option() {
+        let ok = |v: Value| validate("submit_diagnosis", &v);
+        let file = json!({"action": "file_task", "project": "mason", "title": "Fix it",
+                          "body": "the problem", "evidence": "x.rs:1 the line"});
+        let land = json!({"action": "land_now", "reason": "the base has it too"});
+        let wait = json!({"action": "wait_for", "task": 1104});
+        let retry = json!({"action": "retry", "note": "again"});
+        let open = json!({"action": "open_session", "where": "base", "brief": "look"});
+        let cancel = json!({"label": "Cancel", "recommended": false, "action": "cancel"});
+        let card = |cause: &str, acts: Vec<Value>| {
+            json!({"summary": "s", "cause": cause, "options": [
+                {"label": "Both", "recommended": true, "actions": acts}, cancel.clone()]})
+        };
+        // Both halves: accepted, in either order.
+        assert!(ok(card("outside", vec![file.clone(), land.clone()])).is_ok());
+        assert!(ok(card("base", vec![land.clone(), file.clone()])).is_ok());
+        assert!(ok(card("pipeline", vec![file.clone(), retry.clone()])).is_ok());
+        assert!(ok(card("outside", vec![file.clone(), open.clone()])).is_ok());
+        // A wait on an existing open task is both: it holds the task and the cause is covered.
+        assert!(ok(card("outside", vec![wait.clone()])).is_ok());
+        // Only Land now, or only the ticket: refused, and the words say which half is missing.
+        let e = ok(card("outside", vec![land.clone()])).unwrap_err();
+        assert!(format!("{e:?}").contains("later"), "{e:?}");
+        let e = ok(card("outside", vec![file.clone()])).unwrap_err();
+        assert!(format!("{e:?}").contains("now"), "{e:?}");
+        // The task's own code needs neither.
+        assert!(ok(card("code", vec![retry.clone()])).is_ok());
+        assert!(
+            ok(json!({"summary": "s", "options": [
+            {"label": "Land", "recommended": true, "action": "land_now", "reason": "r"},
+            cancel.clone()]}))
+            .is_ok(),
+            "no cause given: #1044's card"
+        );
+        assert!(
+            ok(card("weather", vec![retry.clone()])).is_err(),
+            "an unknown cause"
+        );
+        // Each action carries what it needs.
+        for bad in [
+            json!({"action": "file_task", "project": "mason", "title": "t"}),
+            json!({"action": "land_now"}),
+            json!({"action": "wait_for"}),
+            json!({"action": "open_session", "brief": "b"}),
+            json!({"action": "file_task", "project": "m", "title": "t", "body": "b", "priority": "urgent"}),
+            json!({"action": "rm_rf"}),
+        ] {
+            assert!(ok(card("code", vec![bad.clone()])).is_err(), "{bad}");
+        }
+        // At most four actions, at least one.
+        assert!(ok(card("code", vec![retry.clone(); 5])).is_err());
+        assert!(ok(card("code", vec![])).is_err());
     }
 
     #[test]

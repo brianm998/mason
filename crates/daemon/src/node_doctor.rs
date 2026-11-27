@@ -227,7 +227,7 @@ pub fn evaluate(i: &Inputs, at_ms: u64) -> Report {
         },
     );
     match &i.mdns {
-        Mdns::Advertising => add("mdns", true, false, "advertising over mDNS".into()),
+        Mdns::Advertising => add("mdns", true, false, advertising_message()),
         Mdns::Off => add("mdns", true, false, "not advertising (switched off)".into()),
         // A node can still be reached by address (`[nodes] static`), so this does not stop it.
         Mdns::Failed(e) => add(
@@ -410,9 +410,17 @@ pub struct FileId(u64, u64, std::time::SystemTime);
 
 impl FileId {
     pub fn of(path: &Path) -> Option<FileId> {
-        use std::os::unix::fs::MetadataExt;
         let m = std::fs::metadata(path).ok()?;
-        Some(FileId(m.ino(), m.len(), m.modified().ok()?))
+        #[cfg(unix)]
+        let ino = {
+            use std::os::unix::fs::MetadataExt;
+            m.ino()
+        };
+        // The inode is not read off Unix (std's windows file_index is unstable); size and
+        // mtime still identify a replaced binary.
+        #[cfg(not(unix))]
+        let ino = 0u64;
+        Some(FileId(ino, m.len(), m.modified().ok()?))
     }
 }
 
@@ -634,6 +642,25 @@ pub fn gather_in(
         mdns,
         tools,
     }
+}
+
+/// What the doctor says about the advertised name. On macOS the system responder answers for
+/// the current `LocalHostName`; if `gethostname` (what a long-running process may still hold)
+/// differs, say so.
+fn advertising_message() -> String {
+    let advertised = crate::lan::hostname();
+    #[allow(unused_mut)]
+    let mut m = format!("advertising over mDNS as {advertised}.local");
+    #[cfg(target_os = "macos")]
+    if let Some(h) = mason_platform::host::name() {
+        let h = h.trim_end_matches(".local");
+        if !h.is_empty() && h != advertised {
+            m.push_str(&format!(
+                " (system LocalHostName is {advertised}, gethostname says {h}: they differ)"
+            ));
+        }
+    }
+    m
 }
 
 #[cfg(test)]
