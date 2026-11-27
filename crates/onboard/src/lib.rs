@@ -761,7 +761,14 @@ mod tests {
         );
         f.token = Some("none".into());
         let p = plan(d.path(), &f);
-        assert!(p.warnings.is_empty(), "{:?}", p.warnings);
+        // (The made-up remote has no `.mason/`; that warning is not about the token.)
+        let only_token = |p: &Plan| {
+            p.warnings
+                .iter()
+                .filter(|w| !w.contains("has no .mason/"))
+                .count()
+        };
+        assert_eq!(only_token(&p), 0, "{:?}", p.warnings);
         let overlay = &p
             .files
             .iter()
@@ -772,7 +779,7 @@ mod tests {
         f.token = Some("env:GITHUB_TOKEN".into());
         f.machine.env = Some(vec![("GITHUB_TOKEN".into(), "x".into())]);
         let p = plan(d.path(), &f);
-        assert!(p.warnings.is_empty(), "{:?}", p.warnings);
+        assert_eq!(only_token(&p), 0, "{:?}", p.warnings);
     }
 
     fn all_answered() -> Flags {
@@ -904,7 +911,8 @@ mod tests {
         f.suites = Some("accept".into());
         f.machine = m;
         let p = plan(d.path(), &f);
-        assert!(p.errors.iter().any(|e| e.contains("--test")), "{p:?}");
+        assert_eq!(p.next.as_ref().map(|q| q.id), Some("test"), "{p:?}");
+        assert!(p.warnings.iter().any(|w| w.contains("--test")), "{p:?}");
         let e = apply(d.path(), &f, cfg.path(), &mut |_| {}).unwrap_err();
         assert!(e.contains("--test true"), "{e}");
         assert!(!cfg.path().join("projects").exists());

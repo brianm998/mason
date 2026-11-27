@@ -393,7 +393,7 @@ mod tests {
         std::fs::write(d.path().join("node_modules/x/Cargo.toml"), "").unwrap();
         let p = propose(d.path(), &[]);
         let names: Vec<&str> = p.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, ["gradle-app", "rust-core", "go-svc", "swift-kit"]);
+        assert_eq!(names, ["swift-kit", "gradle-app", "rust-core", "go-svc"]);
         let swift = p.iter().find(|s| s.name == "swift-kit").unwrap();
         assert_eq!(swift.command, "cd Kit && swift test 2>&1");
         assert!(p.iter().all(|s| s.command.starts_with("cd ")));

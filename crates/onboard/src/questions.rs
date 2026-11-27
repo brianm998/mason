@@ -671,24 +671,33 @@ pub fn resolve(
         ),
         Some(t) => Some(t.to_string()),
         None if accept_suites && crate::suites::propose(&d.root, &d.languages).is_empty() => {
+            const PENDING: &str = "\u{0}pending";
             let given = if f.yes || !mode.interactive {
                 String::new()
             } else {
+                // An empty answer, or none yet (a plan only lists the question), stays
+                // pending; `setup` refuses it before writing anything.
                 answer(
                     None,
                     q(
                         "test",
                         "No test suite could be proposed. What command runs the tests? (`true` means the project has none, and nothing is proved)",
                         &[],
-                        "",
+                        PENDING,
                         "--test",
                     ),
                 )?
             };
-            if given.trim().is_empty() {
-                return Err("no test suite could be proposed for this repository (build files are looked for at its top and one folder down), so the test step would run `true` and prove nothing. Pass --test COMMAND, or --test true to add it with no tests on purpose, or --suites skip".into());
+            match given.trim() {
+                "" => {
+                    return Err("no test suite could be proposed for this repository (build files are looked for at its top and one folder down), so the test step would run `true` and prove nothing. Pass --test COMMAND, or --test true to add it with no tests on purpose, or --suites skip".into());
+                }
+                PENDING => {
+                    warnings.push("no test suite could be proposed: a test command is needed (--test COMMAND, or --test true for none)".into());
+                    None
+                }
+                g => Some(g.to_string()),
             }
-            Some(given.trim().to_string())
         }
         None => None,
     };
@@ -1141,13 +1150,17 @@ mod tests {
     ) -> (Result<Answers, String>, Vec<&'static str>) {
         let mut asked = vec![];
         let mut said: Vec<String> = vec![];
+        // `/r` has no build files; these tests are about the other questions, so the test
+        // command is answered (the `test` question has its own test below).
+        let mut f = f.clone();
+        f.test.get_or_insert_with(|| "true".to_string());
         let r = {
             let mut ask = |q: &Question| {
                 asked.push(q.id);
                 None
             };
             resolve(
-                f,
+                &f,
                 d,
                 &mut Mode {
                     interactive,
@@ -1294,6 +1307,68 @@ mod tests {
         let (r, asked) = run(&f, &detected(), true);
         r.unwrap();
         assert_eq!(asked, ["agent", "sessions", "suites", "base", "land"]);
+    }
+
+    #[test]
+    fn with_nothing_to_propose_a_test_command_is_asked_and_true_must_be_said() {
+        let machine = Machine {
+            known_bins: vec![(Agent::Claude, std::env::current_exe().unwrap())],
+            ..Default::default()
+        };
+        let base = Flags {
+            machine,
+            ..Default::default()
+        };
+        let resolve_with = |f: &Flags, interactive: bool, answer: Option<&str>| {
+            let mut asked = vec![];
+            let mut ask = |q: &Question| {
+                asked.push(q.id);
+                (q.id == "test").then(|| answer.map(String::from)).flatten()
+            };
+            let r = resolve(
+                f,
+                &detected(),
+                &mut Mode {
+                    interactive,
+                    ask: &mut ask,
+                },
+                &mut |_| {},
+            );
+            (r, asked)
+        };
+        // --yes takes no test command for the owner.
+        let (r, _) = resolve_with(
+            &Flags {
+                yes: true,
+                ..base.clone()
+            },
+            false,
+            None,
+        );
+        assert!(r.unwrap_err().contains("--test true"));
+        // A terminal is asked; an empty line stays pending (setup refuses it), a command is used.
+        let (r, asked) = resolve_with(&base, true, Some(""));
+        assert!(asked.contains(&"test"));
+        let a = r.unwrap();
+        assert!(a.test.is_none() && a.warnings.iter().any(|w| w.contains("--test")));
+        let (r, _) = resolve_with(&base, true, Some("make check"));
+        assert_eq!(r.unwrap().test.as_deref(), Some("make check"));
+        // `--test true` is the explicit answer; `--suites skip` is an answer too.
+        let f = Flags {
+            yes: true,
+            test: Some("true".into()),
+            ..base.clone()
+        };
+        assert_eq!(
+            resolve_with(&f, false, None).0.unwrap().test.as_deref(),
+            Some("true")
+        );
+        let f = Flags {
+            yes: true,
+            suites: Some("skip".into()),
+            ..base
+        };
+        assert_eq!(resolve_with(&f, false, None).0.unwrap().test, None);
     }
 
     #[test]
