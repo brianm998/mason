@@ -2740,7 +2740,16 @@ impl CheckHandler for TestChecks {
                         "run_check: base fold"
                     );
                 }
-                let note = crate::basefold::note(base, &fold);
+                let tip = mason_landing::git::run(&self.wt, &["rev-parse", base])
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_default();
+                let in_a_row = crate::basefold::record_fold(
+                    &self.slots.d.task_dir(mason_core::TaskId(self.task)),
+                    self.run,
+                    &fold,
+                    &tip,
+                );
+                let note = crate::basefold::note_bounded(base, &fold, in_a_row);
                 if let Some(c) = &scope.call {
                     self.remember_call(c, note.as_deref().unwrap_or(""));
                 }
