@@ -78,6 +78,14 @@ pub struct Limits {
     pub blocked_compiles: u32,
     /// ...for at least this long.
     pub blocked_compile_ms: u64,
+    /// A task in one state longer than this many times its usual longest time (`stuck:long`)...
+    pub long_factor: u64,
+    /// ...and at least this long in develop, review and test...
+    pub long_min_ms: u64,
+    /// ...or this long in landing.
+    pub long_landing_min_ms: u64,
+    /// A develop run with more than this many full `run_check` rounds and no submission.
+    pub checks_max: u32,
 }
 
 const MIN: u64 = 60_000;
@@ -109,6 +117,10 @@ impl Default for Limits {
             cooldown_ms: 6 * H,
             blocked_compiles: 4,
             blocked_compile_ms: 10 * MIN,
+            long_factor: 6,
+            long_min_ms: 6 * H,
+            long_landing_min_ms: 2 * H,
+            checks_max: 6,
         }
     }
 }
@@ -159,6 +171,18 @@ pub fn holder_fact(
     })
 }
 
+/// What a task's current develop run has done: for `stuck:long`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RoundFact {
+    pub task: u64,
+    /// Full `run_check` rounds recorded in the current run.
+    pub rounds: u32,
+    /// The step run's attempt number.
+    pub attempt: u32,
+    /// The last few rounds, newest last: `green` or `red (n failing)`.
+    pub last_checks: Vec<String>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FailedFact {
     pub task: u64,
@@ -172,6 +196,8 @@ pub struct FailedFact {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Facts {
     pub tasks: Vec<TaskFact>,
+    /// Check rounds of tasks in a step (for `stuck:long`).
+    pub rounds: Vec<RoundFact>,
     pub queued: u32,
     pub queued_oldest_ms: u64,
     pub running: u32,
@@ -410,6 +436,50 @@ pub fn judge(x: &Facts, l: &Limits) -> Vec<Finding> {
             }
         }
         if t.is_step {
+            let round = x.rounds.iter().find(|r| r.task == t.id);
+            let rounds = round.map_or(0, |r| r.rounds);
+            let hi = t.typical_hi_ms.unwrap_or(0);
+            let floor = if t.state == "landing" {
+                l.long_landing_min_ms
+            } else {
+                l.long_min_ms
+            };
+            let long = hi.saturating_mul(l.long_factor).max(floor);
+            let too_long = t.in_state_ms > long;
+            let too_many = rounds > l.checks_max;
+            if too_long || too_many {
+                let mut ev = vec![
+                    format!(
+                        "in {} for {} min; limit {} min",
+                        t.state,
+                        mins(t.in_state_ms),
+                        mins(long)
+                    ),
+                    format!(
+                        "{rounds} full check rounds in this run (limit {}), attempt {}",
+                        l.checks_max,
+                        round.map_or(0, |r| r.attempt)
+                    ),
+                ];
+                if let Some(r) = round {
+                    for c in &r.last_checks {
+                        ev.push(format!("check: {c}"));
+                    }
+                }
+                ev.push(format!("no progress for {} min", mins(t.silent_ms)));
+                out.push(f(
+                    format!("stuck:long:{}", t.id),
+                    "stuck",
+                    Severity::Warn,
+                    format!(
+                        "#{} has been {} for {} min over {rounds} check round(s), whatever its activity",
+                        t.id,
+                        t.state,
+                        mins(t.in_state_ms)
+                    ),
+                    ev,
+                ));
+            }
             // Without history for the step, only the floor applies.
             let hi = t.typical_hi_ms.unwrap_or(0);
             let limit = hi.saturating_mul(l.stuck_factor).max(l.stuck_min_ms);
@@ -788,6 +858,49 @@ mod tests {
         assert_eq!((v[0].pid, v[0].elapsed_s, v[0].cpu_s), (42, 2760, 1));
         assert_eq!(dependency_dir(&v[0].command), Some("/d/deps"));
         assert_eq!(v[1].elapsed_s, 93_784);
+    }
+
+    #[test]
+    fn a_busy_task_in_one_state_for_hours_is_stuck_long() {
+        let task = |in_state_ms| TaskFact {
+            id: 5,
+            state: "developing".into(),
+            is_step: true,
+            in_state_ms,
+            typical_hi_ms: Some(20 * MIN),
+            silent_ms: MIN,
+            waiting: None,
+            holders: None,
+        };
+        let x = |t: TaskFact, rounds: u32| Facts {
+            tasks: vec![t],
+            rounds: vec![RoundFact {
+                task: 5,
+                rounds,
+                attempt: 2,
+                last_checks: vec!["red (3 failing)".into()],
+            }],
+            ..Default::default()
+        };
+        assert!(judge(&x(task(5 * H), 2), &l()).is_empty());
+        let out = judge(&x(task(7 * H), 2), &l());
+        assert_eq!(keys(&out), vec!["stuck:long:5".to_string()]);
+        assert_eq!(out[0].severity, Severity::Warn);
+        assert!(out[0].evidence.iter().any(|e| e.contains("attempt 2")));
+        // The 7th round without submitting, at any age.
+        assert!(judge(&x(task(MIN), 6), &l()).is_empty());
+        assert_eq!(
+            keys(&judge(&x(task(MIN), 7), &l())),
+            vec!["stuck:long:5".to_string()]
+        );
+        // Landing has a shorter floor.
+        let mut t = task(3 * H);
+        t.state = "landing".into();
+        t.typical_hi_ms = None;
+        assert_eq!(
+            keys(&judge(&x(t, 0), &l())),
+            vec!["stuck:long:5".to_string()]
+        );
     }
 
     #[test]
