@@ -599,7 +599,16 @@ pub fn toolchains() -> Value {
     let java = probe("/usr/libexec/java_home", &["-V"])
         .map(|t| parse_java_home(&t))
         .unwrap_or_default();
-    let v = json!({"rust": rust, "xcode": xcode, "java": java});
+    let mut v = json!({"rust": rust, "xcode": xcode, "java": java});
+    // Only where it was asked: a node that does not say leaves `xcodebuild test` runs to the
+    // coordinator's old rule (it has Xcode, so it may).
+    if let Some(ok) = crate::node_doctor::testmanagerd_reachable() {
+        v["xctest"] = if ok {
+            json!(["testmanagerd"])
+        } else {
+            json!([])
+        };
+    }
     *g = Some((std::time::Instant::now(), v.clone()));
     v
 }
