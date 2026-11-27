@@ -4296,6 +4296,12 @@ fn agent_job(c: &Ctx) {
         _ => prompt,
     };
 
+    // From round 2 on, the earlier rounds' findings as data, beside the owner notes (task 1135).
+    let prompt = match crate::reviewrounds::prompt_block(&dir) {
+        Some(b) if kind == StepKind::Review => format!("{prompt}\n\n{b}"),
+        _ => prompt,
+    };
+
     // The minor findings of an approval, for the develop round that follows one, if any does.
     let prompt = match crate::reviewfindings::pending_advice(&dir) {
         Some(a) if kind == StepKind::Develop => format!("{prompt}\n\n{a}"),
@@ -4455,13 +4461,32 @@ fn agent_job(c: &Ctx) {
         )
     });
     let validator = validator.or_else(|| {
-        (kind == StepKind::Review).then(|| {
+        (kind == StepKind::Review).then(|| -> Validator {
             let mut text = format!("{}\n{}", c.title, c.body);
             if let Some(p) = &plan {
                 text.push('\n');
                 text.push_str(&p.to_string().replace("\\n", "\n"));
             }
-            review_validator(c.wt.clone(), c.project.base_ref(), text)
+            let quotes = review_validator(c.wt.clone(), c.project.base_ref(), text);
+            // A review from round 2 on answers the earlier findings and keeps to the line rule
+            // (task 1135).
+            let (dir, wt) = (dir.clone(), c.wt.clone());
+            Box::new(move |tool, args| {
+                let mut p = quotes(tool, args).err().unwrap_or_default();
+                if tool == "submit_review" {
+                    let all = crate::reviewrounds::rounds(&dir);
+                    let last = all.last().and_then(|r| r["head"].as_str()).unwrap_or("");
+                    let diff = (!last.is_empty())
+                        .then(|| git::run(&wt, &["diff", "-U0", last, "HEAD"]).ok())
+                        .flatten();
+                    p.extend(crate::reviewrounds::problems(&all, args, diff.as_deref()));
+                }
+                if p.is_empty() {
+                    Ok(())
+                } else {
+                    Err(p)
+                }
+            })
         })
     });
     // A head whose tree was red on the test step, unchanged since, is not submitted again.
@@ -5238,6 +5263,8 @@ fn finish_agent_inner(c: &Ctx, report: StepReport, dir: &Path) {
             }
             if c.state == State::Review {
                 crate::reviewfindings::keep(dir, c.run.0, &submission["findings"]);
+                let head = git::run(&c.wt, &["rev-parse", "HEAD"]).unwrap_or_default();
+                crate::reviewrounds::record(dir, c.run.0, head.trim(), &submission);
             }
             // A reviewer who asks for changes is red, not an error.
             if c.state == State::Review && submission["verdict"] == "changes" {
