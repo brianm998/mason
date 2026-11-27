@@ -674,7 +674,7 @@ fn own_slot_wait(
 }
 
 /// Per waiting task: its holders' grant times and the waiting count of its class.
-pub type WaitHolders = BTreeMap<TaskId, (Vec<u64>, u32, u32)>;
+pub type WaitHolders = BTreeMap<TaskId, (Vec<u64>, u32, u32, bool)>;
 
 struct DiskCfg {
     source: Arc<dyn DiskSource>,
@@ -2053,7 +2053,7 @@ impl Broker {
                 *depth.entry(w.class()).or_default() += 1;
             }
         }
-        let holders: BTreeMap<TaskId, (Vec<u64>, u32, u32)> = waits
+        let holders: BTreeMap<TaskId, (Vec<u64>, u32, u32, bool)> = waits
             .waits
             .iter()
             .filter_map(|(id, w)| {
@@ -2064,6 +2064,7 @@ impl Broker {
                             w.held_by.iter().map(|h| h.since).collect(),
                             depth.get(&w.class()).copied().unwrap_or(0),
                             w.position as u32,
+                            w.held_by.iter().any(|h| is_check_lease(&h.label)),
                         ),
                     )
                 })
@@ -3877,6 +3878,11 @@ impl Broker {
     }
 }
 
+/// A runner-pool lease taken for an agent's `#N check` (not `interactive \`cargo check\``).
+pub fn is_check_lease(label: &str) -> bool {
+    label.starts_with('#') && label.ends_with(" check")
+}
+
 /// What kind of work a request for runner units is, from its label (#818): a landing batch, an
 /// agent's check, a debt payment, else a test step.
 pub fn gha_kind(label: &str) -> &'static str {
@@ -4146,6 +4152,13 @@ pub(crate) fn broker_with_waiting(dir: &Path, n: u64) -> Arc<Broker> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn is_check_lease_matches_only_agent_check_labels() {
+        assert!(is_check_lease("#1111 check"));
+        assert!(!is_check_lease("#1111"));
+        assert!(!is_check_lease("interactive `cargo check`"));
+    }
 
     #[test]
     fn a_waiters_pass_is_due_only_when_none_ran_lately() {
