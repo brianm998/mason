@@ -625,6 +625,8 @@ struct Walk {
     runs: Vec<(String, u64, Value)>,
     questions: Vec<Value>,
     answers: Vec<Value>,
+    /// Reasons a task was sent back (a blocking review finding, or the owner's rejection).
+    sent_back: Vec<Value>,
 }
 
 fn walk(d: &Daemon, from: u64, to: u64, mine: &dyn Fn(&str) -> bool) -> Walk {
@@ -699,6 +701,13 @@ fn note(
                     .push(json!({"task": task.0, "project": project, "at": at, "answer": answer}));
             }
         }
+        EventKind::SentBack { task, reason, .. } => {
+            if let Some((t, project)) = of(task) {
+                out.sent_back.push(json!({
+                    "task": task.0, "project": project, "at": at, "step": t.step, "reason": reason,
+                }));
+            }
+        }
         _ => {}
     }
     let (task, outcome) = match kind {
@@ -747,6 +756,113 @@ fn exclude(wt: &Path) -> Result<(), String> {
     std::fs::write(&file, text).map_err(|e| format!("{}: {e}", file.display()))
 }
 
+/// The words of a correction, lower case, for comparing two of them.
+fn normalized(text: &str) -> String {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Group correction items (`task`, `kind`, `text`, ...) by what they say. A group seen on two
+/// or more different tasks is `repeated`; one task's alone is not (s1228).
+pub fn group_corrections(items: Vec<Value>) -> Value {
+    let mut groups: BTreeMap<String, Vec<&Value>> = BTreeMap::new();
+    for i in &items {
+        let key = normalized(i["text"].as_str().unwrap_or(""));
+        if !key.is_empty() {
+            groups.entry(key).or_default().push(i);
+        }
+    }
+    let mut repeated = vec![];
+    for (_, g) in groups {
+        let tasks: BTreeSet<u64> = g.iter().filter_map(|i| i["task"].as_u64()).collect();
+        if tasks.len() >= 2 {
+            repeated.push(json!({
+                "text": g[0]["text"], "tasks": tasks, "items": g,
+            }));
+        }
+    }
+    json!({"items": items, "repeated": repeated})
+}
+
+/// Everything the owner corrected in the last day, with task numbers.
+fn corrections(
+    d: &Daemon,
+    w: &mason_engine::World,
+    from: u64,
+    log: &Walk,
+    about: &dyn Fn(&str) -> bool,
+) -> Value {
+    let project_of = |t: u64| {
+        w.tasks
+            .get(&TaskId(t))
+            .and_then(|t| w.projects.get(&t.project))
+            .map(|p| p.name.clone())
+            .unwrap_or_default()
+    };
+    let mut items: Vec<Value> = vec![];
+    let mut add = |task: u64, kind: &str, at: u64, text: &str| {
+        let text = text.trim();
+        if !text.is_empty() {
+            items.push(json!({
+                "task": task, "project": project_of(task), "kind": kind, "at": at, "text": text,
+            }));
+        }
+    };
+    for id in w.tasks.keys() {
+        if !about(&project_of(id.0)) {
+            continue;
+        }
+        for n in crate::ownernotes::list(&d.task_dir(*id)) {
+            let at = n["at_ms"].as_u64().unwrap_or(0);
+            if at >= from {
+                add(id.0, "retry_note", at, n["note"].as_str().unwrap_or(""));
+            }
+        }
+    }
+    for r in d.store.proposals().unwrap_or_default() {
+        if r.status == "rejected" && r.at >= from && about(&project_of(r.task)) {
+            add(r.task, "proposal_rejected", r.at, &r.reject_reason);
+        }
+    }
+    for a in &log.answers {
+        let at = a["at"].as_u64().unwrap_or(0);
+        if at >= from {
+            add(
+                a["task"].as_u64().unwrap_or(0),
+                "answer",
+                at,
+                a["answer"].as_str().unwrap_or(""),
+            );
+        }
+    }
+    for s in &log.sent_back {
+        let at = s["at"].as_u64().unwrap_or(0);
+        let reason = s["reason"].as_str().unwrap_or("");
+        let kind = if reason.starts_with("rejected by the owner") {
+            "rejected"
+        } else {
+            "blocking_finding"
+        };
+        if at >= from {
+            add(s["task"].as_u64().unwrap_or(0), kind, at, reason);
+        }
+    }
+    for r in d.store.diagnoses(None).unwrap_or_default() {
+        if r.at_ms >= from && about(&project_of(r.task)) {
+            let args: Value = serde_json::from_str(&r.args).unwrap_or(Value::Null);
+            let note = args["note"]
+                .as_str()
+                .or_else(|| args["summary"].as_str())
+                .unwrap_or("");
+            add(r.task, "diagnosis_note", r.at_ms, note);
+        }
+    }
+    group_corrections(items)
+}
+
 const FACTS_README: &str = "Facts for the pipeline review, computed from recorded data only.
 
 - digest-7d.json: the digest of the last 7 days, per project (trends).
@@ -763,6 +879,9 @@ const FACTS_README: &str = "Facts for the pipeline review, computed from recorde
 - daemon.json: daemon starts and takeovers, job panics and other recorded bugs.
 - ci-watch.json: the base-branch CI watch of each project.
 - owner.json: sessions opened by hand, questions and the owner's answers.
+- corrections.json: what the owner corrected in the last day (retry notes, rejection reasons,
+  answers to questions, blocking review findings, diagnosis notes), each with its task, and
+  `repeated`: the same correction on two or more tasks. Part 7 of the review reads it.
 - tasks.json: every task (id, project, state, title, the first 400 characters of its body).
   Search it before proposing anything.
 ";
@@ -1056,6 +1175,11 @@ pub fn write_facts(d: &Daemon, task: TaskId, wt: &Path) -> Result<(), String> {
             "questions": log.questions,
             "answers": log.answers,
         }),
+    )?;
+
+    write(
+        "corrections.json",
+        &corrections(d, &w, now.saturating_sub(DAY_MS), &log, &about),
     )?;
 
     let index: Vec<Value> = {
