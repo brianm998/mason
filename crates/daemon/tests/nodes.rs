@@ -3218,7 +3218,7 @@ fn a_node_job_whose_host_dies_leaves_no_grandchild_behind() {
 /// command writes `marker` only where `MASON_NODE` is set, so the file says where it ran.
 fn suiteless_pair(test_tail: &str, marker: &Path, build: bool, extra: &str) -> Pair {
     let cmd = format!(
-        "test -f hello.txt && {{ [ -z \"$MASON_NODE\" ] || echo node >> {m}; [ -n \"$MASON_NODE\" ] || echo here >> {m}.here; }}; {test_tail}",
+        "test -f hello.txt && {{ [ ${{MASON_NODE:-0}} = 0 ] || echo node >> {m}; [ ${{MASON_NODE:-0}} != 0 ] || echo here >> {m}.here; }}; {test_tail}",
         m = marker.display()
     );
     let extra = if build {
@@ -3374,7 +3374,7 @@ fn a_local_project_runs_its_suiteless_test_step_here_as_before() {
     let marks = tempfile::tempdir().unwrap();
     let marker = marks.path().join("ran");
     let cmd = format!(
-        "test -f hello.txt && echo here >> {} && [ -z \"$MASON_NODE\" ]",
+        "test -f hello.txt && echo here >> {} && [ ${{MASON_NODE:-0}} = 0 ]",
         marker.display()
     );
     let p = working_pair_scripted(
