@@ -1,0 +1,9 @@
+.mason/run.json
+crates/cli/src/node.rs
+crates/daemon/src/config.rs
+crates/daemon/src/node_serve.rs
+crates/daemon/src/nodes.rs
+docs/decisions/1226-node-watches-every-volume.md
+docs/nodes.md
+docs/stages/s1236.md
+scripts/exit/s1123.sh
