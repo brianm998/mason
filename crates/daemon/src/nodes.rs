@@ -865,6 +865,13 @@ pub fn rooms_for(
     (rooms, prefer_github)
 }
 
+/// May a node take a run of `project` once it is back (or has room)? `[nodes] enabled`, the
+/// project allowed, and a node paired. A node that is away or full still counts: it is waited for.
+pub fn may_take(d: &Daemon, project: &str) -> bool {
+    let cfg = d.nodes.cfg(&d.cfg.config_dir);
+    cfg.enabled && cfg.allows(project) && !d.nodes.lock().paired.is_empty()
+}
+
 /// Start the browse thread and the poller. The poller wakes every `[nodes] status_every_s`
 /// (read afresh each time) and does nothing while no node is paired.
 pub fn start(d: &Arc<Daemon>) {
