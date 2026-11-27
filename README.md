@@ -817,6 +817,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s1106**: submit_change, run_check and landing now refuse added lines that hold a secret or a word on the owner's banned list, which lives outside git.
 - **s1107**: Every Claude agent MASON starts is refused `git` commands that destroy uncommitted or shared work, and any recursive `rm` outside what it owns, with a reason it can act on.
 - **s1110**: Every GitHub Action in MASON's workflows is pinned to a full commit SHA, Dependabot proposes the moves weekly, and CI's lint job refuses an unpinned `uses:`.
+- **s1112**: Every review finding is now `blocking` or `minor`, only a blocking one sends the task back, and minor ones are kept as advice in the feedback history, `mason task show` and the monitors.
 - **s1115**: `mason node doctor` looks for tools on the `PATH` a job gets (so rustup's `~/.cargo/bin` counts) and names `rustup default` when no toolchain is chosen, and docs/nodes.md gains the missing default toolchain, plist `PATH`, `mason` wrapper (now written by `export-runtime`), firewall path and export command.
 - **s1116**: a failed task holds its diagnosis as its decision card, answered on the task page or with `mason task answer` (an option runs its action, other words retry the task with them), and every answer may carry the owner's context.
 - **s1117**: Every recorded override names the client that made it, a pause or resume also names the pause rows it made or lifted, a lift is shown for ten minutes, and `mason pause list` no longer drops the partial hour.
@@ -840,5 +841,9 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s1161**: the step-host launch-listing tests now stop waiting when the launch ends and show its error, and they retry the ETXTBSY spawn race that most likely turned s594 red on ubuntu.
 - **s1163**: the file hold no longer reads the standard "How to work in this repository" footer or the Trust section of a task body as files the task changes, so unrelated tasks no longer wait on each other for them.
 - **s1170**: push_candidate waits and retries (up to the outage limit) when git cannot reach the remote (DNS, route, timeout), instead of failing the landing step.
+- **s1172**: The skills tests build colon-named skills as commands on Windows, where NTFS rejects a `:` in a directory name.
 - **s1173**: A queued task kept back by the file hold or the check-queue hold now says so in the monitor's `why_waiting` and `activity` (same text as `mason task show`), instead of "Waiting for an LLM session to be free".
+- **s1180**: The red CI/monitor-compose run 45883735030 names no failing step in the supplied log tail, so no code changed and decision 1170 records how to classify it from the full log.
+- **s1181**: The fake-driven WatchdogTests arm the watchdog with a timer-free `arm(config:log:)`, so a stalled runner can no longer fire a real 250 ms tick into their hand-driven state.
+- **s1182**: Harden the hung-git deadline test against a pid-file race on busy runners.
 <!-- status:end -->

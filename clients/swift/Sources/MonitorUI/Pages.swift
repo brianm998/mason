@@ -612,6 +612,13 @@ struct TaskDetailPage: View {
             if !d.closing.isEmpty {
                 section("Tests", theme: theme) { LinkedText(model: model, text: d.closing).accessibilityIdentifier("detail:closing") }
             }
+            if !d.reviewFindings.isEmpty {
+                section("Review findings", theme: theme) {
+                    ForEach(Array(d.reviewFindings.enumerated()), id: \.offset) { _, f in
+                        LinkedText(model: model, text: f)
+                    }
+                }
+            }
             if !d.debts.isEmpty {
                 section("Debts", theme: theme) {
                     ForEach(d.debts, id: \.id) { x in
