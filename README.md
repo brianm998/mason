@@ -844,5 +844,6 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s1172**: The skills tests build colon-named skills as commands on Windows, where NTFS rejects a `:` in a directory name.
 - **s1173**: A queued task kept back by the file hold or the check-queue hold now says so in the monitor's `why_waiting` and `activity` (same text as `mason task show`), instead of "Waiting for an LLM session to be free".
 - **s1180**: The red CI/monitor-compose run 45883735030 names no failing step in the supplied log tail, so no code changed and decision 1170 records how to classify it from the full log.
+- **s1181**: The fake-driven WatchdogTests arm the watchdog with a timer-free `arm(config:log:)`, so a stalled runner can no longer fire a real 250 ms tick into their hand-driven state.
 - **s1182**: Harden the hung-git deadline test against a pid-file race on busy runners.
 <!-- status:end -->
