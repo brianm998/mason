@@ -451,6 +451,7 @@ pub fn visible(views: &[View], owner: bool) -> Vec<Item> {
                 for (i, s) in t.steps.iter().enumerate() {
                     let mut texts = vec![s.name.clone(), s.outcome.clone()];
                     texts.extend(s.launches.iter().map(|l| l.display.clone()));
+                    texts.extend(Some(s.context.clone()).filter(|c| !c.is_empty()));
                     out.push(Item::new(format!("step:{}", s.run), texts, vec![], i));
                 }
                 if let (Some(c), Some(r)) = (&t.card, &t.row) {

@@ -18,6 +18,7 @@ struct SettingsPage: View {
                     Text(n).font(theme.body()).foregroundStyle(theme.muted)
                         .accessibilityIdentifier("settings:notice")
                 }
+                review()
                 if let s = model.settings {
                     proposals(s)
                     schedules(s)
@@ -31,6 +32,18 @@ struct SettingsPage: View {
             }.padding(theme.spacingLarge)
         }
         .onAppear { model.loadSettings(); model.loadDevices() }
+    }
+
+    func review() -> some View {
+        section("Pipeline review", theme: theme) {
+            if let r = model.reviewSettings {
+                ReviewSectionBody(model: model, review: r,
+                                  change: { model.changeReviewSetting($0) },
+                                  runNow: { model.runReview() })
+            } else {
+                Text("Loading the pipeline review.").font(theme.body()).foregroundStyle(theme.muted)
+            }
+        }
     }
 
     func choice(_ title: String, _ id: String, value: String, options: [String], _ pick: @escaping (String) -> Void) -> some View {
@@ -144,6 +157,57 @@ struct ScheduleRow: View {
                 .accessibilityIdentifier("settings:run:\(job.name)")
         }
         .onAppear { every = job.every }
+    }
+}
+
+/// The body of the "Pipeline review" section (s1093): on or off, the time, how often, the last
+/// run with its proposals, the next run and Run now.
+struct ReviewSectionBody: View {
+    @Environment(\.theme) var theme
+    let model: MonitorModel
+    let review: ReviewSettings
+    let change: (String) -> Void
+    let runNow: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: theme.spacingSmall) {
+            Toggle("Review the pipeline", isOn: Binding(get: { review.enabled }, set: { change(SettingsPayload.reviewEnabled($0)) }))
+                .font(theme.body())
+                .accessibilityIdentifier("settings:review:enabled")
+            DatePicker("At", selection: Binding(
+                get: { ReviewSettings.date(at: review.at) },
+                set: { picked in
+                    let at = ReviewSettings.timeText(picked)
+                    if at != review.at { change(SettingsPayload.reviewAt(at)) }
+                }), displayedComponents: .hourAndMinute)
+                .font(theme.body())
+                .disabled(!review.enabled)
+                .accessibilityIdentifier("settings:review:at")
+            Stepper(review.everyText, value: Binding(get: { review.everyDays }, set: { change(SettingsPayload.reviewEvery(days: min(30, max(1, $0)))) }), in: 1...30)
+                .font(theme.body())
+                .disabled(!review.enabled)
+                .accessibilityIdentifier("settings:review:every")
+            HStack(spacing: theme.spacing) {
+                ForEach(ReviewSettings.presets, id: \.days) { p in
+                    Button(p.name) { change(SettingsPayload.reviewEvery(days: p.days)) }
+                        .disabled(!review.enabled || review.everyDays == p.days)
+                        .accessibilityIdentifier("settings:review:\(p.name.lowercased())")
+                }
+            }
+            if let p = review.problem { Text(p).font(theme.small()).foregroundStyle(theme.muted) }
+            if let t = review.lastTask {
+                LinkedText(model: model, text: "Last run: \(review.lastAt ?? "") (#\(t))", font: theme.body())
+                LinkedText(model: model, text: review.filedText, font: theme.body())
+                Text(review.lastSummary).font(theme.small()).foregroundStyle(theme.muted)
+            } else {
+                Text("Last run: none yet").font(theme.body()).foregroundStyle(theme.muted)
+            }
+            LinkedText(model: model, text: review.nextText, font: theme.body())
+            Button("Run now", action: runNow)
+                .disabled(review.runningTask != nil || review.project.isEmpty)
+                .accessibilityIdentifier("settings:review:run")
+            Text(ReviewSettings.explanation).font(theme.small()).foregroundStyle(theme.muted)
+        }
     }
 }
 

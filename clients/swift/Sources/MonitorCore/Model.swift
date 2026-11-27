@@ -73,6 +73,7 @@ public final class MonitorModel {
     public var notifySettings: NotifySettings?
     public var settingsNotice: String?
     public var remoteSettings: RemoteSettings?
+    public var reviewSettings: ReviewSettings?
     /// Running work on other Macs: this Mac's own switch (a node), and the nodes (a coordinator).
     public var nodeSelf: NodeSelf?
     public var nodes: NodesSnapshot?
@@ -789,9 +790,14 @@ public final class MonitorModel {
     public func makeTestImmune(_ task: UInt64) {
         command { $0.skip = .with { $0.task = task; $0.allTests = true } }
     }
-    public func answer(task: UInt64, _ text: String, cardHash: String) {
-        command { $0.answer = .with { $0.task = task; $0.answer = text; $0.cardHash = cardHash } }
+    public func answer(task: UInt64, _ text: String, cardHash: String, context: String = "") {
+        command { $0.answer = .with { $0.task = task; $0.answer = text; $0.cardHash = cardHash; $0.context = context } }
     }
+    public func answer(task: UInt64, _ r: AnswerRequest, cardHash: String) {
+        answer(task: task, r.answer, cardHash: cardHash, context: r.context)
+    }
+    /// Ask for a diagnosis of a failed task (owner only).
+    public func diagnose(_ task: UInt64) { command { $0.diagnose = .with { $0.task = task } } }
     /// Approve a held self-change: the exact diff the owner was shown.
     public func approveHold(_ task: UInt64, diffHash: String) {
         command { $0.approveHold = .with { $0.task = task; $0.diffHash = diffHash } }
@@ -987,6 +993,17 @@ public final class MonitorModel {
         if !p.isEmpty { raw("GET", SettingsPayload.settingsPath(project: p), id: "settings") }
         raw("GET", "/notify/settings", id: "notify-settings")
         raw("GET", "/remote", id: "remote")
+        raw("GET", "/review", id: "review")
+    }
+    /// Change one setting of the pipeline review (a body from `SettingsPayload`).
+    public func changeReviewSetting(_ body: String) {
+        settingsNotice = nil
+        raw("POST", "/review", json: body, id: "review-save")
+    }
+    /// File a pipeline review now.
+    public func runReview() {
+        settingsNotice = nil
+        raw("POST", "/review/run", json: "{}", id: "review-run")
     }
     /// Change the global placement mode; the page reloads `/remote` on the answer.
     public func changeGlobalMode(_ mode: String) {
@@ -1435,6 +1452,16 @@ public final class MonitorModel {
         }
         if r.id == "notify-settings", r.ok { notifySettings = NotifySettings(json: r.json) }
         if r.id == "remote", r.ok { remoteSettings = RemoteSettings(json: r.json) }
+        if r.id == "review", r.ok { reviewSettings = ReviewSettings(json: r.json) }
+        if r.id == "review-save" {
+            settingsNotice = r.ok ? Self.settingsDone(r.id) : r.error
+            // The answer is the review as it stands now; a refusal puts the controls back.
+            if r.ok { reviewSettings = ReviewSettings(json: r.json) } else { raw("GET", "/review", id: "review") }
+        }
+        if r.id == "review-run" {
+            settingsNotice = r.ok ? Self.settingsDone(r.id) : r.error
+            if r.ok { raw("GET", "/review", id: "review") }
+        }
         if r.id == "node-self", r.ok { nodeSelf = NodeSelf(json: r.json) }
         if r.id == "nodes", r.ok { nodes = NodesSnapshot(json: r.json) }
         if r.id == "node-accept" || r.id == "nodes-use" || r.id == "node-update" {

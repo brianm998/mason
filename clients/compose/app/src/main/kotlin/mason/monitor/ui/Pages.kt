@@ -449,7 +449,18 @@ private fun TaskDetail(model: MonitorModel, d: TaskDetailView, loading: Boolean 
         if (r.typical.isNotEmpty()) Text(r.typical, style = theme.small())
     }
     r.progress.running?.let { ProgressDetail(model, it) }
-    ActionButtons(model, r, hasApprovalView = d.approval != null)
+    val failedPage = if (r.state == "failed") FailedPage.choose(d.card != null, d.diagnosis_running != null, r.allowed_actions) else null
+    if (failedPage == FailedPage.Card) {
+        // The diagnosis first: its summary is the card's why, the failure line under it.
+        if (failedPage != FailedPage.Card) d.card?.let { DecisionCardView(model, r.id, it) }
+        if (d.failure.isNotEmpty() && failedPage != FailedPage.Card) LinkedText(model, "Failed: ${d.failure}", theme.body(color = theme.attention), Modifier.testTag("detail:failure"))
+    }
+    if (failedPage == FailedPage.Diagnosing) {
+        d.diagnosis_running?.let {
+            Text(diagnosingLine(it.started_ms, it.ran_on, model.daemonNow()), style = theme.body(color = theme.attention), modifier = Modifier.testTag("detail:diagnosing"))
+        }
+    }
+    ActionButtons(model, r, hasApprovalView = d.approval != null, failedPage = failedPage)
     if (loading) Text("Loading details…", style = theme.body(color = theme.muted), modifier = Modifier.testTag("detail:loading"))
     if (r.blockers.isNotEmpty()) {
         Row(horizontalArrangement = Arrangement.spacedBy(theme.spacingSmall), modifier = Modifier.testTag("waiting-for")) {
@@ -501,6 +512,9 @@ private fun TaskDetail(model: MonitorModel, d: TaskDetailView, loading: Boolean 
                     Text(c.countText, style = theme.body(color = theme.muted))
                     Text(c.timeText(now), style = theme.body(color = if (c.isStale(now)) theme.slow else theme.muted))
                 }
+            }
+            if (s.context.isNotEmpty()) {
+                Text(s.context, style = theme.small(color = theme.muted), modifier = Modifier.padding(start = theme.spacingLarge))
             }
             // Every session this run started, so a retry up the ladder shows.
             s.launches.forEach { l ->
@@ -962,6 +976,11 @@ fun SettingsPage(model: MonitorModel) {
     Scrolling(model) {
         Text("Settings", style = theme.title())
         model.settingsNotice?.let { Text(it, style = theme.body(color = theme.muted), modifier = Modifier.testTag("settings:notice")) }
+        Section("Pipeline review") {
+            val r = model.reviewSettings
+            if (r == null) Text("Loading the pipeline review.", style = theme.body(color = theme.muted))
+            else ReviewSectionBody(model, r, { model.changeReviewSetting(it) }, { model.runReview() })
+        }
         val s = model.settings
         if (s == null) {
             Text("Loading the project's settings.", style = theme.body(color = theme.muted))
@@ -1031,6 +1050,61 @@ fun SettingsPage(model: MonitorModel) {
         }
         DevicesSection(model)
     }
+}
+
+/**
+ * The body of the "Pipeline review" section (s1093): on or off, the time, how often, the last run
+ * with its proposals, the next run and Run now.
+ */
+@Composable
+internal fun ReviewSectionBody(model: MonitorModel, review: ReviewSettings, change: (String) -> Unit, runNow: () -> Unit) {
+    val theme = LocalTheme.current
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        androidx.compose.material3.Checkbox(
+            checked = review.enabled,
+            onCheckedChange = { change(SettingsPayload.reviewEnabled(it)) },
+            modifier = Modifier.testTag("settings:review:enabled"),
+        )
+        Text("Review the pipeline", style = theme.body())
+    }
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(theme.spacing)) {
+        Text("At ${review.at}", style = theme.body())
+        listOf(
+            Triple("hour:less", "-1 h", review.atMoved(hours = -1)),
+            Triple("hour:more", "+1 h", review.atMoved(hours = 1)),
+            Triple("minute:less", "-5 min", review.atMoved(minutes = -5)),
+            Triple("minute:more", "+5 min", review.atMoved(minutes = 5)),
+        ).forEach { (tag, label, at) ->
+            androidx.compose.material3.TextButton(
+                onClick = { change(SettingsPayload.reviewAt(at)) }, enabled = review.enabled,
+                modifier = Modifier.testTag("settings:review:$tag"),
+            ) { Text(label) }
+        }
+    }
+    SettingStepper(review.everyText, review.everyDays, 1, 30, "settings:review:every") { change(SettingsPayload.reviewEvery(it)) }
+    Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing)) {
+        ReviewSettings.PRESETS.forEach { (name, days) ->
+            androidx.compose.material3.TextButton(
+                onClick = { change(SettingsPayload.reviewEvery(days)) }, enabled = review.enabled && review.everyDays != days,
+                modifier = Modifier.testTag("settings:review:${name.lowercase()}"),
+            ) { Text(name) }
+        }
+    }
+    review.problem?.let { Text(it, style = theme.small(color = theme.muted)) }
+    val last = review.lastTask
+    if (last == null) {
+        Text("Last run: none yet", style = theme.body(color = theme.muted))
+    } else {
+        LinkedText(model, "Last run: ${review.lastAt.orEmpty()} (#$last)", theme.body())
+        LinkedText(model, review.filedText, theme.body())
+        Text(review.lastSummary, style = theme.small(color = theme.muted))
+    }
+    LinkedText(model, review.nextText, theme.body())
+    androidx.compose.material3.TextButton(
+        onClick = runNow, enabled = review.runningTask == null && review.project.isNotEmpty(),
+        modifier = Modifier.testTag("settings:review:run"),
+    ) { Text("Run now") }
+    Text(ReviewSettings.EXPLANATION, style = theme.small(color = theme.muted))
 }
 
 /** The body of the "Where runs go" section (#891): the global mode and the project's. */

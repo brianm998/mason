@@ -97,6 +97,7 @@ pub const CONDITIONS: &[&str] = &[
     "provider_overage",
     "provider_budget",
     "stalled",
+    "review",
 ];
 
 /// Every alert kind the daemon raises. Add a new kind here when it is raised, and give it a route
@@ -124,6 +125,7 @@ pub const ALERT_KINDS: &[&str] = &[
     "paused",
     "debt",
     "stalled",
+    "review",
 ];
 
 /// Kinds that are deliberately shown on the monitor and nothing else: the owner did these
@@ -135,6 +137,9 @@ pub const MONITOR_ONLY: &[&str] = &["paused", "debt", "provider_hold"];
 /// `Routing::repeat_ms` until the alert is acknowledged or clears. Every other kind is
 /// reminded once.
 pub const REPEATING: &[&str] = &["stalled", "disk"];
+
+/// Kinds that report something that happened and are never reminded of.
+pub const ONCE: &[&str] = &["review"];
 
 /// A daily window in local minutes of the day, `start` up to but not including
 /// `end`; a window that ends before it starts runs over midnight.
@@ -270,6 +275,7 @@ impl Routing {
             put(k, r);
         }
         put("landed", vec![rule(Monitor, 0), rule(Speech, 0)]);
+        put("review", vec![rule(Monitor, 0), rule(Speech, 0)]);
         Routing {
             by_kind,
             quiet: BTreeMap::new(),
@@ -405,7 +411,7 @@ pub fn due(
             out.push((ru.channel, Delivery::Initial));
         }
     }
-    if now_ms >= st.since_ms + r.reminder_ms {
+    if now_ms >= st.since_ms + r.reminder_ms && !ONCE.contains(&kind) {
         for ru in &rules {
             if ru.channel == Channel::Monitor || r.is_quiet(ru.channel, minute_of_day) {
                 continue;
@@ -620,6 +626,8 @@ pub fn sentence(kind: &str, subject: &str, detail: &str, reminder: bool) -> Stri
         "disk" if detail.is_empty() => "MASON is stopped: disk is nearly full".into(),
         "disk" => format!("MASON is stopped: disk is nearly full, {detail}"),
         "landed" => format!("{subject}, has landed"),
+        // The line is already a sentence: "Pipeline review: 4 proposed, ...".
+        "review" if !detail.is_empty() => detail,
         "daemon_down" => "MASON has lost its daemon; check that mason D is running".into(),
         "credentials" => {
             format!("{subject}, the agent is not logged in; renew the token in claude.env or log in again (`claude /login`); work resumes at the next check, or `mason account release <name>` resumes it now")

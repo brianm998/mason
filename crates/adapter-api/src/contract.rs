@@ -306,11 +306,12 @@ pub fn tool_spec(tool: &str) -> Option<(String, Value)> {
                     "duplicate_of": {"type": "integer", "description": "close, duplicate: the other task's number"},
                     "evidence": {"type": "string", "description": "close: what shows it (commit, file, test, task)"}},
                     "required": ["label", "recommended", "action"]}},
+                "quote": {"type": "string", "description": "The decisive lines, copied exactly from the failure output, the test log or the code you blame (1 to 10 lines). The contract checks that they are there."},
                 "cause": {"type": "string", "enum": ["code", "outside", "base", "pipeline"], "description": "Whose fault it is: the task's own code, or something outside it (outside), the base branch (base) or MASON (pipeline). When it is not the code, the recommended option must contain a fix-later action (file_task, or wait_for on an open task) and a fix-now action (land_now, retry, wait_for or open_session). land_now is allowed only when every one of the task's own suites is green, or red the same way on the base"},
                 "no_code_change": {"type": "boolean", "description": "true only if the task's code needs no change and running it again is expected to pass (a flaky or environment failure); a recommended retry is then applied by itself"},
                 "evidence_lines": {"type": "array", "maxItems": 10, "items": {"type": "string"}, "description": "The decisive lines, at most 10"}
             }),
-            &["summary", "options"],
+            &["summary", "options", "quote"],
         ),
         "submit_review" => s(
             "Submit your review. verdict is 'approve' or 'changes'. Every finding has a severity: only \
@@ -326,9 +327,10 @@ pub fn tool_spec(tool: &str) -> Option<(String, Value)> {
                 "summary": {"type": "string"},
                 "findings": {"type": "array", "items": {"type": "object", "properties": {
                     "issue": {"type": "string"}, "file": {"type": "string"},
+                    "quote": {"type": "string", "description": "One to five lines copied exactly from the change (the diff, or the file at the head); for a finding about something missing, from the task text or the plan. The contract checks that they are there."},
                     "severity": {"type": "string", "enum": ["blocking", "minor"],
                         "description": "'blocking' sends the task back; 'minor' is kept as advice"}},
-                    "required": ["issue", "severity"]}},
+                    "required": ["issue", "severity", "quote"]}},
                 "removes": {"type": "array", "items": {"type": "object", "properties": {
                     "file": {"type": "string"}, "line": {"type": "string"}, "reason": {"type": "string"}},
                     "required": ["file", "line", "reason"]},
@@ -454,10 +456,82 @@ fn scope_list(a: &Value, key: &str, out: &mut Vec<String>) {
     }
 }
 
+/// A quote: a string of 1 to `max` non-blank lines. `key` is the field's name in the message
+/// (for a finding, its full path); the field itself is always `quote`.
+fn quote_shape(a: &Value, key: &str, max: usize, p: &mut Vec<String>) {
+    match a.get("quote").and_then(Value::as_str) {
+        Some(q) => {
+            let n = q.lines().filter(|l| !l.trim().is_empty()).count();
+            if n == 0 || n > max {
+                p.push(format!(
+                    "{key}: {n} lines given, need 1 to {max} lines copied exactly from the evidence"
+                ));
+            }
+        }
+        None => p.push(format!(
+            "{key}: required, 1 to {max} lines copied exactly from the evidence"
+        )),
+    }
+}
+
+/// One line of a quote or of the material it is matched against: a leading line-number prefix
+/// from a tool (`123→`, `123\t`) removed when `strip_numbers`, whitespace runs collapsed.
+fn norm_line(l: &str, strip_numbers: bool) -> String {
+    let mut t = l.trim_start();
+    if strip_numbers {
+        let digits = t.len() - t.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        if digits > 0 {
+            let rest = &t[digits..];
+            if let Some(r) = rest
+                .strip_prefix('\u{2192}')
+                .or_else(|| rest.strip_prefix('\t'))
+            {
+                t = r;
+            }
+        }
+    }
+    t.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn norm_lines(text: &str, strip_numbers: bool) -> Vec<String> {
+    text.lines()
+        .map(|l| norm_line(l, strip_numbers))
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
+/// Whether `quote` is in `material`: its lines in order and next to each other (the first may
+/// start and the last may end partway through a line).
+/// Whitespace is normalised, blank lines are ignored, tool line-number prefixes on the quote
+/// are stripped, and a diff's `+`/`-`/space marker may be left out of the quote.
+pub fn quote_in(quote: &str, material: &str) -> bool {
+    let hay_plain = norm_lines(material, false).join("\n");
+    let hay_diff = material
+        .lines()
+        .map(|l| norm_line(l.strip_prefix(['+', '-', ' ']).unwrap_or(l), false))
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    [false, true].iter().any(|&strip| {
+        let q = norm_lines(quote, strip).join("\n");
+        !q.is_empty() && (hay_plain.contains(&q) || hay_diff.contains(&q))
+    })
+}
+
+/// `Ok` when `quote` is in one of the named materials, else "not found in <where it looked>".
+pub fn check_quote(quote: &str, materials: &[(String, String)]) -> Result<(), String> {
+    if materials.iter().any(|(_, m)| quote_in(quote, m)) {
+        return Ok(());
+    }
+    let names: Vec<&str> = materials.iter().map(|(n, _)| n.as_str()).collect();
+    Err(format!("not found in {}", names.join(", ")))
+}
+
 /// The problems of a `submit_diagnosis`: a card of 2 to 4 options, exactly one recommended,
 /// each with an action that carries what it needs.
 fn diagnosis_problems(a: &Value, p: &mut Vec<String>) {
     text(a, "summary", 2000, p);
+    quote_shape(a, "quote", 10, p);
     if a.get("no_code_change").is_some_and(|c| !c.is_boolean()) {
         p.push("no_code_change: must be true or false".into());
     }
@@ -866,6 +940,7 @@ pub fn validate(tool: &str, a: &Value) -> Result<(), Vec<String>> {
                 {
                     p.push(format!("findings[{i}].issue: required"));
                 }
+                quote_shape(f, &format!("findings[{i}].quote"), 5, &mut p);
                 if !matches!(
                     f.get("severity").and_then(Value::as_str),
                     Some("blocking" | "minor")
@@ -1601,7 +1676,7 @@ mod tests {
         let open = json!({"action": "open_session", "where": "base", "brief": "look"});
         let cancel = json!({"label": "Cancel", "recommended": false, "action": "cancel"});
         let card = |cause: &str, acts: Vec<Value>| {
-            json!({"summary": "s", "cause": cause, "options": [
+            json!({"summary": "s", "quote": "q", "cause": cause, "options": [
                 {"label": "Both", "recommended": true, "actions": acts}, cancel.clone()]})
         };
         // Both halves: accepted, in either order.
@@ -1619,7 +1694,7 @@ mod tests {
         // The task's own code needs neither.
         assert!(ok(card("code", vec![retry.clone()])).is_ok());
         assert!(
-            ok(json!({"summary": "s", "options": [
+            ok(json!({"summary": "s", "quote": "q", "options": [
             {"label": "Land", "recommended": true, "action": "land_now", "reason": "r"},
             cancel.clone()]}))
             .is_ok(),
@@ -1659,7 +1734,7 @@ mod tests {
         let close = json!({"label": "Close it", "recommended": false, "action": "close",
                            "kind": "already_done", "evidence": "commit abc"});
         let cancel = json!({"label": "Cancel it", "recommended": false, "action": "cancel"});
-        let card = |o: Vec<Value>| json!({"summary": "s", "options": o});
+        let card = |o: Vec<Value>| json!({"summary": "s", "quote": "q", "options": o});
         assert!(ok(card(vec![retry(true), explore(false)])));
         assert!(ok(card(vec![
             retry(true),
@@ -1838,8 +1913,8 @@ mod tests {
                 &json!({"verdict": verdict, "summary": "s", "findings": findings}),
             )
         };
-        let minor = json!({"issue": "a nit", "severity": "minor"});
-        let blocking = json!({"issue": "broken", "severity": "blocking"});
+        let minor = json!({"issue": "a nit", "severity": "minor", "quote": "a"});
+        let blocking = json!({"issue": "broken", "severity": "blocking", "quote": "a"});
         let why = review("changes", json!([minor, minor]))
             .unwrap_err()
             .join("\n");
@@ -1847,8 +1922,8 @@ mod tests {
         assert_eq!(review("approve", json!([minor, minor])), Ok(()));
         assert_eq!(review("changes", json!([blocking, minor])), Ok(()));
         for bad in [
-            json!({"issue": "x"}),
-            json!({"issue": "x", "severity": "major"}),
+            json!({"issue": "x", "quote": "a"}),
+            json!({"issue": "x", "severity": "major", "quote": "a"}),
         ] {
             for verdict in ["approve", "changes"] {
                 let why = review(verdict, json!([blocking, bad]))
@@ -1859,6 +1934,55 @@ mod tests {
         }
         let why = review("approve", json!([blocking])).unwrap_err().join("\n");
         assert!(why.contains("'approve' cannot carry"), "{why}");
+    }
+
+    #[test]
+    fn a_finding_and_a_diagnosis_need_a_quote_of_the_right_size() {
+        let review = |f: Value| {
+            validate(
+                "submit_review",
+                &json!({"verdict": "approve", "summary": "s", "findings": [f]}),
+            )
+        };
+        let why = review(json!({"issue": "x", "severity": "minor"}))
+            .unwrap_err()
+            .join("\n");
+        assert!(why.contains("findings[0].quote: required"), "{why}");
+        let six = "1\n2\n3\n4\n5\n6";
+        let why = review(json!({"issue": "x", "severity": "minor", "quote": six}))
+            .unwrap_err()
+            .join("\n");
+        assert!(why.contains("6 lines given"), "{why}");
+        let card = json!({"summary": "s", "options": [
+            {"label": "a", "recommended": true, "action": "cancel"},
+            {"label": "b", "recommended": false, "action": "cancel"}]});
+        let why = validate("submit_diagnosis", &card).unwrap_err().join("\n");
+        assert!(why.contains("quote: required"), "{why}");
+    }
+
+    #[test]
+    fn quotes_match_through_indentation_line_numbers_and_diff_markers() {
+        let diff = "@@ -1,2 +1,3 @@\n fn a() {\n+    let x = 1;\n+    let y = 2;\n }\n";
+        assert!(quote_in("let x = 1;", diff));
+        assert!(quote_in("        let x = 1;\n  let y   =   2;", diff));
+        assert!(quote_in("+    let x = 1;", diff));
+        assert!(quote_in(
+            "  472\u{2192}    let x = 1;\n  473\u{2192}    let y = 2;",
+            diff
+        ));
+        assert!(quote_in("12\tlet x = 1;", diff));
+        assert!(!quote_in("let x = 2;", diff));
+        assert!(!quote_in("let x = 1;\nlet z = 3;", diff));
+        assert!(!quote_in("  ", diff));
+        let m = [
+            ("the diff".to_string(), diff.to_string()),
+            ("the log".to_string(), "boom".to_string()),
+        ];
+        assert_eq!(check_quote("boom", &m), Ok(()));
+        assert_eq!(
+            check_quote("nope", &m),
+            Err("not found in the diff, the log".to_string())
+        );
     }
 
     #[test]

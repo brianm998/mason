@@ -191,7 +191,9 @@ pub fn review_prompt(
          Check that it does what the task asks, that the acceptance criteria hold, and that it breaks nothing.\n\n\
          {severity}\n\n\
          Call submit_review with verdict \"approve\" (with any minor findings), or \"changes\" with at least \
-         one concrete blocking finding. {progress}",
+         one concrete blocking finding. Every finding carries a `quote`: one to five lines copied exactly \
+         from the diff above or the file at the head (for a finding about something missing, from the task text \
+         or the plan); a quote that is not found is refused. {progress}",
         severity = REVIEW_SEVERITY,
         progress = PROGRESS_LINE,
         proj = p.id,

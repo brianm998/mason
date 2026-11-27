@@ -398,6 +398,10 @@ impl Daemon {
         let t = w.tasks.get(&task).ok_or("no such task")?;
         let p = self.project(t.project).ok_or("no such project")?;
         let have = self.store.reservations(task.0).map_err(|e| e.to_string())?;
+        // The nightly review commits nothing: it must not use up a number every night.
+        if crate::introspect::is_analyst_task(self, task, &p.id) {
+            return Ok(mine_from(t, &have));
+        }
         let stage = stage_of_task(&t.title, &t.body);
         let need_exit = stage.is_none() && !have.iter().any(|r| r.kind == KIND_EXIT);
         let need_dec = !have.iter().any(|r| r.kind == KIND_DECISION);

@@ -7,7 +7,7 @@
 # detector to file its proposal, then waits while you look. Open each monitor, point it at the
 # printed address, choose Health in the sidebar, and check:
 #   1. "Findings" lists the retry loop with its metric (retry_loop_rate) and the verdict "open".
-#   2. "Recurring jobs" lists introspect and the analyst rows with when they last ran.
+#   2. "Recurring jobs" lists introspect and the review rows with when they last ran.
 #   3. "Digest" shows landed, interventions, exploring skips by route (with how many came
 #      back), forced landings with reasons, and "Tokens per landed task: not recorded".
 #   4. "Triage" says it is off.

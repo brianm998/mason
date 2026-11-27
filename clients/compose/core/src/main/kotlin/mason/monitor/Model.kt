@@ -57,6 +57,7 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     var notifySettings by mutableStateOf<NotifySettings?>(null)
     var settingsNotice by mutableStateOf<String?>(null)
     var remoteSettings by mutableStateOf<RemoteSettings?>(null)
+    var reviewSettings by mutableStateOf<ReviewSettings?>(null)
     /** The Devices section (s433): LAN state, paired devices, the code on show, and what the last action said. */
     var lanStatus by mutableStateOf<LanStatus?>(null)
     var devices by mutableStateOf<DeviceList?>(null)
@@ -714,8 +715,11 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     fun skipTest(task: Long, step: String) = send(Command(skip = Skip(task = task, step = step)))
     /** Make a task immune to testing (a fast track): no test runs for it through landing; the full run is owed. */
     fun makeTestImmune(task: Long) = send(Command(skip = Skip(task = task, all_tests = true)))
-    fun answer(task: Long, text: String, cardHash: String) =
-        send(Command(answer = Answer(task = task, answer = text, card_hash = cardHash)))
+    fun answer(task: Long, text: String, cardHash: String, context: String = "") =
+        send(Command(answer = Answer(task = task, answer = text, card_hash = cardHash, context = context)))
+    fun answer(task: Long, r: AnswerRequest, cardHash: String) = answer(task, r.answer, cardHash, r.context)
+    /** Ask for a diagnosis of a failed task (owner only). */
+    fun diagnose(task: Long) = send(Command(diagnose = TaskRef(task = task)))
     fun addTask(project: String, title: String, body: String) =
         send(Command(add_task = AddTask(project = project, title = title, body = body)))
     fun setSessionLimit(units: Int) {
@@ -907,6 +911,19 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         if (p.isNotEmpty()) raw("GET", SettingsPayload.path(p), id = "settings")
         raw("GET", "/notify/settings", id = "notify-settings")
         raw("GET", "/remote", id = "remote")
+        raw("GET", "/review", id = "review")
+    }
+
+    /** Change one setting of the pipeline review (a body from [SettingsPayload]). */
+    fun changeReviewSetting(body: String) {
+        settingsNotice = null
+        raw("POST", "/review", id = "review-save", json = body)
+    }
+
+    /** File a pipeline review now. */
+    fun runReview() {
+        settingsNotice = null
+        raw("POST", "/review/run", id = "review-run", json = "{}")
     }
 
     /** Change the global placement mode; the page reloads `/remote` on the answer. */
@@ -1150,6 +1167,12 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
             }
             if (r.id == "notify-settings" && r.ok) notifySettings = NotifySettings.parse(r.json)
             if (r.id == "remote" && r.ok) remoteSettings = RemoteSettings.parse(r.json)
+            if (r.id == "review" && r.ok) reviewSettings = ReviewSettings.parse(r.json)
+            // The answer to a change is the review as it stands; a refusal asks for it again.
+            if (r.id == "review-save") {
+                if (r.ok) reviewSettings = ReviewSettings.parse(r.json) else raw("GET", "/review", id = "review")
+            }
+            if (r.id == "review-run" && r.ok) raw("GET", "/review", id = "review")
             if (r.id in SETTINGS_RESULTS) {
                 settingsNotice = if (r.ok) SettingsPayload.done(r.id) else r.error
                 if (r.ok && (r.id == "settings-save" || r.id == "notify-save")) loadSettings()

@@ -127,6 +127,7 @@ fn filing(
         blocks_task: blocks,
         explored: false,
         estimate: None,
+        lookback: None,
     }
 }
 
