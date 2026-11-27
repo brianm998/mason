@@ -1432,7 +1432,7 @@ mod tests {
         let close = json!({"label": "Close it", "recommended": false, "action": "close",
                            "kind": "already_done", "evidence": "commit abc"});
         let cancel = json!({"label": "Cancel it", "recommended": false, "action": "cancel"});
-        let card = |o: Vec<Value>| json!({"summary": "s", "options": o});
+        let card = |o: Vec<Value>| json!({"summary": "s", "quote": "q", "options": o});
         assert!(ok(card(vec![retry(true), explore(false)])));
         assert!(ok(card(vec![
             retry(true),
