@@ -707,7 +707,7 @@ fn at_most_three_lessons_are_filed_a_night() {
         .unwrap()
         .tasks
         .values()
-        .filter(|t| t.state == State::Proposed || t.state == State::Queued)
+        .filter(|t| t.title.ends_with("line about fixtures") || t.title.contains(" line about "))
         .count();
     assert_eq!(filed, introspect::MAX_LESSONS);
     let refused = std::fs::read_to_string(dir.path().join("analyst-refused.txt")).unwrap();

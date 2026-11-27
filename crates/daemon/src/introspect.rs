@@ -1084,14 +1084,14 @@ pub fn review_body(d: &Daemon, since: u64, now: u64, max_proposals: u32) -> Stri
          At most {max_proposals} findings are filed per review, in the order you write them: put the most important first.\n\n\
          ## The result\n\
          Write `{ANALYST_FILE}` in the root of your worktree, do not commit it, then call submit_change with the hash from `git rev-parse HEAD`:\n\n\
-         ```json\n{{\n  \"findings\": [{{\"category\": \"one of: {categories}\", \"title\": \"1 to 120 characters\", \"body\": \"the ticket\", \
+         ```json\n{{\n  \"findings\": [{{\"category\": \"one of: {categories}, {lesson}\", \"title\": \"1 to 120 characters\", \"body\": \"the ticket\", \
          \"evidence\": \"a file and line or recorded output that shows it, e.g. crates/daemon/src/sched.rs:120\", \
          \"project\": \"the project it is for (leave out for {own})\", \"metric\": \"optional, one of: {metrics}\", \
          \"severity\": \"low or high\", \"cost\": \"small or large\"}}],\n  \
          \"duplicates\": [{{\"category\": \"...\", \"idea\": \"what you did not file\", \"task\": 123}}],\n  \
          \"nothing_found\": [{{\"category\": \"...\", \"because\": \"...\"}}]\n}}\n```\n\n\
          Each of the six categories must appear in `findings`, `duplicates` or `nothing_found`. A finding with no evidence naming a file is refused.",
-        categories = format!("{}, {LESSON}", CATEGORIES.join(", ")),
+        categories = CATEGORIES.join(", "),
         lesson = LESSON,
         max_lessons = MAX_LESSONS,
         metrics = METRICS.join(", "),
