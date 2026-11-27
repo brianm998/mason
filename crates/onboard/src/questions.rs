@@ -276,8 +276,12 @@ pub struct Flags {
     pub land: Option<String>,
     pub no_prove: bool,
     pub prove_only: bool,
-    /// The test command for `adopt` (`--test` there; `init` does not take it).
+    /// The test command: for `adopt` (`--test`), and for `init` when no suite can be proposed or
+    /// kept. `true` is accepted only when given here, so it is always a deliberate answer.
     pub test: Option<String>,
+    /// Where runs go when nodes are enabled: `local`, `favor-local`, `favor-remote` or `remote`
+    /// (`[placement] mode`). Ignored (and never asked) when nodes are off.
+    pub placement: Option<String>,
     /// How the GitHub sections of the overlay reach their token: `env:NAME`, `file:/path`, or
     /// `none` to leave those sections out. Unset: `env:GITHUB_TOKEN`, with a warning if the
     /// process that will read it does not have the variable.
@@ -299,6 +303,12 @@ pub struct Machine {
     pub known_bins: Vec<(Agent, PathBuf)>,
     /// `None`: this process's environment.
     pub env: Option<Vec<(String, String)>>,
+    /// `[nodes] enabled` on the machine that will run the project. Only then is the placement
+    /// question asked. The CLI does not know it and leaves it off.
+    pub nodes_enabled: bool,
+    /// The `[placement] mode` of the owner's most recently added nodes-only project, which is
+    /// what the placement question recommends; unset, `local`.
+    pub recent_node_only_mode: Option<String>,
 }
 
 /// An executable regular file.
@@ -379,6 +389,8 @@ pub fn parse_flags(args: &mut Vec<String>) -> Result<Flags, String> {
             "--tracker" => f.tracker = Some(take(args)?),
             "--agent" => f.agent = Some(take(args)?),
             "--agent-bin" => f.agent_bin = Some(take(args)?),
+            "--test" => f.test = Some(take(args)?),
+            "--placement" => f.placement = Some(take(args)?),
             "--sessions" => f.sessions = Some(take(args)?),
             "--workflow" => f.workflow = Some(take(args)?),
             "--suites" => f.suites = Some(take(args)?),
@@ -453,11 +465,18 @@ pub struct Answers {
     pub prove: bool,
     /// `env:NAME` or `file:/path` for the GitHub sections; `None` leaves them out.
     pub token: Option<String>,
+    /// `[placement] mode` to write; `None` when nodes are off (nothing asked, nothing written).
+    pub placement: Option<String>,
+    /// The test command when no suite is kept: the owner's `--test`. `None` with suites.
+    pub test: Option<String>,
     /// Said while resolving, for the report.
     pub notes: Vec<String>,
     /// Things that will stop the setup working as written; a front end shows them.
     pub warnings: Vec<String>,
 }
+
+/// The `[placement] mode` values.
+pub const PLACEMENTS: [&str; 4] = ["local", "favor-local", "favor-remote", "remote"];
 
 /// How a question gets its answer.
 pub struct Mode<'a> {
@@ -644,6 +663,35 @@ pub fn resolve(
         "--suites",
     )
     .map_err(|_| "--suites is accept or skip".to_string())?;
+    // With nothing to propose, a test command is asked for. `true` is only ever an answer.
+    let test = match f.test.as_deref().map(str::trim) {
+        Some("") => return Err(
+            "--test needs a command; pass `--test true` to add the project knowing it has no tests"
+                .into(),
+        ),
+        Some(t) => Some(t.to_string()),
+        None if accept_suites && crate::suites::propose(&d.root, &d.languages).is_empty() => {
+            let given = if f.yes || !mode.interactive {
+                String::new()
+            } else {
+                answer(
+                    None,
+                    q(
+                        "test",
+                        "No test suite could be proposed. What command runs the tests? (`true` means the project has none, and nothing is proved)",
+                        &[],
+                        "",
+                        "--test",
+                    ),
+                )?
+            };
+            if given.trim().is_empty() {
+                return Err("no test suite could be proposed for this repository (build files are looked for at its top and one folder down), so the test step would run `true` and prove nothing. Pass --test COMMAND, or --test true to add it with no tests on purpose, or --suites skip".into());
+            }
+            Some(given.trim().to_string())
+        }
+        None => None,
+    };
 
     // 6. Landing.
     let base = answer(
@@ -801,6 +849,39 @@ pub fn resolve(
         return Err("--land pr opens a pull request for the setup branch, which only the `pr` landing mode uses; pass --landing pr or another --land".into());
     }
 
+    // Remote setup that leaves `.mason/` off the remote base: said now, before anything is added.
+    if let Some(w) = crate::land::unpublished_warning(d, &base, landing, land) {
+        warnings.push(w);
+    }
+
+    // Where runs go, only when nodes are enabled.
+    let placement = if f.machine.nodes_enabled {
+        let rec = f
+            .machine
+            .recent_node_only_mode
+            .clone()
+            .filter(|m| PLACEMENTS.contains(&m.as_str()))
+            .unwrap_or_else(|| "local".to_string());
+        let p = answer(
+            f.placement.as_ref(),
+            q(
+                "placement",
+                "Where should runs go? local = this machine; favor-local = here, a node when overloaded; favor-remote = a node, here if none has room; remote = nodes only",
+                &PLACEMENTS,
+                &rec,
+                "--placement",
+            ),
+        )?;
+        if !PLACEMENTS.contains(&p.as_str()) {
+            return Err(format!(
+                "--placement is local, favor-local, favor-remote or remote, not {p:?}"
+            ));
+        }
+        Some(p)
+    } else {
+        None
+    };
+
     // 8. Prove it.
     let prove = !f.no_prove;
 
@@ -825,6 +906,8 @@ pub fn resolve(
         land,
         prove,
         token,
+        placement,
+        test,
         notes,
         warnings,
     })
@@ -951,6 +1034,9 @@ pub fn render_overlay(a: &Answers, d: &Detected, test_cmd: &str) -> String {
         if a.tracker == Tracker::Github {
             s.push_str(&section("tracker", "github", &r.repo, tok));
         }
+    }
+    if let Some(m) = &a.placement {
+        s.push_str(&format!("\n[placement]\nmode = {m:?}\n"));
     }
     s
 }
@@ -1521,6 +1607,8 @@ mod tests {
             land: Land::No,
             prove: true,
             token: Some("env:GITHUB_TOKEN".into()),
+            placement: None,
+            test: None,
             notes: vec![],
             warnings: vec![],
         };
@@ -1537,6 +1625,15 @@ mod tests {
                 && pr.contains("token = \"env:GITHUB_TOKEN\"")
         );
         assert!(render_overlay(&a(Landing::DirectCi, Tracker::Local), &d, "true").contains("[ci]"));
+        assert!(!direct.contains("[placement]"));
+        let mut placed = a(Landing::Pr, Tracker::Github);
+        placed.placement = Some("favor-remote".into());
+        let text = render_overlay(&placed, &d, "true");
+        assert!(
+            text.ends_with("[placement]\nmode = \"favor-remote\"\n"),
+            "{text}"
+        );
+        assert!(crate::basic_validate("r", &text).is_ok());
         // Reads as a project overlay (the daemon's own parser is checked in the CLI's tests).
         assert!(crate::basic_validate("r", &pr).is_ok());
         assert!(crate::basic_validate("r", &direct).is_ok());

@@ -1828,7 +1828,7 @@ async fn onboarding_apply(
         .map_err(pool_err)?
         .map_err(|(c, m)| fail(code(c), m))?;
     let mut out = a.body;
-    if a.prove && a.registered {
+    if a.prove && a.registered && a.proof_hold.is_none() {
         let task = json!({"project": a.id, "title": mason_onboard::PROOF_TITLE,
             "body": mason_onboard::PROOF_BODY, "priority": "normal", "proposed": false,
             "explored": true, "after": []});

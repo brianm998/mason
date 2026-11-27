@@ -451,7 +451,12 @@ fn a_second_init_neither_duplicates_the_notes_nor_overwrites_without_force() {
 fn suites_are_run_once_and_a_vacuous_one_is_dropped() {
     // A repository with a Makefile only: no suite can be proposed, and that is said.
     let f = fixture(&[("Makefile", "test:\n\ttrue\n")]);
-    let out = ok(&f.mason(&["init", "--yes", "--no-prove"]));
+    refused(&f.mason(&["init", "--yes", "--no-prove"]), "--test true");
+    assert!(
+        on_setup(&f, ".mason/mason.toml").is_none(),
+        "nothing was written"
+    );
+    let out = ok(&f.mason(&["init", "--yes", "--no-prove", "--test", "true"]));
     assert!(
         out.contains("no suite could be proposed") && out.contains("proves nothing"),
         "{out}"
@@ -969,4 +974,26 @@ fn the_summary_says_where_each_choice_lives() {
     ] {
         assert!(out.contains(want), "{want:?} missing from {out}");
     }
+}
+
+#[test]
+fn a_merge_that_is_not_pushed_warns_names_the_push_and_prove_waits_for_the_remote() {
+    // One package in a subdirectory: its suite runs there.
+    let f = fixture(&[("Kit/Package.swift", "// swift-tools-version:5.9\n")]);
+    let bare = f.with_origin();
+    let out = ok(&run_init(
+        &f,
+        &["--land", "merge", "--test", "cd Kit && true"],
+        &[],
+    ));
+    assert!(
+        out.contains("warning: origin/main has no .mason/") && out.contains("git push origin main"),
+        "{out}"
+    );
+    assert!(has_mason(&f.repo, "main") && !has_mason(&bare, "main"));
+    let o = f.mason(&["init", "--prove-only"]);
+    refused(&o, "has no .mason/ yet");
+    git(&f.repo, &["push", "-q", "origin", "main"]);
+    // Past the check: it now stops only because no masond is running here.
+    refused(&f.mason(&["init", "--prove-only"]), "masond is not running");
 }
