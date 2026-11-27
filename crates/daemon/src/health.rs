@@ -492,7 +492,7 @@ pub fn tick(d: &Arc<Daemon>, now: u64) -> Tick {
         .name(format!("health-{sid}"))
         .spawn(move || {
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                run_session(&d2, sid, &prompt, severe)
+                run_session(&d2, sid, &prompt, severe, now)
             }));
             if r.is_err() {
                 let _ = d2.store.add_owner_message(
@@ -718,7 +718,7 @@ fn make_checkout(d: &Daemon, sid: u64, p: &crate::config::ProjectCfg) -> std::pa
     }
 }
 
-fn run_session(d: &Arc<Daemon>, sid: u64, text: &str, severe: bool) {
+fn run_session(d: &Arc<Daemon>, sid: u64, text: &str, severe: bool, now: u64) {
     let Some((pid, project)) = crate::proposals::self_project(d) else {
         end_session(d, sid);
         return;
@@ -791,11 +791,11 @@ fn run_session(d: &Arc<Daemon>, sid: u64, text: &str, severe: bool) {
     };
     let _ = d
         .store
-        .finish_owner_turn(sid, report.session_id.as_deref(), now_ms());
-    let waits = apply(d, sid, pid, &submission, now_ms());
+        .finish_owner_turn(sid, report.session_id.as_deref(), now);
+    let waits = apply(d, sid, pid, &submission, now);
     if waits {
         // The session stays open for the owner, who can write in it.
-        let _ = d.store.set_owner_session_state(sid, "open", now_ms());
+        let _ = d.store.set_owner_session_state(sid, "open", now);
         d.poke();
     } else {
         end_session(d, sid);

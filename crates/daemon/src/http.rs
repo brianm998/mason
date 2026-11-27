@@ -236,6 +236,11 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
                 "skills": crate::skills::invoked(&d.task_dir(t.id), r.id.0),
             }))
             .collect::<Vec<_>>());
+        // What each run said it tried and gave up (task 1128), newest first.
+        v["tried"] = json!(crate::tried::rounds(&d.task_dir(t.id))
+            .iter()
+            .map(crate::tried::Round::to_json)
+            .collect::<Vec<_>>());
     }
     v
 }
@@ -2864,6 +2869,65 @@ async fn answer_task(
     }
 }
 
+/// The marking Land now and force make: the landing flag and, outside a running batch, the debt.
+/// Returns the debt and whether the task is in a running batch. The owner's HTTP call and a
+/// diagnosis card's `land_now` both come here.
+pub fn mark_land_override(
+    d: &Arc<Daemon>,
+    id: u64,
+    kind: &str,
+    who: &str,
+    reason: &str,
+) -> Result<(Option<u64>, bool), (StatusCode, String)> {
+    let store = |e: StoreError| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+    let w = d.world().map_err(store)?;
+    let t = w
+        .tasks
+        .get(&TaskId(id))
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("no task #{id}")))?;
+    let project = d.project(t.project).map_or(String::new(), |p| p.id.clone());
+    let in_batch = d.landing.in_batch(TaskId(id));
+    // Land now on a task in a running batch stops that batch's remaining verification;
+    // `now` on a queued task only gives it a batch of its own.
+    let flag = match (kind, in_batch) {
+        ("force", _) => "force",
+        ("land-now", true) => crate::suites::LAND_NOW_RUNNING,
+        _ => "now",
+    };
+    // Land now runs the suites again: a red an earlier batch left is not reused.
+    if kind == "land-now" && !matches!(t.state, State::Landed | State::Canceled) {
+        forget_red_runs(d, TaskId(id));
+    }
+    // A mark is for a task that has yet to land.
+    if !matches!(t.state, State::Landed | State::Canceled) {
+        d.store
+            .set_landing_flag(id, flag, who, now_ms())
+            .map_err(store)?;
+    }
+    // What a running batch skips is recorded, suite by suite, when it lands; no
+    // blanket debt then, or the tier would run twice after the merge.
+    let debt = if flag == crate::suites::LAND_NOW_RUNNING {
+        None
+    } else {
+        Some(
+            d.store
+                .add_debt(
+                    id,
+                    &project,
+                    &format!("landing:{}", kind.replace('-', "_")),
+                    reason,
+                    who,
+                    false,
+                    now_ms(),
+                )
+                .map_err(store)?,
+        )
+    };
+    d.landing.wake();
+    d.poke();
+    Ok((debt, in_batch))
+}
+
 /// Land now (its own batch, without waiting for the window) and force (no
 /// verification, past a freeze). Each is recorded as an override and leaves a
 /// debt; the landing engine reads the mark when the task is in the queue.
@@ -2888,58 +2952,13 @@ async fn land_override(
         .unwrap_or_else(|| d.cfg.owner_names.first().cloned().unwrap_or_default());
     let d2 = d.clone();
     let kind2 = kind.clone();
+    let reason2 = reason.clone();
+    let who2 = who.clone();
     let debt = d
         .pool
         .run(move || {
-            let kind = kind2;
-            let w = d2.world().map_err(store_err)?;
-            let t = w
-                .tasks
-                .get(&TaskId(id))
-                .ok_or_else(|| fail(StatusCode::NOT_FOUND, format!("no task #{id}")))?;
-            let project = d2
-                .project(t.project)
-                .map_or(String::new(), |p| p.id.clone());
-            let in_batch = d2.landing.in_batch(TaskId(id));
-            // Land now on a task in a running batch stops that batch's remaining verification;
-            // `now` on a queued task only gives it a batch of its own.
-            let flag = match (kind.as_str(), in_batch) {
-                ("force", _) => "force",
-                ("land-now", true) => crate::suites::LAND_NOW_RUNNING,
-                _ => "now",
-            };
-            // Land now runs the suites again: a red an earlier batch left is not reused.
-            if kind == "land-now" && !matches!(t.state, State::Landed | State::Canceled) {
-                forget_red_runs(&d2, TaskId(id));
-            }
-            // A mark is for a task that has yet to land.
-            if !matches!(t.state, State::Landed | State::Canceled) {
-                d2.store
-                    .set_landing_flag(id, flag, &who, now_ms())
-                    .map_err(store_err)?;
-            }
-            // What a running batch skips is recorded, suite by suite, when it lands; no
-            // blanket debt then, or the tier would run twice after the merge.
-            let debt = if flag == crate::suites::LAND_NOW_RUNNING {
-                None
-            } else {
-                Some(
-                    d2.store
-                        .add_debt(
-                            id,
-                            &project,
-                            &format!("landing:{}", kind.replace('-', "_")),
-                            &reason,
-                            &who,
-                            false,
-                            now_ms(),
-                        )
-                        .map_err(store_err)?,
-                )
-            };
-            d2.landing.wake();
-            d2.poke();
-            Ok((debt, in_batch))
+            mark_land_override(&d2, id, &kind2, &who2, &reason2)
+                .map_err(|(code, msg)| fail(code, msg))
         })
         .await
         .map_err(pool_err)??;

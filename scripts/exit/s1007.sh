@@ -99,7 +99,11 @@ daemon=$!
 until m status >/dev/null 2>&1; do kill -0 "$daemon" || { cat "$root/masond.log" >&2; exit 1; }; sleep 0.1; done
 
 echo "== a skip of review is refused and records nothing"
+# Paused, so the task stays queued and has no pinned definition yet: the skip must be judged
+# by the project's own pipeline, not the built-in one (which has no `review` step).
+m pause --project alpha --mode all --for 1h > /dev/null
 m task add "Add a thing" --project alpha --body "x" > /dev/null
+[ "$(m task show 0 --json | jq_state)" = queued ] || fail "the task is not queued"
 if out=$(m task skip 0 --step review --reason "exit test" 2>&1); then fail "the review skip was accepted: $out"; fi
 echo "$out" | grep -q 'only the test step can' || fail "unexpected error: $out"
 m debt list | grep -q 'step:review' && fail "a debt was recorded"
