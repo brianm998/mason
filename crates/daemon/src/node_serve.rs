@@ -1503,7 +1503,14 @@ fn spawn_upkeep(d: &Arc<Daemon>) {
             // grant says so before a coordinator finds out with a job.
             if measures_machine(&d) && now_ms() >= next_doctor {
                 next_doctor = now_ms() + 600_000;
-                run_doctor(&d);
+                let r = run_doctor(&d);
+                // A signature `codesign` could not read in time (a busy `syspolicyd`) is not
+                // kept: ask again in half a minute rather than hold the node off for ten.
+                if r.checks.iter().any(|c| {
+                    c.name == "signature" && c.detail.starts_with("could not read masond's")
+                }) {
+                    next_doctor = now_ms() + 30_000;
+                }
             }
             // A runtime that arrived: this daemon becomes it at once. The running jobs do not
             // wait and are not touched: their commands run under step hosts, and the new daemon
