@@ -606,6 +606,10 @@ struct TaskDetailPage: View {
                     }
                     .font(theme.body())
                     .accessibilityIdentifier("step:\(s.run)")
+                    if !s.context.isEmpty {
+                        Text(s.context).font(theme.small()).foregroundStyle(theme.muted)
+                            .padding(.leading, theme.spacingLarge)
+                    }
                     // Every session this run started, so a retry up the ladder shows.
                     ForEach(Array(s.launches.enumerated()), id: \.offset) { _, l in
                         LinkedText(model: model, text: "\(l.kind): \(l.display)", font: theme.small(), color: theme.muted)

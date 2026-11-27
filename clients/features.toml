@@ -733,6 +733,14 @@ ios = "done"
 android = "todo"
 android_reason = "Not in the first Android phone app (stage 469): the Android module has no Settings page yet"
 
+[feature.step-context-fill]
+description = "A task page's step row shows how full the run's agent sessions got their context window, as the daemon's own line such as 'context peak 62%, final 40%, 1 compaction'; nothing when the run reported none; a filter or search finds it (s1108)"
+swift = "done"
+compose = "done"
+ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no task page step list yet"
+
 [feature.home-hosts]
 description = "Home's Hosts section: one block per host (this Mac, each node, GitHub) with its status line and the tasks running on it now, each a link to the task with its pipeline state, what runs and for how long, and the GitHub run link; 'idle' for a host with none; one line per host with a run count that opens to the rows on a phone. The task page has a 'Running on' line (#1156)"
 swift = "done"

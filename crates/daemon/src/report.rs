@@ -10,7 +10,7 @@ use mason_core::introspect::{median, p90};
 use mason_core::{EventKind, FailClass, Next, State, TaskId};
 use mason_engine::{reduce, World};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 const DAY_MS: u64 = 86_400_000;
 
@@ -32,6 +32,8 @@ pub struct Rows {
     pub slowest: Vec<mason_store::SlowTest>,
     /// (phase, note) of each landing batch that began in the window (s702).
     pub batches: Vec<(String, String)>,
+    /// The context rows written in the window (s1108).
+    pub context: Vec<mason_store::ContextRun>,
 }
 
 #[derive(Default)]
@@ -55,6 +57,8 @@ pub struct Collector {
     waits: BTreeMap<String, Vec<u64>>,
     /// task -> project name, as last seen
     projects: BTreeMap<u64, String>,
+    /// The step runs whose work a send-back rejected.
+    sent_back_runs: BTreeSet<u64>,
 }
 
 impl Collector {
@@ -79,6 +83,17 @@ impl Collector {
     pub fn feed(&mut self, event: &mason_core::Event) {
         let at = event.at.0;
         let inw = at >= self.from && at < self.to;
+        // The work sent back is the latest run, by now, of the step it goes back to.
+        if let EventKind::SentBack { task, to_step, .. } = &event.kind {
+            let run = self
+                .w
+                .step_runs
+                .values()
+                .filter(|r| r.task == *task && r.name == *to_step)
+                .map(|r| r.id.0)
+                .max();
+            self.sent_back_runs.extend(run);
+        }
         match &event.kind {
             EventKind::Admitted {
                 task,
@@ -252,6 +267,10 @@ impl Collector {
             "flaky": {"sightings": rows.flaky.len(), "by_test": flaky},
             "open_debts": debts,
             "batches": batch_counts(&rows.batches),
+            "context": crate::context::by_fill(
+                rows.context.iter().filter(|r| in_p(&r.project)),
+                &self.sent_back_runs,
+            ),
         })
     }
 }
@@ -381,6 +400,7 @@ pub fn report(d: &Daemon, project: Option<&str>, days: u64) -> Value {
             .store
             .slowest_tests(project, SLOWEST_TESTS)
             .unwrap_or_default(),
+        context: d.store.context_runs_since(from).unwrap_or_default(),
         batches: d
             .store
             .batches(project, 2000)
@@ -486,6 +506,80 @@ mod tests {
     }
 
     #[test]
+    fn send_backs_are_counted_by_peak_context_fill() {
+        let mut c = Collector::new(0, DAY_MS);
+        let register = ev(
+            0,
+            EventKind::ProjectRegistered {
+                project: ProjectId(1),
+                name: "p".into(),
+            },
+        );
+        for e in [register, filed(0, 1), filed(0, 1), admit(1, 0), admit(1, 1)] {
+            c.feed(&e);
+        }
+        let to = |t: u64, name: &str, state: State| {
+            ev(
+                2,
+                EventKind::StepSucceeded {
+                    task: TaskId(t),
+                    next: Some(Next {
+                        step: name.into(),
+                        state,
+                    }),
+                },
+            )
+        };
+        let open = |c: &Collector, t: u64| c.w.open_run(TaskId(t)).unwrap().0;
+        // Task 0: develop, sent back by its test, develop again, landed.
+        let first = open(&c, 0);
+        c.feed(&to(0, "test", State::Testing));
+        c.feed(&ev(
+            3,
+            EventKind::SentBack {
+                task: TaskId(0),
+                reason: "red".into(),
+                to_step: "develop".into(),
+            },
+        ));
+        let second = open(&c, 0);
+        c.feed(&to(0, "test", State::Testing));
+        c.feed(&to(0, "", State::Landed));
+        // Task 1: develop once, never sent back.
+        let other = open(&c, 1);
+        let row = |run, session: &str, peak_used, compactions| mason_store::ContextRun {
+            attempt: format!("r{run}"),
+            session: session.into(),
+            run,
+            project: "p".into(),
+            step: "develop".into(),
+            peak_used,
+            final_used: peak_used,
+            window: 100,
+            compactions,
+            ..Default::default()
+        };
+        let rows = Rows {
+            context: vec![
+                // Two sessions of one run count once, at the higher peak.
+                row(first, "a", 20, 0),
+                row(first, "b", 80, 0),
+                row(second, "c", 30, 1),
+                row(other, "d", 76, 0),
+            ],
+            ..Default::default()
+        };
+        let v = c.finish(&rows, None);
+        assert_eq!(
+            v["context"],
+            json!([
+                {"step": "develop", "bucket": "75-90%", "runs": 2, "sent_back": 1, "rate_percent": 50},
+                {"step": "develop", "bucket": "compacted", "runs": 1, "sent_back": 0, "rate_percent": 0},
+            ])
+        );
+    }
+
+    #[test]
     fn every_section_counts_a_small_synthetic_log() {
         let day1 = DAY_MS;
         let mut c = Collector::new(0, 3 * DAY_MS);
@@ -569,6 +663,7 @@ mod tests {
             flaky: vec!["s::t".into(), "s::t".into(), "s::u".into()],
             open_debts: vec![("p".into(), "suite:x".into())],
             batches: vec![],
+            context: vec![],
             slowest: ["a", "b", "c"]
                 .iter()
                 .zip([4_000, 3_000, 1_000])
