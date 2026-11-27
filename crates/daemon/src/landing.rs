@@ -222,6 +222,14 @@ impl Landing {
         self.lock().owed.contains(&t)
     }
 
+    /// The integration slots of the project's running batches: their worktrees are in use.
+    pub fn running_slots(&self, p: ProjectId) -> Vec<usize> {
+        self.lock()
+            .running
+            .get(&p)
+            .map_or_else(Vec::new, |r| r.iter().map(|x| x.slot).collect())
+    }
+
     pub fn running_batches(&self, p: ProjectId) -> usize {
         self.lock().running.get(&p).map_or(0, Vec::len)
     }

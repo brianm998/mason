@@ -6,6 +6,7 @@ import mason.v1.DiskPoint
 import mason.v1.DiskReading
 import mason.v1.DiskVolume
 import mason.v1.View
+import mason.v1.WorktreeUsage
 import kotlin.test.*
 
 class DiskViewTest {
@@ -94,6 +95,25 @@ class DiskViewTest {
         assertNull(diskLatest(two, "zzz"))
         assertEquals("/Volumes/sp: data, worktrees", diskVolumeTip(a.mount, a.roles))
         assertEquals("/: projects, cache", diskVolumeTip(b.mount, b.roles))
+    }
+
+    @Test
+    fun theWorktreeTotalsAreListedAfterTheirSum() {
+        assertEquals(emptyList(), diskWorktreeLines(two))
+        val h = two.copy(
+            worktrees = listOf(
+                WorktreeUsage(kind = "task worktree", state = "canceled", count = 43, bytes = 188_000_000_000, free_next_bytes = 188_000_000_000),
+                WorktreeUsage(kind = "landing scratch", state = "idle", count = 12, bytes = 26_000_000_000),
+            ),
+        )
+        assertEquals(
+            listOf(
+                "Worktrees 214 GB · next sweep frees 188 GB",
+                "task worktree, canceled: 43, 188 GB",
+                "landing scratch, idle: 12, 26 GB",
+            ),
+            diskWorktreeLines(h),
+        )
     }
 
     @Test
