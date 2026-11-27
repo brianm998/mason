@@ -143,4 +143,19 @@ final class DiskViewTests: XCTestCase {
         XCTAssertNil(m.disk.history)
         XCTAssertEqual(m.disk.span.ms, 86_400_000)
     }
+
+    func testTheWorktreeTotalsAreListedAfterTheirSum() {
+        XCTAssertEqual(diskWorktreeLines(two), [])
+        var w = Mason_V1_WorktreeUsage()
+        w.kind = "task worktree"; w.state = "canceled"; w.count = 43; w.bytes = 188 * gb; w.freeNextBytes = 188 * gb
+        var l = Mason_V1_WorktreeUsage()
+        l.kind = "landing scratch"; l.state = "idle"; l.count = 12; l.bytes = 26 * gb
+        var h = two
+        h.worktrees = [w, l]
+        XCTAssertEqual(diskWorktreeLines(h), [
+            "Worktrees 214 GB · next sweep frees 188 GB",
+            "task worktree, canceled: 43, 188 GB",
+            "landing scratch, idle: 12, 26 GB",
+        ])
+    }
 }

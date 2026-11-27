@@ -284,6 +284,9 @@ fn turn(d: &Arc<Daemon>, id: u64, text: &str) -> Option<String> {
         Some(task) => d.world().ok().and_then(|w| {
             let t = w.tasks.get(&task)?;
             let p = d.project(t.project)?.clone();
+            if let Err(e) = crate::worktrees::restore(d, task) {
+                tracing::warn!(task = task.0, "the worktree could not be added again: {e}");
+            }
             let wt = p.worktree(&d.cfg, task.0);
             let before = if s.adapter_session.is_empty() {
                 crate::attention::session_for(d, task)

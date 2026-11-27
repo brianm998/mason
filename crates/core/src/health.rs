@@ -140,6 +140,9 @@ pub struct TaskFact {
     pub waiting: Option<(String, u64)>,
     /// The holders of the slot it waits for; `None` when the wait has none (a gate, a pause).
     pub holders: Option<HolderFact>,
+    /// Waits for a GitHub runner pool unit: no progress is expected, overloaded:slots and
+    /// stuck:wait judge it.
+    pub pool_wait: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -152,6 +155,8 @@ pub struct HolderFact {
     pub queue_depth: u32,
     /// The waiter's place in that queue (1 is next in line).
     pub position: u32,
+    /// A holder is a runner-pool check lease: its run length is one job, not the check.
+    pub check: bool,
 }
 
 /// Holder facts from the grant times (`since`) of a slot's holders; `None` without holders.
@@ -160,6 +165,7 @@ pub fn holder_fact(
     now: u64,
     queue_depth: u32,
     position: u32,
+    check: bool,
 ) -> Option<HolderFact> {
     let newest = held_since.iter().max()?;
     let oldest = held_since.iter().min()?;
@@ -168,6 +174,7 @@ pub fn holder_fact(
         run_ms: now.saturating_sub(*oldest),
         queue_depth,
         position,
+        check,
     })
 }
 
@@ -383,11 +390,14 @@ pub fn judge(x: &Facts, l: &Limits) -> Vec<Finding> {
         if let Some((what, ms)) = &t.waiting {
             if *ms > l.wait_ms {
                 // The work ahead of this task, and the whole queue (for the aged-wait note).
+                // A check holder's run is one job of a full-CI check that runs for hours, so it
+                // gives no bound: only a quiet queue or the aged-wait note applies.
                 let bound = t
                     .holders
                     .as_ref()
+                    .filter(|h| !h.check)
                     .map(|h| (h.position as u64).saturating_mul(h.run_ms).max(l.wait_ms));
-                let queue_bound = t.holders.as_ref().map(|h| {
+                let queue_bound = t.holders.as_ref().filter(|h| !h.check).map(|h| {
                     (h.queue_depth as u64)
                         .saturating_mul(h.run_ms)
                         .max(l.wait_ms)
@@ -398,13 +408,16 @@ pub fn judge(x: &Facts, l: &Limits) -> Vec<Finding> {
                     .is_none_or(|h| h.last_grant_ms >= l.wait_ms);
                 if quiet || bound.is_some_and(|b| *ms > b) {
                     let mut ev = vec![format!("#{} is {}; the wait is `{what}`", t.id, t.state)];
-                    if let (Some(h), Some(b)) = (&t.holders, bound) {
+                    if let Some(h) = &t.holders {
+                        let bound_text = match bound {
+                            Some(b) => format!("{} min", mins(b)),
+                            None => "none: a full-CI check holds the pool".to_string(),
+                        };
                         ev.push(format!(
-                            "newest holder grant {} min ago, longest holder run {} min, position {}, bound {} min",
+                            "newest holder grant {} min ago, longest holder run {} min, position {}, bound {bound_text}",
                             mins(h.last_grant_ms),
                             mins(h.run_ms),
                             h.position,
-                            mins(b)
                         ));
                     }
                     out.push(f(
@@ -488,7 +501,7 @@ pub fn judge(x: &Facts, l: &Limits) -> Vec<Finding> {
             // Without history for the step, only the floor applies.
             let hi = t.typical_hi_ms.unwrap_or(0);
             let limit = hi.saturating_mul(l.stuck_factor).max(l.stuck_min_ms);
-            if t.in_state_ms > limit && t.silent_ms >= l.stuck_min_ms {
+            if t.in_state_ms > limit && t.silent_ms >= l.stuck_min_ms && !t.pool_wait {
                 out.push(f(
                     format!("stuck:task:{}", t.id),
                     "stuck",
@@ -876,6 +889,7 @@ mod tests {
             silent_ms: MIN,
             waiting: None,
             holders: None,
+            pool_wait: false,
         };
         let x = |t: TaskFact, rounds: u32| Facts {
             tasks: vec![t],
@@ -921,6 +935,7 @@ mod tests {
                 silent_ms: 0,
                 waiting: None,
                 holders: None,
+                pool_wait: false,
             }],
             rounds: vec![RoundFact {
                 task: 5,
@@ -956,6 +971,7 @@ mod tests {
                 silent_ms: MIN,
                 waiting: None,
                 holders: None,
+                pool_wait: false,
             }],
             load_pct: Some(40),
             ..Default::default()
@@ -974,6 +990,7 @@ mod tests {
             silent_ms: 2 * H,
             waiting: Some(("exclusive".into(), 52 * MIN)),
             holders: None,
+            pool_wait: false,
         };
         let x = Facts {
             tasks: vec![t.clone()],
@@ -1001,6 +1018,7 @@ mod tests {
             silent_ms: 2 * H,
             waiting: None,
             holders: None,
+            pool_wait: false,
         };
         let x = Facts {
             tasks: vec![t.clone()],
@@ -1023,6 +1041,34 @@ mod tests {
         assert_eq!(keys(&judge(&x, &l())), ["stuck:wait:7"]);
     }
 
+    #[test]
+    fn a_step_queued_for_a_runner_pool_is_not_stuck_task() {
+        let mut t = TaskFact {
+            id: 11,
+            state: "landing".into(),
+            is_step: true,
+            in_state_ms: 36 * MIN,
+            typical_hi_ms: None,
+            silent_ms: 36 * MIN,
+            waiting: Some(("a GitHub runner: 19 of 16 in use".into(), 36 * MIN)),
+            holders: None,
+            pool_wait: true,
+        };
+        let x = |t: &TaskFact| Facts {
+            tasks: vec![t.clone()],
+            slot_waits: vec![(11, "a GitHub runner: 19 of 16 in use".into(), 36 * MIN)],
+            ..Default::default()
+        };
+        assert_eq!(keys(&judge(&x(&t), &l())), ["overloaded:slots"]);
+        // Not a pool wait: judged as before.
+        t.pool_wait = false;
+        assert!(keys(&judge(&x(&t), &l())).contains(&"stuck:task:11".to_string()));
+        // A pool wait past wait_ms is still stuck:wait.
+        t.pool_wait = true;
+        t.waiting = Some(("a GitHub runner".into(), 3 * H));
+        assert!(keys(&judge(&x(&t), &l())).contains(&"stuck:wait:11".to_string()));
+    }
+
     fn waiter(id: u64, wait: u64, h: Option<HolderFact>) -> TaskFact {
         TaskFact {
             id,
@@ -1033,6 +1079,7 @@ mod tests {
             silent_ms: MIN,
             waiting: Some(("compile".into(), wait)),
             holders: h,
+            pool_wait: false,
         }
     }
 
@@ -1044,6 +1091,7 @@ mod tests {
             100 * H,
             23,
             23,
+            false,
         );
         let x = Facts {
             tasks: (1..=23).map(|i| waiter(i, wait, h.clone())).collect(),
@@ -1070,6 +1118,7 @@ mod tests {
                 100 * H,
                 9,
                 position,
+                false,
             );
             let x = Facts {
                 tasks: vec![waiter(7, wait, h)],
@@ -1085,6 +1134,30 @@ mod tests {
         assert!(!at(9, 200 * MIN)
             .iter()
             .any(|k| k.starts_with("stuck:wait:")));
+    }
+
+    #[test]
+    fn check_holders_give_no_run_length_bound() {
+        let at = |grant: u64, wait: u64| {
+            let h = holder_fact(
+                &[100 * H - grant, 100 * H - 8 * MIN.max(grant)],
+                100 * H,
+                9,
+                2,
+                true,
+            );
+            let x = Facts {
+                tasks: vec![waiter(7, wait, h)],
+                ..Default::default()
+            };
+            judge(&x, &l())
+        };
+        // #1111: newest grant 1 min ago, longest run 8 min, position 2, waited 747 min.
+        let f = at(MIN, 747 * MIN);
+        assert_eq!(keys(&f), ["stuck:aged-wait:7"]);
+        assert_eq!(f[0].severity, Severity::Note);
+        // No grant for 3 h: the quiet branch still fires.
+        assert_eq!(keys(&at(3 * H, 4 * H)), ["stuck:wait:7"]);
     }
 
     #[test]
