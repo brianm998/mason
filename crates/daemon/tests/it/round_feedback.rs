@@ -94,8 +94,19 @@ fn changes(finding: &str) -> Value {
         "verdict": "changes", "summary": "not yet", "findings": [{"issue": finding, "severity": "blocking", "quote": "diff --git"}]}}}])
 }
 
-fn approve() -> Value {
-    json!({"call": {"tool": "submit_review", "args": {"verdict": "approve", "summary": "fine"}}})
+/// A later round's send-back: it answers the earlier finding and raises its own on the changed
+/// line of `marker.txt` (task 1135).
+fn changes_again(finding: &str, round: u64) -> Value {
+    json!([{"call": {"tool": "submit_review", "args": {
+        "verdict": "changes", "summary": "not yet",
+        "earlier": [{"round": round, "index": 0, "status": "fixed", "note": "done"}],
+        "findings": [{"issue": finding, "severity": "blocking", "quote": "diff --git", "file": "marker.txt", "line": 1}]}}}])
+}
+
+/// An approval that answers round `round`'s only blocking finding (task 1135).
+fn approve(round: u64) -> Value {
+    json!({"call": {"tool": "submit_review", "args": {"verdict": "approve", "summary": "fine",
+        "earlier": [{"round": round, "index": 0, "status": "fixed", "note": "done"}]}}})
 }
 
 fn diagnosis(rec: &Path, quote: &str) -> Value {
@@ -172,11 +183,11 @@ fn the_last_reviews_findings_reach_the_history_the_diagnosis_and_the_retried_dev
             "develop": [develop(r, "dev1", "one"), develop(r, "dev2", "two"), develop(r, "dev3", "three")],
             "review": [
                 changes("FINDING-ONE"),
-                changes("FINDING-TWO"),
+                changes_again("FINDING-TWO", 1),
                 [
                     record(r, "review3"),
                     {"sh": format!("while [ ! -f {} ]; do sleep 0.1; done", gate.display())},
-                    approve()
+                    approve(2)
                 ],
             ],
             "diagnose": [diagnosis(r, "not yet")],
@@ -263,7 +274,7 @@ fn a_retry_from_review_that_approves_removes_the_old_findings() {
         &def,
         json!({
             "develop": [develop(r, "dev1", "one")],
-            "review": [changes("FINDING-ONLY"), [approve()]],
+            "review": [changes("FINDING-ONLY"), [approve(1)]],
         }),
         "diagnose = false",
     );
