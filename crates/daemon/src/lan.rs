@@ -144,11 +144,47 @@ pub fn load_or_create_identity(data_dir: &FsPath) -> std::io::Result<(Vec<u8>, V
     Ok((c, k))
 }
 
+/// The `.local` name this machine answers to, without the suffix. On macOS that is the current
+/// `LocalHostName` (which moves when the system renames the Mac), not `gethostname`.
 pub fn hostname() -> String {
-    mason_platform::host::name()
-        .map(|h| h.trim_end_matches(".local").to_string())
+    #[cfg(target_os = "macos")]
+    let local = local_host_name();
+    #[cfg(not(target_os = "macos"))]
+    let local = None;
+    pick_hostname(local, mason_platform::host::name())
+}
+
+/// `LocalHostName` if there is one, else the `gethostname` answer, else `mason`; no `.local`.
+pub(crate) fn pick_hostname(local: Option<String>, gethost: Option<String>) -> String {
+    let clean = |h: String| h.trim().trim_end_matches(".local").to_string();
+    local
+        .map(clean)
         .filter(|h| !h.is_empty())
+        .or_else(|| gethost.map(clean).filter(|h| !h.is_empty()))
         .unwrap_or_else(|| "mason".into())
+}
+
+/// `scutil --get LocalHostName`, cached briefly: it is read on request paths.
+#[cfg(target_os = "macos")]
+fn local_host_name() -> Option<String> {
+    use std::time::Instant;
+    static CACHE: Mutex<Option<(Instant, Option<String>)>> = Mutex::new(None);
+    let mut g = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((t, v)) = g.as_ref() {
+        if t.elapsed() < Duration::from_secs(30) {
+            return v.clone();
+        }
+    }
+    let v = std::process::Command::new("/usr/sbin/scutil")
+        .args(["--get", "LocalHostName"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    *g = Some((Instant::now(), v.clone()));
+    v
 }
 
 fn tls_config(
@@ -178,22 +214,47 @@ pub fn txt_record(fingerprint: &str) -> BTreeMap<String, String> {
     ])
 }
 
-pub(crate) fn advertise(info: &Info) -> Result<mdns_sd::ServiceDaemon, String> {
-    let host = hostname();
-    let mdns = mdns_sd::ServiceDaemon::new().map_err(|e| e.to_string())?;
+/// A live advertisement. Kept for the life of the process (callers `std::mem::forget` it).
+pub(crate) enum Advertisement {
+    #[cfg(target_os = "macos")]
+    System(crate::dnssd::Registration),
+    #[cfg(not(target_os = "macos"))]
+    Own(#[allow(dead_code)] mdns_sd::ServiceDaemon),
+}
+
+/// The `ServiceInfo` for platforms that run their own responder. Its host name is ours
+/// (`mason-<first 8 of the fingerprint>.local.`), never the machine's, so no one is ever told
+/// this process answers for the machine's own `.local` name.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub(crate) fn service_info(info: &Info) -> Result<mdns_sd::ServiceInfo, String> {
+    let fp8: String = info.fingerprint.chars().take(8).collect();
     let props: std::collections::HashMap<String, String> = info.txt.clone().into_iter().collect();
-    let svc = mdns_sd::ServiceInfo::new(
+    mdns_sd::ServiceInfo::new(
         SERVICE_TYPE,
         &info.instance,
-        &format!("{host}.local."),
+        &format!("mason-{fp8}.local."),
         "",
         info.port,
         props,
     )
-    .map_err(|e| e.to_string())?
-    .enable_addr_auto();
-    mdns.register(svc).map_err(|e| e.to_string())?;
-    Ok(mdns)
+    .map(|s| s.enable_addr_auto())
+    .map_err(|e| e.to_string())
+}
+
+/// Advertise `_mason._tcp`. macOS registers through the system responder (null host, so the
+/// record names the Mac's real `.local` name); elsewhere `mdns-sd` runs with its own host name.
+pub(crate) fn advertise(info: &Info) -> Result<Advertisement, String> {
+    #[cfg(target_os = "macos")]
+    {
+        crate::dnssd::register(&info.instance, info.port, &info.txt).map(Advertisement::System)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let mdns = mdns_sd::ServiceDaemon::new().map_err(|e| e.to_string())?;
+        mdns.register(service_info(info)?)
+            .map_err(|e| e.to_string())?;
+        Ok(Advertisement::Own(mdns))
+    }
 }
 
 /// Accept TLS connections on one listener and serve the shared router on them.
@@ -251,7 +312,7 @@ pub async fn start(d: Arc<Daemon>) -> std::io::Result<u16> {
     }
     match advertise(&info) {
         // Kept for the life of the process.
-        Ok(m) => std::mem::forget(m),
+        Ok(m) => std::mem::forget(m), // an `Advertisement`
         Err(e) => tracing::warn!("mDNS is not advertising: {e}"),
     }
     let app = router(d.clone());
@@ -586,5 +647,41 @@ mod tests {
         assert_eq!(bearer(&h).as_deref(), Some("abc"));
         h.insert("authorization", "Basic abc".parse().unwrap());
         assert_eq!(bearer(&h), None);
+    }
+}
+
+#[cfg(test)]
+mod hostname_tests {
+    use super::*;
+
+    #[test]
+    fn the_local_host_name_wins_and_loses_its_suffix() {
+        let h = pick_hostname(Some("Marmot-827.local".into()), Some("Marmot-807".into()));
+        assert_eq!(h, "Marmot-827");
+        let h = pick_hostname(Some("Marmot-827".into()), None);
+        assert_eq!(h, "Marmot-827");
+    }
+
+    #[test]
+    fn it_falls_back_to_gethostname() {
+        assert_eq!(pick_hostname(None, Some("box.local".into())), "box");
+        assert_eq!(pick_hostname(Some(" ".into()), Some("box".into())), "box");
+        assert_eq!(pick_hostname(None, None), "mason");
+    }
+
+    #[test]
+    fn the_service_host_is_never_the_machines_name() {
+        let info = Info {
+            port: 7425,
+            fingerprint: "0123456789abcdef".into(),
+            instance: "MASON node on box".into(),
+            txt: txt_record("0123456789abcdef"),
+        };
+        let svc = service_info(&info).unwrap();
+        assert_eq!(svc.get_hostname(), "mason-01234567.local.");
+        assert_ne!(
+            svc.get_hostname().trim_end_matches('.'),
+            format!("{}.local", hostname())
+        );
     }
 }

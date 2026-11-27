@@ -972,7 +972,7 @@ pub async fn start(d: Arc<Daemon>) -> std::io::Result<u16> {
         match lan::advertise(&adv) {
             // Kept for the life of the process.
             Ok(m) => {
-                std::mem::forget(m);
+                std::mem::forget(m); // see `lan::Advertisement`
                 *d.node.mdns.lock().unwrap_or_else(|e| e.into_inner()) =
                     crate::node_doctor::Mdns::Advertising;
             }
