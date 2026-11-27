@@ -105,9 +105,11 @@ pub fn gather(d: &Arc<Daemon>, now: u64) -> Facts {
         let in_state = now.saturating_sub(t.state_entered_at.0);
         let last_start = ix.last_start_of(t.id);
         let wait = waits.get(&t.id).cloned();
-        let hf = holders.get(&t.id).and_then(|(since, depth, position)| {
-            health::holder_fact(since, now, *depth, *position)
-        });
+        let hf = holders
+            .get(&t.id)
+            .and_then(|(since, depth, position, check)| {
+                health::holder_fact(since, now, *depth, *position, *check)
+            });
         let since_run = now.saturating_sub(t.state_entered_at.0.max(last_start));
         match t.state {
             State::Queued => {

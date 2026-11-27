@@ -129,11 +129,13 @@ pub mod update;
 pub mod update_plan;
 pub mod usage;
 pub mod usersession;
+pub mod validate;
 pub mod version;
 pub mod views;
 pub mod waitview;
 pub mod watch;
 pub mod watchdog;
+pub mod worktrees;
 pub mod ws;
 
 pub use daemon::Daemon;

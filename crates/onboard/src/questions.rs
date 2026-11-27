@@ -11,7 +11,7 @@
 
 use mason_definition::filing::AGENT_NOTES;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub const STARTING_POINT: &str = "This is only a starting point. You can change anything, any time, in the monitor or in `.mason/`.";
 pub const SUITES_MARKER: &str = "# suites: mason init fills this in";
@@ -278,6 +278,70 @@ pub struct Flags {
     pub prove_only: bool,
     /// The test command for `adopt` (`--test` there; `init` does not take it).
     pub test: Option<String>,
+    /// How the GitHub sections of the overlay reach their token: `env:NAME`, `file:/path`, or
+    /// `none` to leave those sections out. Unset: `env:GITHUB_TOKEN`, with a warning if the
+    /// process that will read it does not have the variable.
+    pub token: Option<String>,
+    /// The machine the overlay is for. Not part of the wire format; unset, the process itself.
+    #[serde(skip)]
+    pub machine: Machine,
+}
+
+/// What the process that will run the agent and read the tokens can see. The daemon fills in
+/// the binaries other projects already use; tests replace PATH, HOME and the environment.
+#[derive(Clone, Debug, Default)]
+pub struct Machine {
+    /// `None`: this process's PATH.
+    pub path: Option<std::ffi::OsString>,
+    /// `None`: this process's HOME.
+    pub home: Option<PathBuf>,
+    /// Agent binaries of projects that are already registered.
+    pub known_bins: Vec<(Agent, PathBuf)>,
+    /// `None`: this process's environment.
+    pub env: Option<Vec<(String, String)>>,
+}
+
+/// An executable regular file.
+pub fn is_executable(p: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+impl Machine {
+    pub fn var_set(&self, name: &str) -> bool {
+        match &self.env {
+            Some(v) => v.iter().any(|(k, val)| k == name && !val.is_empty()),
+            None => std::env::var_os(name).is_some_and(|v| !v.is_empty()),
+        }
+    }
+
+    fn home(&self) -> Option<PathBuf> {
+        self.home
+            .clone()
+            .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+    }
+
+    /// The agent CLI as an absolute path: PATH, then a binary a registered project of that
+    /// provider uses, then `~/.local/bin`. Only an executable file counts.
+    pub fn find_agent(&self, agent: Agent) -> Option<PathBuf> {
+        let name = agent.name();
+        let path = self.path.clone().or_else(|| std::env::var_os("PATH"));
+        let on_path = path.into_iter().flat_map(|p| {
+            std::env::split_paths(&p)
+                .map(|d| d.join(name))
+                .collect::<Vec<_>>()
+        });
+        let known = self
+            .known_bins
+            .iter()
+            .filter(|(a, _)| *a == agent)
+            .map(|(_, p)| p.clone());
+        let local = self.home().map(|h| h.join(".local/bin").join(name));
+        on_path
+            .chain(known)
+            .chain(local)
+            .find(|c| c.is_absolute() && is_executable(c))
+    }
 }
 
 /// Takes the init flags out of `args`; anything left over is the caller's to refuse.
@@ -387,8 +451,12 @@ pub struct Answers {
     pub ci_workflow: bool,
     pub land: Land,
     pub prove: bool,
+    /// `env:NAME` or `file:/path` for the GitHub sections; `None` leaves them out.
+    pub token: Option<String>,
     /// Said while resolving, for the report.
     pub notes: Vec<String>,
+    /// Things that will stop the setup working as written; a front end shows them.
+    pub warnings: Vec<String>,
 }
 
 /// How a question gets its answer.
@@ -480,12 +548,51 @@ pub fn resolve(
         "codex" => Agent::Codex,
         o => return Err(format!("--agent is claude or codex, not {o:?}")),
     };
-    if f.agent_bin.is_none() && !d.agents.iter().any(|(a, _)| *a == agent) {
-        notes.push(format!(
-            "`{}` is not on PATH. Install it, or pass --agent-bin PATH; agent steps cannot run until then",
-            agent.name()
-        ));
-    }
+    let mut warnings: Vec<String> = vec![];
+    let check_bin = |b: &str| -> Result<String, String> {
+        let p = Path::new(b);
+        if !p.is_absolute() {
+            return Err(format!("--agent-bin {b:?} is not an absolute path"));
+        }
+        if !is_executable(p) {
+            return Err(format!("--agent-bin {b:?} is not an executable file"));
+        }
+        Ok(b.to_string())
+    };
+    let agent_bin = match f.agent_bin.as_deref() {
+        Some(b) => Some(check_bin(b)?),
+        None => match f.machine.find_agent(agent) {
+            Some(p) => Some(p.display().to_string()),
+            None => {
+                let given = if f.yes || !mode.interactive {
+                    String::new()
+                } else {
+                    answer(
+                        None,
+                        q(
+                            "agent-bin",
+                            &format!(
+                                "Where is the `{}` CLI? Give its absolute path",
+                                agent.name()
+                            ),
+                            &[],
+                            "",
+                            "--agent-bin",
+                        ),
+                    )?
+                };
+                if given.trim().is_empty() {
+                    warnings.push(format!(
+                        "no `{0}` executable was found on PATH, in another project's setting or in ~/.local/bin, so agent steps could not start; nothing is written until you pass --agent-bin PATH (the absolute path of `{0}`)",
+                        agent.name()
+                    ));
+                    None
+                } else {
+                    Some(check_bin(given.trim())?)
+                }
+            }
+        },
+    };
     let sessions: u32 = answer(
         f.sessions.as_ref(),
         q(
@@ -580,6 +687,51 @@ pub fn resolve(
         return Err("--landing direct-ci waits for GitHub Actions, and this repository has no GitHub remote; use --landing direct".into());
     }
 
+    // The token the GitHub sections read, checked where it will be read.
+    let needs_token = d.github().is_some()
+        && (landing.needs_host() || landing == Landing::DirectCi || tracker == Tracker::Github);
+    let mut token = Some("env:GITHUB_TOKEN".to_string());
+    if needs_token {
+        let given = match f.token.clone() {
+            Some(t) => t,
+            None if f.machine.var_set("GITHUB_TOKEN") || f.yes || !mode.interactive => {
+                String::new()
+            }
+            None => answer(
+                None,
+                q(
+                    "token",
+                    "GITHUB_TOKEN is not set where masond runs. Give a token reference (file:/path or env:NAME), or `none` to leave the GitHub sections out",
+                    &[],
+                    "",
+                    "--token",
+                ),
+            )?,
+        };
+        match given.trim() {
+            "" => {}
+            "none" => token = None,
+            g if g.starts_with("env:") || g.starts_with("file:") => token = Some(g.to_string()),
+            o => {
+                return Err(format!(
+                    "--token is env:NAME, file:/path or none, not {o:?}"
+                ))
+            }
+        }
+        match token.as_deref() {
+            Some(t) if t.starts_with("env:") && !f.machine.var_set(&t[4..]) => {
+                warnings.push(format!(
+                    "the environment variable {} is not set where masond runs, so the GitHub sections cannot authenticate; pass --token file:/path or env:NAME, or --token none to leave them out",
+                    &t[4..]
+                ));
+            }
+            Some(t) if t.starts_with("file:") && !Path::new(&t[5..]).is_file() => {
+                warnings.push(format!("the token file {} does not exist", &t[5..]));
+            }
+            _ => {}
+        }
+    }
+
     // 7. Alerts.
     let alerts_in = answer(f.alerts.as_ref(), q("alerts", "Which alerts besides the monitor? (sound, speech, email, push; or none; empty keeps the defaults)", &[], "", "--alerts"))?;
     let alerts = match alerts_in.trim() {
@@ -662,7 +814,7 @@ pub fn resolve(
         id,
         tracker,
         agent,
-        agent_bin: f.agent_bin.clone(),
+        agent_bin,
         sessions,
         workflow,
         accept_suites,
@@ -672,7 +824,9 @@ pub fn resolve(
         ci_workflow,
         land,
         prove,
+        token,
         notes,
+        warnings,
     })
 }
 
@@ -785,17 +939,17 @@ pub fn render_overlay(a: &Answers, d: &Detected, test_cmd: &str) -> String {
         }
     }
     let section = |name: &str, kind: &str, repo: &str, token: &str| {
-        format!("\n[{name}]\nkind = \"{kind}\"\nrepo = {repo:?}\ntoken = \"env:{token}\"\n")
+        format!("\n[{name}]\nkind = \"{kind}\"\nrepo = {repo:?}\ntoken = {token:?}\n")
     };
-    if let Some(r) = d.github() {
+    if let (Some(r), Some(tok)) = (d.github(), a.token.as_deref()) {
         if a.landing.needs_host() {
-            s.push_str(&section("host", "github", &r.repo, "GITHUB_TOKEN"));
+            s.push_str(&section("host", "github", &r.repo, tok));
         }
         if a.landing == Landing::DirectCi {
-            s.push_str(&section("ci", "github-actions", &r.repo, "GITHUB_TOKEN"));
+            s.push_str(&section("ci", "github-actions", &r.repo, tok));
         }
         if a.tracker == Tracker::Github {
-            s.push_str(&section("tracker", "github", &r.repo, "GITHUB_TOKEN"));
+            s.push_str(&section("tracker", "github", &r.repo, tok));
         }
     }
     s
@@ -1023,7 +1177,15 @@ mod tests {
 
     #[test]
     fn a_terminal_is_asked_in_part_21s_order_and_only_what_flags_leave() {
-        let (r, asked) = run(&Flags::default(), &detected(), true);
+        // An agent the machine can see, so `agent-bin` is not asked.
+        let f = Flags {
+            machine: Machine {
+                known_bins: vec![(Agent::Claude, std::env::current_exe().unwrap())],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (r, asked) = run(&f, &detected(), true);
         r.unwrap();
         assert_eq!(
             asked,
@@ -1037,6 +1199,10 @@ mod tests {
             workflow: Some("solo".into()),
             landing: Some("direct".into()),
             alerts: Some("none".into()),
+            machine: Machine {
+                known_bins: vec![(Agent::Claude, std::env::current_exe().unwrap())],
+                ..Default::default()
+            },
             ..Default::default()
         };
         let (r, asked) = run(&f, &detected(), true);
@@ -1354,7 +1520,9 @@ mod tests {
             ci_workflow: false,
             land: Land::No,
             prove: true,
+            token: Some("env:GITHUB_TOKEN".into()),
             notes: vec![],
+            warnings: vec![],
         };
         let direct = render_overlay(&a(Landing::Direct, Tracker::Local), &d, "true");
         assert!(
