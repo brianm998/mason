@@ -85,6 +85,7 @@ pub mod policyd;
 pub mod pool;
 pub mod progress;
 pub mod prompts;
+pub mod prompts_eval;
 pub mod proposals;
 pub mod protect;
 pub mod providers;

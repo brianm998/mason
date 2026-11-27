@@ -50,6 +50,7 @@ mod hosts;
 mod init;
 mod node;
 mod progress;
+mod prompts;
 mod remote;
 mod remove;
 mod resources;
@@ -134,6 +135,9 @@ mason: command-line client for the MASON pipeline
   mason debt list | run <id>          what was skipped and not yet proven; run one on the base branch
   mason quarantine list | add <suite> <test> --owner O --days N [--reason R] | remove <suite> <test>
   mason test parse <parser> <file> [--min N]   read a results file the way a suite would, and judge it
+  mason prompts eval [--project P] [--step review|diagnose|explore] [--against REV] [--candidate REV]
+                                      replay past read-only steps under the prompts of two revisions and grade both
+  mason prompts eval add <task> --step S --expect TEXT [--head REV]   write a case from a finished task
   mason logs <id> [--follow]
   mason status [--json] [--watch]     with --watch, follow every running step's progress
   mason hosts [--json]                this Mac, each node and GitHub, with what runs on each now
@@ -664,6 +668,13 @@ fn main() {
                 remote::COMMANDS
             )),
         }
+    }
+    if cmd == "prompts" {
+        exit(prompts::run(
+            std::mem::take(&mut a.rest),
+            &config_dir,
+            &data_dir,
+        ));
     }
     if cmd == "remove" {
         exit(remove::run(std::mem::take(&mut a.rest), &config_dir));
