@@ -4130,6 +4130,10 @@ fn agent_job(c: &Ctx) {
         }
     }
     let decisions = std::fs::read_to_string(dir.join("decisions.txt")).ok();
+    // What earlier rounds tried and gave up, for the next developer and the reviewer (#1128).
+    let tried = matches!(kind, StepKind::Develop | StepKind::Review)
+        .then(|| crate::prompts::tried_block(&crate::tried::rounds(&dir)))
+        .flatten();
     let pack_name = match kind {
         StepKind::Develop => "develop",
         StepKind::Review => "review",
@@ -4177,6 +4181,7 @@ fn agent_job(c: &Ctx) {
                 project: &c.project,
                 plan: plan.as_ref(),
                 feedback: feedback.as_deref(),
+                tried: tried.as_deref(),
             },
         )
     } else {
@@ -4188,16 +4193,25 @@ fn agent_job(c: &Ctx) {
                 c.trust,
                 &c.project,
                 plan.as_ref(),
-                feedback.as_deref(),
+                crate::prompts::Earlier {
+                    feedback: feedback.as_deref(),
+                    tried: tried.as_deref(),
+                },
             ),
-            StepKind::Review => crate::prompts::review_prompt(
-                c.task.0,
-                &c.title,
-                &c.body,
-                c.trust,
-                &c.project,
-                plan.as_ref(),
-            ),
+            StepKind::Review => {
+                let prompt = crate::prompts::review_prompt(
+                    c.task.0,
+                    &c.title,
+                    &c.body,
+                    c.trust,
+                    &c.project,
+                    plan.as_ref(),
+                );
+                match &tried {
+                    Some(block) => format!("{prompt}\n\n{block}"),
+                    None => prompt,
+                }
+            }
             StepKind::Explore => {
                 let p = crate::prompts::explore_prompt(
                     c.task.0, &c.title, &c.body, c.trust, &c.project,
@@ -4422,6 +4436,13 @@ fn agent_job(c: &Ctx) {
                 let _ = std::fs::rename(&tmp, &path);
             }
             d.crash.point("accepted_persisted");
+        }));
+    }
+    {
+        // Kept as the call is accepted, so a round that then fails leaves its notes.
+        let (dir, run, step) = (dir.clone(), c.run.0, c.step.name.clone());
+        contract.set_on_tried(Box::new(move |list| {
+            crate::tried::keep(&dir, run, &step, list)
         }));
     }
     if let Err(e) = contract.serve(&c.d.cfg.sockets_dir().join(format!("{key}.sock"))) {

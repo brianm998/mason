@@ -169,6 +169,23 @@ pub fn preamble(step: StepKind) -> String {
     )
 }
 
+/// The most `tried` entries one call may carry, and the most characters in each of their texts.
+pub const TRIED_MAX: usize = 10;
+pub const TRIED_TEXT_MAX: usize = 300;
+
+/// What `submit_change` says about `tried`; the other tools that take it say the same.
+const TRIED_DESCRIPTION: &str =
+    "Approaches you tried and gave up, and why. The next round and the reviewer read this.";
+
+/// The schema of the optional `tried` field.
+fn tried_schema(description: &str) -> Value {
+    json!({"type": "array", "maxItems": TRIED_MAX, "items": {"type": "object", "properties": {
+        "approach": {"type": "string", "maxLength": TRIED_TEXT_MAX, "description": "What you tried"},
+        "why_dropped": {"type": "string", "maxLength": TRIED_TEXT_MAX, "description": "Why you gave it up"}},
+        "required": ["approach", "why_dropped"]},
+        "description": description})
+}
+
 /// Name, description and JSON Schema for a tool, as shown to the agent.
 pub fn tool_spec(tool: &str) -> Option<(String, Value)> {
     let s = |d: &str, p: Value, req: &[&str]| {
@@ -198,7 +215,8 @@ pub fn tool_spec(tool: &str) -> Option<(String, Value)> {
                 "removes": {"type": "array", "items": {"type": "object", "properties": {
                     "file": {"type": "string"}, "line": {"type": "string"}, "reason": {"type": "string"}},
                     "required": ["file", "line", "reason"]},
-                    "description": "Lines the base branch landed that your change removes on purpose, each with a reason. Landing sends a task back when a merge with the base dropped a landed line that is not listed here."}
+                    "description": "Lines the base branch landed that your change removes on purpose, each with a reason. Landing sends a task back when a merge with the base dropped a landed line that is not listed here."},
+                "tried": tried_schema(TRIED_DESCRIPTION)
             }),
             &["summary", "head"],
         ),
@@ -210,7 +228,8 @@ pub fn tool_spec(tool: &str) -> Option<(String, Value)> {
             json!({
                 "kind": {"type": "string", "enum": ["already_done", "duplicate", "not_a_problem"]},
                 "duplicate_of": {"type": "integer", "description": "duplicate: the other task's number"},
-                "evidence": {"type": "string", "description": "What shows it: a commit, a file and line, a test, the other task. Up to 2000 characters"}
+                "evidence": {"type": "string", "description": "What shows it: a commit, a file and line, a test, the other task. Up to 2000 characters"},
+                "tried": tried_schema(TRIED_DESCRIPTION)
             }),
             &["kind", "evidence"],
         ),
@@ -346,7 +365,12 @@ pub fn tool_spec(tool: &str) -> Option<(String, Value)> {
                 "message": {"type": "string", "description": "Up to 300 characters"},
                 "done": {"type": "integer"},
                 "total": {"type": "integer"},
-                "unit": {"type": "string", "description": "What is counted, up to 20 characters (default \"steps\"), such as \"files\" or \"criteria\""}
+                "unit": {"type": "string", "description": "What is counted, up to 20 characters (default \"steps\"), such as \"files\" or \"criteria\""},
+                "tried": tried_schema(
+                    "Approaches you tried and gave up so far, and why. Kept even if this step ends \
+                     without a submission, for the next round. A later list (here or in your \
+                     submission) replaces this one."
+                )
             }),
             &["message"],
         ),
@@ -681,6 +705,33 @@ fn health_problems(a: &Value, p: &mut Vec<String>) {
     }
 }
 
+/// The optional `tried` list: at most [`TRIED_MAX`] objects, each with an `approach` and a
+/// `why_dropped` of at most [`TRIED_TEXT_MAX`] characters.
+fn tried(a: &Value, out: &mut Vec<String>) {
+    match a.get("tried") {
+        None | Some(Value::Null) => {}
+        Some(Value::Array(v)) if v.len() > TRIED_MAX => out.push(format!(
+            "tried: {} entries, the limit is {TRIED_MAX}",
+            v.len()
+        )),
+        Some(Value::Array(v)) => {
+            for (i, e) in v.iter().enumerate() {
+                if !e.is_object() {
+                    out.push(format!(
+                        "tried[{i}]: must be an object with `approach` and `why_dropped`"
+                    ));
+                    continue;
+                }
+                let mut q = vec![];
+                text(e, "approach", TRIED_TEXT_MAX, &mut q);
+                text(e, "why_dropped", TRIED_TEXT_MAX, &mut q);
+                out.extend(q.into_iter().map(|m| format!("tried[{i}].{m}")));
+            }
+        }
+        Some(_) => out.push("tried: must be a list of {approach, why_dropped} objects".into()),
+    }
+}
+
 /// Every problem with `args` for `tool`, or `Ok(())`. Pure.
 pub fn validate(tool: &str, a: &Value) -> Result<(), Vec<String>> {
     let mut p = vec![];
@@ -710,9 +761,11 @@ pub fn validate(tool: &str, a: &Value) -> Result<(), Vec<String>> {
                 }
             }
             removes(a, &mut p);
+            tried(a, &mut p);
         }
         "submit_close" => {
             text(a, "evidence", 2000, &mut p);
+            tried(a, &mut p);
             match a.get("kind").and_then(Value::as_str) {
                 Some("already_done" | "not_a_problem") => {}
                 Some("duplicate") => {
@@ -788,6 +841,7 @@ pub fn validate(tool: &str, a: &Value) -> Result<(), Vec<String>> {
         }
         "report_progress" => {
             text(a, "message", 300, &mut p);
+            tried(a, &mut p);
             if let Some(u) = a.get("unit") {
                 match u.as_str() {
                     Some(u) if !u.trim().is_empty() && u.chars().count() <= 20 => {}
@@ -965,6 +1019,10 @@ pub type Validator = Box<dyn Fn(&str, &Value) -> Result<(), Vec<String>> + Send 
 /// was accepted, so a controller can make it durable first.
 pub type OnAccept = Box<dyn Fn(&str, &Value) + Send + Sync>;
 
+/// Called with the `tried` list of an accepted call that carries a non-empty one, before the
+/// agent is told it was accepted.
+pub type OnTried = Box<dyn Fn(&Value) + Send + Sync>;
+
 /// Rewrites a card that does not fit, given the card and what is wrong with
 /// it. Returns a replacement card (which must itself fit) or `None`.
 pub type AskRewriter = Box<dyn Fn(&Value, &[String]) -> Option<Value> + Send + Sync>;
@@ -973,6 +1031,7 @@ struct Inner {
     ask_rewriter: Mutex<Option<AskRewriter>>,
     on_accept: Mutex<Option<OnAccept>>,
     on_progress: Mutex<Option<OnProgress>>,
+    on_tried: Mutex<Option<OnTried>>,
     allowed: Mutex<Option<Vec<String>>>,
     validator: Option<Validator>,
     step: StepKind,
@@ -1013,6 +1072,7 @@ impl ContractHandle {
             ask_rewriter: Mutex::new(None),
             on_accept: Mutex::new(None),
             on_progress: Mutex::new(None),
+            on_tried: Mutex::new(None),
             allowed: Mutex::new(None),
             validator,
             step,
@@ -1053,6 +1113,31 @@ impl ContractHandle {
     /// contract's lock is released, so `f` may take its own locks).
     pub fn set_on_progress(&self, f: OnProgress) {
         *self.0.on_progress.lock().unwrap_or_else(|e| e.into_inner()) = Some(f);
+    }
+
+    /// Run `f` for the `tried` list of each accepted call that has one (`submit_change`,
+    /// `submit_close`, `report_progress`).
+    pub fn set_on_tried(&self, f: OnTried) {
+        *self.0.on_tried.lock().unwrap_or_else(|e| e.into_inner()) = Some(f);
+    }
+
+    /// Hand an accepted call's non-empty `tried` list to the callback.
+    fn keep_tried(&self, args: &Value) {
+        let Some(list) = args
+            .get("tried")
+            .filter(|t| t.as_array().is_some_and(|a| !a.is_empty()))
+        else {
+            return;
+        };
+        if let Some(f) = self
+            .0
+            .on_tried
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            f(list);
+        }
     }
 
     /// Re-establish a submission accepted before the controller restarted.
@@ -1198,6 +1283,7 @@ impl ContractHandle {
                     return reject(&mut st, problems);
                 }
             }
+            self.keep_tried(args);
             if let Some(f) = self
                 .0
                 .on_accept
@@ -1254,6 +1340,7 @@ impl ContractHandle {
                 }
             }
             "report_progress" => {
+                self.keep_tried(args);
                 let message = args["message"].as_str().unwrap_or_default().to_string();
                 let report = ProgressReport {
                     message: message.clone(),
@@ -1734,6 +1821,91 @@ mod tests {
         assert!(why.contains("removes[0].reason"), "{why}");
         let bad = json!({"summary": "s", "head": "0123abc", "removes": "all"});
         assert!(validate("submit_change", &bad).is_err());
+    }
+
+    #[test]
+    fn tried_is_optional_capped_and_a_bad_shape_is_named() {
+        let entry = |n: usize| json!({"approach": "a".repeat(n), "why_dropped": "w".repeat(n)});
+        for (tool, base) in [
+            ("submit_change", json!({"summary": "s", "head": "0123abc"})),
+            (
+                "submit_close",
+                json!({"kind": "already_done", "evidence": "abc123"}),
+            ),
+            ("report_progress", json!({"message": "m"})),
+        ] {
+            let with = |tried: Value| {
+                let mut a = base.clone();
+                a["tried"] = tried;
+                validate(tool, &a).map_err(|p| p.join("\n"))
+            };
+            assert!(validate(tool, &base).is_ok(), "{tool}: optional");
+            assert!(with(Value::Null).is_ok() && with(json!([])).is_ok());
+            assert!(with(json!(vec![entry(TRIED_TEXT_MAX); TRIED_MAX])).is_ok());
+            let why = with(json!(vec![entry(1); TRIED_MAX + 1])).unwrap_err();
+            assert!(why.contains("tried: 11 entries, the limit is 10"), "{why}");
+            let why = with(json!([entry(TRIED_TEXT_MAX + 1)])).unwrap_err();
+            assert!(
+                why.contains("tried[0].approach: 301 characters, the limit is 300")
+                    && why.contains("tried[0].why_dropped"),
+                "{why}"
+            );
+            let why = with(json!([{"approach": "x"}])).unwrap_err();
+            assert!(why.contains("tried[0].why_dropped: required"), "{why}");
+            let why = with(json!(["I tried a lock"])).unwrap_err();
+            assert!(why.contains("tried[0]: must be an object"), "{why}");
+            let why = with(json!("a lock")).unwrap_err();
+            assert!(why.contains("tried: must be a list"), "{why}");
+            let (_, spec) = tool_spec(tool).unwrap();
+            assert_eq!(spec["properties"]["tried"]["maxItems"], TRIED_MAX);
+            assert!(!spec["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("tried")));
+        }
+        let (_, spec) = tool_spec("submit_change").unwrap();
+        assert_eq!(
+            spec["properties"]["tried"]["description"],
+            "Approaches you tried and gave up, and why. The next round and the reviewer read this."
+        );
+    }
+
+    #[test]
+    fn tried_reaches_the_hook_only_from_accepted_calls() {
+        let c = ContractHandle::new(StepKind::Develop, Box::new(NoChecks));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let s2 = seen.clone();
+        c.set_on_tried(Box::new(move |t| {
+            s2.lock()
+                .unwrap()
+                .push(t[0]["approach"].as_str().unwrap_or("").to_string())
+        }));
+        let tried = |a: &str| json!([{"approach": a, "why_dropped": "no"}]);
+        // Refused by the schema: nothing is kept.
+        assert!(
+            !c.call(
+                "submit_change",
+                &json!({"summary": "s", "head": "nope", "tried": tried("refused")})
+            )
+            .ok
+        );
+        // A round that never submits still leaves what its progress reports said.
+        assert!(
+            c.call(
+                "report_progress",
+                &json!({"message": "m", "tried": tried("progress")})
+            )
+            .ok
+        );
+        assert!(c.call("report_progress", &json!({"message": "m"})).ok);
+        assert!(
+            c.call(
+                "submit_change",
+                &json!({"summary": "s", "head": "0123abc", "tried": tried("submitted")})
+            )
+            .ok
+        );
+        assert_eq!(*seen.lock().unwrap(), ["progress", "submitted"]);
     }
 
     #[test]
