@@ -3362,6 +3362,10 @@ public nonisolated struct Mason_V1_StepLine: Sendable {
   /// Every session this run started: the first, resumes, and each ladder retry.
   public var launches: [Mason_V1_ModelUse] = []
 
+  /// How full the run's agent sessions got, such as `context peak 62%, final 40%,
+  /// 1 compaction`; empty when nothing reported it.
+  public var context: String = String()
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -10273,7 +10277,7 @@ nonisolated extension Mason_V1_Compilation: SwiftProtobuf.Message, SwiftProtobuf
 
 nonisolated extension Mason_V1_StepLine: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".StepLine"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}run\0\u{1}name\0\u{1}category\0\u{1}attempt\0\u{1}outcome\0\u{3}started_ms\0\u{1}launches\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}run\0\u{1}name\0\u{1}category\0\u{1}attempt\0\u{1}outcome\0\u{3}started_ms\0\u{1}launches\0\u{1}context\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -10288,6 +10292,7 @@ nonisolated extension Mason_V1_StepLine: SwiftProtobuf.Message, SwiftProtobuf._M
       case 5: try { try decoder.decodeSingularStringField(value: &self.outcome) }()
       case 6: try { try decoder.decodeSingularUInt64Field(value: &self.startedMs) }()
       case 7: try { try decoder.decodeRepeatedMessageField(value: &self.launches) }()
+      case 8: try { try decoder.decodeSingularStringField(value: &self.context) }()
       default: break
       }
     }
@@ -10315,6 +10320,9 @@ nonisolated extension Mason_V1_StepLine: SwiftProtobuf.Message, SwiftProtobuf._M
     if !self.launches.isEmpty {
       try visitor.visitRepeatedMessageField(value: self.launches, fieldNumber: 7)
     }
+    if !self.context.isEmpty {
+      try visitor.visitSingularStringField(value: self.context, fieldNumber: 8)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -10326,6 +10334,7 @@ nonisolated extension Mason_V1_StepLine: SwiftProtobuf.Message, SwiftProtobuf._M
     if lhs.outcome != rhs.outcome {return false}
     if lhs.startedMs != rhs.startedMs {return false}
     if lhs.launches != rhs.launches {return false}
+    if lhs.context != rhs.context {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

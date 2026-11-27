@@ -114,6 +114,8 @@ mason: command-line client for the MASON pipeline
   mason notify test CHANNEL           send a test through sound, speech, push, email or webhook
   mason metrics [--days N]            interventions per landed task
   mason health                        the detectors' findings, verdicts on fixes, recurring jobs, triage review queue
+  mason report context [--days N] [--project P]
+                                      send-back rate per step by how full the agent's context got
   mason report [--days N] [--project P]   throughput, send-backs, waits, interventions, host losses, flakes, debts
   mason digest [--days N] [--project P]   landed, interventions, time by state, skips, forced landings (recorded data only)
   mason schedule list | run <name> [--force]    recurring jobs (introspect, analyst:<project>, <project>/<schedule>); run one now (a full test follows the record unless --force)
@@ -2092,6 +2094,14 @@ fn main() {
         "report" => {
             let days = a.opt("--days").unwrap_or_else(|| "7".into());
             let project = a.opt("--project");
+            let context = match a.pos().as_deref() {
+                None => false,
+                Some("context") => true,
+                Some(other) => {
+                    eprintln!("mason report: unknown section `{other}` (only `context`)");
+                    std::process::exit(2);
+                }
+            };
             finish(&a);
             let mut path = format!("/report?days={days}");
             if let Some(p) = project {
@@ -2101,7 +2111,11 @@ fn main() {
             if json_out {
                 return println!("{r:#}");
             }
-            print_report(&r);
+            if context {
+                print_context_report(&r["context"]);
+            } else {
+                print_report(&r);
+            }
         }
         "schedule" => {
             let sub = a.pos().unwrap_or_default();
@@ -3583,12 +3597,16 @@ fn main() {
                     println!("\nsteps:");
                     for s in t["steps"].as_array().into_iter().flatten() {
                         println!(
-                            "  run {:<3} {:<11} {:<12} attempt {}  {}",
+                            "  run {:<3} {:<11} {:<12} attempt {}  {}{}",
                             s["run"],
                             s["step"].as_str().unwrap_or("?"),
                             s["name"].as_str().unwrap_or(""),
                             s["attempt"],
-                            s["outcome"].as_str().unwrap_or("running")
+                            s["outcome"].as_str().unwrap_or("running"),
+                            s["context"]["line"]
+                                .as_str()
+                                .map(|l| format!("  {l}"))
+                                .unwrap_or_default()
                         );
                     }
                 }
@@ -4200,6 +4218,27 @@ fn print_health(r: &serde_json::Value) {
         q,
         r["triage"]["reviewed"]
     );
+}
+
+/// `mason report context`: the daemon's `context` section, one line per step and bucket.
+fn print_context_report(r: &serde_json::Value) {
+    let rows = r.as_array().cloned().unwrap_or_default();
+    if rows.is_empty() {
+        println!("no agent run in the window reported its context");
+        return;
+    }
+    println!("send-backs by peak context fill:");
+    println!("  step         peak fill   runs  sent back   rate");
+    for x in &rows {
+        println!(
+            "  {:<12} {:<9} {:>6} {:>10}  {:>4}%",
+            x["step"].as_str().unwrap_or("?"),
+            x["bucket"].as_str().unwrap_or("?"),
+            x["runs"],
+            x["sent_back"],
+            x["rate_percent"]
+        );
+    }
 }
 
 /// `mason report` as text: one block per section, from the daemon's `/report`.

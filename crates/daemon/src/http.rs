@@ -226,6 +226,7 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
         v["question"] = crate::attention::card_of(d, t).map_or(Value::Null, |(c, _)| json!(c.ask));
         v["card"] = crate::attention::card_of(d, t)
             .map_or(Value::Null, |(c, h)| crate::attention::card_json(&c, &h));
+        let context = crate::context::of_task(d, t.id.0);
         v["steps"] = json!(w
             .step_runs
             .values()
@@ -234,6 +235,7 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
                 "run": r.id.0, "step": state_name(r.step), "name": r.name, "attempt": r.attempt,
                 "started_at": r.started_at.0,
                 "outcome": r.outcome.map(|o| format!("{o:?}").to_lowercase()),
+                "context": context.get(&r.id.0).map(crate::context::RunFill::json),
                 "launches": crate::launchview::history(d, r.id.0).iter().map(crate::launchview::json_of).collect::<Vec<_>>(),
                 "skills": crate::skills::invoked(&d.task_dir(t.id), r.id.0),
             }))
