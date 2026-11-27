@@ -13,9 +13,8 @@ mkdir -p "$root/d/h/t0r1-1" "$root/d/h/t0r1-2"
 echo "host_pid=999999" > "$root/d/h/t0r1-1/host.kv"
 echo "host_pid=$$" > "$root/d/h/t0r1-2/host.kv"
 # Shim: the first read of a host.kv finds it gone, as the CI failure did.
-gone=0
 sed() {
-  if [ "$gone" = 0 ]; then gone=1; rm -f "${@: -1}"; fi
+  if [ ! -e "$root/gone" ]; then : > "$root/gone"; rm -f "${@: -1}"; fi
   command sed "$@"
 }
 eval "$loop"
