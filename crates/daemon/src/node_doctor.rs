@@ -385,17 +385,142 @@ fn run_as_a_job(
 
 /// How `exe` is signed, read with `codesign` (macOS), within the deadline.
 pub fn signature_of(exe: &Path) -> Signature {
+    signature_of_within(exe, DEADLINE)
+}
+
+/// [`signature_of`] with each `codesign` call given `limit`.
+pub fn signature_of_within(exe: &Path, limit: Duration) -> Signature {
     if !cfg!(target_os = "macos") {
         return Signature::Unchecked;
     }
     let f = exe.to_string_lossy().into_owned();
     // `codesign` exits non-zero for a file that is not signed, and says so in words: read both.
-    let req = run_status("/usr/bin/codesign", &["-dr", "-", &f], DEADLINE);
-    let det = run_status("/usr/bin/codesign", &["-dvv", &f], DEADLINE);
+    let req = run_status("/usr/bin/codesign", &["-dr", "-", &f], limit);
+    let det = run_status("/usr/bin/codesign", &["-dvv", &f], limit);
     match (req, det) {
         (Ok((_, r)), Ok((_, d))) => parse_signature(&r, &d),
         (Err(e), _) | (_, Err(e)) => Signature::Unknown(e),
     }
+}
+
+/// Which file a path was when it was read: its inode, size and modification time. A signature
+/// cannot change while all three are the same.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileId(u64, u64, std::time::SystemTime);
+
+impl FileId {
+    pub fn of(path: &Path) -> Option<FileId> {
+        let m = std::fs::metadata(path).ok()?;
+        #[cfg(unix)]
+        let ino = {
+            use std::os::unix::fs::MetadataExt;
+            m.ino()
+        };
+        // The inode is not read off Unix (std's windows file_index is unstable); size and
+        // mtime still identify a replaced binary.
+        #[cfg(not(unix))]
+        let ino = 0u64;
+        Some(FileId(ino, m.len(), m.modified().ok()?))
+    }
+}
+
+/// The signatures read so far, by path, with the file each was read from.
+pub type SignatureCache = std::sync::Mutex<std::collections::HashMap<PathBuf, (FileId, Signature)>>;
+
+/// [`signature_of`] for the node's own executable, asked every ten minutes while `syspolicyd` can
+/// keep `codesign` waiting past the deadline. A signature that was read is kept for that file (its
+/// inode, size and mtime) and `codesign` is not asked again until the file is a different one;
+/// one that could not be read (`Unknown`) is not kept, so the next check asks again. A file that
+/// changed is read afresh, so a bad new signature is still refused.
+///
+/// A first read can find `syspolicyd` so busy that `codesign` never finishes within the
+/// deadline, and then nothing would ever be kept. So the read runs on its own thread with a
+/// longer limit ([`SLOW_SIGNATURE`]); the check waits the usual deadline for it, and if it is not
+/// back by then the check says "could not read" while the read carries on and fills the cache
+/// for the next check. One read per binary is in flight at a time.
+pub fn signature_cached(exe: &Path, cache: &'static SignatureCache) -> Signature {
+    static IN_FLIGHT: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
+        std::sync::LazyLock::new(Default::default);
+    if let Some(sig) = cached(exe, cache) {
+        return sig;
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let started = IN_FLIGHT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(exe.to_path_buf());
+    if started {
+        let path = exe.to_path_buf();
+        let spawned = std::thread::Builder::new()
+            .name("node-signature".into())
+            .spawn(move || {
+                let sig = signature_cached_with(&path, cache, &|p| {
+                    signature_of_within(p, SLOW_SIGNATURE)
+                });
+                IN_FLIGHT
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&path);
+                let _ = tx.send(sig);
+            });
+        if spawned.is_err() {
+            IN_FLIGHT
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(exe);
+            return signature_cached_with(exe, cache, &signature_of);
+        }
+        match rx.recv_timeout(2 * DEADLINE) {
+            Ok(sig) => sig,
+            Err(_) => Signature::Unknown(format!(
+                "did not finish in {} s (still reading in the background)",
+                2 * DEADLINE.as_secs()
+            )),
+        }
+    } else {
+        Signature::Unknown("an earlier read is still waiting on codesign".into())
+    }
+}
+
+/// How long one background `codesign` call may take in [`signature_cached`].
+pub const SLOW_SIGNATURE: Duration = Duration::from_secs(300);
+
+/// The kept signature for `exe`, when the file is still the one it was read from.
+fn cached(exe: &Path, cache: &SignatureCache) -> Option<Signature> {
+    let id = FileId::of(exe)?;
+    cache
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(exe)
+        .filter(|(was, _)| *was == id)
+        .map(|(_, sig)| sig.clone())
+}
+
+/// [`signature_cached`] with the reader given: a fake in a test.
+pub fn signature_cached_with(
+    exe: &Path,
+    cache: &SignatureCache,
+    read: &dyn Fn(&Path) -> Signature,
+) -> Signature {
+    let Some(id) = FileId::of(exe) else {
+        return read(exe);
+    };
+    if let Some((_, sig)) = cache
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(exe)
+        .filter(|(was, _)| *was == id)
+    {
+        return sig.clone();
+    }
+    let sig = read(exe);
+    if !matches!(sig, Signature::Unknown(_)) {
+        cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(exe.to_path_buf(), (id, sig.clone()));
+    }
+    sig
 }
 
 /// The team id `exe` is signed with, when it is signed by a team.
@@ -476,6 +601,9 @@ pub fn gather(
     gather_in(&base, exe, data_dir, listener_bound, mdns, allow_unsigned)
 }
 
+/// The signatures this process has read, so the periodic check asks `codesign` once per binary.
+static SIGNATURES: std::sync::LazyLock<SignatureCache> = std::sync::LazyLock::new(Default::default);
+
 /// [`gather`] with the environment given: `base` is this process's variables.
 pub fn gather_in(
     base: &dyn Fn(&str) -> Option<String>,
@@ -506,7 +634,7 @@ pub fn gather_in(
         signature: if allow_unsigned {
             Signature::Unchecked
         } else {
-            signature_of(exe)
+            signature_cached(exe, &SIGNATURES)
         },
         paths,
         host_socket: longest_host_socket(data_dir),
@@ -671,6 +799,75 @@ mod tests {
         assert_eq!(volume_of(Path::new("/Volumes")), None);
         assert_eq!(volume_of(Path::new("/Users/me")), None);
         assert_eq!(volume_of(Path::new("relative/Volumes/x")), None);
+    }
+
+    fn temp_exe(tag: &str, body: &[u8]) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("sigcache-{}-{tag}", std::process::id()));
+        std::fs::write(&p, body).unwrap();
+        p
+    }
+
+    fn timed_out() -> Signature {
+        Signature::Unknown("did not finish in 10 s".into())
+    }
+
+    #[test]
+    fn a_read_signature_is_kept_for_the_same_file_and_survives_a_timeout() {
+        let exe = temp_exe("keep", b"one");
+        let c = SignatureCache::default();
+        let team = Signature::Team(Some("ABCDE12345".into()));
+        let t = team.clone();
+        assert_eq!(signature_cached_with(&exe, &c, &move |_| t.clone()), team);
+        // codesign is not asked again, so a busy syspolicyd cannot matter.
+        let again = signature_cached_with(&exe, &c, &|_| panic!("asked again"));
+        assert_eq!(again, team);
+        let _ = std::fs::remove_file(&exe);
+    }
+
+    #[test]
+    fn a_first_time_timeout_is_not_kept_and_is_asked_again() {
+        let exe = temp_exe("first", b"one");
+        let c = SignatureCache::default();
+        assert_eq!(
+            signature_cached_with(&exe, &c, &|_| timed_out()),
+            timed_out()
+        );
+        assert!(problem(&Inputs {
+            signature: timed_out(),
+            ..good()
+        })
+        .unwrap()
+        .contains("could not read masond's signature"));
+        let team = Signature::Team(None);
+        let t = team.clone();
+        assert_eq!(signature_cached_with(&exe, &c, &move |_| t.clone()), team);
+        let _ = std::fs::remove_file(&exe);
+    }
+
+    #[test]
+    fn a_changed_binary_is_read_again_and_a_bad_signature_is_refused() {
+        let exe = temp_exe("changed", b"one");
+        let c = SignatureCache::default();
+        let team = Signature::Team(Some("ABCDE12345".into()));
+        let t = team.clone();
+        signature_cached_with(&exe, &c, &move |_| t.clone());
+        // A different size is a different file, whatever the clock says.
+        std::fs::write(&exe, b"another, longer").unwrap();
+        let got = signature_cached_with(&exe, &c, &|_| Signature::AdHoc);
+        assert_eq!(got, Signature::AdHoc);
+        assert!(problem(&Inputs {
+            signature: got,
+            ..good()
+        })
+        .unwrap()
+        .contains("signed ad hoc"));
+        // And one that then cannot be read is not taken for the old good one.
+        std::fs::write(&exe, b"a third, longer still").unwrap();
+        assert_eq!(
+            signature_cached_with(&exe, &c, &|_| timed_out()),
+            timed_out()
+        );
+        let _ = std::fs::remove_file(&exe);
     }
 
     #[test]
