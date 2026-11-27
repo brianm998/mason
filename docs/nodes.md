@@ -196,6 +196,12 @@ own work it tolerates, how much disk to keep free, the lease) are set **on the c
 and sent to the node (see section 3). A node that has heard nothing uses safe defaults
 (2 jobs, other work at most 50 % of the CPU, 50 GB free).
 
+A node advertises the Bonjour service `_mason._tcp` as `MASON node on <host> (<8 characters of its
+fingerprint>)`, and the LAN listener as `MASON on <host> (...)`. On macOS it registers through the
+system's own responder, so it never claims the Mac's `.local` name. `MASON_NO_MDNS=1` in a
+daemon's environment switches its advertising and browsing off, and every command a node runs has
+it set.
+
 **Keep the data directory's path short.** Each job's step host listens on a unix socket at
 `<data-dir>/node/hosts/<16 characters>/sock`, and macOS limits the length of such a path (MASON
 refuses one over 100 characters). So the data directory may be at most 67 characters; the one used
@@ -325,6 +331,14 @@ is lost shows up before a job meets it:
 - **toolchains:** `cargo`, `xcode-select` and `java` run as that user without a prompt, found on
   the `PATH` a job gets (`~/.cargo/bin` first, whatever the daemon's own `PATH` is) and run from the
   user's home. A `cargo` with no default toolchain says to run `rustup default <version>`.
+- **xctest:** `com.apple.testmanagerd.control` can be looked up from the node's launchd domain.
+  testmanagerd is a per-login-session agent (`LimitLoadToSessionType` is `LoginWindow` and `Aqua`),
+  so a LaunchDaemon with nobody logged in as the node user has no such service, and
+  `xcodebuild test` ends in "Connection init failed at lookup with error 3" a couple of seconds
+  after the build. This does not stop the node (builds work); the node reports an empty `xctest`
+  toolchain, and the coordinator sends no `xcodebuild test` run to it. Hosted macOS app tests also
+  need a window server connection, so the only fix is a GUI session for the node user; with
+  FileVault on, that means someone logging in at the console after each boot.
 
 A failure that stops the node doing a job makes it `not accepting`, with the reason as `mason node
 list` shows it on the iMac. A new tool that does not run as `masonnode` is almost always a missing
@@ -609,9 +623,15 @@ node the ref only moves forward. Both commands need a node on this runtime (`mas
 - **You turn the switch off.** No new job starts. Jobs already running finish and the iMac collects
   them as usual (`on_switch_off = "drain"`). If you need the machine back at once: `mason node
   stop-jobs` (or set `on_switch_off = "cancel"` for that node on the iMac, which does it whenever
-  the switch goes off). The iMac then runs those jobs somewhere else, and no task is charged.
+  the switch goes off). Where the job goes next depends on the project's mode, and no task is charged:
+  with `remote` and `fallback` not `local`, a suite (a task's test step or a landing batch's) never
+  starts on the iMac. It goes to GitHub if that can take it, else to a node with room, else waits
+  with backoff for a node (a skip or a daemon stop ends the wait), and with no place that can ever
+  take it, or a node without the base, it is reported as an outage, never a red. With
+  `fallback = "local"` or a `favor-*` mode it runs on the iMac under the usual slots after GitHub
+  and other nodes were tried.
 - **The Studio sleeps or leaves the network.** After `lost_after_polls` polls in a row with no
-  answer the iMac gives up on the job and runs it somewhere else. The Studio, when it is back, kills
+  answer the iMac gives up on the job and places it again by the same rule as above. The Studio, when it is back, kills
   the orphan once its lease (`lease_s`) has run out with nobody asking after it.
 - **The node is too hot or busy with your own work.** It takes no new job; a job already running
   continues, since there is no pre-emption.

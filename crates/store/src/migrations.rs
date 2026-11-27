@@ -921,6 +921,25 @@ const STEPS: &[&str] = &[
     // once. Additive.
     "ALTER TABLE diagnoses ADD COLUMN card TEXT NOT NULL DEFAULT '';
      ALTER TABLE diagnoses ADD COLUMN failed_at INTEGER NOT NULL DEFAULT 0;",
+    // How full each agent session's context window got (s1108), in tokens: one row per
+    // (attempt key, session). Kept beside `usage_runs`; an adapter that reports nothing
+    // leaves no row. `at_ms` is when the row was last written. Additive.
+    "CREATE TABLE context_runs (
+         attempt     TEXT NOT NULL,
+         session     TEXT NOT NULL,
+         run         INTEGER NOT NULL,
+         task        INTEGER NOT NULL,
+         project     TEXT NOT NULL,
+         step        TEXT NOT NULL,
+         peak_used   INTEGER NOT NULL,
+         final_used  INTEGER NOT NULL,
+         window      INTEGER NOT NULL,
+         compactions INTEGER NOT NULL,
+         at_ms       INTEGER NOT NULL,
+         PRIMARY KEY (attempt, session)
+     );
+     CREATE INDEX context_runs_at ON context_runs(at_ms);
+     CREATE INDEX context_runs_task ON context_runs(task);",
     // A task the owner told to wait for another task (a diagnosis' `wait_for`, s1176, decision
     // 1166): the automatic retry skips it, and it is retried when the other task lands. Additive.
     "CREATE TABLE diagnosis_waits (

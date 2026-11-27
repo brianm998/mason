@@ -185,7 +185,7 @@ android = "todo"
 android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.disk-history]
-description = "Home's Disk section, right of the CPU section (below it on a narrow window): free space per volume over time as a line chart (y from 0 to the largest total), a span picker (5 min, 1 h, 6 h, 24 h), the time and 'name: 412 GB free of 1.8 TB' on hover or tap, and a legend per volume with its latest reading and, with more than one volume, a checkbox that shows or hides its line (remembered)"
+description = "Home's Disk section, right of the CPU section (below it on a narrow window): free space per volume over time as a line chart (y from 0 to the largest total), a span picker (5 min, 1 h, 6 h, 24 h), the time and 'name: 412 GB free of 1.8 TB' on hover or tap, and a legend per volume with its latest reading and, with more than one volume, a checkbox that shows or hides its line (remembered); under it what the pipeline's worktrees take, in all and by kind and task state, with what the next sweep frees"
 swift = "done"
 compose = "done"
 ios = "done"
@@ -221,6 +221,21 @@ swift = "done"
 compose = "done"
 ios = "done"
 android = "done"
+
+[feature.decision-card-context]
+description = "Every decision card has an optional \"Add context\" field under the options; an option click, or Return on the selected one, sends the option with the field's text as `context`, Other sends free text with it, an empty field sends none; Tab reaches the field, Enter sends the selected option, Shift-Enter a new line; monitor tools take `answer --context TEXT`"
+swift = "done"
+compose = "done"
+ios = "done"
+android = "done"
+
+[feature.failed-task-diagnosis]
+description = "A failed task's page leads with the diagnosis card (its summary as the why, the failure line under it) and folds Retry, Cancel and Skip all testing into a collapsed \"Other actions\" row, Open session stays; while one runs it says \"Diagnosing on <model, effort>… started <time>\"; with none it shows the old buttons plus Diagnose when offered; failed rows say \"diagnosis ready\" or \"diagnosing\" next to the activity"
+swift = "done"
+compose = "done"
+ios = "done"
+android = "todo"
+android_reason = "The phone task page shows the card, the running line and Diagnose, but its list rows do not show the diagnosis badge yet"
 
 [feature.progress-cells]
 description = "Filled, part, hatched and empty cells; a running cell fills in proportion to a real total, lighter for a typical one, outline for none; a percentage only from a real total, the count and typical range for a history total, the count alone for none; a progress line per running step with a counting time; amber and never red when slow or quiet"
@@ -732,6 +747,22 @@ compose = "done"
 ios = "done"
 android = "todo"
 android_reason = "Not in the first Android phone app (stage 469): the Android module has no Settings page yet"
+
+[feature.settings-review]
+description = "Settings starts with a Pipeline review section: an on/off switch, the time of day, every N days (with Daily and Weekly), each saved through POST /review; the last run with links to the proposals it filed and its summary, the next run, any problem with review.toml, and Run now through POST /review/run, off while a review is running (s1093)"
+swift = "done"
+compose = "done"
+ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no Settings page yet"
+
+[feature.step-context-fill]
+description = "A task page's step row shows how full the run's agent sessions got their context window, as the daemon's own line such as 'context peak 62%, final 40%, 1 compaction'; nothing when the run reported none; a filter or search finds it (s1108)"
+swift = "done"
+compose = "done"
+ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no task page step list yet"
 
 [feature.home-hosts]
 description = "Home's Hosts section: one block per host (this Mac, each node, GitHub) with its status line and the tasks running on it now, each a link to the task with its pipeline state, what runs and for how long, and the GitHub run link; 'idle' for a host with none; one line per host with a run count that opens to the rows on a phone. The task page has a 'Running on' line (#1156)"

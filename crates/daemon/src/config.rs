@@ -82,6 +82,15 @@ pub struct DaemonConfig {
     /// How long a suite waits before trying again after an environmental
     /// failure (no device, the stack would not come up). Charged to no task.
     pub env_retry: Duration,
+    /// The waits between the tries of a landing's git call that met a network error (#1185).
+    pub network_backoff: Vec<Duration>,
+    /// How long before a suite that was red only because the network failed runs again.
+    pub network_rerun: Duration,
+    /// How often a batch held because a push met no network looks whether a fetch works.
+    pub network_probe: Duration,
+    /// How long a batch held because a suite could not reach the network waits before it looks:
+    /// a fetch of the base may work while the host the suite needs does not.
+    pub network_suite_hold: Duration,
     /// Wait out the landing window even when no other task is moving toward landing (the
     /// behaviour before #731). Off in production; tests that file several tasks one after the
     /// other and expect one batch turn it on.
@@ -127,8 +136,6 @@ pub struct DaemonConfig {
     pub adhoc_exit_start: u32,
     /// How often the detector cycle runs (Part 14: daily).
     pub introspect_interval: Duration,
-    /// How often the analyst agent is asked (weekly).
-    pub analyst_interval: Duration,
     /// How often the daemon looks at what is due among the recurring jobs.
     pub schedule_tick: Duration,
 }
@@ -1079,6 +1086,10 @@ impl DaemonConfig {
             speech_timeout: Duration::from_secs(30),
             attention_interval: Duration::from_secs(5),
             env_retry: Duration::from_secs(30),
+            network_backoff: [10, 30, 90].map(Duration::from_secs).to_vec(),
+            network_rerun: Duration::from_secs(30),
+            network_probe: Duration::from_secs(15),
+            network_suite_hold: Duration::from_secs(600),
             landing_window_always: false,
             base_red_poll: Duration::from_secs(60),
             auto_retry_delays: vec![Duration::from_secs(120), Duration::from_secs(600)],
@@ -1098,7 +1109,6 @@ impl DaemonConfig {
                 .filter(|n| (1..=crate::numbers::EXIT_CEILING).contains(n))
                 .unwrap_or(crate::numbers::DEFAULT_ADHOC_START),
             introspect_interval: Duration::from_secs(24 * 3600),
-            analyst_interval: Duration::from_secs(7 * 24 * 3600),
             schedule_tick: Duration::from_secs(30),
             owner_names: vec![std::env::var("USER")
                 .or_else(|_| std::env::var("LOGNAME"))
@@ -1177,6 +1187,13 @@ pub struct ProjectCfg {
     pub diagnose_model: Option<String>,
     /// Its effort (`diagnose_effort`), one of the provider's efforts.
     pub diagnose_effort: Option<String>,
+    /// `[review] validate` (default true): a review that asks for changes is first checked by a
+    /// read-only validation session (task 1134).
+    pub review_validate: bool,
+    /// The model of the validation session (`validate_model`; default Sonnet on Claude).
+    pub validate_model: Option<String>,
+    /// Its effort (`validate_effort`; default medium on Claude).
+    pub validate_effort: Option<String>,
     /// Retry a failure outside the code by itself (`auto_retry`, default true; s247).
     pub auto_retry: bool,
     /// Test rounds before the task fails, if the overlay sets one (layer 3).
@@ -1199,6 +1216,8 @@ pub struct ProjectCfg {
     /// Clone the landing area's warm build into a new task's directory when it is of the commit
     /// the task starts from (`task_cache_seed`; default off, decision 0552).
     pub task_cache_seed: bool,
+    /// How long the pipeline's worktrees and their build output are kept (s1145).
+    pub keep: crate::worktrees::KeepCfg,
     /// A command that reads a task body on stdin and prints `clear` or
     /// `unclear`. Optional, and only consulted when the deterministic check is
     /// unsure. Anything but `clear`, or a failure, means explore.
@@ -2059,6 +2078,44 @@ pub fn parse_project(id: &str, text: &str) -> Result<ProjectCfg, String> {
             }
         }
     };
+    let validate_model = match doc.get("validate_model") {
+        None => None,
+        Some(v) => match v.as_str().map(str::trim).filter(|m| !m.is_empty()) {
+            Some(m) => Some(m.to_string()),
+            None => return Err(format!("{id}: `validate_model` must be a non-empty string")),
+        },
+    };
+    let validate_effort = match doc.get("validate_effort") {
+        None => None,
+        Some(v) => {
+            let efforts = crate::tiermap::effort_levels(agent.provider);
+            match v.as_str() {
+                Some(e) if efforts.iter().any(|x| x == e) => Some(e.to_string()),
+                Some(e) => {
+                    return Err(mason_definition::tiers::bad_effort(
+                        &format!("{id}: `validate_effort`"),
+                        e,
+                        &efforts,
+                    ))
+                }
+                None => return Err(format!("{id}: `validate_effort` must be a string")),
+            }
+        }
+    };
+    let review_validate = match doc.get("review") {
+        None => true,
+        Some(item) => {
+            let t = item
+                .as_table_like()
+                .ok_or_else(|| format!("{id}: `[review]` is a table"))?;
+            match t.get("validate") {
+                None => true,
+                Some(v) => v
+                    .as_bool()
+                    .ok_or_else(|| format!("{id}: `[review] validate` is `true` or `false`"))?,
+            }
+        }
+    };
     crate::proposals::parse_cfg(id, &doc)?;
     crate::introspect::parse_cfg(id, &doc)?;
     crate::schedule::parse(id, &doc)?;
@@ -2095,6 +2152,9 @@ pub fn parse_project(id: &str, text: &str) -> Result<ProjectCfg, String> {
             .unwrap_or(true),
         diagnose_model,
         diagnose_effort,
+        review_validate,
+        validate_model,
+        validate_effort,
         auto_retry: doc
             .get("auto_retry")
             .and_then(|v| v.as_bool())
@@ -2122,6 +2182,7 @@ pub fn parse_project(id: &str, text: &str) -> Result<ProjectCfg, String> {
             .get("task_cache_seed")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
+        keep: crate::worktrees::KeepCfg::parse(id, &doc)?,
         task_cache: match s("task_cache").filter(|t| !t.trim().is_empty()) {
             Some(t) => {
                 crate::taskcache::check_template(&t).map_err(|e| format!("{id}: {e}"))?;

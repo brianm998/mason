@@ -214,6 +214,30 @@ pub fn txt_record(fingerprint: &str) -> BTreeMap<String, String> {
     ])
 }
 
+/// Is advertising and browsing switched off (`MASON_NO_MDNS` set)? Every command a node runs has
+/// it set, so a daemon started by one of its tests never shows up on the owner's network.
+pub(crate) fn mdns_off() -> bool {
+    std::env::var_os("MASON_NO_MDNS").is_some()
+}
+
+/// A DNS label, and so a service instance name, holds at most this many bytes.
+const INSTANCE_MAX: usize = 63;
+
+/// The name a daemon advertises its service under: `MASON on <host> (<fp8>)`, or `MASON node on
+/// <host> (<fp8>)` for a node's listener. It names a `_mason._tcp` service, never the machine's
+/// own `.local` name. The first 8 characters of the daemon's fingerprint keep two daemons on one
+/// Mac, or two Macs with the same name, apart. A long host is cut so that they always fit.
+pub(crate) fn instance_name(node: bool, host: &str, fingerprint: &str) -> String {
+    let head = if node { "MASON node on " } else { "MASON on " };
+    let fp8: String = fingerprint.chars().take(8).collect();
+    let tail = format!(" ({fp8})");
+    let mut end = host.len().min(INSTANCE_MAX - head.len() - tail.len());
+    while !host.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{head}{}{tail}", &host[..end])
+}
+
 /// A live advertisement. Kept for the life of the process (callers `std::mem::forget` it).
 pub(crate) enum Advertisement {
     #[cfg(target_os = "macos")]
@@ -311,16 +335,18 @@ pub async fn start(d: Arc<Daemon>) -> std::io::Result<u16> {
     let info = Info {
         port,
         fingerprint: fingerprint.clone(),
-        instance: format!("MASON on {}", hostname()),
+        instance: instance_name(false, &hostname(), &fingerprint),
         txt: txt_record(&fingerprint),
     };
     if let Ok(mut g) = d.lan.info.lock() {
         *g = Some(info.clone());
     }
-    match advertise(&info) {
-        // Kept for the life of the process.
-        Ok(m) => m.keep(),
-        Err(e) => tracing::warn!("mDNS is not advertising: {e}"),
+    if !mdns_off() {
+        match advertise(&info) {
+            // Kept for the life of the process.
+            Ok(m) => m.keep(),
+            Err(e) => tracing::warn!("mDNS is not advertising: {e}"),
+        }
     }
     let app = router(d.clone());
     tracing::info!(
@@ -674,6 +700,34 @@ mod hostname_tests {
         assert_eq!(pick_hostname(None, Some("box.local".into())), "box");
         assert_eq!(pick_hostname(Some(" ".into()), Some("box".into())), "box");
         assert_eq!(pick_hostname(None, None), "mason");
+    }
+
+    #[test]
+    fn an_instance_name_carries_the_fingerprint_and_is_never_the_bare_host() {
+        let fp = "0123456789abcdef";
+        assert_eq!(
+            instance_name(false, "Marmot", fp),
+            "MASON on Marmot (01234567)"
+        );
+        assert_eq!(
+            instance_name(true, "Marmot", fp),
+            "MASON node on Marmot (01234567)"
+        );
+        assert_ne!(
+            instance_name(true, "Marmot", fp),
+            instance_name(true, "Marmot", "fedcba9876543210")
+        );
+    }
+
+    #[test]
+    fn a_long_host_is_cut_so_the_instance_name_fits_a_label() {
+        for node in [false, true] {
+            for host in ["h".repeat(100), "\u{e9}".repeat(60)] {
+                let n = instance_name(node, &host, "0123456789abcdef");
+                assert!(n.len() <= INSTANCE_MAX, "{} bytes: {n}", n.len());
+                assert!(n.ends_with(" (01234567)"), "{n}");
+            }
+        }
     }
 
     #[test]

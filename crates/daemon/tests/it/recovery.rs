@@ -68,13 +68,14 @@ fn fix_turn() -> Value {
     ])
 }
 
-fn card(recommended_repair: bool) -> Value {
+fn card(recommended_repair: bool, quote: &str) -> Value {
     let repair = json!({"label": "Add the missing file", "recommended": recommended_repair,
         "action": "repair", "summary": "add fixed.txt", "to_step": "test"});
     let cancel =
         json!({"label": "Cancel the task", "recommended": !recommended_repair, "action": "cancel"});
     json!([{"call": {"tool": "submit_diagnosis", "args": {
         "summary": "fixed.txt is missing from the branch",
+        "quote": quote,
         "options": [cancel, repair]}}}])
 }
 
@@ -98,7 +99,7 @@ fn has_decision(d: &Arc<mason_daemon::Daemon>, t: TaskId, decision: &str) -> boo
 fn a_failed_step_leaves_a_recovery_row_and_a_card_with_the_recommended_option_first() {
     let (_s, d) = start(
         DEF,
-        json!({"develop": [develop("one")], "diagnose": [card(false)]}),
+        json!({"develop": [develop("one")], "diagnose": [card(false, "Please do: Red test")]}),
     );
     let t = file_task(&d, "Red test");
     wait_state(&d, t, State::Failed, 600);
@@ -127,7 +128,7 @@ fn a_failed_step_leaves_a_recovery_row_and_a_card_with_the_recommended_option_fi
 fn a_recommended_repair_commits_the_change_and_runs_the_task_on_from_the_test_step() {
     let (s, d) = start(
         DEF,
-        json!({"develop": [develop("one"), fix_turn()], "diagnose": [card(true)]}),
+        json!({"develop": [develop("one"), fix_turn()], "diagnose": [card(true, "Please do: Needs a file")]}),
     );
     let t = file_task(&d, "Needs a file");
     wait_for("the repair", 600, || has_decision(&d, t, "repaired"));
@@ -175,7 +176,7 @@ fn a_second_failure_with_the_same_signature_may_not_repair_again() {
         )
         .unwrap();
     assert!(recovery::repaired_before(&d, t.0, &sig));
-    let repair = json!({"summary": "again", "options": [
+    let repair = json!({"summary": "again", "quote": "q", "options": [
         {"label": "Repair again", "recommended": true, "action": "repair", "summary": "again"},
         {"label": "Cancel", "recommended": false, "action": "cancel"}]});
     mason_daemon::diagnose::record_verdict(&d, t, repair);
@@ -256,6 +257,7 @@ fn a_spent_budget_goes_straight_to_a_handoff() {
 fn an_owner_rejection_is_a_card_and_nothing_is_applied() {
     let card = json!([{"call": {"tool": "submit_diagnosis", "args": {
         "summary": "the owner said no",
+        "quote": "Please do: Rejected",
         "no_code_change": true,
         "options": [
             {"label": "Retry as it is", "recommended": true, "action": "retry", "step": "develop", "note": "again"},
@@ -391,7 +393,7 @@ fn panicking_daemon(diagnose: Value) -> (Scratch, support::Masond) {
 
 #[test]
 fn a_job_panic_is_charged_to_the_pipeline_and_gets_a_recovery_row_and_a_session() {
-    let (s, _m) = panicking_daemon(json!([card(false)]));
+    let (s, _m) = panicking_daemon(json!([card(false, "Do it.")]));
     wait_for("the failure", 240, || s.task_json(0)["state"] == "failed");
     wait_for("a recovery row", 120, || {
         !s.task_json(0)["recovery"].is_null()

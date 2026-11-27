@@ -1928,6 +1928,7 @@ fn a_node_with_the_documented_length_of_data_dir_runs_jobs_with_long_ids() {
                 listener_bound: true,
                 mdns: node_doctor::Mdns::Off,
                 tools: vec![],
+                xctest: None,
             },
             1,
         );
@@ -3140,6 +3141,13 @@ fn a_node_job_whose_host_dies_leaves_no_grandchild_behind() {
         let h = sc.spawn(|| run_on_b(&p, &spec("run-gc-lost", None, &cmd), &|| None));
         support::wait_for("the job's grandchild to run", 60, || {
             grandchild_pid(&pidfile).is_some()
+        });
+        // The host writes its record after it has spawned the command, so the grandchild can
+        // run before the host is on record.
+        support::wait_for("the job's host to be on record", 60, || {
+            mason_step_host::registry::Registry::new(&hosts)
+                .scan()
+                .is_ok_and(|f| !f.is_empty())
         });
         let found = mason_step_host::registry::Registry::new(&hosts)
             .scan()

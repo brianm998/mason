@@ -122,6 +122,8 @@ message Command {
     BatchRef land_now_batch = 22;
     // Where runs go (protocol 2): for all of MASON, one project or one task. Owner only.
     SetPlacement set_placement = 23;
+    // Ask for a diagnosis of a failed task (#1046). Owner only.
+    TaskRef diagnose = 24;
     Raw raw = 30;
   }
   // Who is acting and, optionally, why (recorded with overrides).
@@ -215,6 +217,8 @@ message Answer {
   string answer = 2;
   // The hash of the card the answerer was looking at: a stale one is refused.
   string card_hash = 3;
+  // The owner's added words (the card's "Add context" field); empty: none. Additive (#1046).
+  string context = 4;
 }
 
 message ApproveHold {
@@ -583,6 +587,8 @@ message TaskRow {
   uint64 state_since_ms = 31;
   // The task's own placement mode when it overrides its project's ("" when it follows). Additive (#834).
   string run_on_override = 32;
+  // A failed task's diagnosis: "ready" (it holds a card), "running", or "" (none). Additive (#1046).
+  string diagnosis = 33;
 
 }
 
@@ -1125,6 +1131,21 @@ message DiskHistory {
   // Every volume seen in the span, in a stable order, even one with a gap.
   repeated DiskVolume volumes = 3;
   repeated DiskPoint points = 4;
+  // What the pipeline's worktrees take, by kind and task state, as last measured (empty
+  // until the first measurement).
+  repeated WorktreeUsage worktrees = 5;
+}
+
+// The pipeline's worktree directories of one kind in one state.
+message WorktreeUsage {
+  // "task worktree" (without its build output), "build output" or "landing scratch".
+  string kind = 1;
+  // The task's state ("unknown": no task owns it); "idle" or "running" for landing scratch.
+  string state = 2;
+  uint32 count = 3;
+  uint64 bytes = 4;
+  // What the next sweep would free.
+  uint64 free_next_bytes = 5;
 }
 
 // Who holds a `compile` slot.
@@ -1209,6 +1230,9 @@ message StepLine {
   uint64 started_ms = 6;
   // Every session this run started: the first, resumes, and each ladder retry.
   repeated ModelUse launches = 7;
+  // How full the run's agent sessions got, such as `context peak 62%, final 40%,
+  // 1 compaction`; empty when nothing reported it.
+  string context = 8;
 }
 
 message DebtLine {
@@ -1261,6 +1285,14 @@ message TaskDetailView {
   repeated string review_findings = 26;
   // The task's runs in flight now, with the host of each (#1155). Additive.
   repeated HostRun running_on = 25;
+  // A diagnosis session of this failed task is running now. Unset otherwise. Additive (#1046).
+  DiagnosisRunning diagnosis_running = 27;
+}
+
+// A running diagnosis: when it started (daemon time, ms) and the model and effort it runs on.
+message DiagnosisRunning {
+  uint64 started_ms = 1;
+  string ran_on = 2;
 }
 
 // A page on the git host a client opens in the browser. `label` is exactly the text the

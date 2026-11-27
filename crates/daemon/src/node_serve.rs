@@ -599,7 +599,16 @@ pub fn toolchains() -> Value {
     let java = probe("/usr/libexec/java_home", &["-V"])
         .map(|t| parse_java_home(&t))
         .unwrap_or_default();
-    let v = json!({"rust": rust, "xcode": xcode, "java": java});
+    let mut v = json!({"rust": rust, "xcode": xcode, "java": java});
+    // Only where it was asked: a node that does not say leaves `xcodebuild test` runs to the
+    // coordinator's old rule (it has Xcode, so it may).
+    if let Some(ok) = crate::node_doctor::testmanagerd_reachable() {
+        v["xctest"] = if ok {
+            json!(["testmanagerd"])
+        } else {
+            json!([])
+        };
+    }
     *g = Some((std::time::Instant::now(), v.clone()));
     v
 }
@@ -962,11 +971,11 @@ pub async fn start(d: Arc<Daemon>) -> std::io::Result<u16> {
         *g = Some(info);
     }
     // Tests turn the advertisement off: multicast is unreliable where they run.
-    if std::env::var_os("MASON_NO_MDNS").is_none() {
+    if !lan::mdns_off() {
         let adv = lan::Info {
             port,
+            instance: lan::instance_name(true, &lan::hostname(), &fingerprint),
             fingerprint,
-            instance: format!("MASON node on {}", lan::hostname()),
             txt,
         };
         match lan::advertise(&adv) {

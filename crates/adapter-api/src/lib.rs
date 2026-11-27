@@ -264,12 +264,27 @@ pub enum Outcome {
     },
 }
 
+/// The most bytes of old or new text a [`AgentEvent::FileEdit`] carries.
+pub const FILE_EDIT_TEXT_MAX: usize = 8 * 1024;
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum AgentEvent {
     Text(String),
     ToolCall {
         name: String,
         summary: String,
+    },
+    /// One file edit the agent made (Claude's `Edit`, `MultiEdit` and `Write`), sent in
+    /// addition to the edit's `ToolCall`. `old` is `None` for a `Write`. Each text is cut to
+    /// [`FILE_EDIT_TEXT_MAX`] bytes; `truncated` says one was. `turn` counts the agent's
+    /// messages in this invocation from 1.
+    FileEdit {
+        tool: String,
+        path: String,
+        old: Option<String>,
+        new: String,
+        truncated: bool,
+        turn: u32,
     },
     /// The agent's own todo list, whole, each time it changes.
     Plan {
@@ -289,6 +304,21 @@ pub enum AgentEvent {
         attempt: u32,
         status: Option<u32>,
         delay_ms: Option<u64>,
+    },
+    /// The context window's fill: the input of the latest message (uncached, cache read
+    /// and cache write) against the model's window. Sent when the fill moves by a
+    /// percentage point or more, or the window becomes known. Only from adapters whose
+    /// stream says so.
+    Context {
+        used: u64,
+        window: u64,
+    },
+    /// The CLI compacted the conversation. `subtype` is the `system` line's own, so a
+    /// rename in a later CLI shows. The sizes are `None` when the stream did not say.
+    Compacted {
+        subtype: String,
+        before: Option<u64>,
+        after: Option<u64>,
     },
     /// Always the last event.
     Finished(Outcome),

@@ -1562,3 +1562,46 @@ fn a_probe_is_remembered_for_its_project_suite_tip_and_tests() {
     assert!(!s.red_probed("q", "cargo", "T", &t(&["a", "b"])).unwrap());
     assert!(!s.red_probed("p", "cargo", "T", &t(&["a"])).unwrap());
 }
+
+#[test]
+fn context_runs_apply_on_the_step_before_and_merge_a_replayed_session() {
+    use mason_store::ContextRun;
+    let (_d, p) = db();
+    {
+        let mut c = Connection::open(&p).unwrap();
+        migrations::migrate_to(&mut c, migrations::SCHEMA_VERSION - 1).unwrap();
+    }
+    let s = Store::open(&p).unwrap();
+    let row = |session: &str, peak_used, final_used, compactions, at_ms| ContextRun {
+        attempt: "t1r3".into(),
+        session: session.into(),
+        run: 3,
+        task: 1,
+        project: "p".into(),
+        step: "develop".into(),
+        peak_used,
+        final_used,
+        window: 200_000,
+        compactions,
+        at_ms,
+    };
+    s.record_context_run(row("a", 150_000, 150_000, 1, 100))
+        .unwrap();
+    // The same session written again: nothing is counted twice, the peak stays.
+    s.record_context_run(row("a", 90_000, 40_000, 1, 200))
+        .unwrap();
+    s.record_context_run(row("b", 10_000, 10_000, 0, 300))
+        .unwrap();
+    drop(s);
+    let s = Store::open(&p).unwrap();
+    let got = s.context_runs_of_task(1).unwrap();
+    assert_eq!(
+        got,
+        [
+            row("a", 150_000, 40_000, 1, 200),
+            row("b", 10_000, 10_000, 0, 300)
+        ]
+    );
+    assert_eq!(s.context_runs_since(201).unwrap().len(), 1);
+    assert!(s.context_runs_of_task(2).unwrap().is_empty());
+}

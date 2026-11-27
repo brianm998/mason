@@ -114,6 +114,7 @@ fn replay_card() -> Value {
     json!({
         "summary": "The trd windows job hangs in tests/scan.rs on the base too since task 1000 landed.",
         "cause": "outside",
+        "quote": "SCAN-HANG-LINE",
         "evidence_lines": ["tests/scan.rs:41 SCAN-HANG-LINE"],
         "options": [
             {"label": "File the scan fix, then land now", "recommended": true, "actions": [
@@ -303,6 +304,7 @@ fn a_file_task_that_repeats_an_open_ticket_is_refused_and_the_card_says_which() 
             blocks_task: false,
             explored: false,
             estimate: None,
+            lookback: None,
         },
     )
     .unwrap();
@@ -322,6 +324,7 @@ fn a_file_task_that_repeats_an_open_ticket_is_refused_and_the_card_says_which() 
 #[test]
 fn two_tasks_of_one_cause_get_one_diagnosis_and_one_card_that_acts_on_both() {
     let mut card = replay_card();
+    card["quote"] = json!("First rejected");
     // A card whose recommendation is a plain retry, so applying it acts on each task.
     card["options"] = json!([
         {"label": "Retry both", "recommended": true, "actions": [
@@ -377,6 +380,7 @@ fn a_session_without_a_verdict_releases_the_held_retry() {
 fn a_recommended_retry_releases_the_retry_and_waits_for_the_loop() {
     let card = json!({
         "summary": "The hook refused the push once; trying again may work.",
+        "quote": "Rejected",
         "cause": "outside",
         "options": [
             {"label": "Retry now", "recommended": true, "actions": [
@@ -399,6 +403,7 @@ fn a_recommended_retry_releases_the_retry_and_waits_for_the_loop() {
     // A card whose recommended option is a lone retry does not hold it.
     let single = json!({
         "summary": "The hook refused the push once.",
+        "quote": "Rejected",
         "options": [
             {"label": "Retry", "recommended": true, "action": "retry", "note": "again"},
             {"label": "Cancel", "recommended": false, "action": "cancel"}]

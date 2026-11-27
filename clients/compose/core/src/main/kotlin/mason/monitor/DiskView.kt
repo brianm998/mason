@@ -117,3 +117,15 @@ fun pruneHiddenVolumes(hidden: Set<String>, h: DiskHistory): Set<String> {
     val listed = h.volumes.map { it.id }.toSet()
     return hidden.filter { it in listed }.toSet()
 }
+
+/**
+ * What the pipeline's worktrees take, the same totals as `mason disk`: a line for all of it,
+ * then one per kind and task state. Empty until the daemon has measured them.
+ */
+fun diskWorktreeLines(h: DiskHistory): List<String> {
+    if (h.worktrees.isEmpty()) return emptyList()
+    val all = h.worktrees.sumOf { it.bytes }
+    val next = h.worktrees.sumOf { it.free_next_bytes }
+    return listOf("Worktrees ${Format.bytes(all)} · next sweep frees ${Format.bytes(next)}") +
+        h.worktrees.map { "${it.kind}, ${it.state}: ${it.count}, ${Format.bytes(it.bytes)}" }
+}

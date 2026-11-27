@@ -77,6 +77,23 @@ To give each task its own cargo target without the cleanup being your job, set `
 
 To keep dependencies warm across tasks, add a shared compiler cache: install `sccache` and set `RUSTC_WRAPPER=sccache` in the same commands. Compiled dependencies are then reused from sccache's own store, while workspace crates still build per task. This is optional, and the daemon does not depend on sccache. The project file is yours to change; MASON only provides the directory and its cleanup.
 
+## The pipeline's worktrees
+
+The reconcile sweep clears up what finished and idle tasks leave under the data directory. It never deletes a branch, never touches a worktree a running step, step host, landing batch or owner session is using, and never removes a dirty one (uncommitted changes, or HEAD off the task's branch). The keys go in the project file; the defaults are shown.
+
+```toml
+worktree_keep_canceled_h = 24  # a canceled task with its branch kept; at once if the branch is already in the base
+worktree_keep_failed_h   = 72  # a failed task
+target_idle_h            = 12  # build output of a worktree with no step this long
+landing_scratch_keep_h   = 48  # a landing worktree (l/<project>-b<N>) unused this long
+landing_scratch_max      = 2   # and no more than this many of them
+build_outputs            = []  # more build output, e.g. ["DerivedData", "app/out"]
+```
+
+`mason task revive` and `mason task retry` add a removed worktree again from the branch; `mason task open`, an owner session and a diagnosis do too. Build output means a directory git ignores that is named `target`, `build` or `.build`, or listed in `build_outputs`; sources and uncommitted files stay. While the data directory's disk has less than twice `disk.floor_gb` free, the sweep removes build output from every worktree with nothing running, oldest first, without waiting for `target_idle_h`. After anything is removed, the definition's worktree setup commands run again before the task's next step. A removal moves the directory into `<data dir>/trash` and deletes it in the background, one at a time.
+
+`mason disk` lists what the worktrees take, by kind and task state, what the next sweep would free and what is left alone and why; `mason disk clean --dry-run` lists only that; `mason disk clean` (owner only) runs the sweep now. The monitors' Disk section shows the totals. A repository's own session worktrees (`.claude/worktrees` and the like) are not MASON's and are not counted or touched.
+
 ## Another pipeline on the same machine
 
 A second pipeline (star's starpipe, say) can queue with masond instead of keeping its own lock queue, so the two share one arbiter. Nothing changes until it sends the new fields.

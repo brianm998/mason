@@ -169,11 +169,51 @@ impl TokenTotals {
     }
 }
 
+/// How full the context window got, in tokens, as the stream reported it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ContextStats {
+    /// The fullest and the latest message input. `window` is 0 when nothing was reported.
+    pub peak_used: u64,
+    pub final_used: u64,
+    /// The largest window the events carried, so a stated window replaces a smaller
+    /// assumed one.
+    pub window: u64,
+    pub compactions: u32,
+}
+
+impl ContextStats {
+    /// Take a [`AgentEvent::Context`] or [`AgentEvent::Compacted`]; other events pass.
+    pub fn observe(&mut self, ev: &AgentEvent) {
+        match ev {
+            AgentEvent::Context { used, window } => {
+                self.peak_used = self.peak_used.max(*used);
+                self.final_used = *used;
+                self.window = self.window.max(*window);
+            }
+            AgentEvent::Compacted { before, after, .. } => {
+                self.compactions += 1;
+                // What was in use just before counts toward the peak.
+                self.peak_used = self.peak_used.max(before.unwrap_or(0));
+                if let Some(a) = after {
+                    self.final_used = *a;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Did the stream say anything?
+    pub fn reported(&self) -> bool {
+        self.window > 0 || self.compactions > 0
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct StepReport {
     pub end: StepEnd,
     pub session_id: Option<String>,
     pub tokens: TokenTotals,
+    pub context: ContextStats,
     pub nudges: u32,
     pub rejections: u32,
     pub api_retries: u32,
@@ -190,6 +230,7 @@ impl StepReport {
             end: StepEnd::Failed(FailReason::NoResult { nudges: 0 }),
             session_id: None,
             tokens: TokenTotals::default(),
+            context: ContextStats::default(),
             nudges: 0,
             rejections: 0,
             api_retries: 0,
@@ -346,12 +387,19 @@ impl<'a> StepRunner<'a> {
                             r.tool_calls.push(name);
                         }
                     }
-                    Some(ev @ (AgentEvent::Plan { .. } | AgentEvent::Skill { .. })) => {
+                    Some(
+                        ev @ (AgentEvent::Plan { .. }
+                        | AgentEvent::Skill { .. }
+                        | AgentEvent::FileEdit { .. }),
+                    ) => {
                         if let Some(f) = &spec.on_agent_event {
                             f(&ev);
                         }
                     }
                     Some(AgentEvent::Text(_)) => go_live(&spec),
+                    Some(ev @ (AgentEvent::Context { .. } | AgentEvent::Compacted { .. })) => {
+                        r.context.observe(&ev)
+                    }
                     Some(AgentEvent::Finished(o)) => break o,
                     None => {
                         break Outcome::Crash {

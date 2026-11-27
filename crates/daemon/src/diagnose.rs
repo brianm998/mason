@@ -487,7 +487,8 @@ pub fn prompt(
          and have no option you would recommend, give `handoff` with a `brief` instead of \
          `options`. Say in the summary why the recommended option beats the others. Set \
          `no_code_change` only if the code is right and running it again is expected to pass; \
-         MASON then retries by itself. Put the decisive lines in `evidence_lines`.\n\n\
+         MASON then retries by itself. Put the decisive lines in `evidence_lines`, and copy the lines your diagnosis rests on, exactly, into `quote` \
+         (1 to 10 lines from the failure, the test logs or the code you blame; a quote that is not found is refused).\n\n\
          # The task\n{title}\n\n{body}\n\n\
          # The plan\n{plan}\n\n\
          # Why it failed\n{reason}\n\n\
@@ -624,6 +625,10 @@ fn diagnose(
     let Ok(c) = crate::jobs::ctx(d, task, run) else {
         return;
     };
+    // A diagnosis asked for late reads a worktree the sweep may have removed (s1145).
+    if let Err(e) = crate::worktrees::restore(d, task) {
+        tracing::warn!(task = task.0, "the worktree could not be added again: {e}");
+    }
     let dir = c.task_dir();
     let plan: Option<Value> = std::fs::read_to_string(dir.join("plan.json"))
         .ok()
@@ -639,7 +644,14 @@ fn diagnose(
         plan.as_ref(),
         &reason,
         &history,
-        crate::prompts::tried_block(&crate::tried::rounds(&dir)).as_deref(),
+        match (
+            crate::prompts::tried_block(&crate::tried::rounds(&dir)),
+            crate::prompts::edits_block(&dir),
+        ) {
+            (Some(t), Some(e)) => Some(format!("{t}\n\n{e}")),
+            (t, e) => t.or(e),
+        }
+        .as_deref(),
         &log_tails(&dir, 3, 40),
         &diffstat,
         &steps,
@@ -659,7 +671,38 @@ fn diagnose(
     mark.ran_on(&ran_on);
     let adapter = crate::jobs::adapter(&c);
     let runner = StepRunner::new(adapter.as_ref(), RunnerConfig::default());
-    let contract = ContractHandle::new(StepKind::Diagnose, Box::new(NoChecks));
+    // The quote must be in what the agent was given or can read: the failure, the task and
+    // plan, what the rounds were told, the whole test logs, or the diff of the branch.
+    let materials = {
+        let diff = mason_landing::git::run(&c.wt, &["diff", &format!("{base}...HEAD")])
+            .unwrap_or_default();
+        vec![
+            ("the failure reason".to_string(), reason.clone()),
+            (
+                "the task text and plan".to_string(),
+                format!(
+                    "{title}\n{body}\n{}",
+                    plan.as_ref()
+                        .map_or(String::new(), |p| p.to_string().replace("\\n", "\n"))
+                ),
+            ),
+            ("what each round was told".to_string(), history.clone()),
+            ("the test logs".to_string(), log_tails(&dir, 20, 200_000)),
+            (format!("the diff against {base}"), diff),
+        ]
+    };
+    let validator: mason_adapter_api::contract::Validator = Box::new(move |tool, args| {
+        if tool != "submit_diagnosis" {
+            return Ok(());
+        }
+        match args["quote"].as_str() {
+            Some(q) => mason_adapter_api::contract::check_quote(q, &materials)
+                .map_err(|why| vec![format!("quote: {why}")]),
+            None => Ok(()),
+        }
+    });
+    let contract =
+        ContractHandle::with_validator(StepKind::Diagnose, Box::new(NoChecks), Some(validator));
     let key = format!("t{}r{}diag{}", task.0, run.0, so_far);
     if contract
         .serve(&d.cfg.sockets_dir().join(format!("{key}.sock")))

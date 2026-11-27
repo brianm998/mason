@@ -724,12 +724,29 @@ pub fn covers_run(status: &Value, suite_name: &str, command: &str) -> bool {
             return false;
         }
     }
+    // A run that tests with `xcodebuild` needs testmanagerd, which a node with no login session
+    // does not have; a node that does not report `xctest` (an older one) is taken at its word.
+    if runs_xcode_tests(command) && tc["xctest"].as_array().is_some_and(|a| a.is_empty()) {
+        return false;
+    }
     match crate::remote::xcode_requested(command) {
         Some(v) => tc["xcode"]
             .as_array()
             .is_some_and(|a| a.iter().any(|x| x.as_str() == Some(v.as_str()))),
         None => true,
     }
+}
+
+/// Does `command` run `xcodebuild test` (or `test-without-building`)? A build alone does not
+/// need the test manager.
+pub fn runs_xcode_tests(command: &str) -> bool {
+    let words: Vec<&str> = command.split_whitespace().collect();
+    words.iter().enumerate().any(|(n, w)| {
+        w.rsplit('/').next() == Some("xcodebuild")
+            && words[n + 1..]
+                .iter()
+                .any(|a| matches!(*a, "test" | "test-without-building"))
+    })
 }
 
 /// The node with the most room for a run of `project`, if any: where a run that waited too long
@@ -848,6 +865,13 @@ pub fn rooms_for(
     (rooms, prefer_github)
 }
 
+/// May a node take a run of `project` once it is back (or has room)? `[nodes] enabled`, the
+/// project allowed, and a node paired. A node that is away or full still counts: it is waited for.
+pub fn may_take(d: &Daemon, project: &str) -> bool {
+    let cfg = d.nodes.cfg(&d.cfg.config_dir);
+    cfg.enabled && cfg.allows(project) && !d.nodes.lock().paired.is_empty()
+}
+
 /// Start the browse thread and the poller. The poller wakes every `[nodes] status_every_s`
 /// (read afresh each time) and does nothing while no node is paired.
 pub fn start(d: &Arc<Daemon>) {
@@ -873,7 +897,7 @@ pub fn start(d: &Arc<Daemon>) {
                 std::thread::sleep(Duration::from_secs(every));
             }
         });
-    if std::env::var_os("MASON_NO_MDNS").is_some() {
+    if crate::lan::mdns_off() {
         return;
     }
     let weak = Arc::downgrade(d);
@@ -1468,5 +1492,23 @@ mod tests {
             "swift",
             "swift test"
         ));
+    }
+
+    #[test]
+    fn an_xcodebuild_test_run_needs_a_node_whose_testmanagerd_is_reachable() {
+        let cmd = "cd DiskFree && xcodebuild test -project DiskFree.xcodeproj -scheme DiskFree";
+        let no = json!({"toolchains": {"xcode": ["27.0"], "xctest": []}});
+        let yes = json!({"toolchains": {"xcode": ["27.0"], "xctest": ["testmanagerd"]}});
+        let old = json!({"toolchains": {"xcode": ["27.0"]}});
+        assert!(!covers_run(&no, "swift", cmd));
+        assert!(covers_run(&yes, "swift", cmd));
+        assert!(covers_run(&old, "swift", cmd));
+        // A build, or a swift package's test, does not use it.
+        assert!(covers_run(&no, "swift", "xcodebuild build -scheme X"));
+        assert!(covers_run(&no, "swift", "swift test"));
+        assert!(runs_xcode_tests(
+            "/usr/bin/xcodebuild -scheme X test-without-building"
+        ));
+        assert!(!runs_xcode_tests("echo xcodebuild; ls test"));
     }
 }

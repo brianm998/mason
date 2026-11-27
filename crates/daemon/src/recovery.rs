@@ -384,6 +384,10 @@ struct Repair {
 
 fn run_repair(d: &Arc<Daemon>, r: Repair) {
     let fail = |why: String| handoff(d, r.task, &why, None);
+    // The sweep may have removed a failed task's worktree: put it back before working in it.
+    if let Err(e) = crate::worktrees::restore(d, r.task) {
+        return fail(format!("the worktree could not be added again: {e}"));
+    }
     let Ok(c) = crate::jobs::ctx(d, r.task, r.run) else {
         return fail("the repair could not be set up: the step's context is gone".into());
     };

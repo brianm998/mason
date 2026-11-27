@@ -136,6 +136,64 @@ pub fn note(base: &str, f: &BaseFold) -> Option<String> {
     }
 }
 
+/// How many checks in a row may be told to merge the base by hand. From this one on, the agent is
+/// told the base moves faster than a hand merge can keep up, and the branch goes to the landing
+/// queue (decision 1212).
+pub const MANUAL_MERGE_ROUNDS: u32 = 3;
+
+/// The task-dir file holding one line per conflicted fold since the last clean one.
+pub(crate) const FOLD_CONFLICTS_FILE: &str = "fold-conflicts.txt";
+
+/// Record this check's fold in `dir` and return how many conflicted folds in a row there are,
+/// this one included. A clean or merged fold empties the record; other outcomes leave it.
+pub fn record_fold(dir: &Path, run: u64, fold: &BaseFold, base_tip: &str) -> u32 {
+    let path = dir.join(FOLD_CONFLICTS_FILE);
+    let count = |p: &Path| {
+        std::fs::read_to_string(p)
+            .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count() as u32)
+            .unwrap_or(0)
+    };
+    match fold {
+        BaseFold::Current | BaseFold::Merged(_) => {
+            let _ = std::fs::remove_file(&path);
+            0
+        }
+        BaseFold::Conflicts(_, files) => {
+            use std::io::Write;
+            let _ = std::fs::create_dir_all(dir);
+            let line = format!(
+                "{run}\t{base_tip}\t{}\n",
+                files.lines().collect::<Vec<_>>().join(", ")
+            );
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+            {
+                let _ = f.write_all(line.as_bytes());
+            }
+            count(&path)
+        }
+        BaseFold::Uncommitted(_) | BaseFold::Failed(_) => count(&path),
+    }
+}
+
+/// Like [`note`], but after [`MANUAL_MERGE_ROUNDS`] conflicted checks in a row it stops asking for
+/// a hand merge.
+pub fn note_bounded(base: &str, f: &BaseFold, conflicted_in_a_row: u32) -> Option<String> {
+    match f {
+        BaseFold::Conflicts(n, _) if conflicted_in_a_row >= MANUAL_MERGE_ROUNDS => Some(format!(
+            "`{base}` has {n} commit{} your branch does not have, and `{base}` moved faster than a \
+             hand merge can keep up ({conflicted_in_a_row} conflicted checks in a row). Do not merge it \
+             by hand again; this check ran on your branch as it is. Finish and submit \
+             your change: it goes to the landing queue, which folds `{base}` in when it lands and \
+             sends a conflict back to you with a bounded count.",
+            if *n == 1 { "" } else { "s" }
+        )),
+        _ => note(base, f),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,5 +306,57 @@ mod tests {
         let n = note("base", &BaseFold::Conflicts(1, "a.txt".into())).unwrap();
         assert!(n.contains("1 commit your branch does not have"));
         assert!(n.contains("git merge base") && n.contains("- a.txt"));
+    }
+
+    #[test]
+    fn note_bounded_below_the_bound_is_note() {
+        let f = BaseFold::Conflicts(2, "a.txt".into());
+        assert_eq!(note_bounded("base", &f, 1), note("base", &f));
+        assert_eq!(
+            note_bounded("base", &f, MANUAL_MERGE_ROUNDS - 1),
+            note("base", &f)
+        );
+        let m = BaseFold::Merged(2);
+        assert_eq!(note_bounded("base", &m, 9), note("base", &m));
+    }
+
+    #[test]
+    fn note_bounded_at_the_bound_stops_asking_for_a_merge() {
+        let f = BaseFold::Conflicts(2, "a.txt".into());
+        let n = note_bounded("base", &f, MANUAL_MERGE_ROUNDS).unwrap();
+        assert!(!n.contains("git merge"), "{n}");
+        assert!(n.contains("landing queue"), "{n}");
+    }
+
+    #[test]
+    fn record_fold_counts_conflicts_and_resets() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = BaseFold::Conflicts(1, "a.txt\nb.txt".into());
+        assert_eq!(record_fold(dir.path(), 1, &c, "abc"), 1);
+        assert_eq!(record_fold(dir.path(), 2, &c, "abd"), 2);
+        assert_eq!(
+            record_fold(dir.path(), 3, &BaseFold::Uncommitted(1), "abd"),
+            2
+        );
+        assert_eq!(record_fold(dir.path(), 4, &c, "abe"), 3);
+        let text = std::fs::read_to_string(dir.path().join(FOLD_CONFLICTS_FILE)).unwrap();
+        assert!(text.starts_with("1\tabc\ta.txt, b.txt\n"), "{text}");
+        assert_eq!(record_fold(dir.path(), 5, &BaseFold::Merged(1), "abe"), 0);
+        assert_eq!(record_fold(dir.path(), 6, &c, "abf"), 1);
+        assert_eq!(record_fold(dir.path(), 7, &BaseFold::Current, "abf"), 0);
+    }
+
+    #[test]
+    fn a_conflicted_fold_then_a_clean_one_counts_zero() {
+        let (_t, repo, wt) = setup();
+        let dir = tempfile::tempdir().unwrap();
+        commit(&wt, "a.txt", "one\nmine\nthree\n");
+        commit(&repo, "a.txt", "one\ntheirs\nthree\n");
+        let f = fold(&wt, "base");
+        assert_eq!(record_fold(dir.path(), 1, &f, "x"), 1);
+        git(&wt, &["merge", "-q", "-X", "ours", "base"]);
+        let f = fold(&wt, "base");
+        assert_eq!(f, BaseFold::Current);
+        assert_eq!(record_fold(dir.path(), 2, &f, "x"), 0);
     }
 }

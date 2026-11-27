@@ -6,7 +6,7 @@
 //! mason task add <title> [--project P] [--body TEXT | --body-file F | --body -] [--priority urgent|high|normal|low] [--proposed]
 //! mason task edit <id> [--title T] [--body TEXT | --body-file F | --body -] [--reason R]
 //! mason task list [--state S] [--json]
-//! mason task show <id> [--json] [--watch]
+//! mason task show <id> [--json] [--watch] [--edits [--run N]]
 //! mason task cancel <id> [--delete-branch]
 //! mason task retry <id> [--from exploring|developing|testing|review|landing]
 //! mason logs <id> [--follow]
@@ -21,11 +21,13 @@
 //! mason ssh-key list | use <path> [--project P]
 //! mason alerts [--all] | mason metrics [--days N]
 //! mason health | mason digest [--days N] [--project P] | mason schedule list | run <name>
+//! mason review [status | run | set --enabled B --at HH:MM --every-days N]
 //! mason triage list | review <id> (--agree | --disagree)
 //! mason status [--json] [--watch]
 //! mason hosts [--json]
 //! mason run --needs compile[=N],... [--exclusive] [--label L] [--origin O] -- <cmd>...
 //! mason hold --needs R[,R...] [--exclusive] --pipeline NAME --label L [--pid P]
+//! mason disk [--json] | mason disk clean [--dry-run]
 //! mason targets list [--json]
 //! mason cpu [--json] | mason resources [--json] | mason resources limit <resource> <units>
 //! mason resources gate <name> <value> | mason resources gate <name> --reset
@@ -41,6 +43,7 @@ mod adopt;
 mod batch_ci;
 mod client;
 mod definition;
+mod disk;
 mod doctor;
 mod guard;
 mod hosts;
@@ -77,6 +80,7 @@ mason: command-line client for the MASON pipeline
   mason task block <id> --after ID[,ID...]   add blockers to a task that has not started (owner only)
   mason task revive <id>              put a canceled task whose branch was kept back in the queue (owner only)
   mason task show <id> [--json] [--watch]   with --watch, follow the live step progress
+  mason task show <id> --edits [--run N]    the agent's file edits as compact diffs, and per file how often and whether undone
   mason task cancel <id> [--delete-branch]
   mason task retry <id> [--from STEP] [--restart] [--message TEXT]
                                       the message is shown once in the next round's prompt
@@ -116,9 +120,13 @@ mason: command-line client for the MASON pipeline
   mason notify test CHANNEL           send a test through sound, speech, push, email or webhook
   mason metrics [--days N]            interventions per landed task
   mason health                        the detectors' findings, verdicts on fixes, recurring jobs, triage review queue
+  mason report context [--days N] [--project P]
+                                      send-back rate per step by how full the agent's context got
   mason report [--days N] [--project P]   throughput, send-backs, waits, interventions, host losses, flakes, debts
   mason digest [--days N] [--project P]   landed, interventions, time by state, skips, forced landings (recorded data only)
-  mason schedule list | run <name> [--force]    recurring jobs (introspect, analyst:<project>, <project>/<schedule>); run one now (a full test follows the record unless --force)
+  mason schedule list | run <name> [--force]    recurring jobs (introspect, review, <project>/<schedule>); run one now (a full test follows the record unless --force)
+  mason review [status | run]         the nightly pipeline review: its settings, last and next run; run one now
+  mason review set [--enabled true|false] [--at HH:MM] [--every-days N] [--model M] [--effort E] [--max-proposals N]
   mason triage list | review <id> (--agree | --disagree)   the triage agent's sampled suggestions; it never answers
   mason task skip <id> (--suite S | --step S | --all) [--reason R] [--deferred]
                                       skip a suite or step by force, even mid-run; records a debt;
@@ -156,6 +164,9 @@ mason: command-line client for the MASON pipeline
                                       hold resources for a process's life: prints `granted`, then holds until
                                       stdin closes, --pid exits or it is signalled
   mason resources [--json]            limits, who holds what, and every wait explained
+  mason disk [--json]                 what the pipeline's worktrees take, by kind and task state, and
+                                      what the next sweep would free
+  mason disk clean [--dry-run]        run that sweep now (owner only), or only list what it would remove
   mason cpu [--json]                  where the machine's CPU goes, by task (share of all cores)
   mason targets list [--json]         simulators, emulators and phones, and who has each
   mason resources limit <resource> <units>   change a limit while things run (llm:claude, compile, ...)
@@ -299,6 +310,51 @@ fn run_session(s: &Value) -> i32 {
             eprintln!("cannot run `{}`: {e}", argv[0]);
             127
         }
+    }
+}
+
+/// `mason review status`.
+fn print_review(r: &Value) {
+    let s = &r["settings"];
+    let days = s["every_days"].as_u64().unwrap_or(1);
+    println!(
+        "Pipeline review: {} at {} every {days} day{} ({}, {}; at most {} proposals)",
+        if s["enabled"] == json!(true) {
+            "enabled"
+        } else {
+            "disabled"
+        },
+        s["at"].as_str().unwrap_or("?"),
+        if days == 1 { "" } else { "s" },
+        s["model"].as_str().unwrap_or("default model"),
+        s["effort"].as_str().unwrap_or("default effort"),
+        s["max_proposals"],
+    );
+    if let Some(p) = r["problem"].as_str() {
+        println!("  {p}");
+    }
+    if r["project"].is_null() {
+        println!("  no project of MASON's own is registered ([self]), so no review runs");
+    }
+    if let Some(t) = r["running_task"].as_u64() {
+        println!("  running: task #{t}");
+    }
+    println!(
+        "  next run: {}",
+        r["next_run_text"].as_str().unwrap_or("none")
+    );
+    match r["last"].as_object() {
+        Some(l) => println!(
+            "  last run: {} {}",
+            l.get("completed_text")
+                .and_then(Value::as_str)
+                .unwrap_or("?"),
+            l.get("summary").and_then(Value::as_str).unwrap_or("")
+        ),
+        None => println!("  last run: none"),
+    }
+    if let Some(st) = r["last_status"].as_str().filter(|s| !s.is_empty()) {
+        println!("  status: {st}");
     }
 }
 
@@ -2094,6 +2150,14 @@ fn main() {
         "report" => {
             let days = a.opt("--days").unwrap_or_else(|| "7".into());
             let project = a.opt("--project");
+            let context = match a.pos().as_deref() {
+                None => false,
+                Some("context") => true,
+                Some(other) => {
+                    eprintln!("mason report: unknown section `{other}` (only `context`)");
+                    std::process::exit(2);
+                }
+            };
             finish(&a);
             let mut path = format!("/report?days={days}");
             if let Some(p) = project {
@@ -2103,7 +2167,11 @@ fn main() {
             if json_out {
                 return println!("{r:#}");
             }
-            print_report(&r);
+            if context {
+                print_context_report(&r["context"]);
+            } else {
+                print_report(&r);
+            }
         }
         "schedule" => {
             let sub = a.pos().unwrap_or_default();
@@ -2158,6 +2226,68 @@ fn main() {
                 _ => die("usage: mason schedule list | run <name> [--force]"),
             }
         }
+        "review" => {
+            let sub = a.pos().unwrap_or_else(|| "status".into());
+            if std::env::var("MASON_AS").is_err() {
+                if let Ok(u) = std::env::var("USER") {
+                    std::env::set_var("MASON_AS", u);
+                }
+            }
+            match sub.as_str() {
+                "status" => {
+                    finish(&a);
+                    let r = or_die(d.call("GET", "/review", None));
+                    if json_out {
+                        return println!("{r:#}");
+                    }
+                    print_review(&r);
+                }
+                "run" => {
+                    finish(&a);
+                    let r = or_die(d.call("POST", "/review/run", Some(&json!({}))));
+                    println!("{}", r["said"].as_str().unwrap_or(""));
+                }
+                "set" => {
+                    let mut change = serde_json::Map::new();
+                    if let Some(v) = a.opt("--enabled") {
+                        let on = match v.as_str() {
+                            "true" | "on" | "yes" => true,
+                            "false" | "off" | "no" => false,
+                            _ => die("--enabled is true or false"),
+                        };
+                        change.insert("enabled".into(), json!(on));
+                    }
+                    for (flag, key) in
+                        [("--at", "at"), ("--model", "model"), ("--effort", "effort")]
+                    {
+                        if let Some(v) = a.opt(flag) {
+                            change.insert(key.into(), json!(v));
+                        }
+                    }
+                    for (flag, key) in [
+                        ("--every-days", "every_days"),
+                        ("--max-proposals", "max_proposals"),
+                    ] {
+                        if let Some(v) = a.opt(flag) {
+                            let n: i64 = v
+                                .parse()
+                                .unwrap_or_else(|_| die(&format!("{flag} is a whole number")));
+                            change.insert(key.into(), json!(n));
+                        }
+                    }
+                    finish(&a);
+                    if change.is_empty() {
+                        die("usage: mason review set [--enabled B] [--at HH:MM] [--every-days N]");
+                    }
+                    let r = or_die(d.call("POST", "/review", Some(&Value::Object(change))));
+                    if json_out {
+                        return println!("{r:#}");
+                    }
+                    print_review(&r);
+                }
+                _ => die("usage: mason review [status | run | set ...]"),
+            }
+        }
         "triage" => {
             let sub = a.pos().unwrap_or_default();
             if std::env::var("MASON_AS").is_err() {
@@ -2210,6 +2340,36 @@ fn main() {
                 _ => die("usage: mason triage list | review <id> (--agree | --disagree)"),
             }
         }
+        "disk" => match a.pos().as_deref() {
+            None => {
+                finish(&a);
+                let r = disk::report(
+                    || d.call("GET", "/disk/worktrees", None),
+                    || std::thread::sleep(Duration::from_secs(2)),
+                );
+                let r = or_die(r);
+                if json_out {
+                    return println!("{r:#}");
+                }
+                print!("{}", disk::report_text(&r));
+            }
+            Some("clean") => {
+                let dry_run = a.flag("--dry-run");
+                finish(&a);
+                if std::env::var("MASON_AS").is_err() {
+                    if let Ok(u) = std::env::var("USER") {
+                        std::env::set_var("MASON_AS", u);
+                    }
+                }
+                let body = json!({"dry_run": dry_run});
+                let r = or_die(d.call("POST", "/disk/clean", Some(&body)));
+                if json_out {
+                    return println!("{r:#}");
+                }
+                print!("{}", disk::clean_text(&r));
+            }
+            Some(other) => die(&format!("unknown disk command {other:?}\n\n{HELP}")),
+        },
         "metrics" => {
             let days = a.opt("--days").unwrap_or_else(|| "0".into());
             finish(&a);
@@ -3284,7 +3444,20 @@ fn main() {
                     let id = task_id(&mut a);
                     let watch = a.flag("--watch") || a.flag("-w");
                     let original = a.flag("--original");
+                    let edits = a.flag("--edits");
+                    let edits_run = a.opt("--run");
                     finish(&a);
+                    if edits {
+                        let q = edits_run.map(|r| format!("?run={r}")).unwrap_or_default();
+                        let e = or_die(d.call("GET", &format!("/tasks/{id}/edits{q}"), None));
+                        if json_out {
+                            return println!("{e:#}");
+                        }
+                        for l in mason_daemon::edits::report_lines(&e) {
+                            println!("{l}");
+                        }
+                        return;
+                    }
                     let t = or_die(d.call("GET", &format!("/tasks/{id}"), None));
                     if original {
                         match t["edited"].as_object() {
@@ -3582,12 +3755,16 @@ fn main() {
                     println!("\nsteps:");
                     for s in t["steps"].as_array().into_iter().flatten() {
                         println!(
-                            "  run {:<3} {:<11} {:<12} attempt {}  {}",
+                            "  run {:<3} {:<11} {:<12} attempt {}  {}{}",
                             s["run"],
                             s["step"].as_str().unwrap_or("?"),
                             s["name"].as_str().unwrap_or(""),
                             s["attempt"],
-                            s["outcome"].as_str().unwrap_or("running")
+                            s["outcome"].as_str().unwrap_or("running"),
+                            s["context"]["line"]
+                                .as_str()
+                                .map(|l| format!("  {l}"))
+                                .unwrap_or_default()
                         );
                     }
                 }
@@ -4220,6 +4397,27 @@ fn print_health(r: &serde_json::Value) {
         q,
         r["triage"]["reviewed"]
     );
+}
+
+/// `mason report context`: the daemon's `context` section, one line per step and bucket.
+fn print_context_report(r: &serde_json::Value) {
+    let rows = r.as_array().cloned().unwrap_or_default();
+    if rows.is_empty() {
+        println!("no agent run in the window reported its context");
+        return;
+    }
+    println!("send-backs by peak context fill:");
+    println!("  step         peak fill   runs  sent back   rate");
+    for x in &rows {
+        println!(
+            "  {:<12} {:<9} {:>6} {:>10}  {:>4}%",
+            x["step"].as_str().unwrap_or("?"),
+            x["bucket"].as_str().unwrap_or("?"),
+            x["runs"],
+            x["sent_back"],
+            x["rate_percent"]
+        );
+    }
 }
 
 /// `mason report` as text: one block per section, from the daemon's `/report`.

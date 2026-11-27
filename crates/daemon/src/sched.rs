@@ -148,6 +148,12 @@ pub const DEFAULT_GHA_CEILING: u32 = 20;
 /// The name of the ceiling in `mason resources limit` and limits.kv. It is not a pool.
 pub const GHA_CEILING: &str = "gha_ceiling";
 
+/// The share of the `gha` limit, in percent, above which a scheduled full-CI run is not started
+/// (s1218). `mason resources limit gha_full_share N` changes it. It is not a pool.
+pub const DEFAULT_GHA_FULL_SHARE: u32 = 50;
+/// The name of the full-CI share in `mason resources limit` and limits.kv. It is not a pool.
+pub const GHA_FULL_SHARE: &str = "gha_full_share";
+
 /// GitHub's macOS job limit for the free plan: a job on a `macos*` runner counts against this
 /// as well as against `gha_ceiling` (#819).
 pub const DEFAULT_GHA_MACOS_CEILING: u32 = 5;
@@ -493,6 +499,8 @@ struct State {
     /// workflows with a short label for them (#766).
     gha_ceiling: u32,
     gha_macos_ceiling: u32,
+    /// Percent of the `gha` limit a scheduled full-CI run may start under (s1218).
+    gha_full_share: u32,
     other: OtherJobs,
     floor_mb: Option<u64>,
     /// resources.toml as read, and the gates changed since (`gates.kv`).
@@ -666,7 +674,7 @@ fn own_slot_wait(
 }
 
 /// Per waiting task: its holders' grant times and the waiting count of its class.
-pub type WaitHolders = BTreeMap<TaskId, (Vec<u64>, u32, u32)>;
+pub type WaitHolders = BTreeMap<TaskId, (Vec<u64>, u32, u32, bool)>;
 
 struct DiskCfg {
     source: Arc<dyn DiskSource>,
@@ -879,6 +887,13 @@ impl Giver {
     /// The runner units the lease holds now.
     pub fn held(&self) -> BTreeMap<String, u32> {
         self.b.lease_units(self.id)
+    }
+
+    /// Can the pool ever grant `units`? `false` when a resource's limit is below what is asked.
+    pub fn pool_fits(&self, units: &BTreeMap<String, u32>) -> bool {
+        units
+            .iter()
+            .all(|(k, n)| self.b.limit(k).is_none_or(|l| l >= *n))
     }
 
     /// Ask again for `units`, at the lease's rank and from when it first began to wait.
@@ -1102,6 +1117,7 @@ impl Broker {
                 pools,
                 gha_ceiling: DEFAULT_GHA_CEILING,
                 gha_macos_ceiling: DEFAULT_GHA_MACOS_CEILING,
+                gha_full_share: DEFAULT_GHA_FULL_SHARE,
                 other: OtherJobs::default(),
                 floor_mb: cfg.memory_floor_mb,
                 base: cfg.clone(),
@@ -1193,6 +1209,10 @@ impl Broker {
                             st.gha_macos_ceiling = n;
                             continue;
                         }
+                        if name == GHA_FULL_SHARE {
+                            st.gha_full_share = n.min(100);
+                            continue;
+                        }
                         // A saved `compile` count is the owner's word and replaces
                         // cpu.compile_jobs; the CPU and disk gates still apply.
                         let kind = kind_for(&st, name);
@@ -1255,6 +1275,11 @@ impl Broker {
             st.gha_ceiling = units;
         } else if name == GHA_MACOS_CEILING {
             st.gha_macos_ceiling = units;
+        } else if name == GHA_FULL_SHARE {
+            if units > 100 {
+                return Err("`gha_full_share` is a percent: 0 to 100".into());
+            }
+            st.gha_full_share = units;
         } else {
             let kind = kind_for(&st, name);
             st.ledger.set_capacity(name, units, kind);
@@ -1369,12 +1394,32 @@ impl Broker {
                 })
             })
             .collect();
+        let task_waiting = snap
+            .waiting
+            .iter()
+            .filter(|r| {
+                r.needs
+                    .amounts
+                    .keys()
+                    .any(|k| mason_scheduler::is_gha_pool(k))
+            })
+            .filter(|r| {
+                let (label, _) = mason_scheduler::label_parts(&r.label);
+                !label.starts_with("debt") && !label.contains("scheduled full test")
+            })
+            .count() as u32;
+        let limit = st.ledger.capacity(GHA).map_or(0, |c| c.units);
+        let total = snap.used.get(GHA).copied().unwrap_or(0);
+        let deferred =
+            crate::ci_schedule::full_start_deferred(total, limit, st.gha_full_share, task_waiting);
         serde_json::json!({
             "mason": used,
+            "full_deferred": deferred,
             "other": st.other.gha_running,
             "other_queued": st.other.gha_queued,
             "other_label": st.other.label,
             "ceiling": st.gha_ceiling,
+            "full_share_pct": st.gha_full_share,
             "waiters": waiters,
             "macos": {
                 "other": st.other.macos_running,
@@ -1401,6 +1446,39 @@ impl Broker {
                     .any(|k| mason_scheduler::is_gha_pool(k))
             })
             .count()
+    }
+
+    /// How many requests for GitHub runner units are task work: waiting, not a debt payment and
+    /// not the scheduled full test itself. A full-CI dispatch is deferred while this is above 0.
+    pub fn gha_task_waiting(&self) -> usize {
+        let st = lock(&self.st);
+        st.ledger
+            .snapshot()
+            .waiting
+            .iter()
+            .filter(|r| {
+                r.needs
+                    .amounts
+                    .keys()
+                    .any(|k| mason_scheduler::is_gha_pool(k))
+            })
+            .filter(|r| {
+                let (label, _) = mason_scheduler::label_parts(&r.label);
+                !label.starts_with("debt") && !label.contains("scheduled full test")
+            })
+            .count()
+    }
+
+    /// Units of the `gha` pool in use (MASON's and other workflows'), the pool's limit, and the
+    /// percent share a full-CI run may start under.
+    pub fn gha_use(&self) -> (u32, u32, u32) {
+        let st = lock(&self.st);
+        let snap = st.ledger.snapshot();
+        (
+            snap.used.get(GHA).copied().unwrap_or(0),
+            st.ledger.capacity(GHA).map_or(0, |c| c.units),
+            st.gha_full_share,
+        )
     }
 
     fn gates_file(&self) -> PathBuf {
@@ -1526,6 +1604,18 @@ impl Broker {
         let mut st = lock(&self.st);
         self.refresh_disk(&mut st)
             .filter(|g| g.free_mb < g.floor_mb)
+    }
+
+    /// Megabytes free on the volume holding `path`, read now, and the floor; `None` when there
+    /// is no reading or no floor.
+    pub fn disk_free_and_floor(&self, path: &std::path::Path) -> Option<(u64, u64)> {
+        let (source, floor) = {
+            let st = lock(&self.st);
+            let c = st.disk.as_ref()?;
+            (c.source.clone(), c.floor_mb)
+        };
+        let free = source.free_mb(&crate::disk::nearest_existing(path)?)?;
+        Some((free, floor))
     }
 
     /// How many requests the disk gate is holding right now (zero while disk is fine).
@@ -1975,7 +2065,7 @@ impl Broker {
                 *depth.entry(w.class()).or_default() += 1;
             }
         }
-        let holders: BTreeMap<TaskId, (Vec<u64>, u32, u32)> = waits
+        let holders: BTreeMap<TaskId, (Vec<u64>, u32, u32, bool)> = waits
             .waits
             .iter()
             .filter_map(|(id, w)| {
@@ -1986,6 +2076,7 @@ impl Broker {
                             w.held_by.iter().map(|h| h.since).collect(),
                             depth.get(&w.class()).copied().unwrap_or(0),
                             w.position as u32,
+                            w.held_by.iter().any(|h| is_check_lease(&h.label)),
                         ),
                     )
                 })
@@ -3799,6 +3890,11 @@ impl Broker {
     }
 }
 
+/// A runner-pool lease taken for an agent's `#N check` (not `interactive \`cargo check\``).
+pub fn is_check_lease(label: &str) -> bool {
+    label.starts_with('#') && label.ends_with(" check")
+}
+
 /// What kind of work a request for runner units is, from its label (#818): a landing batch, an
 /// agent's check, a debt payment, else a test step.
 pub fn gha_kind(label: &str) -> &'static str {
@@ -4068,6 +4164,13 @@ pub(crate) fn broker_with_waiting(dir: &Path, n: u64) -> Arc<Broker> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn is_check_lease_matches_only_agent_check_labels() {
+        assert!(is_check_lease("#1111 check"));
+        assert!(!is_check_lease("#1111"));
+        assert!(!is_check_lease("interactive `cargo check`"));
+    }
 
     #[test]
     fn a_waiters_pass_is_due_only_when_none_ran_lately() {
@@ -5062,6 +5165,48 @@ pub(crate) mod tests {
 
     fn macos_run() -> BTreeMap<String, u32> {
         BTreeMap::from([("gha".to_string(), 1), ("gha-macos".to_string(), 1)])
+    }
+
+    #[test]
+    fn gha_task_waiting_leaves_out_debts_and_the_scheduled_full_test() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = runner_broker(dir.path(), 1, 1, 0);
+        let uses = BTreeMap::from([("gha".to_string(), 1)]);
+        let rank = |t: u64| Rank::new(false, 3, 2, t, t, false);
+        let _hold = b
+            .acquire(
+                TaskId(9),
+                "#9 holder",
+                rank(9),
+                Needs::of(&[("gha", 1)]),
+                &|| true,
+                &mut |_| {},
+            )
+            .unwrap();
+        {
+            let mut st = lock(&b.st);
+            for (t, label) in [(1u64, "debt #1"), (2, "scheduled full test")] {
+                let id = st.ledger.submit(rank(t), needs_of(&uses, None), label, t);
+                st.meta.insert(id, Meta::Task);
+            }
+        }
+        assert_eq!(b.gha_waiting(), 2);
+        assert_eq!(b.gha_task_waiting(), 0);
+        queue_gha(&b, 3);
+        assert_eq!(b.gha_task_waiting(), 1);
+    }
+
+    #[test]
+    fn the_full_share_is_a_percent_kept_across_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = runner_broker(dir.path(), 16, 4, 0);
+        assert_eq!(b.gha_use().2, 50);
+        assert!(b.set_limit(GHA_FULL_SHARE, 101).is_err());
+        b.set_limit(GHA_FULL_SHARE, 30).unwrap();
+        assert_eq!(b.gha_use().2, 30);
+        assert_eq!(b.limit(GHA_FULL_SHARE), None);
+        let b2 = runner_broker(dir.path(), 16, 4, 0);
+        assert_eq!(b2.gha_use().2, 30);
     }
 
     #[test]

@@ -5,8 +5,8 @@
 //! - The daily detector cycle runs the rules of `mason_core::introspect` over the recorded
 //!   history (the `step_attempts` table, the event log, debts) and files each finding as a
 //!   proposal through `proposals::file`, so the duplicate, evidence and cap rules apply.
-//! - The weekly analyst is an agent task. It reads the digest and writes a JSON file in its
-//!   worktree; the daemon checks every entry with the same rules before filing it.
+//! - The pipeline review (`crate::review`) is an agent task. It reads the facts in its
+//!   worktree and writes a JSON file there; the daemon checks every entry before filing it.
 //! - Closing the loop: each cycle looks at the findings whose proposal has landed and compares
 //!   the metric since then with the metric when it was found.
 //! - The digest and the Health report are computed from recorded data only.
@@ -27,9 +27,10 @@ use std::sync::{Arc, Mutex};
 use toml_edit::DocumentMut;
 
 const DAY_MS: u64 = 24 * 3_600_000;
-/// The analyst's tasks start with this, which is how a finished step is known to be one.
+/// The title of the pipeline review's task. Which task is the review is told by the schedule
+/// row, not by this.
 pub const ANALYST_TITLE: &str = "Analyse recent pipeline behaviour";
-/// The file the analyst writes in its worktree.
+/// The file the review writes in its worktree.
 pub const ANALYST_FILE: &str = "analyst-result.json";
 
 // ---- configuration -----------------------------------------------------------------------
@@ -170,8 +171,9 @@ pub struct Runtime {
 
 // ---- the tick ----------------------------------------------------------------------------
 
-/// Start the thread that runs the detector cycle, the analyst and the recurring jobs when
-/// they are due. Nothing runs at start-up: a job seen for the first time waits one interval.
+/// Start the thread that runs the detector cycle, the pipeline review and the recurring jobs
+/// when they are due. A job seen for the first time waits one interval (the review: its next
+/// time of day).
 pub fn spawn(d: &Arc<Daemon>) {
     let every = d.cfg.schedule_tick;
     crate::bg::spawn_loop(d, "introspect", move |weak| {
@@ -227,22 +229,8 @@ pub fn tick(d: &Arc<Daemon>) {
     if due(Some(intro.last_run), now, intro.every_ms) {
         jobs.push(("introspect".into(), Job::Cycle));
     }
+    crate::review::tick(d, now);
     for p in d.projects().values() {
-        let cfg = p.introspect();
-        if cfg.enabled && cfg.analyst {
-            let name = format!("analyst:{}", p.id);
-            let row = ensure_row(
-                d,
-                &name,
-                &p.id,
-                "analyst",
-                d.cfg.analyst_interval.as_millis() as u64,
-                now,
-            );
-            if due(Some(row.last_run), now, row.every_ms) {
-                jobs.push((name, Job::Analyst(p.id.clone())));
-            }
-        }
         for spec in p.schedules() {
             let name = crate::schedule::row_name(&p.id, &spec.name);
             let row = ensure_row(d, &name, &p.id, &spec.kind, spec.every_ms, now);
@@ -327,7 +315,6 @@ fn look_quiet(d: &Daemon, project: &str, name: &str, dur_ms: u64, now: u64) -> b
 
 enum Job {
     Cycle,
-    Analyst(String),
     Schedule(String, String),
 }
 
@@ -345,13 +332,6 @@ fn run_job(d: &Arc<Daemon>, name: &str, job: &Job) -> String {
             let v = cycle(d);
             v["summary"].as_str().unwrap_or("ran").to_string()
         }
-        Job::Analyst(p) => match d.project_id_by_name(p) {
-            Some(pid) => match file_analyst_task(d, pid) {
-                Ok(t) => format!("analyst task #{} filed", t.0),
-                Err(e) => format!("analyst not started: {e}"),
-            },
-            None => "no such project".into(),
-        },
         Job::Schedule(p, s) => {
             let spec = d
                 .project_id_by_name(p)
@@ -379,17 +359,21 @@ fn run_job(d: &Arc<Daemon>, name: &str, job: &Job) -> String {
     said
 }
 
-/// Run the job called `name` now (`introspect`, `analyst:<project>` or `<project>/<schedule>`).
+/// Run the job called `name` now (`introspect`, `review` or `<project>/<schedule>`).
 pub fn run_now(d: &Arc<Daemon>, name: &str) -> Result<String, String> {
     run_now_forced(d, name, false)
 }
 
 /// As [`run_now`]; `force` makes a full-test schedule start whatever the record says.
 pub fn run_now_forced(d: &Arc<Daemon>, name: &str, force: bool) -> Result<String, String> {
+    if name == crate::review::ROW {
+        return crate::review::file(d, now_ms()).map(|t| format!("review task #{} filed", t.0));
+    }
+    if name.starts_with("analyst:") {
+        return Err("the analyst is now the pipeline review: use `mason review run`".into());
+    }
     let job = if name == "introspect" {
         Job::Cycle
-    } else if let Some(p) = name.strip_prefix("analyst:") {
-        Job::Analyst(p.to_string())
     } else if let Some((p, s)) = name.split_once('/') {
         Job::Schedule(p.to_string(), s.to_string())
     } else {
@@ -901,11 +885,9 @@ pub fn file_finding(
         None => format!("{} is a snapshot with no window to compare", f.metric),
     };
     let body = format!(
-        "{}\n\n**Metric expected to move:** `{}`. {metric_line}.\n\n_Found by the {} introspection {}; project `{}`._",
+        "{}\n\n**Metric expected to move:** `{}`. {metric_line}.\n\n_Found by the daily introspection detector; project `{}`._",
         f.body.trim(),
         f.metric,
-        if f.rule == "analyst" { "weekly" } else { "daily" },
-        if f.rule == "analyst" { "analyst" } else { "detector" },
         f.project
     );
     let filed = crate::proposals::file(
@@ -919,8 +901,15 @@ pub fn file_finding(
             blocks_task: false,
             explored: true,
             estimate: Some((f.impact, f.cost)),
+            lookback: None,
         },
     )?;
+    note_finding(d, &f, filed.task)?;
+    Ok(Some(filed.task))
+}
+
+/// Remember a filed finding, and the metric it expects to move.
+fn note_finding(d: &Daemon, f: &Finding, task: TaskId) -> Result<(), String> {
     let b = f.before.unwrap_or(Measure {
         num: 0.0,
         den: 0.0,
@@ -933,7 +922,7 @@ pub fn file_finding(
             project: f.project.clone(),
             metric: f.metric.clone(),
             title: f.title.clone(),
-            task: filed.task.0,
+            task: task.0,
             before_num: b.num,
             before_den: b.den,
             before_n: b.n,
@@ -941,7 +930,7 @@ pub fn file_finding(
             ..Default::default()
         })
         .map_err(|e| e.to_string())?;
-    Ok(Some(filed.task))
+    Ok(())
 }
 
 /// For each open finding whose proposal landed, compare the metric since the landing with the
@@ -1027,57 +1016,145 @@ pub fn close_loops(d: &Arc<Daemon>) -> Vec<Value> {
     out
 }
 
-// ---- the analyst -------------------------------------------------------------------------
+// ---- the pipeline review ------------------------------------------------------------------
 
-/// File the analyst's task: Low priority, with the digest in its body. Not filed while the
-/// last one is still open.
-pub fn file_analyst_task(d: &Arc<Daemon>, pid: ProjectId) -> Result<TaskId, String> {
-    let p = d.project(pid).ok_or("no such project")?;
-    let key = format!("analyst:{}", p.id);
-    let mut row = d
-        .store
-        .schedule(&key)
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| ScheduleRow {
-            name: key.clone(),
-            project: p.id.clone(),
-            kind: "analyst".into(),
-            every_ms: d.cfg.analyst_interval.as_millis() as u64,
-            ..Default::default()
-        });
-    if let Some(prev) = row.last_task {
-        let live = d
-            .world()
-            .ok()
-            .and_then(|w| w.tasks.get(&TaskId(prev)).map(|t| t.state))
-            .is_some_and(|s| !matches!(s, State::Landed | State::Canceled | State::Failed));
-        if live {
-            return Err(format!("the last analyst task, #{prev}, is still open"));
-        }
-    }
-    let now = now_ms();
-    let dg = digest(d, Some(&p.id), now.saturating_sub(7 * DAY_MS), now);
-    let text = serde_json::to_string_pretty(&dg).unwrap_or_default();
-    let digest_text: String = text.chars().take(8000).collect();
-    let body = format!(
-        "You are the analyst. Read the digest below and the event history (`mason digest`, `mason metrics`) and find what the daily rules cannot: a pattern in how this pipeline spends its time, fails, or makes the owner step in.\n\n\
-         Write your findings as JSON in a file called `{ANALYST_FILE}` in the root of your worktree, and do not commit it:\n\n\
-         ```json\n{{\"findings\": [{{\"title\": \"...\", \"body\": \"what is wrong and why it matters\", \"evidence\": \"a file and line or recorded output that shows it, e.g. crates/daemon/src/sched.rs:120\", \"metric\": \"one of: {}\", \"severity\": \"low or high\", \"cost\": \"small or large\"}}]}}\n```\n\n\
-         `severity` is how much the finding matters and `cost` how big the fix looks; leave them out and it counts as high and large. A finding with no evidence naming a file, or naming a metric that is not in that list, is refused. Do not change any code. Commit nothing. Then finish with a summary.\n\n## Digest (last 7 days, computed from recorded data)\n```json\n{digest_text}\n```",
-        METRICS.join(", ")
-    );
-    let t = crate::schedule::file_low(d, p, ANALYST_TITLE, &body)?;
-    row.last_task = Some(t.0);
-    row.last_run = now;
-    let _ = d.store.put_schedule(&row);
-    Ok(t)
+/// The owner's six questions, each with the category its findings name.
+pub const QUESTIONS: [(&str, &str); 6] = [
+    ("stuck", "Where was the pipeline stuck?"),
+    ("speed", "Where could the pipeline be faster?"),
+    (
+        "narrow",
+        "Where did the pipeline test more than it needed to at an early stage (where could tests be narrowed without losing quality)?",
+    ),
+    ("coverage", "Where is there a gap in test coverage?"),
+    ("crash", "Where did the pipeline crash, in any way?"),
+    (
+        "automate",
+        "Where could the pipeline automate more and involve the owner less?",
+    ),
+];
+
+/// The body of the review task, for the window from `since` to `now`.
+pub fn review_body(d: &Daemon, since: u64, now: u64, max_proposals: u32) -> String {
+    let own = crate::proposals::self_project(d).map_or_else(String::new, |(_, p)| p.id.clone());
+    let projects = crate::review::included(d)
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let hours = now.saturating_sub(since) / 3_600_000;
+    let questions: String = QUESTIONS
+        .iter()
+        .enumerate()
+        .map(|(i, (c, q))| format!("{}. `{c}`: {q}\n", i + 1))
+        .collect();
+    let facts = crate::review::FACTS_DIR;
+    format!(
+        "You are reviewing the health of this pipeline for its owner. Projects covered: {projects}. \
+         MASON's own project is `{own}`. The window is since the last completed review: from {since} to {now} \
+         (milliseconds since 1970, about {hours} hour(s)). Use `{facts}/digest-7d.json` for week-long trends.\n\n\
+         ## Six questions, six required sections\n\
+         Answer each of these. Every section ends in findings, or in \"nothing found, because ...\":\n\n\
+         {questions}\n\
+         ## What to read\n\
+         The facts are files in `{facts}/` in your worktree (start with `{facts}/README.md`). They are computed from recorded data. \
+         You may also run read-only `mason` commands: `mason task list --json`, `mason task show <id>`, `mason digest`, `mason metrics`, `mason health history`. \
+         Change nothing in the pipeline and commit nothing.\n\n\
+         ## No duplicates, ever\n\
+         `{facts}/tasks.json` lists every task, open or finished, whoever filed it. Search it before each idea. \
+         Do not file an idea that any task already covers, however old and whatever its state; list it under `duplicates` with that task's number, \
+         and name each one in your final summary. MASON also refuses a filing that duplicates a task.\n\n\
+         ## Each finding is a proposed ticket\n\
+         For MASON's own project write `body` in the format of CLAUDE.md \"Filing tasks\": one paragraph on the problem; \
+         **Cause** with file:line on `origin/develop` (read it with `git show origin/develop:<path>`, not from the worktree); \
+         **Change**; **Coordinate**; **Trust** (paths in `PROTECTED`, `crates/daemon/src/protect.rs`); **Tests** (no timing assertions); \
+         **Exit test**; then the \"How to work in this repository\" footer, copied from an existing task (`mason task show 54`). \
+         For another project use that project's own task format, with no footer. The owner approves each one before anything runs. \
+         At most {max_proposals} findings are filed per review, in the order you write them: put the most important first.\n\n\
+         ## The result\n\
+         Write `{ANALYST_FILE}` in the root of your worktree, do not commit it, then call submit_change with the hash from `git rev-parse HEAD`:\n\n\
+         ```json\n{{\n  \"findings\": [{{\"category\": \"one of: {categories}\", \"title\": \"1 to 120 characters\", \"body\": \"the ticket\", \
+         \"evidence\": \"a file and line or recorded output that shows it, e.g. crates/daemon/src/sched.rs:120\", \
+         \"project\": \"the project it is for (leave out for {own})\", \"metric\": \"optional, one of: {metrics}\", \
+         \"severity\": \"low or high\", \"cost\": \"small or large\"}}],\n  \
+         \"duplicates\": [{{\"category\": \"...\", \"idea\": \"what you did not file\", \"task\": 123}}],\n  \
+         \"nothing_found\": [{{\"category\": \"...\", \"because\": \"...\"}}]\n}}\n```\n\n\
+         Each of the six categories must appear in `findings`, `duplicates` or `nothing_found`. A finding with no evidence naming a file is refused.",
+        categories = CATEGORIES.join(", "),
+        metrics = METRICS.join(", "),
+    )
 }
 
-/// What reading an analyst task's result came to.
+/// The result file of a review.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ReviewResult {
+    /// Each finding, with the project it names (empty: MASON's own).
+    pub findings: Vec<(Draft, String)>,
+    /// Ideas the agent did not file: (idea, the task that covers it).
+    pub duplicates: Vec<(String, u64)>,
+    /// (category, why nothing was found).
+    pub nothing_found: Vec<(String, String)>,
+}
+
+/// Read the result file. An error says what to write instead.
+pub fn parse_result(text: &str) -> Result<ReviewResult, String> {
+    let v: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+    let findings = v["findings"]
+        .as_array()
+        .ok_or("the file needs a `findings` array")?;
+    let s = |x: &Value, k: &str| x[k].as_str().unwrap_or_default().trim().to_string();
+    let list = |k: &str| v[k].as_array().cloned().unwrap_or_default();
+    let mut out = ReviewResult::default();
+    for x in findings {
+        out.findings.push((
+            Draft {
+                title: s(x, "title"),
+                body: s(x, "body"),
+                evidence: s(x, "evidence"),
+                category: s(x, "category"),
+                metric: s(x, "metric"),
+                severity: s(x, "severity"),
+                cost: s(x, "cost"),
+            },
+            s(x, "project"),
+        ));
+    }
+    let mut answered: BTreeSet<String> = out
+        .findings
+        .iter()
+        .map(|(f, _)| f.category.clone())
+        .collect();
+    for x in list("duplicates") {
+        let task = x["task"]
+            .as_u64()
+            .ok_or("each of `duplicates` needs the `task` number it duplicates")?;
+        answered.insert(s(&x, "category"));
+        out.duplicates.push((s(&x, "idea"), task));
+    }
+    for x in list("nothing_found") {
+        let (c, why) = (s(&x, "category"), s(&x, "because"));
+        if why.is_empty() {
+            return Err("each of `nothing_found` needs `because`".into());
+        }
+        answered.insert(c.clone());
+        out.nothing_found.push((c, why));
+    }
+    let missing: Vec<&str> = CATEGORIES
+        .into_iter()
+        .filter(|c| !answered.contains(*c))
+        .collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "every section needs findings or a `nothing_found` entry; missing: {}",
+            missing.join(", ")
+        ));
+    }
+    Ok(out)
+}
+
+/// What reading a review task's result came to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Ingest {
-    /// Not the analyst's task: nothing was read.
+    /// Not the review's task: nothing was read.
     NotAnalyst,
     /// The result was read and its findings filed, now or by an earlier step of this task.
     Done,
@@ -1087,20 +1164,20 @@ pub enum Ingest {
     Unreadable(String),
 }
 
-/// Whether `task` is the analyst's task of `project`, known by the schedule row that recorded
-/// it, not by its title.
+/// Whether `task` is the review's task, in MASON's own `project`, known by the schedule row
+/// that recorded it, not by its title.
 pub fn is_analyst_task(d: &Daemon, task: TaskId, project: &str) -> bool {
     d.store
-        .schedule(&format!("analyst:{project}"))
+        .schedule(crate::review::ROW)
         .ok()
         .flatten()
-        .is_some_and(|r| r.last_task == Some(task.0))
+        .is_some_and(|r| r.project == project && r.last_task == Some(task.0))
 }
 
-/// A task that carries the analyst's title, in a project whose analyst schedule names another
-/// task or none, is not read. Say so: its findings would otherwise vanish without a word.
+/// A task that carries the analyst's title, but that the review schedule does not name, is not
+/// read. Say so: its findings would otherwise vanish without a word.
 fn warn_if_passed_over(d: &Daemon, task: TaskId, project: &str, wt: &Path) {
-    let Ok(Some(row)) = d.store.schedule(&format!("analyst:{project}")) else {
+    let Ok(Some(row)) = d.store.schedule(crate::review::ROW) else {
         return;
     };
     let titled = d
@@ -1114,14 +1191,14 @@ fn warn_if_passed_over(d: &Daemon, task: TaskId, project: &str, wt: &Path) {
             project,
             worktree = %wt.display(),
             last_task = ?row.last_task,
-            "the analyst schedule does not name this analyst task; its result was not read"
+            "the review schedule does not name this analyst task; its result was not read"
         );
     }
 }
 
-/// After the develop step of an analyst task: read the file it wrote, check every finding, and
-/// file the good ones, once per task. The consumed file is kept in `dir` (the task's log
-/// directory), not in the worktree. Refusals are written beside it.
+/// After the develop step of the review task: read the file it wrote, check every finding, and
+/// file the good ones as proposed, once per task. The consumed file is kept in `dir` (the
+/// task's log directory), not in the worktree. Refusals are written beside it.
 pub fn ingest_analyst(
     d: &Arc<Daemon>,
     task: TaskId,
@@ -1149,84 +1226,205 @@ pub fn ingest_analyst(
         );
         return Ingest::Missing;
     };
-    let drafts = match parse_drafts(&text) {
+    let result = match parse_result(&text) {
         Ok(x) => x,
         Err(e) => {
             let _ = std::fs::write(
                 dir.join("analyst-refused.txt"),
                 format!("unreadable: {e}\n"),
             );
-            note_analyst(
-                d,
-                project,
-                format!("task #{}: result unreadable: {e}", task.0),
-            );
+            note_review(d, &format!("task #{}: result unreadable: {e}", task.0));
             return Ingest::Unreadable(e);
         }
     };
     let _ = std::fs::write(dir.join(ANALYST_FILE), &text);
     let _ = std::fs::remove_file(&file);
     let _ = std::fs::write(&done, "");
-    let (ok, refused) = accept_drafts(project, &drafts);
-    let cfg = d
-        .project_id_by_name(project)
-        .and_then(|p| d.project(p))
-        .map(|p| p.introspect())
-        .unwrap_or_default();
-    let now = now_ms();
-    let stats = stats_for(d, Some(project), now.saturating_sub(cfg.window_ms), now);
-    let (mut filed, mut refused_n) = (0, refused.len());
-    let mut why = refused
-        .iter()
-        .map(|(t, w)| format!("{t}: {w}"))
-        .collect::<Vec<_>>();
-    for f in ok {
-        match file_finding(d, f.clone(), &stats) {
-            Ok(Some(_)) => filed += 1,
-            Ok(None) => {}
-            Err(e) => {
-                refused_n += 1;
-                why.push(format!("{}: {e}", f.title));
-            }
-        }
-    }
-    if !why.is_empty() {
-        let _ = std::fs::write(dir.join("analyst-refused.txt"), why.join("\n") + "\n");
-    }
-    note_analyst(
-        d,
-        project,
-        format!("task #{}: {filed} filed, {refused_n} refused", task.0),
-    );
+    file_result(d, task, project, &result, dir);
     Ingest::Done
 }
 
-fn note_analyst(d: &Daemon, project: &str, say: String) {
-    let key = format!("analyst:{project}");
-    if let Ok(Some(mut row)) = d.store.schedule(&key) {
-        row.last_status = say;
-        let _ = d.store.put_schedule(&row);
+/// File what a review found and record what became of each part of it.
+fn file_result(d: &Arc<Daemon>, task: TaskId, own: &str, result: &ReviewResult, dir: &Path) {
+    let included = crate::review::included(d);
+    let max = crate::review::read(d).0.max_proposals as usize;
+    let now = now_ms();
+    let mut filed: Vec<u64> = vec![];
+    let mut dups: Vec<Value> = result
+        .duplicates
+        .iter()
+        .map(|(idea, t)| json!({"idea": idea, "task": t, "by": "analyst"}))
+        .collect();
+    let mut refused: Vec<String> = vec![];
+    let mut capped: Vec<String> = vec![];
+    let mut windows: BTreeMap<String, Stats> = BTreeMap::new();
+    for (draft, named) in &result.findings {
+        let project = if named.is_empty() { own } else { named };
+        if project != own && !included.contains(project) {
+            refused.push(format!(
+                "{}: project {project:?} is not part of this review",
+                draft.title
+            ));
+            continue;
+        }
+        let (ok, bad) = accept_drafts(project, std::slice::from_ref(draft));
+        refused.extend(bad.iter().map(|(t, w)| format!("{t}: {w}")));
+        let Some(mut f) = ok.into_iter().next() else {
+            continue;
+        };
+        if filed.len() >= max {
+            capped.push(f.title);
+            continue;
+        }
+        if !f.metric.is_empty() {
+            let stats = windows.entry(f.project.clone()).or_insert_with(|| {
+                let window = d
+                    .project_id_by_name(&f.project)
+                    .and_then(|p| d.project(p))
+                    .map(|p| p.introspect())
+                    .unwrap_or_default()
+                    .window_ms;
+                stats_for(d, Some(&f.project), now.saturating_sub(window), now)
+            });
+            f.before = measure(&f.metric, stats);
+        }
+        match file_review_finding(d, task, &f) {
+            Ok(t) => filed.push(t.0),
+            Err(why) => match duplicated_task(&why) {
+                Some(of) => dups.push(json!({"idea": f.title, "task": of, "by": "mason"})),
+                None => refused.push(format!("{}: {why}", f.title)),
+            },
+        }
     }
+    let mut lines: Vec<String> = refused.clone();
+    lines.extend(
+        capped
+            .iter()
+            .map(|t| format!("{t}: not filed, over the cap of {max} per review")),
+    );
+    if !lines.is_empty() {
+        let _ = std::fs::write(dir.join("analyst-refused.txt"), lines.join("\n") + "\n");
+    }
+    let nothing: Vec<Value> = result
+        .nothing_found
+        .iter()
+        .map(|(c, why)| json!({"category": c, "because": why}))
+        .collect();
+    let summary = summary_line(
+        task,
+        &filed,
+        &dups,
+        &result.nothing_found,
+        &refused,
+        &capped,
+        max,
+    );
+    crate::review::complete(
+        d,
+        task,
+        json!({
+            "filed": filed, "duplicates": dups, "nothing_found": nothing,
+            "refused": refused, "capped": capped, "max_proposals": max,
+        }),
+        &summary,
+    );
     d.poke();
 }
 
-fn parse_drafts(text: &str) -> Result<Vec<Draft>, String> {
-    let v: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
-    let arr = v["findings"]
-        .as_array()
-        .ok_or("the file needs a `findings` array")?;
-    let s = |x: &Value, k: &str| x[k].as_str().unwrap_or_default().to_string();
-    Ok(arr
-        .iter()
-        .map(|x| Draft {
-            title: s(x, "title"),
-            body: s(x, "body"),
-            evidence: s(x, "evidence"),
-            metric: s(x, "metric"),
-            severity: s(x, "severity"),
-            cost: s(x, "cost"),
-        })
-        .collect())
+/// The task a refusal says the filing duplicates.
+fn duplicated_task(why: &str) -> Option<u64> {
+    why.strip_prefix(crate::proposals::DUPLICATE_OF)?
+        .split(|c: char| !c.is_ascii_digit())
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// What the schedule row says of a completed review.
+fn summary_line(
+    task: TaskId,
+    filed: &[u64],
+    dups: &[Value],
+    nothing: &[(String, String)],
+    refused: &[String],
+    capped: &[String],
+    max: usize,
+) -> String {
+    let mut out = format!("task #{}: {} filed", task.0, filed.len());
+    if !filed.is_empty() {
+        let ids: Vec<String> = filed.iter().map(|t| format!("#{t}")).collect();
+        out += &format!(" ({})", ids.join(", "));
+    }
+    out += &format!("; {} duplicate(s) dropped", dups.len());
+    if !dups.is_empty() {
+        let each: Vec<String> = dups
+            .iter()
+            .map(|x| format!("{:?} is #{}", x["idea"].as_str().unwrap_or(""), x["task"]))
+            .collect();
+        out += &format!(" ({})", each.join(", "));
+    }
+    if !nothing.is_empty() {
+        let each: Vec<String> = nothing
+            .iter()
+            .map(|(c, why)| format!("{c} (because {why})"))
+            .collect();
+        out += &format!("; nothing found: {}", each.join(", "));
+    }
+    out += &format!("; {} refused", refused.len());
+    if !capped.is_empty() {
+        out += &format!("; {} not filed, over the cap of {max}", capped.len());
+    }
+    out
+}
+
+/// File one finding of the review: always proposed, and only if no task of the target project,
+/// in any state, is already about it.
+fn file_review_finding(d: &Arc<Daemon>, task: TaskId, f: &Finding) -> Result<TaskId, String> {
+    f.check()?;
+    let pid = d
+        .project_id_by_name(&f.project)
+        .ok_or_else(|| format!("no project {}", f.project))?;
+    let metric = match (f.metric.as_str(), f.before) {
+        ("", _) => String::new(),
+        (m, Some(v)) => format!(
+            "\n\n**Metric expected to move:** `{m}`. It was {:.3} ({} of {}, {} samples) when this was found.",
+            v.rate(),
+            v.num,
+            v.den,
+            v.n
+        ),
+        (m, None) => format!("\n\n**Metric expected to move:** `{m}`."),
+    };
+    let body = format!(
+        "{}{metric}\n\n_Found by the pipeline review (`{}`); project `{}`._",
+        f.body.trim(),
+        f.category,
+        f.project
+    );
+    let filed = crate::proposals::file(
+        d,
+        &crate::proposals::Filing {
+            from_task: Some(task),
+            project: pid,
+            title: f.title.clone(),
+            body,
+            evidence: f.evidence.clone(),
+            blocks_task: false,
+            explored: true,
+            estimate: Some((f.impact, f.cost)),
+            lookback: Some(crate::proposals::Lookback::All),
+        },
+    )?;
+    note_finding(d, f, filed.task)?;
+    Ok(filed.task)
+}
+
+fn note_review(d: &Daemon, say: &str) {
+    if let Ok(Some(mut row)) = d.store.schedule(crate::review::ROW) {
+        row.last_status = say.into();
+        let _ = d.store.put_schedule(&row);
+    }
+    d.poke();
 }
 
 // ---- triage ------------------------------------------------------------------------------
@@ -1297,8 +1495,12 @@ fn evidence_ok_text(e: &str) -> Result<(), String> {
 /// reasons, flaky suites, debts and the verdicts on fixes. Every number is a count or a sum of
 /// recorded rows and events; what is not recorded is `null` with the reason.
 pub fn digest(d: &Daemon, project: Option<&str>, from: u64, to: u64) -> Value {
-    let rep = replay(d, from, to);
-    let stats = stats_from(d, &rep, project, from, to);
+    digest_from(d, &replay(d, from, to), project, from, to)
+}
+
+/// [`digest`] from a replay already made of the same window, so several projects cost one.
+pub fn digest_from(d: &Daemon, rep: &Replay, project: Option<&str>, from: u64, to: u64) -> Value {
+    let stats = stats_from(d, rep, project, from, to);
     let in_p = |p: &str| project.is_none_or(|x| x == p);
 
     let times: Vec<u64> = rep
@@ -1386,7 +1588,7 @@ pub fn digest(d: &Daemon, project: Option<&str>, from: u64, to: u64) -> Value {
         .filter(|f| in_p(&f.project))
         .map(finding_json)
         .collect();
-    let per_project = per_project_numbers(&rep, &in_p, from, to);
+    let per_project = per_project_numbers(rep, &in_p, from, to);
     json!({
         "from": from, "to": to, "project": project,
         "per_project": per_project,
@@ -1396,7 +1598,7 @@ pub fn digest(d: &Daemon, project: Option<&str>, from: u64, to: u64) -> Value {
         "interventions": stats.interventions,
         "interventions_per_landed": per(stats.interventions, stats.landed),
         "time_by_state_ms": merged(&rep.state_ms),
-        "wait_by_class": wait_rows(&rep, &in_p, stats.active_ms),
+        "wait_by_class": wait_rows(rep, &in_p, stats.active_ms),
         "tokens_per_landed": Value::Null,
         "tokens_note": "token counts are not recorded per task, so none is shown",
         "exploring": {
@@ -1532,7 +1734,13 @@ pub fn health(d: &Daemon) -> Value {
         .map(|r| {
             json!({
                 "name": r.name, "project": r.project, "kind": r.kind, "every_ms": r.every_ms,
-                "last_run": r.last_run, "next_run": r.last_run + r.every_ms, "runs": r.runs,
+                "last_run": r.last_run,
+                "next_run": if r.name == crate::review::ROW {
+                    json!(crate::review::next_run(d, now))
+                } else {
+                    json!(r.last_run + r.every_ms)
+                },
+                "runs": r.runs,
                 "last_task": r.last_task, "last_status": r.last_status,
                 "baseline": r.baseline.as_ref().map(|b| b.len()),
                 "follow": crate::ci_schedule::follow_view(r),
@@ -1626,12 +1834,47 @@ mod tests {
     }
 
     #[test]
-    fn the_analyst_file_is_read_as_drafts() {
-        let d = parse_drafts(r#"{"findings":[{"title":"t","body":"b","evidence":"e","metric":"wait_share"},{"title":"u"}]}"#).unwrap();
-        assert_eq!(d.len(), 2);
-        assert_eq!(d[1].metric, "");
-        assert!(parse_drafts("{}").is_err());
-        assert!(parse_drafts("not json").is_err());
+    fn the_review_file_is_read_and_every_section_must_be_answered() {
+        let nothing = |cats: &[&str]| {
+            cats.iter()
+                .map(|c| json!({"category": c, "because": "the facts show none"}))
+                .collect::<Vec<_>>()
+        };
+        let all = json!({
+            "findings": [{"title": "t", "body": "b", "evidence": "e", "category": "stuck",
+                          "project": "web"}],
+            "duplicates": [{"category": "speed", "idea": "faster", "task": 7}],
+            "nothing_found": nothing(&["narrow", "coverage", "crash", "automate"]),
+        });
+        let r = parse_result(&all.to_string()).unwrap();
+        assert_eq!(r.findings.len(), 1);
+        assert_eq!(r.findings[0].1, "web");
+        assert_eq!(r.findings[0].0.metric, "");
+        assert_eq!(r.duplicates, vec![("faster".to_string(), 7)]);
+        assert_eq!(r.nothing_found.len(), 4);
+        let some = json!({"findings": [], "nothing_found": nothing(&["stuck", "speed", "narrow", "coverage"])});
+        let e = parse_result(&some.to_string()).unwrap_err();
+        assert!(e.ends_with("missing: crash, automate"), "{e}");
+        let no_reason = json!({"findings": [], "nothing_found": [{"category": "stuck"}]});
+        assert!(parse_result(&no_reason.to_string())
+            .unwrap_err()
+            .contains("because"));
+        let no_task = json!({"findings": [], "duplicates": [{"idea": "x"}]});
+        assert!(parse_result(&no_task.to_string())
+            .unwrap_err()
+            .contains("task"));
+        assert!(parse_result("{}").is_err());
+        assert!(parse_result("not json").is_err());
+    }
+
+    #[test]
+    fn a_duplicate_refusal_names_the_task() {
+        let why = format!(
+            "{}12: \"x\"; do not file it again",
+            crate::proposals::DUPLICATE_OF
+        );
+        assert_eq!(duplicated_task(&why), Some(12));
+        assert_eq!(duplicated_task("evidence is empty"), None);
     }
 
     fn ev(at: u64, kind: EventKind) -> mason_core::Event {

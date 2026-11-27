@@ -14,7 +14,7 @@ import SwiftUI
 ///     monitor-tool snapshot --port P --out DIR      render screenshots from `masond --demo-manual`
 ///     monitor-tool snapshot --ipad --port P --out DIR   the same at iPad landscape sizes (1366x1024, 1180x820), light and dark, via ImageRenderer
 ///     monitor-tool editor --port P --project NAME [--step S] --out DIR   dump what the pipeline editor shows
-///     monitor-tool answer --port P --task N [--option 1 | --text WORDS] [--hash H]   answer a task's open question as the monitor does
+///     monitor-tool answer --port P --task N [--option 1 | --text WORDS] [--context TEXT] [--hash H]   answer a task's open question as the monitor does
 ///     monitor-tool approve --port P --task N [--diff HASH]   what the Approve button sends (the hold's diff hash, as shown)
 ///     monitor-tool reject --port P --task N [--reason WORDS]   what the Reject button sends
 ///     monitor-tool task-page --port P --task N --out DIR   screenshot of a task's page (a real daemon), and whether any JSON shows
@@ -210,7 +210,7 @@ struct Tool {
         var c = Mason_V1_Command()
         c.id = "answer"
         // --hash sends a card hash the owner was not looking at, to see a stale card refused.
-        c.answer = .with { $0.task = t; $0.answer = option; $0.cardHash = opt("--hash") ?? item.card.hash }
+        c.answer = .with { $0.task = t; $0.answer = option; $0.cardHash = opt("--hash") ?? item.card.hash; $0.context = contextText(opt("--context") ?? "") ?? "" }
         model.send(c)
         await until("the answer's result") { result != nil }
         guard result?.ok == true else { fail("the daemon refused the answer (\(result?.status ?? 0)): \(result?.error ?? "?")") }
