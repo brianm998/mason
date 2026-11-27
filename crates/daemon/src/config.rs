@@ -347,7 +347,11 @@ pub struct NodeSettings {
     pub max_jobs: u32,
     /// The node takes no job while other work uses more of its CPU than this.
     pub max_other_cpu_pct: u32,
+    /// Free space the volumes of the data folder and the build cache must keep.
     pub min_disk_free_gb: u64,
+    /// Free space the other volumes a job writes to (home, cargo home, temporary folder) must
+    /// keep. Lower: a node's internal disk holds little that grows.
+    pub min_other_disk_free_gb: u64,
     pub on_switch_off: OnSwitchOff,
     /// A job whose coordinator has not asked after it for this long is cancelled.
     pub lease_s: u64,
@@ -361,6 +365,7 @@ impl Default for NodeSettings {
             max_jobs: 2,
             max_other_cpu_pct: 50,
             min_disk_free_gb: 50,
+            min_other_disk_free_gb: 10,
             on_switch_off: OnSwitchOff::Drain,
             lease_s: 300,
             max_die_c: 0,
@@ -374,6 +379,7 @@ pub struct SettingsPatch {
     pub max_jobs: Option<u32>,
     pub max_other_cpu_pct: Option<u32>,
     pub min_disk_free_gb: Option<u64>,
+    pub min_other_disk_free_gb: Option<u64>,
     pub on_switch_off: Option<OnSwitchOff>,
     pub lease_s: Option<u64>,
     pub max_die_c: Option<u32>,
@@ -393,6 +399,7 @@ impl SettingsPatch {
             "max_jobs" => self.max_jobs = Some(int(1, 64)? as u32),
             "max_other_cpu_pct" => self.max_other_cpu_pct = Some(int(1, 100)? as u32),
             "min_disk_free_gb" => self.min_disk_free_gb = Some(int(0, 100_000)? as u64),
+            "min_other_disk_free_gb" => self.min_other_disk_free_gb = Some(int(0, 100_000)? as u64),
             "lease_s" => self.lease_s = Some(int(10, 3600)? as u64),
             "max_die_c" => {
                 let n = int(0, 110)?;
@@ -432,6 +439,9 @@ impl SettingsPatch {
         if let Some(v) = self.min_disk_free_gb {
             s.min_disk_free_gb = v;
         }
+        if let Some(v) = self.min_other_disk_free_gb {
+            s.min_other_disk_free_gb = v;
+        }
         if let Some(v) = self.on_switch_off {
             s.on_switch_off = v;
         }
@@ -450,6 +460,7 @@ impl NodeSettings {
             "max_jobs": self.max_jobs,
             "max_other_cpu_pct": self.max_other_cpu_pct,
             "min_disk_free_gb": self.min_disk_free_gb,
+            "min_other_disk_free_gb": self.min_other_disk_free_gb,
             "on_switch_off": self.on_switch_off.name(),
             "lease_s": self.lease_s,
             "max_die_c": self.max_die_c,
@@ -492,6 +503,7 @@ impl NodeSettings {
             max_jobs: a.max_jobs.min(b.max_jobs),
             max_other_cpu_pct: a.max_other_cpu_pct.min(b.max_other_cpu_pct),
             min_disk_free_gb: a.min_disk_free_gb.max(b.min_disk_free_gb),
+            min_other_disk_free_gb: a.min_other_disk_free_gb.max(b.min_other_disk_free_gb),
             on_switch_off: if a.on_switch_off == OnSwitchOff::Cancel
                 || b.on_switch_off == OnSwitchOff::Cancel
             {
@@ -2859,6 +2871,7 @@ mod tests {
             max_jobs: 4,
             max_other_cpu_pct: 60,
             min_disk_free_gb: 10,
+            min_other_disk_free_gb: 5,
             lease_s: 300,
             max_die_c: 0,
             on_switch_off: OnSwitchOff::Drain,
@@ -2867,6 +2880,7 @@ mod tests {
             max_jobs: 2,
             max_other_cpu_pct: 80,
             min_disk_free_gb: 40,
+            min_other_disk_free_gb: 8,
             lease_s: 120,
             max_die_c: 85,
             on_switch_off: OnSwitchOff::Cancel,
@@ -2877,11 +2891,12 @@ mod tests {
                 m.max_jobs,
                 m.max_other_cpu_pct,
                 m.min_disk_free_gb,
+                m.min_other_disk_free_gb,
                 m.lease_s,
                 m.max_die_c,
                 m.on_switch_off
             ),
-            (2, 60, 40, 120, 85, OnSwitchOff::Cancel)
+            (2, 60, 40, 8, 120, 85, OnSwitchOff::Cancel)
         );
         assert_eq!(NodeSettings::strictest(&[]), NodeSettings::default());
         assert_eq!(NodeSettings::strictest(&[a]), a);

@@ -99,6 +99,10 @@ claude_bin = "$bin/fake-claude"
 FAKE_CLAUDE_SCRIPT = "$root/script.json"
 TOML
 printf '[node]\nserve = true\nport = 0\nbind = ["127.0.0.1"]\n' > "$root/nc/daemon.toml"
+# This test is about placement, not disk limits (unit tests cover those): the coordinator tells
+# the node to ask for no free space, so the result does not depend on how full this host's disks
+# are (#1246). No assertion is changed.
+printf '[nodes.default]\nmin_disk_free_gb = 0\nmin_other_disk_free_gb = 0\n' > "$root/c/daemon.toml"
 
 # The node is a development build, says it has Rust, and reads its CPU use from a file.
 echo 0 > "$root/cpu"
