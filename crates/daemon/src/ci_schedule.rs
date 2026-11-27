@@ -357,7 +357,9 @@ pub fn run(
         force,
     };
     let said = dispatch_as(d, pid, ci, &host, &repo, row, now, &go);
-    (format!("{took}{said}"), true)
+    // A deferred run keeps its slot: the next tick asks again.
+    let decided = !said.starts_with(DEFERRED);
+    (format!("{took}{said}"), decided)
 }
 
 /// A manual run asked while a rerun is followed: when the rerun is of a commit develop has moved
@@ -565,6 +567,31 @@ pub fn dispatch(
     dispatch_as(d, pid, ci, host, repo, row, now, &go)
 }
 
+/// What a deferred full-CI dispatch says first (s1218).
+const DEFERRED: &str = "deferred: ";
+
+/// Whether a non-forced full-CI run should wait (s1218): task work waits for GitHub runner
+/// units, or the `gha` pool is used beyond `share_pct` percent of `limit`. `None` means start.
+/// A run already dispatched cannot be capped; this only decides when it starts.
+pub fn full_start_deferred(
+    used: u32,
+    limit: u32,
+    share_pct: u32,
+    task_waiting: u32,
+) -> Option<String> {
+    if task_waiting > 0 {
+        return Some(format!(
+            "{task_waiting} task request(s) wait for GitHub runner units"
+        ));
+    }
+    if u64::from(used) * 100 > u64::from(limit) * u64::from(share_pct) {
+        return Some(format!(
+            "{used} of {limit} gha units are in use, above the full-CI share of {share_pct}%"
+        ));
+    }
+    None
+}
+
 /// [`dispatch`] with the trigger named. Both triggers and the manual one come through here, so
 /// one rule decides: the record of full tests first, then what the CI host knows.
 #[allow(clippy::too_many_arguments)]
@@ -605,6 +632,14 @@ pub fn dispatch_as(
         );
         if !decision.dispatch && !asked.force {
             return Ok(format!("not dispatched: {}", decision.reason));
+        }
+        if !asked.force {
+            let (used, limit, share) = d.broker.gha_use();
+            if let Some(why) =
+                full_start_deferred(used, limit, share, d.broker.gha_task_waiting() as u32)
+            {
+                return Ok(format!("{DEFERRED}{why}"));
+            }
         }
         host.dispatch(&ci.workflow, &branch, &ci.inputs)?;
         let _ = d.store.add_full_test(&FullTestRow {
@@ -1193,4 +1228,31 @@ pub fn full_views(d: &Daemon) -> Vec<Value> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod share_tests {
+    use super::full_start_deferred;
+
+    #[test]
+    fn waiting_task_work_defers() {
+        assert!(full_start_deferred(0, 16, 50, 1).is_some());
+    }
+
+    #[test]
+    fn use_over_the_share_defers_and_at_the_share_starts() {
+        assert!(full_start_deferred(9, 16, 50, 0).is_some());
+        assert!(full_start_deferred(8, 16, 50, 0).is_none());
+    }
+
+    #[test]
+    fn idle_pool_with_no_waiters_starts() {
+        assert!(full_start_deferred(0, 16, 50, 0).is_none());
+    }
+
+    #[test]
+    fn a_zero_limit_starts_only_when_nothing_is_used() {
+        assert!(full_start_deferred(0, 0, 50, 0).is_none());
+        assert!(full_start_deferred(1, 0, 50, 0).is_some());
+    }
 }
