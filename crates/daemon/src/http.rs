@@ -620,6 +620,7 @@ async fn proposal_file(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> 
                 blocks_task: b["blocks_task"].as_bool().unwrap_or(false),
                 explored: b["explored"].as_bool().unwrap_or(false),
                            estimate: None,
+                           lookback: None,
             };
             match crate::proposals::file(&d2, &f) {
                 Ok(done) => Ok(json!({"task": done.task.0, "route": done.route, "proposed": done.proposed, "project": done.project})),
@@ -3757,7 +3758,55 @@ async fn schedules_list(Shared(d): Shared<Arc<Daemon>>) -> Res {
     Ok(Json(json!({"schedules": v})))
 }
 
-/// Run a recurring job now: `introspect`, `analyst:<project>` or `<project>/<schedule>`.
+/// The pipeline review: its settings, last run, next run and whether one is running.
+async fn review_get(Shared(d): Shared<Arc<Daemon>>) -> Res {
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || crate::review::status(&d2))
+        .await
+        .map_err(pool_err)?;
+    Ok(Json(v))
+}
+
+/// Change the review's settings (the owner only). Answers as `GET /v1/review`.
+async fn review_set(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Json(b): Json<Value>,
+) -> Res {
+    let who = who_of(&headers);
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || {
+            owner_only(&d2, &who, "change the pipeline review")?;
+            crate::review::set(&d2, &b, &who).map_err(|(c, m)| fail(code(c), m))?;
+            Ok::<_, (StatusCode, Json<Value>)>(crate::review::status(&d2))
+        })
+        .await
+        .map_err(pool_err)??;
+    Ok(Json(v))
+}
+
+/// Run the pipeline review now (the owner only).
+async fn review_run(Shared(d): Shared<Arc<Daemon>>, headers: axum::http::HeaderMap) -> Res {
+    let who = who_of(&headers);
+    let d2 = d.clone();
+    let task = d
+        .pool
+        .run(move || {
+            owner_only(&d2, &who, "run the pipeline review")?;
+            crate::review::file(&d2, now_ms()).map_err(|e| fail(StatusCode::CONFLICT, e))
+        })
+        .await
+        .map_err(pool_err)??;
+    Ok(Json(
+        json!({"task": task.0, "said": format!("review task #{} filed", task.0)}),
+    ))
+}
+
+/// Run a recurring job now: `introspect`, `review` or `<project>/<schedule>`.
 async fn schedule_run(
     Shared(d): Shared<Arc<Daemon>>,
     headers: axum::http::HeaderMap,
@@ -4581,6 +4630,8 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/report", get(report))
         .route("/schedules", get(schedules_list))
         .route("/schedules/run", post(schedule_run))
+        .route("/review", get(review_get).post(review_set))
+        .route("/review/run", post(review_run))
         .route("/triage", get(triage_list))
         .route("/triage/{id}/review", post(triage_review))
         .route("/tasks/{id}/skip", post(skip_task))

@@ -21,6 +21,7 @@
 //! mason ssh-key list | use <path> [--project P]
 //! mason alerts [--all] | mason metrics [--days N]
 //! mason health | mason digest [--days N] [--project P] | mason schedule list | run <name>
+//! mason review [status | run | set --enabled B --at HH:MM --every-days N]
 //! mason triage list | review <id> (--agree | --disagree)
 //! mason status [--json] [--watch]
 //! mason hosts [--json]
@@ -119,7 +120,9 @@ mason: command-line client for the MASON pipeline
                                       send-back rate per step by how full the agent's context got
   mason report [--days N] [--project P]   throughput, send-backs, waits, interventions, host losses, flakes, debts
   mason digest [--days N] [--project P]   landed, interventions, time by state, skips, forced landings (recorded data only)
-  mason schedule list | run <name> [--force]    recurring jobs (introspect, analyst:<project>, <project>/<schedule>); run one now (a full test follows the record unless --force)
+  mason schedule list | run <name> [--force]    recurring jobs (introspect, review, <project>/<schedule>); run one now (a full test follows the record unless --force)
+  mason review [status | run]         the nightly pipeline review: its settings, last and next run; run one now
+  mason review set [--enabled true|false] [--at HH:MM] [--every-days N] [--model M] [--effort E] [--max-proposals N]
   mason triage list | review <id> (--agree | --disagree)   the triage agent's sampled suggestions; it never answers
   mason task skip <id> (--suite S | --step S | --all) [--reason R] [--deferred]
                                       skip a suite or step by force, even mid-run; records a debt;
@@ -300,6 +303,51 @@ fn run_session(s: &Value) -> i32 {
             eprintln!("cannot run `{}`: {e}", argv[0]);
             127
         }
+    }
+}
+
+/// `mason review status`.
+fn print_review(r: &Value) {
+    let s = &r["settings"];
+    let days = s["every_days"].as_u64().unwrap_or(1);
+    println!(
+        "Pipeline review: {} at {} every {days} day{} ({}, {}; at most {} proposals)",
+        if s["enabled"] == json!(true) {
+            "enabled"
+        } else {
+            "disabled"
+        },
+        s["at"].as_str().unwrap_or("?"),
+        if days == 1 { "" } else { "s" },
+        s["model"].as_str().unwrap_or("default model"),
+        s["effort"].as_str().unwrap_or("default effort"),
+        s["max_proposals"],
+    );
+    if let Some(p) = r["problem"].as_str() {
+        println!("  {p}");
+    }
+    if r["project"].is_null() {
+        println!("  no project of MASON's own is registered ([self]), so no review runs");
+    }
+    if let Some(t) = r["running_task"].as_u64() {
+        println!("  running: task #{t}");
+    }
+    println!(
+        "  next run: {}",
+        r["next_run_text"].as_str().unwrap_or("none")
+    );
+    match r["last"].as_object() {
+        Some(l) => println!(
+            "  last run: {} {}",
+            l.get("completed_text")
+                .and_then(Value::as_str)
+                .unwrap_or("?"),
+            l.get("summary").and_then(Value::as_str).unwrap_or("")
+        ),
+        None => println!("  last run: none"),
+    }
+    if let Some(st) = r["last_status"].as_str().filter(|s| !s.is_empty()) {
+        println!("  status: {st}");
     }
 }
 
@@ -2169,6 +2217,68 @@ fn main() {
                     println!("{}", r["said"].as_str().unwrap_or(""));
                 }
                 _ => die("usage: mason schedule list | run <name> [--force]"),
+            }
+        }
+        "review" => {
+            let sub = a.pos().unwrap_or_else(|| "status".into());
+            if std::env::var("MASON_AS").is_err() {
+                if let Ok(u) = std::env::var("USER") {
+                    std::env::set_var("MASON_AS", u);
+                }
+            }
+            match sub.as_str() {
+                "status" => {
+                    finish(&a);
+                    let r = or_die(d.call("GET", "/review", None));
+                    if json_out {
+                        return println!("{r:#}");
+                    }
+                    print_review(&r);
+                }
+                "run" => {
+                    finish(&a);
+                    let r = or_die(d.call("POST", "/review/run", Some(&json!({}))));
+                    println!("{}", r["said"].as_str().unwrap_or(""));
+                }
+                "set" => {
+                    let mut change = serde_json::Map::new();
+                    if let Some(v) = a.opt("--enabled") {
+                        let on = match v.as_str() {
+                            "true" | "on" | "yes" => true,
+                            "false" | "off" | "no" => false,
+                            _ => die("--enabled is true or false"),
+                        };
+                        change.insert("enabled".into(), json!(on));
+                    }
+                    for (flag, key) in
+                        [("--at", "at"), ("--model", "model"), ("--effort", "effort")]
+                    {
+                        if let Some(v) = a.opt(flag) {
+                            change.insert(key.into(), json!(v));
+                        }
+                    }
+                    for (flag, key) in [
+                        ("--every-days", "every_days"),
+                        ("--max-proposals", "max_proposals"),
+                    ] {
+                        if let Some(v) = a.opt(flag) {
+                            let n: i64 = v
+                                .parse()
+                                .unwrap_or_else(|_| die(&format!("{flag} is a whole number")));
+                            change.insert(key.into(), json!(n));
+                        }
+                    }
+                    finish(&a);
+                    if change.is_empty() {
+                        die("usage: mason review set [--enabled B] [--at HH:MM] [--every-days N]");
+                    }
+                    let r = or_die(d.call("POST", "/review", Some(&Value::Object(change))));
+                    if json_out {
+                        return println!("{r:#}");
+                    }
+                    print_review(&r);
+                }
+                _ => die("usage: mason review [status | run | set ...]"),
             }
         }
         "triage" => {

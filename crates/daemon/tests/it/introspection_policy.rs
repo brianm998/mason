@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! Introspection findings are proposed or queued by the owner's `[proposals.introspection]`
-//! table, per severity and cost (s295), and the analyst's task is known by the schedule row that
-//! recorded it, not by its title.
+//! table, per severity and cost (s295), and the pipeline review's task is known by the schedule
+//! row that recorded it, not by its title. What the review finds always waits for the owner.
 
 use crate::support;
 use mason_core::introspect::{Finding, Stats};
@@ -16,6 +16,15 @@ use support::*;
 
 const SPLIT: &str = "[proposals.introspection]\nlow_small = \"queued\"\n";
 const LANDING: &str = "mode = \"direct\"\nwindow = \"0s\"\n";
+/// The project is MASON's own, so the review is filed in it.
+const OWN: &str = "[self]\nmax_open = 50\nper_week = 50\nmax_steps = 500\n";
+
+/// A world whose project is MASON's own, with nothing claimed: the tests play the agent.
+fn review_world() -> W {
+    let w = world_with(LANDING, &|_| format!("{OWN}{SPLIT}"), &[]);
+    mason_daemon::attention::pause(&w.d, "", "claims", "test", 3600).unwrap();
+    w
+}
 
 fn finding(title: &str, impact: Impact, cost: Cost) -> Finding {
     Finding {
@@ -26,6 +35,7 @@ fn finding(title: &str, impact: Impact, cost: Cost) -> Finding {
         body: format!("{title}: what is wrong and why it matters."),
         evidence: "crates/daemon/src/sched.rs:120 ranks reviews below develop".into(),
         metric: "wait_share".into(),
+        category: String::new(),
         before: None,
         impact,
         cost,
@@ -80,10 +90,10 @@ fn with_no_table_every_finding_is_proposed() {
 
 #[test]
 fn a_renamed_analyst_task_is_still_read_and_another_task_with_its_title_is_not() {
-    let w = world_with(LANDING, &|_| SPLIT.into(), &[]);
+    let w = review_world();
     let d = &w.d;
     let pid = d.project_id_by_name("scratch").unwrap();
-    let analyst = introspect::file_analyst_task(d, pid).unwrap();
+    let analyst = mason_daemon::review::file(d, now_ms()).unwrap();
     d.emit(EventKind::TrackerEdited {
         task: analyst,
         title: "Weekly look at the pipeline".into(),
@@ -91,7 +101,8 @@ fn a_renamed_analyst_task_is_still_read_and_another_task_with_its_title_is_not()
         priority: Priority::Low,
     })
     .unwrap();
-    let result = r#"{"findings":[{"title":"Reviews wait for a slot","body":"Review steps queue behind develop.","evidence":"crates/daemon/src/sched.rs:120 ranks review below develop","metric":"wait_share","severity":"low","cost":"small"}]}"#;
+    let result = result_json("Reviews wait for a slot");
+    let result = result.as_str();
     let wt = tempfile::tempdir().unwrap();
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(wt.path().join(introspect::ANALYST_FILE), result).unwrap();
@@ -99,8 +110,9 @@ fn a_renamed_analyst_task_is_still_read_and_another_task_with_its_title_is_not()
     assert!(!wt.path().join(introspect::ANALYST_FILE).exists());
     let rows = d.store.proposals().unwrap();
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].decided_by, "proposals.introspection.low_small");
-    assert_ne!(state(d, TaskId(rows[0].task)), State::Proposed);
+    // The table queues a low, small finding; the review's still waits for the owner.
+    assert_eq!(rows[0].decided_by, "review: always proposed");
+    assert_eq!(state(d, TaskId(rows[0].task)), State::Proposed);
 
     // Another task that carries the analyst's old title is not the analyst.
     let other = d
@@ -129,17 +141,27 @@ fn a_renamed_analyst_task_is_still_read_and_another_task_with_its_title_is_not()
 }
 
 fn result_json(title: &str) -> String {
-    format!(
-        r#"{{"findings":[{{"title":"{title}","body":"Review steps queue behind develop.","evidence":"crates/daemon/src/sched.rs:120 ranks review below develop","metric":"wait_share","severity":"low","cost":"small"}}]}}"#
-    )
+    let nothing: Vec<_> = ["stuck", "narrow", "coverage", "crash", "automate"]
+        .iter()
+        .map(|c| serde_json::json!({"category": c, "because": "the facts show none"}))
+        .collect();
+    serde_json::json!({
+        "findings": [{
+            "title": title,
+            "body": "Review steps queue behind develop.",
+            "evidence": "crates/daemon/src/sched.rs:120 ranks review below develop",
+            "category": "speed", "metric": "wait_share", "severity": "low", "cost": "small",
+        }],
+        "nothing_found": nothing,
+    })
+    .to_string()
 }
 
 #[test]
 fn an_analyst_result_is_read_once_kept_in_the_log_dir_and_ends_the_develop_step() {
-    let w = world_with(LANDING, &|_| SPLIT.into(), &[]);
+    let w = review_world();
     let d = &w.d;
-    let pid = d.project_id_by_name("scratch").unwrap();
-    let analyst = introspect::file_analyst_task(d, pid).unwrap();
+    let analyst = mason_daemon::review::file(d, now_ms()).unwrap();
     let wt = tempfile::tempdir().unwrap();
     let dir = tempfile::tempdir().unwrap();
 
@@ -235,9 +257,9 @@ fn an_analyst_task_that_commits_nothing_files_its_good_finding_and_ends() {
         "true",
         serde_json::json!({"steps": {"explore": [explore_turn()], "develop": [develop]}}),
     );
+    s.write_project("scratch", "true", OWN);
     let d = s.start();
-    let pid = d.project_id_by_name("scratch").unwrap();
-    let analyst = introspect::file_analyst_task(&d, pid).unwrap();
+    let analyst = mason_daemon::review::file(&d, now_ms()).unwrap();
     // Closed with no change counts as landed; a refused submission ends in failed instead.
     wait_state(&d, analyst, State::Landed, 90);
     assert_eq!(
