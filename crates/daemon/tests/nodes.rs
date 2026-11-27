@@ -54,6 +54,33 @@ fn pair_with_a(
     on_node_daemon: impl FnOnce(&mut mason_daemon::config::DaemonConfig),
     on_node: impl FnOnce(&mut mason_daemon::config::NodeCfg),
 ) -> Pair {
+    pair_scripted(Project::default(), on_coordinator, on_node_daemon, on_node)
+}
+
+/// The coordinator's project: its `test` command, the fake agent's script, and more of its
+/// registration file.
+struct Project {
+    test: String,
+    script: Value,
+    extra: String,
+}
+
+impl Default for Project {
+    fn default() -> Self {
+        Project {
+            test: "true".into(),
+            script: json!({"steps": {}}),
+            extra: String::new(),
+        }
+    }
+}
+
+fn pair_scripted(
+    project: Project,
+    on_coordinator: impl FnOnce(&mut mason_daemon::config::DaemonConfig),
+    on_node_daemon: impl FnOnce(&mut mason_daemon::config::DaemonConfig),
+    on_node: impl FnOnce(&mut mason_daemon::config::NodeCfg),
+) -> Pair {
     std::env::set_var("MASON_NO_MDNS", "1");
     let _one_at_a_time = worlds();
     let sb = Scratch::new("true", json!({"steps": {}}));
@@ -64,7 +91,10 @@ fn pair_with_a(
         on_node(&mut c.node);
         on_node_daemon(c);
     });
-    let sa = Scratch::new("true", json!({"steps": {}}));
+    let sa = Scratch::new(&project.test, project.script);
+    if !project.extra.is_empty() {
+        sa.write_project("scratch", &project.test, &project.extra);
+    }
     let a = sa.start_with(on_coordinator);
     let rt = tokio::runtime::Runtime::new().unwrap();
     let rt_b = tokio::runtime::Runtime::new().unwrap();
@@ -436,12 +466,33 @@ fn working_pair_full(
     on_node_daemon: impl FnOnce(&mut mason_daemon::config::DaemonConfig),
     on_node: impl FnOnce(&mut mason_daemon::config::NodeCfg),
 ) -> Pair {
+    working_pair_scripted(
+        Project::default(),
+        max_jobs,
+        top,
+        default,
+        on_coordinator,
+        on_node_daemon,
+        on_node,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn working_pair_scripted(
+    project: Project,
+    max_jobs: u32,
+    top: &str,
+    default: &str,
+    on_coordinator: impl FnOnce(&mut mason_daemon::config::DaemonConfig),
+    on_node_daemon: impl FnOnce(&mut mason_daemon::config::DaemonConfig),
+    on_node: impl FnOnce(&mut mason_daemon::config::NodeCfg),
+) -> Pair {
     std::env::set_var(
         "MASON_NODE_TOOLCHAINS",
         r#"{"rust":["1.96.0"],"xcode":[],"java":[]}"#,
     );
     std::env::set_var("MASON_NODE_POLL_MS", "50");
-    let p = pair_with_a(on_coordinator, on_node_daemon, on_node);
+    let p = pair_scripted(project, on_coordinator, on_node_daemon, on_node);
     std::fs::write(
         p.sa.config_dir.join("daemon.toml"),
         format!(
@@ -3159,4 +3210,195 @@ fn a_node_job_whose_host_dies_leaves_no_grandchild_behind() {
     support::wait_for("the lost job's grandchild to be gone", 60, || {
         !mason_step_host::registry::pid_alive(pid)
     });
+}
+
+// ---- #1237: a test step without suites follows placement ---------------------------------------
+
+/// A coordinator whose project has only a `test` command (no suites) and is nodes only. The
+/// command writes `marker` only where `MASON_NODE` is set, so the file says where it ran.
+fn suiteless_pair(test_tail: &str, marker: &Path, build: bool, extra: &str) -> Pair {
+    let cmd = format!(
+        "test -f hello.txt && {{ [ -z \"$MASON_NODE\" ] || echo node >> {m}; [ -n \"$MASON_NODE\" ] || echo here >> {m}.here; }}; {test_tail}",
+        m = marker.display()
+    );
+    let extra = if build {
+        format!("build = \"echo building\"\n{extra}")
+    } else {
+        extra.to_string()
+    };
+    let p = working_pair_scripted(
+        Project {
+            test: cmd,
+            script: happy_script(),
+            extra,
+        },
+        2,
+        "",
+        "",
+        |_| {},
+        |_| {},
+        |_| {},
+    );
+    let set =
+        mason_daemon::place::set_project_mode(&p.a, "scratch", mason_daemon::place::Mode::Remote)
+            .unwrap();
+    assert_eq!(set["mode"], "remote", "{set}");
+    p
+}
+
+/// The step hosts this daemon started for the test step of run `run` of `t`: none when it ran
+/// somewhere else.
+fn local_test_hosts(d: &Arc<Daemon>, t: mason_core::TaskId, run: u64) -> Vec<String> {
+    let prefix = format!("t{}r{run}-test", t.0);
+    std::fs::read_dir(d.cfg.hosts_dir())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with(&prefix))
+        .collect()
+}
+
+fn testing_run(d: &Arc<Daemon>, t: mason_core::TaskId) -> Option<u64> {
+    d.world()
+        .ok()?
+        .step_runs
+        .values()
+        .filter(|r| r.task == t && r.step == mason_core::State::Testing)
+        .map(|r| r.id.0)
+        .max()
+}
+
+#[test]
+fn a_test_step_without_suites_runs_on_the_node_with_its_build_and_starts_nothing_here() {
+    let marks = tempfile::tempdir().unwrap();
+    let marker = marks.path().join("ran");
+    let p = suiteless_pair("echo node=$MASON_NODE", &marker, true, "");
+    let t = file_task(&p.a, "Suite-less test step");
+    wait_state(&p.a, t, mason_core::State::Landed, 240);
+    let run = testing_run(&p.a, t).expect("the task had a test step");
+    let on_node = std::fs::read_to_string(&marker).unwrap_or_default();
+    assert!(
+        on_node.lines().any(|l| l == "node"),
+        "ran on the node: {on_node:?}"
+    );
+    assert!(
+        !marks.path().join("ran.here").exists(),
+        "nothing of it ran on the coordinator"
+    );
+    assert_eq!(local_test_hosts(&p.a, t, run), Vec::<String>::new());
+    let note = std::fs::read_to_string(p.a.task_dir(t).join(format!("test-r{run}.ran")))
+        .expect("the step records where it ran");
+    assert!(note.contains("node b"), "{note}");
+    let log = std::fs::read_to_string(p.a.task_dir(t).join(format!("test-r{run}.log")))
+        .expect("the log is where a local run's is");
+    assert!(log.contains("node=1"), "{log}");
+}
+
+#[test]
+fn a_test_step_without_suites_waits_for_a_node_and_never_runs_here() {
+    let marks = tempfile::tempdir().unwrap();
+    let marker = marks.path().join("ran");
+    let p = suiteless_pair("true", &marker, false, "");
+    // The node takes no work.
+    set_switch(&p, false);
+    poll(&p);
+    let t = file_task(&p.a, "Waits for a node");
+    wait_state(&p.a, t, mason_core::State::Testing, 120);
+    // The step is waiting for a node: at its lease, or in the run it asked for. Either way
+    // nothing started here, and nothing ran at all.
+    let run = loop {
+        if let Some(r) = testing_run(&p.a, t) {
+            break r;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    wait_for("the step to be waiting for a node", 60, || {
+        let w = p.a.world().unwrap();
+        matches!(w.tasks[&t].activity, mason_core::Activity::Waiting(_))
+            || p.a
+                .task_dir(t)
+                .join(format!("t{}r{run}-test0.check", t.0))
+                .exists()
+    });
+    assert_eq!(local_test_hosts(&p.a, t, run), Vec::<String>::new());
+    assert!(!marker.exists() && !marks.path().join("ran.here").exists());
+    assert_ne!(
+        mason_core::State::Landed,
+        state_of(&p.a, t),
+        "a project that runs nowhere but on a node did not land"
+    );
+    // A node that takes work again takes the step.
+    set_switch(&p, true);
+    poll(&p);
+    wait_state(&p.a, t, mason_core::State::Landed, 240);
+    let on_node = std::fs::read_to_string(&marker).unwrap_or_default();
+    assert!(on_node.lines().any(|l| l == "node"), "{on_node:?}");
+    assert!(!marks.path().join("ran.here").exists());
+}
+
+#[test]
+fn a_red_run_on_the_node_is_judged_red_as_a_local_one_is() {
+    let marks = tempfile::tempdir().unwrap();
+    let marker = marks.path().join("ran");
+    let p = suiteless_pair(
+        "echo nope-from-the-node; exit 1",
+        &marker,
+        false,
+        "max_test_rounds = 1\ntest_reruns = 0",
+    );
+    let t = file_task(&p.a, "Red on the node");
+    wait_state(&p.a, t, mason_core::State::Failed, 240);
+    let run = testing_run(&p.a, t).unwrap();
+    let w = p.a.world().unwrap();
+    assert!(
+        !w.tasks[&t]
+            .failure
+            .as_deref()
+            .unwrap_or("")
+            .contains("infrastructure"),
+        "a red is the code's: {:?}",
+        w.tasks[&t].failure
+    );
+    assert!(
+        !p.sa.origin_log().contains(&"add hello".to_string()),
+        "nothing red may land"
+    );
+    let log = std::fs::read_to_string(p.a.task_dir(t).join(format!("test-r{run}.log"))).unwrap();
+    assert!(log.contains("nope-from-the-node"), "{log}");
+    assert_eq!(local_test_hosts(&p.a, t, run), Vec::<String>::new());
+}
+
+#[test]
+fn a_local_project_runs_its_suiteless_test_step_here_as_before() {
+    let marks = tempfile::tempdir().unwrap();
+    let marker = marks.path().join("ran");
+    let cmd = format!(
+        "test -f hello.txt && echo here >> {} && [ -z \"$MASON_NODE\" ]",
+        marker.display()
+    );
+    let p = working_pair_scripted(
+        Project {
+            test: cmd,
+            script: happy_script(),
+            extra: String::new(),
+        },
+        2,
+        "",
+        "",
+        |_| {},
+        |_| {},
+        |_| {},
+    );
+    mason_daemon::place::set_project_mode(&p.a, "scratch", mason_daemon::place::Mode::Local)
+        .unwrap();
+    let t = file_task(&p.a, "Local");
+    wait_state(&p.a, t, mason_core::State::Landed, 240);
+    let run = testing_run(&p.a, t).unwrap();
+    assert!(std::fs::read_to_string(&marker).unwrap().contains("here"));
+    assert!(
+        !local_test_hosts(&p.a, t, run).is_empty()
+            || p.a.task_dir(t).join(format!("test-r{run}.log")).exists()
+    );
+    assert!(!p.a.task_dir(t).join(format!("test-r{run}.ran")).exists());
 }
