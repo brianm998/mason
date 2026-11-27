@@ -217,9 +217,16 @@ pub fn txt_record(fingerprint: &str) -> BTreeMap<String, String> {
 /// A live advertisement. Kept for the life of the process (callers `std::mem::forget` it).
 pub(crate) enum Advertisement {
     #[cfg(target_os = "macos")]
-    System(crate::dnssd::Registration),
+    System(#[allow(dead_code)] crate::dnssd::Registration),
     #[cfg(not(target_os = "macos"))]
     Own(#[allow(dead_code)] mdns_sd::ServiceDaemon),
+}
+
+impl Advertisement {
+    /// Keep it for the life of the process.
+    pub(crate) fn keep(self) {
+        Box::leak(Box::new(self));
+    }
 }
 
 /// The `ServiceInfo` for platforms that run their own responder. Its host name is ours
@@ -312,7 +319,7 @@ pub async fn start(d: Arc<Daemon>) -> std::io::Result<u16> {
     }
     match advertise(&info) {
         // Kept for the life of the process.
-        Ok(m) => std::mem::forget(m), // an `Advertisement`
+        Ok(m) => m.keep(),
         Err(e) => tracing::warn!("mDNS is not advertising: {e}"),
     }
     let app = router(d.clone());
