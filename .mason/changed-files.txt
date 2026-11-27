@@ -1,0 +1,7 @@
+.mason/run.json
+crates/daemon/src/jobs.rs
+crates/daemon/src/rerun.rs
+docs/decisions/1242-failure-digest-in-run-check.md
+docs/stages/s1252.md
+scripts/exit/s1252.sh
+scripts/exit/weights.txt
