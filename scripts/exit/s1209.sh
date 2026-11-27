@@ -3,7 +3,7 @@
 # Stage 1209 exit test: s06's host search survives a host.kv removed between its test and its read.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
-grep -q "2>/dev/null || true)" <(grep "host_pid=//p" scripts/exit/s06.sh)
+grep "host_pid=//p" scripts/exit/s06.sh | grep -q "|| continue"
 # Take the real discovery loop out of s06.sh so this checks what the script runs.
 loop=$(sed -n '/^host_pid=""$/,/^done$/p' scripts/exit/s06.sh)
 [ -n "$loop" ]
