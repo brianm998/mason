@@ -534,7 +534,23 @@ struct TaskDetailPage: View {
                 if let c = cells.running { ProgressDetail(model: model, cell: c) }
             }
 
-            ActionButtons(model: model, row: r, hasApprovalView: d.hasApproval)
+            let failedPage: FailedPage? = r.state == "failed"
+                ? FailedPage.choose(hasCard: d.hasCard, diagnosing: d.hasDiagnosisRunning, actions: r.allowedActions)
+                : nil
+            if failedPage == .card {
+                // The diagnosis first: its summary is the card's why, the failure line under it.
+                DecisionCardView(model: model, task: r.id, card: d.card)
+                if !d.failure.isEmpty {
+                    LinkedText(model: model, text: "Failed: \(d.failure)", color: theme.attention)
+                        .accessibilityIdentifier("detail:failure")
+                }
+            }
+            if failedPage == .diagnosing {
+                Text(diagnosingLine(startedMs: d.diagnosisRunning.startedMs, ranOn: d.diagnosisRunning.ranOn, now: model.daemonNow()))
+                    .font(theme.body()).foregroundStyle(theme.attention)
+                    .accessibilityIdentifier("detail:diagnosing")
+            }
+            ActionButtons(model: model, row: r, hasApprovalView: d.hasApproval, failedPage: failedPage)
             if loading {
                 Text("Loading details…").font(theme.body()).foregroundStyle(theme.muted)
                     .accessibilityIdentifier("detail:loading")
@@ -572,10 +588,10 @@ struct TaskDetailPage: View {
                     .accessibilityIdentifier("number:\(n.kind)")
             }
 
-            if d.hasCard { DecisionCardView(model: model, task: r.id, card: d.card) }
+            if d.hasCard && failedPage != .card { DecisionCardView(model: model, task: r.id, card: d.card) }
             if d.hasApproval { ApprovalView(model: model, task: r.id, approval: d.approval) }
             if d.hasProposal { ProposalView(model: model, row: r, info: d.proposal, title: r.title) }
-            if !d.failure.isEmpty {
+            if !d.failure.isEmpty && failedPage != .card {
                 LinkedText(model: model, text: "Failed: \(d.failure)", color: theme.attention)
                     .accessibilityIdentifier("detail:failure")
             }
