@@ -138,6 +138,17 @@ final class AddProjectTests: XCTestCase {
         XCTAssertEqual(f.model.page, .task(41))
     }
 
+    func testPlanAndApplyWarningsAndNotesAreReadBack() {
+        let p = OnboardingPlan(json: #"{"detected":{},"warnings":["no claude on PATH"],"files":[],"errors":[]}"#)
+        XCTAssertEqual(p?.warnings, ["no claude on PATH"])
+        var w = AddProjectWizard()
+        w.startApply()
+        w.applied(ok: true, json: #"{"id":"web","registered":true,"progress":["x"],"warnings":["the test step runs true"],"notes":["chose main"]}"#, error: "")
+        XCTAssertEqual(w.warnings, ["the test step runs true"])
+        XCTAssertEqual(w.notes, ["chose main"])
+        XCTAssertEqual(w.appliedId, "web")
+    }
+
     func testApplyRefusalStaysOnReview() {
         let f = Fake()
         f.applyOk = false

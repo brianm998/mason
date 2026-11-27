@@ -303,8 +303,7 @@ pub struct Machine {
 
 /// An executable regular file.
 pub fn is_executable(p: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    std::fs::metadata(p).is_ok_and(|m| m.is_file() && mason_platform::fs::is_executable(&m, p))
 }
 
 impl Machine {
