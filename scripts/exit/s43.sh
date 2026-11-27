@@ -8,8 +8,8 @@
 #     else's) is sent back before folding, with the file and the number it should use; it keeps
 #     the same numbers through the retry and a daemon restart.
 #  3. Tasks that each add a stage note, a decision record and an exit script land in either
-#     order (the lower number last, in one round) with no conflict, and the README status block,
-#     written by MASON when they land, lists them and passes scripts/check-status.sh.
+#     order (the lower number last, in one round) with no conflict, and landing leaves README.md
+#     on origin unchanged, with no commit of MASON's own that rewrites it.
 #  4. A task titled "Stage 21" keeps s21 and reserves only a decision number.
 #  5. A cancelled task's numbers are shown released and are not reused.
 #  6. Filing says so when the range of ad-hoc exit numbers is used up.
@@ -53,12 +53,12 @@ git init -q --bare -b main "$root/origin.git"
 git clone -q "$root/origin.git" "$root/repo" 2>/dev/null
 git -C "$root/repo" checkout -q -b main
 mkdir -p "$root/repo/.mason" "$root/repo/docs/stages" "$root/repo/docs/decisions" "$root/repo/scripts/exit"
-cp scripts/gen-status.sh scripts/check-status.sh "$root/repo/scripts/"
 printf '# Stage 20: second adapters\n\nSummary: the second adapters.\n' > "$root/repo/docs/stages/s20.md"
 printf '# s42: dependencies\n\nSummary: task dependencies.\n' > "$root/repo/docs/stages/s42.md"
 printf '# 0020\n' > "$root/repo/docs/decisions/0020-dependencies.md"
 printf '#!/usr/bin/env bash\n' > "$root/repo/scripts/exit/s20.sh"
 printf '# Repo\n\n<!-- status:begin -->\n<!-- status:end -->\n\nThe rest of the readme.\n' > "$root/repo/README.md"
+cp "$root/repo/README.md" "$root/readme.base"
 cat > "$root/repo/.mason/mason.toml" <<'TOML'
 schema = 1
 start = "explore"
@@ -201,13 +201,12 @@ git clone -q "$root/origin.git" "$root/check" 2>/dev/null
 for t in $a $b $c $d1 $d2; do
   git -C "$root/check" cat-file -e "HEAD:docs/stages/s$(num $t exit).md" || fail "task #$t's stage note is missing on origin"
   git -C "$root/check" cat-file -e "HEAD:scripts/exit/s$(num $t exit).sh" || fail "task #$t's exit script is missing on origin"
-  grep -q "^- \*\*s$(num $t exit)\*\*: $t did its part" "$root/check/README.md" || fail "the README status lacks s$(num $t exit)"
 done
-(cd "$root/check" && bash scripts/check-status.sh) || fail "the status block on origin is out of date"
-[ "$(grep -c 'status:begin' "$root/check/README.md")" = 1 ] && grep -q 'The rest of the readme' "$root/check/README.md" || fail "the README was damaged"
+cmp -s "$root/readme.base" "$root/check/README.md" || fail "landing changed README.md on origin"
+[ "$(git -C "$root/check" log --format=%h -- README.md | wc -l | tr -d ' ')" = 1 ] || fail "a commit after the base touched README.md"
 subjects=$(git -C "$root/check" log --format=%s)
-case "$subjects" in *"Regenerate the README status block"*) ;; *) fail "MASON never committed the status block";; esac
-echo "   alpha, beta, gamma, delta and epsilon all landed; the README status block lists them and check-status.sh passes"
+case "$subjects" in *"Regenerate the README status block"*) fail "MASON committed a README regeneration";; esac
+echo "   alpha, beta, gamma, delta and epsilon all landed; README.md on origin is unchanged"
 
 echo "== 4. a task titled Stage 21 keeps s21 and reserves only a decision number"
 s21=$(add "Stage 21: a planned stage" "plan")
