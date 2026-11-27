@@ -4146,6 +4146,7 @@ fn agent_job(c: &Ctx) {
         StepKind::Explore => "explore",
         // A diagnosis session is run by `diagnose`, not as a step of the graph.
         StepKind::Diagnose => "diagnose",
+        StepKind::Validate => "validate",
         StepKind::Chat => "chat",
         StepKind::Health => "health",
     };
@@ -4227,7 +4228,9 @@ fn agent_job(c: &Ctx) {
                     None => p,
                 }
             }
-            StepKind::Diagnose | StepKind::Chat | StepKind::Health => String::new(),
+            StepKind::Diagnose | StepKind::Validate | StepKind::Chat | StepKind::Health => {
+                String::new()
+            }
         }
     };
 
@@ -4857,7 +4860,7 @@ impl LaunchRec<'_> {
 
 /// Keep what the attempt reported: the provider's limits as the latest for the
 /// account, and the tokens and cost against project, task, step and model.
-fn record_usage(c: &Ctx, spec: &SessionSpec, report: &StepReport) {
+pub(crate) fn record_usage(c: &Ctx, spec: &SessionSpec, report: &StepReport) {
     if let Some(u) = &report.usage {
         crate::usage::record_snapshot(&c.d, &c.project.account, u);
     }
@@ -5159,6 +5162,20 @@ fn finish_agent_inner(c: &Ctx, report: StepReport, dir: &Path) {
                     crate::reviewfindings::advice_given(dir);
                 }
                 _ => {}
+            }
+            // A `changes` verdict is checked by a read-only session before it sends the task back
+            // (task 1134); what it does not confirm becomes a minor note.
+            let plan: Option<serde_json::Value> = std::fs::read_to_string(dir.join("plan.json"))
+                .ok()
+                .and_then(|t| serde_json::from_str(&t).ok());
+            let mut submission = submission;
+            if c.state == State::Review && submission["verdict"] == "changes" {
+                match crate::validate::run(c, plan.as_ref(), &submission) {
+                    crate::validate::Outcome::Stands => {}
+                    crate::validate::Outcome::Changes(s) | crate::validate::Outcome::Overruled(s) => {
+                        submission = s
+                    }
+                }
             }
             // An approval that settles replaced base lines declares them as the task's removals.
             if c.state == State::Review && submission["verdict"] == "approve" {

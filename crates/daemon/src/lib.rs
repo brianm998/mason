@@ -129,6 +129,7 @@ pub mod update;
 pub mod update_plan;
 pub mod usage;
 pub mod usersession;
+pub mod validate;
 pub mod version;
 pub mod views;
 pub mod waitview;

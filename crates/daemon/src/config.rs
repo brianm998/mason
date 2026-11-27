@@ -1187,6 +1187,13 @@ pub struct ProjectCfg {
     pub diagnose_model: Option<String>,
     /// Its effort (`diagnose_effort`), one of the provider's efforts.
     pub diagnose_effort: Option<String>,
+    /// `[review] validate` (default true): a review that asks for changes is first checked by a
+    /// read-only validation session (task 1134).
+    pub review_validate: bool,
+    /// The model of the validation session (`validate_model`; default Sonnet on Claude).
+    pub validate_model: Option<String>,
+    /// Its effort (`validate_effort`; default medium on Claude).
+    pub validate_effort: Option<String>,
     /// Retry a failure outside the code by itself (`auto_retry`, default true; s247).
     pub auto_retry: bool,
     /// Test rounds before the task fails, if the overlay sets one (layer 3).
@@ -2071,6 +2078,44 @@ pub fn parse_project(id: &str, text: &str) -> Result<ProjectCfg, String> {
             }
         }
     };
+    let validate_model = match doc.get("validate_model") {
+        None => None,
+        Some(v) => match v.as_str().map(str::trim).filter(|m| !m.is_empty()) {
+            Some(m) => Some(m.to_string()),
+            None => return Err(format!("{id}: `validate_model` must be a non-empty string")),
+        },
+    };
+    let validate_effort = match doc.get("validate_effort") {
+        None => None,
+        Some(v) => {
+            let efforts = crate::tiermap::effort_levels(agent.provider);
+            match v.as_str() {
+                Some(e) if efforts.iter().any(|x| x == e) => Some(e.to_string()),
+                Some(e) => {
+                    return Err(mason_definition::tiers::bad_effort(
+                        &format!("{id}: `validate_effort`"),
+                        e,
+                        &efforts,
+                    ))
+                }
+                None => return Err(format!("{id}: `validate_effort` must be a string")),
+            }
+        }
+    };
+    let review_validate = match doc.get("review") {
+        None => true,
+        Some(item) => {
+            let t = item
+                .as_table_like()
+                .ok_or_else(|| format!("{id}: `[review]` is a table"))?;
+            match t.get("validate") {
+                None => true,
+                Some(v) => v
+                    .as_bool()
+                    .ok_or_else(|| format!("{id}: `[review] validate` is `true` or `false`"))?,
+            }
+        }
+    };
     crate::proposals::parse_cfg(id, &doc)?;
     crate::introspect::parse_cfg(id, &doc)?;
     crate::schedule::parse(id, &doc)?;
@@ -2107,6 +2152,9 @@ pub fn parse_project(id: &str, text: &str) -> Result<ProjectCfg, String> {
             .unwrap_or(true),
         diagnose_model,
         diagnose_effort,
+        review_validate,
+        validate_model,
+        validate_effort,
         auto_retry: doc
             .get("auto_retry")
             .and_then(|v| v.as_bool())
