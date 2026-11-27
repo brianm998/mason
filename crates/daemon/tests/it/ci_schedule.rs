@@ -101,6 +101,10 @@ impl Host for Fake {
         }
         Ok(())
     }
+    fn cancel_run(&self, run: u64) -> Result<(), String> {
+        self.calls.lock().unwrap().push(format!("cancel {run}"));
+        Ok(())
+    }
 }
 
 struct FakeRepo {
@@ -193,7 +197,16 @@ fn follow_all(
 ) -> Vec<String> {
     let mut said = vec![];
     for i in 0..6 {
-        said.push(follow(d, pid, ci, "nightly", f, r, 1_000 + i));
+        said.push(follow(
+            d,
+            pid,
+            ci,
+            "nightly",
+            f,
+            &repo_at("tipsha", None),
+            r,
+            1_000 + i,
+        ));
         if r.follow.is_empty() {
             break;
         }
@@ -345,12 +358,30 @@ fn a_run_that_never_completes_is_dropped_after_the_limit() {
     let mut r = row();
     r.follow = following(4, 1_000);
     let ci = spec(6);
-    let say = follow(&d, pid, &ci, "nightly", &f, &mut r, 1_000 + GIVE_UP_MS);
+    let say = follow(
+        &d,
+        pid,
+        &ci,
+        "nightly",
+        &f,
+        &repo_at("tipsha", None),
+        &mut r,
+        1_000 + GIVE_UP_MS,
+    );
     assert!(
         say.contains("following run 4") && !r.follow.is_empty(),
         "{say}"
     );
-    let say = follow(&d, pid, &ci, "nightly", &f, &mut r, 1_000 + GIVE_UP_MS + 1);
+    let say = follow(
+        &d,
+        pid,
+        &ci,
+        "nightly",
+        &f,
+        &repo_at("tipsha", None),
+        &mut r,
+        1_000 + GIVE_UP_MS + 1,
+    );
     assert!(say.contains("dropped") && r.follow.is_empty(), "{say}");
     assert!(tasks(&d).is_empty());
     // A run that never showed up at all is dropped the same way.
@@ -368,6 +399,7 @@ fn a_run_that_never_completes_is_dropped_after_the_limit() {
         &ci,
         "nightly",
         &Fake::default(),
+        &repo_at("tipsha", None),
         &mut r,
         1_000 + GIVE_UP_MS + 1,
     );
@@ -382,7 +414,16 @@ fn a_rerun_that_is_refused_is_tried_again_and_a_run_rerun_by_hand_is_not_classif
     *f.refuse_rerun.lock().unwrap() = true;
     let mut r = row();
     r.follow = following(5, 500);
-    let say = follow(&d, pid, &spec(6), "nightly", &f, &mut r, 1_000);
+    let say = follow(
+        &d,
+        pid,
+        &spec(6),
+        "nightly",
+        &f,
+        &repo_at("tipsha", None),
+        &mut r,
+        1_000,
+    );
     assert!(
         say.contains("will try again") && !r.follow.is_empty(),
         "{say}"
@@ -390,7 +431,16 @@ fn a_rerun_that_is_refused_is_tried_again_and_a_run_rerun_by_hand_is_not_classif
     assert_eq!(decode(&r.follow).unwrap().phase, Phase::Await1);
     // Somebody reran it: attempt 2 while we wait for attempt 1.
     f.runs.lock().unwrap()[0].attempt = 2;
-    let say = follow(&d, pid, &spec(6), "nightly", &f, &mut r, 1_001);
+    let say = follow(
+        &d,
+        pid,
+        &spec(6),
+        "nightly",
+        &f,
+        &repo_at("tipsha", None),
+        &mut r,
+        1_001,
+    );
     assert!(say.contains("by hand") && r.follow.is_empty(), "{say}");
     assert!(tasks(&d).is_empty());
 }
@@ -420,12 +470,29 @@ fn dispatch_follows_the_decision_and_the_new_run_is_found_on_a_later_tick() {
     assert_eq!(decode(&back.follow), decode(&r.follow));
     // Not in the list yet: wait. Then the new dispatch run appears.
     let mut r = back;
-    assert!(
-        follow(&d, pid, &ci, "nightly", &f, &mut r, 110).contains("waiting for the dispatched run")
-    );
+    assert!(follow(
+        &d,
+        pid,
+        &ci,
+        "nightly",
+        &f,
+        &repo_at("tipsha", None),
+        &mut r,
+        110
+    )
+    .contains("waiting for the dispatched run"));
     f.run(50, "in_progress", "", "tipsha", "workflow_dispatch");
     f.run(40, "completed", "success", "older", "push");
-    let say = follow(&d, pid, &ci, "nightly", &f, &mut r, 120);
+    let say = follow(
+        &d,
+        pid,
+        &ci,
+        "nightly",
+        &f,
+        &repo_at("tipsha", None),
+        &mut r,
+        120,
+    );
     assert!(say.contains("following run 50"), "{say}");
     assert_eq!(decode(&r.follow).unwrap().run_id, 50);
     // While it is in flight a second schedule run dispatches nothing more.
@@ -708,4 +775,110 @@ fn a_project_with_only_proposed_tasks_is_quiet_and_a_queued_one_is_busy() {
     })
     .unwrap();
     assert!(mason_daemon::introspect::project_busy(&d, "scratch"));
+}
+
+#[test]
+fn a_run_cancelled_by_hand_is_not_rerun_and_files_nothing() {
+    let (_s, d, pid) = start();
+    let f = Fake::default();
+    finished(
+        &f,
+        7,
+        &[("alpha/linux", "cancelled"), ("beta/linux", "cancelled")],
+        &[],
+    );
+    f.run(7, "completed", "cancelled", "tipsha", "workflow_dispatch");
+    let mut r = row();
+    r.follow = following(7, 500);
+    let said = follow_all(&d, pid, &spec(6), &f, &mut r);
+    assert!(said[0].contains("cancelled"), "{said:?}");
+    assert!(r.follow.is_empty());
+    assert!(
+        f.calls().iter().all(|c| !c.starts_with("rerun")),
+        "{:?}",
+        f.calls()
+    );
+    assert!(tasks(&d).is_empty());
+}
+
+#[test]
+fn a_real_failure_on_the_current_head_is_rerun_once() {
+    let (_s, d, pid) = start();
+    let f = Fake::default();
+    finished(
+        &f,
+        7,
+        &[("alpha/linux", "failure")],
+        &[("alpha/linux", "failure")],
+    );
+    let mut r = row();
+    r.follow = following(7, 500);
+    let said = follow_all(&d, pid, &spec(6), &f, &mut r);
+    assert!(said[0].contains("rerunning"), "{said:?}");
+    assert_eq!(f.calls().iter().filter(|c| *c == "rerun 7").count(), 1);
+}
+
+#[test]
+fn failures_on_a_commit_develop_has_left_are_superseded_and_a_new_run_is_dispatched() {
+    use mason_daemon::ci_schedule::dispatch_as;
+    let (_s, d, pid) = start();
+    let f = Fake::default();
+    finished(
+        &f,
+        7,
+        &[("alpha/linux", "failure")],
+        &[("alpha/linux", "failure")],
+    );
+    let mut r = row();
+    r.follow = following(7, 500);
+    let new_head = repo_at("newsha", None);
+    let say = follow(&d, pid, &spec(6), "nightly", &f, &new_head, &mut r, 1_000);
+    assert!(say.contains("superseded"), "{say}");
+    assert!(r.follow.is_empty());
+    assert!(
+        f.calls().iter().all(|c| !c.starts_with("rerun")),
+        "{:?}",
+        f.calls()
+    );
+    assert!(tasks(&d).is_empty());
+    let said = dispatch_as(
+        &d,
+        pid,
+        &spec(6),
+        &f,
+        &new_head,
+        &mut r,
+        2_000,
+        &asked("nightly", false),
+    );
+    assert!(said.contains("dispatched"), "{said}");
+    assert_eq!(dispatches(&f), 1);
+}
+
+#[test]
+fn a_manual_run_cancels_the_rerun_of_an_outdated_commit_but_respects_one_of_the_head() {
+    use mason_daemon::ci_schedule::take_over_outdated;
+    let (_s, d, pid) = start();
+    let f = Fake::default();
+    f.run(7, "in_progress", "", "tipsha", "workflow_dispatch");
+    let mut r = row();
+    r.follow = encode(&Follow {
+        run_id: 7,
+        phase: Phase::Await2,
+        at: 500,
+        before: vec![],
+        failures: vec![],
+    });
+    let ci = spec(6);
+    // The rerun is of the current head: left alone ("already running").
+    let head = repo_at("tipsha", None);
+    assert!(take_over_outdated(&d, pid, &ci, "nightly", &f, &head, &mut r).is_none());
+    assert!(!r.follow.is_empty());
+    assert!(f.calls().iter().all(|c| !c.starts_with("cancel")));
+    // Develop has moved: the rerun is cancelled and the follow dropped.
+    let moved = repo_at("newsha", None);
+    let said = take_over_outdated(&d, pid, &ci, "nightly", &f, &moved, &mut r).unwrap();
+    assert!(said.contains("cancelled the rerun"), "{said}");
+    assert!(r.follow.is_empty());
+    assert!(f.calls().contains(&"cancel 7".to_string()));
 }
