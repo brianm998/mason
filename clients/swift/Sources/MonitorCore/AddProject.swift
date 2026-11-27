@@ -53,6 +53,8 @@ public struct OnboardingPlan: Equatable, Sendable {
     public var next: OnboardingQuestion?
     public var files: [OnboardingFile] = []
     public var errors: [String] = []
+    /// What the plan warns of (an agent CLI not found, a token missing).
+    public var warnings: [String] = []
 
     public init() {}
 
@@ -81,6 +83,7 @@ public struct OnboardingPlan: Equatable, Sendable {
             OnboardingFile(path: $0["path"] as? String ?? "", contents: $0["contents"] as? String ?? "")
         }
         errors = o["errors"] as? [String] ?? []
+        warnings = o["warnings"] as? [String] ?? []
     }
 }
 
@@ -119,6 +122,8 @@ public struct AddProjectWizard: Equatable, Sendable {
     public var proofTask: UInt64?
     /// What the apply said it did not do (a failed registration, a proof task not filed).
     public var warnings: [String] = []
+    /// What the apply noted (choices made for the owner); kept until the sheet is closed.
+    public var notes: [String] = []
 
     public init() {}
 
@@ -205,6 +210,8 @@ public struct AddProjectWizard: Equatable, Sendable {
         busy = true
         refusal = nil
         progress = []
+        warnings = []
+        notes = []
     }
 
     /// `/onboarding/apply` answered. On success the new project is selected by the caller (see
@@ -218,6 +225,8 @@ public struct AddProjectWizard: Equatable, Sendable {
             return
         }
         progress = o["progress"] as? [String] ?? []
+        warnings = o["warnings"] as? [String] ?? []
+        notes = o["notes"] as? [String] ?? []
         if let e = o["error"] as? String { warnings.append(e) }
         if let e = o["proof_error"] as? String { warnings.append("The proof task was not filed: \(e)") }
         if let t = o["proof_task"] as? UInt64 { proofTask = t }
