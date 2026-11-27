@@ -1637,6 +1637,7 @@ pub fn file_task(d: &Arc<Daemon>, task: u64, a: &Value) -> Result<String, String
         blocks_task: false,
         explored: false,
         estimate: None,
+        lookback: None,
     };
     let filed =
         crate::proposals::file(d, &f).map_err(|why| format!("the ticket was refused: {why}"))?;
