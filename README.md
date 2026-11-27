@@ -806,6 +806,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s1088**: A landing or debt CI run that MASON stops waiting on without a verdict (timeout, error, Land now, an abandoned batch, a superseded or red pull request) is now cancelled before its branch is deleted, and the batch's note says how many runs were cancelled.
 - **s1089**: the protocol test an_unchanged_view_is_not_sent_again_and_a_changed_one_is no longer fails when the usage view's clock-based text changes while it runs; an identical resend still fails it.
 - **s1092**: the review prompt now names the task's reserved stage note, decision record and exit script as required files, so a reviewer does not ask for them to be removed or renumbered.
+- **s1094**: The health check no longer calls a step host silent while it waits on a picked-up GitHub run that is within its runner limit and still being polled.
 - **s1095**: A failing s40 now names the card checkpoint keys held by only one of the owner and stranger captures and shows both capture logs, in which `conformance expected` records how each checkpoint settled.
 - **s1096**: scripts/test-parallel.py no longer runs doc tests when the cargo command selects targets, and a `--doc` command runs only them, as scripts/test-shard.py does.
 - **s1098**: The red CI/monitor-compose run 45581279465 names no failing step in the supplied log tail, so no code changed and decision 1087 records how to classify it from the full log.
@@ -846,4 +847,5 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s1180**: The red CI/monitor-compose run 45883735030 names no failing step in the supplied log tail, so no code changed and decision 1170 records how to classify it from the full log.
 - **s1181**: The fake-driven WatchdogTests arm the watchdog with a timer-free `arm(config:log:)`, so a stalled runner can no longer fire a real 250 ms tick into their hand-driven state.
 - **s1182**: Harden the hung-git deadline test against a pid-file race on busy runners.
+- **s1184**: The test `a_given_up_grant_asks_again_though_its_lease_still_holds_a_local_slot` was red at 4b63a8a068 because it shrank the lease before building a grant that claims its units are held, which `Giver::short_of` (#822) now rightly asks for; b468ca819 reordered its steps, and this stage records that it passes there.
 <!-- status:end -->

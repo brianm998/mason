@@ -151,6 +151,9 @@ pub fn gather(d: &Arc<Daemon>, now: u64) -> Facts {
                 .map(|p| p.updated_at_ms)
                 .max()
                 .map_or(in_state, |at| now.saturating_sub(at));
+            // A wait on a live GitHub run posts no progress.
+            let silent =
+                crate::remote_runs::remote_quiet_ms(&d.cfg.hosts_dir(), t.id.0, silent, now);
             // A host queued for a lease is judged by overloaded:slots and
             // stuck:wait:N, not as silent.
             if running && silent > 0 && wait.is_none() {
