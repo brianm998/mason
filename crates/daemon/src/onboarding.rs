@@ -91,6 +91,23 @@ fn parse(body: &Value) -> Result<(PathBuf, Flags), Refusal> {
     Ok((PathBuf::from(path), flags))
 }
 
+/// What this daemon can see: the agent binaries other projects use. PATH, HOME and the
+/// environment are the daemon's own, which is the point: it is the process that runs the agent
+/// and reads the tokens.
+fn machine(d: &Daemon) -> mason_onboard::questions::Machine {
+    use mason_onboard::questions::Agent;
+    let mut m = mason_onboard::questions::Machine::default();
+    for p in d.projects().values() {
+        if let Some(b) = &p.claude_bin {
+            m.known_bins.push((Agent::Claude, b.clone()));
+        }
+        if let Some(b) = &p.agent().codex_bin {
+            m.known_bins.push((Agent::Codex, b.clone()));
+        }
+    }
+    m
+}
+
 fn refuse_registered(d: &Daemon, path: &Path) -> Result<(), Refusal> {
     match registered_around(d, path) {
         Some(id) => Err((
@@ -106,7 +123,8 @@ fn refuse_registered(d: &Daemon, path: &Path) -> Result<(), Refusal> {
 
 /// `POST /onboarding/plan`. Writes nothing.
 pub fn plan(d: &Daemon, body: &Value) -> Result<Value, Refusal> {
-    let (path, flags) = parse(body)?;
+    let (path, mut flags) = parse(body)?;
+    flags.machine = machine(d);
     refuse_registered(d, &path)?;
     let p = mason_onboard::plan(&path, &flags);
     Ok(json!({
@@ -115,6 +133,7 @@ pub fn plan(d: &Daemon, body: &Value) -> Result<Value, Refusal> {
         "next": p.next,
         "files": p.files.iter().map(|(n, t)| json!({"path": n, "contents": t})).collect::<Vec<_>>(),
         "errors": p.errors,
+        "warnings": p.warnings,
     }))
 }
 
@@ -129,7 +148,8 @@ pub struct Applied {
 /// `POST /onboarding/apply`, up to and including registration. Every refusal comes before
 /// anything is written.
 pub fn apply(d: &std::sync::Arc<Daemon>, body: &Value) -> Result<Applied, Refusal> {
-    let (path, flags) = parse(body)?;
+    let (path, mut flags) = parse(body)?;
+    flags.machine = machine(d);
     refuse_registered(d, &path)?;
     let det = mason_onboard::detect::detect(&path).map_err(|e| (400, e))?;
     let id = flags.id.clone().unwrap_or_else(|| project_id(&det.id));
@@ -182,6 +202,7 @@ pub fn apply(d: &std::sync::Arc<Daemon>, body: &Value) -> Result<Applied, Refusa
         "kind": applied.kind,
         "report": applied.report,
         "notes": applied.notes,
+        "warnings": applied.warnings,
         "progress": progress,
     });
     if let Some(e) = error {

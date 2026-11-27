@@ -44,6 +44,14 @@ fn fixture(files: &[(&str, &str)]) -> Fixture {
     }
     git(&repo, &["add", "-A"]);
     git(&repo, &["commit", "-qm", "init"]);
+    // The agents are found in ~/.local/bin of a throwaway HOME, as under a launch agent.
+    let bin = dir.path().join("home/.local/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    for n in ["claude", "codex"] {
+        let f = bin.join(n);
+        std::fs::write(&f, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&f, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    }
     Fixture {
         config: dir.path().join("c"),
         data: dir.path().join("d"),
@@ -64,6 +72,7 @@ impl Fixture {
             .args(args)
             .current_dir(&self.repo)
             .stdin(std::process::Stdio::null())
+            .env("HOME", self._dir.path().join("home"))
             .output()
             .unwrap()
     }
@@ -80,6 +89,7 @@ impl Fixture {
             .current_dir(&self.repo)
             .stdin(std::process::Stdio::null())
             .env_remove("GITHUB_TOKEN")
+            .env("HOME", self._dir.path().join("home"))
             .env("MASON_NO_OPEN", "1")
             .envs(env.iter().copied())
             .output()
@@ -199,6 +209,12 @@ fn yes_runs_without_a_terminal_and_writes_the_branch_the_overlay_and_the_notes()
 #[test]
 fn every_flag_changes_what_is_written() {
     let f = fixture(&[("CLAUDE.md", "# Mine\n")]);
+    let codex = f
+        ._dir
+        .path()
+        .join("home/.local/bin/codex")
+        .display()
+        .to_string();
     let out = ok(&f.mason(&[
         "init",
         "--yes",
@@ -210,7 +226,7 @@ fn every_flag_changes_what_is_written() {
         "--agent",
         "codex",
         "--agent-bin",
-        "/opt/codex",
+        &codex,
         "--sessions",
         "3",
         "--workflow",
@@ -226,7 +242,8 @@ fn every_flag_changes_what_is_written() {
     ]));
     let overlay = std::fs::read_to_string(f.config.join("projects/custom.toml")).unwrap();
     assert!(
-        overlay.contains("provider = \"codex\"") && overlay.contains("codex_bin = \"/opt/codex\""),
+        overlay.contains("provider = \"codex\"")
+            && overlay.contains(&format!("codex_bin = {codex:?}")),
         "{overlay}"
     );
     assert!(on_setup(&f, ".mason/mason.toml")
@@ -367,6 +384,7 @@ fn each_refusal_says_what_to_do_and_writes_nothing() {
             "--no-prove",
         ])
         .current_dir(empty.path())
+        .env("HOME", f._dir.path().join("home"))
         .output()
         .unwrap();
     refused(&o, "no commits");

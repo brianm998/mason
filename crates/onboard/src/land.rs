@@ -202,7 +202,9 @@ mod tests {
             ci_workflow: false,
             land: Land::No,
             prove: false,
+            token: None,
             notes: vec![],
+            warnings: vec![],
         };
         let direct = commands(&d(true), &a(Landing::Direct));
         assert!(direct.contains("git push origin main") && direct.contains("--ff-only"));
