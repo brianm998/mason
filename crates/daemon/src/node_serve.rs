@@ -971,11 +971,11 @@ pub async fn start(d: Arc<Daemon>) -> std::io::Result<u16> {
         *g = Some(info);
     }
     // Tests turn the advertisement off: multicast is unreliable where they run.
-    if std::env::var_os("MASON_NO_MDNS").is_none() {
+    if !lan::mdns_off() {
         let adv = lan::Info {
             port,
+            instance: lan::instance_name(true, &lan::hostname(), &fingerprint),
             fingerprint,
-            instance: format!("MASON node on {}", lan::hostname()),
             txt,
         };
         match lan::advertise(&adv) {

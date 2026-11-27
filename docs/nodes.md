@@ -196,6 +196,12 @@ own work it tolerates, how much disk to keep free, the lease) are set **on the c
 and sent to the node (see section 3). A node that has heard nothing uses safe defaults
 (2 jobs, other work at most 50 % of the CPU, 50 GB free).
 
+A node advertises the Bonjour service `_mason._tcp` as `MASON node on <host> (<8 characters of its
+fingerprint>)`, and the LAN listener as `MASON on <host> (...)`. On macOS it registers through the
+system's own responder, so it never claims the Mac's `.local` name. `MASON_NO_MDNS=1` in a
+daemon's environment switches its advertising and browsing off, and every command a node runs has
+it set.
+
 **Keep the data directory's path short.** Each job's step host listens on a unix socket at
 `<data-dir>/node/hosts/<16 characters>/sock`, and macOS limits the length of such a path (MASON
 refuses one over 100 characters). So the data directory may be at most 67 characters; the one used
