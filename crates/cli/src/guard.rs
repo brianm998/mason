@@ -14,9 +14,12 @@
 //! simple commands; each is then read word by word, following `cd`.
 
 use crate::resources::split_unquoted;
+use mason_adapter_api::contract::HOOK_EDIT;
 use mason_adapters::skills::Policy;
+use mason_platform::net::UnixStream;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Component, Path, PathBuf};
 
 pub const DISCARD: &str = "This throws away uncommitted work. Commit it (or `git stash push -m \
@@ -111,6 +114,32 @@ pub fn hook_guard(input: &str, env: &dyn Fn(&str) -> Option<String>) -> Option<V
         "permissionDecision": "deny",
         "permissionDecisionReason": reason,
     }}))
+}
+
+/// `mason hook edit` (s1152): the daemon's answer to an `Edit`, `Write` or `MultiEdit`,
+/// from the project's write-time rules. It fails open: with no session to ask, or no
+/// answer, the edit passes.
+pub fn hook_edit(input: &str, env: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+    let sock = env("MASON_CONTRACT_SOCK").filter(|s| !s.is_empty())?;
+    let ask = || -> std::io::Result<String> {
+        let mut s = UnixStream::connect(&sock)?;
+        let request = json!({"tool": HOOK_EDIT, "args": {"input": input}});
+        writeln!(s, "{request}")?;
+        let mut line = String::new();
+        BufReader::new(s).read_line(&mut line)?;
+        let reply: Value = serde_json::from_str(&line)?;
+        Ok(match reply["ok"].as_bool() {
+            Some(true) => reply["text"].as_str().unwrap_or_default().to_string(),
+            _ => String::new(),
+        })
+    };
+    match ask() {
+        Ok(out) => Some(out).filter(|o| !o.is_empty()),
+        Err(e) => {
+            eprintln!("MASON: the write-time rules could not be asked ({e}); the edit passes");
+            None
+        }
+    }
 }
 
 /// The `PreToolUse` answer for a `Skill` call the session's policy refuses (s1153);

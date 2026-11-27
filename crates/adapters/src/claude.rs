@@ -417,6 +417,8 @@ impl ClaudeAdapter {
                 "Skill",
                 guard(format!("skill --policy {}", quote(&policy)), "skill", "Skill"),
             ),
+            // The write-time rules (s1152). Unlike the guards it fails open.
+            hook("Edit|Write|MultiEdit", format!("{mason} hook edit")),
         ]});
         let path = mcp_path.with_file_name("settings.json");
         std::fs::write(&path, settings.to_string()).map_err(AdapterError::Spawn)?;
@@ -1751,6 +1753,10 @@ mod tests {
             let guard = format!("'{}' hook guard ||", mason.display());
             assert!(command.starts_with(&guard), "{command}");
             assert!(command.contains("exit 2"), "{command}");
+            let edit = &v["hooks"]["PreToolUse"][2];
+            assert_eq!(edit["matcher"], "Edit|Write|MultiEdit");
+            let command = edit["hooks"][0]["command"].as_str().unwrap();
+            assert_eq!(command, format!("'{}' hook edit", mason.display()));
             let env = |k: &str| {
                 let all: Vec<&str> = c
                     .env
