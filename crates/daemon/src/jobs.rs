@@ -257,50 +257,37 @@ impl Ctx {
         self.conclude_round(outcome, reason, feedback, round, "fix")
     }
 
-    /// Which round of this step this run is, as `max_rounds` counts them: its
-    /// runs since the owner last restarted the task (a retry, or explore-anyway),
+    /// Which round of this step this run is, as `max_rounds` counts them: 1 for
+    /// this run plus the earlier runs of the step that ended sent back, since the
+    /// last failed, superseded or canceled run (an owner's retry, or explore-anyway),
     /// leaving out the runs that ended in a conflict with the base
-    /// ([`Ctx::conflict`]). A retried task gets its rounds again, and a base that
-    /// moved is not held against the change. Falls back to the attempt number.
+    /// ([`Ctx::conflict`]). A green run neither counts nor resets the count. Falls
+    /// back to the attempt number when the world cannot be read.
     pub(crate) fn round(&self) -> u32 {
-        let Ok(w) = self.d.world() else {
-            return self.attempt;
-        };
+        match self.round_runs() {
+            Some(runs) => runs.len() as u32,
+            None => self.attempt,
+        }
+    }
+
+    /// The runs this step's round counts, the current one last: the earlier
+    /// sent-back runs of the stretch ([`red_runs_before`]) then this run.
+    pub(crate) fn round_runs(&self) -> Option<Vec<u64>> {
+        let w = self.d.world().ok()?;
         let conflicts = self.conflict_runs();
-        let mut runs: Vec<&StepRun> = w
-            .step_runs
-            .values()
-            .filter(|r| r.task == self.task && r.id.0 <= self.run.0)
-            .collect();
-        runs.sort_by_key(|r| r.id.0);
-        let restart = runs
-            .iter()
-            .rev()
-            .find(|r| {
-                r.id != self.run
-                    && matches!(
-                        r.outcome,
-                        Some(StepOutcome::Failed | StepOutcome::Superseded | StepOutcome::Canceled)
-                    )
-            })
-            .map_or(0, |r| r.id.0);
-        let same = |r: &StepRun| {
+        let mut runs = red_runs_before(&w, self.task, self.run.0, &conflicts, &|r: &StepRun| {
             if self.step.name.is_empty() || r.name.is_empty() {
                 r.step == self.state
             } else {
                 r.name == self.step.name
             }
-        };
-        let n = runs
-            .iter()
-            .filter(|r| r.id.0 > restart && same(r))
-            .filter(|r| r.id == self.run || !conflicts.contains(&r.id.0))
-            .count() as u32;
-        n.max(1)
+        });
+        runs.push(self.run.0);
+        Some(runs)
     }
 
-    /// How many rounds of the test step (the one that sends back to this step) went red since
-    /// the owner last restarted the task, leaving out conflict runs, as `round` counts them.
+    /// How many rounds of the test step (the one that sends back to this step) went red in
+    /// the stretch, leaving out conflict runs, as `round` counts them.
     /// `None` when no test step sends work back here.
     fn test_rounds_done(&self) -> Option<(u32, u32)> {
         let test = self.def.steps.iter().find(|s| {
@@ -309,28 +296,10 @@ impl Ctx {
         let max = self.project.max_test_rounds.or(test.max_rounds)?;
         let w = self.d.world().ok()?;
         let conflicts = self.conflict_runs();
-        let mut runs: Vec<&StepRun> = w
-            .step_runs
-            .values()
-            .filter(|r| r.task == self.task && r.id.0 < self.run.0)
-            .collect();
-        runs.sort_by_key(|r| r.id.0);
-        let restart = runs
-            .iter()
-            .rev()
-            .find(|r| {
-                matches!(
-                    r.outcome,
-                    Some(StepOutcome::Failed | StepOutcome::Superseded | StepOutcome::Canceled)
-                )
-            })
-            .map_or(0, |r| r.id.0);
-        let done = runs
-            .iter()
-            .filter(|r| r.id.0 > restart && r.name == test.name)
-            .filter(|r| !conflicts.contains(&r.id.0))
-            .filter(|r| matches!(r.outcome, Some(StepOutcome::SentBack)))
-            .count() as u32;
+        let done = red_runs_before(&w, self.task, self.run.0, &conflicts, &|r: &StepRun| {
+            r.name == test.name
+        })
+        .len() as u32;
         Some((done, max))
     }
 
@@ -6019,6 +5988,41 @@ fn land_job(c: &Ctx) {
     }
 }
 
+/// The runs of a step that `max_rounds` counts before run `before`: those of the step
+/// (`same`) that ended sent back, after the last failed, superseded or canceled run of
+/// the task, leaving out conflict runs. One list for the round, the last-round check
+/// and approval steps, so they cannot drift apart.
+pub(crate) fn red_runs_before(
+    w: &mason_engine::World,
+    task: TaskId,
+    before: u64,
+    conflicts: &[u64],
+    same: &dyn Fn(&StepRun) -> bool,
+) -> Vec<u64> {
+    let mut runs: Vec<&StepRun> = w
+        .step_runs
+        .values()
+        .filter(|r| r.task == task && r.id.0 < before)
+        .collect();
+    runs.sort_by_key(|r| r.id.0);
+    let restart = runs
+        .iter()
+        .rev()
+        .find(|r| {
+            matches!(
+                r.outcome,
+                Some(StepOutcome::Failed | StepOutcome::Superseded | StepOutcome::Canceled)
+            )
+        })
+        .map_or(0, |r| r.id.0);
+    runs.iter()
+        .filter(|r| r.id.0 > restart && same(r))
+        .filter(|r| !conflicts.contains(&r.id.0))
+        .filter(|r| matches!(r.outcome, Some(StepOutcome::SentBack)))
+        .map(|r| r.id.0)
+        .collect()
+}
+
 /// The owner approves or rejects the approval step a task is waiting in.
 /// Approving goes where the graph says; rejecting is red (back to development
 /// if the step has `on_red`, otherwise the task fails).
@@ -6066,7 +6070,18 @@ pub fn conclude_approval(
             );
         }
     };
-    let kind = match after(&def, step, outcome, r.attempt, step.max_rounds) {
+    let round = {
+        let conflicts = conflict_runs(&d.task_dir(task));
+        let same = |x: &StepRun| {
+            if r.name.is_empty() || x.name.is_empty() {
+                x.step == r.step
+            } else {
+                x.name == r.name
+            }
+        };
+        red_runs_before(&w, task, run.0, &conflicts, &same).len() as u32 + 1
+    };
+    let kind = match after(&def, step, outcome, round, step.max_rounds) {
         Transition::Next { step, state } => EventKind::StepSucceeded {
             task,
             next: Some(Next { step, state }),
@@ -6086,7 +6101,7 @@ pub fn conclude_approval(
                 run,
                 &step.name,
                 outcome,
-                r.attempt,
+                round,
                 step.max_rounds,
                 back,
             );
@@ -6149,6 +6164,97 @@ pub fn cleanup(d: &Arc<Daemon>, task: TaskId, delete_branch: bool) {
 
 #[cfg(test)]
 mod tests {
+    use mason_core::{State, StepOutcome, StepRun, StepRunId, TaskId, Timestamp};
+
+    /// A world with one task's runs: `(name, outcome)` in order, ids from 1.
+    fn world_of(runs: &[(&str, Option<StepOutcome>)]) -> mason_engine::World {
+        let mut w = mason_engine::World::new();
+        for (i, (name, outcome)) in runs.iter().enumerate() {
+            let id = StepRunId(i as u64 + 1);
+            w.step_runs.insert(
+                id,
+                StepRun {
+                    id,
+                    task: TaskId(1),
+                    step: State::Review,
+                    name: name.to_string(),
+                    attempt: i as u32 + 1,
+                    started_at: Timestamp(0),
+                    outcome: *outcome,
+                },
+            );
+        }
+        w
+    }
+
+    /// The round of the run after `runs`, for the step `name`.
+    fn round_after(runs: &[(&str, Option<StepOutcome>)], name: &str, conflicts: &[u64]) -> u32 {
+        let w = world_of(runs);
+        let before = runs.len() as u64 + 1;
+        super::red_runs_before(&w, TaskId(1), before, conflicts, &|r: &StepRun| {
+            r.name == name
+        })
+        .len() as u32
+            + 1
+    }
+
+    use StepOutcome::{Canceled, Failed, SentBack, Succeeded, Superseded};
+
+    #[test]
+    fn green_runs_do_not_spend_a_step_s_rounds() {
+        // review approved, landing sent back, review (first red): round 1 of 2.
+        let runs = [
+            ("review", Some(Succeeded)),
+            ("landing", Some(SentBack)),
+            ("develop", Some(Succeeded)),
+        ];
+        assert_eq!(round_after(&runs, "review", &[]), 1);
+        // Superseded runs end the stretch; green runs stay out of the count.
+        let runs = [
+            ("review", Some(Succeeded)),
+            ("landing", Some(Superseded)),
+            ("review", Some(Succeeded)),
+            ("landing", Some(SentBack)),
+            ("review", Some(SentBack)),
+        ];
+        assert_eq!(round_after(&runs, "review", &[]), 2);
+    }
+
+    #[test]
+    fn reds_add_up_with_or_without_a_green_run_between_them() {
+        let two = [("review", Some(SentBack)), ("review", Some(SentBack))];
+        assert_eq!(round_after(&two, "review", &[]), 3);
+        let gap = [
+            ("review", Some(SentBack)),
+            ("review", Some(Succeeded)),
+            ("landing", Some(SentBack)),
+            ("review", Some(SentBack)),
+        ];
+        assert_eq!(round_after(&gap, "review", &[]), 3);
+    }
+
+    #[test]
+    fn conflict_runs_do_not_count_and_a_failed_run_gives_the_rounds_back() {
+        let runs = [("test", Some(SentBack)), ("test", Some(SentBack))];
+        assert_eq!(round_after(&runs, "test", &[1]), 2);
+        let retried = [
+            ("test", Some(SentBack)),
+            ("test", Some(Failed)),
+            ("test", Some(Canceled)),
+        ];
+        assert_eq!(round_after(&retried, "test", &[]), 1);
+    }
+
+    #[test]
+    fn an_approval_step_counts_only_its_rejections() {
+        let runs = [
+            ("approve", Some(Succeeded)),
+            ("landing", Some(SentBack)),
+            ("develop", Some(Succeeded)),
+        ];
+        assert_eq!(round_after(&runs, "approve", &[]), 1);
+    }
+
     #[test]
     fn a_run_is_given_its_limit_as_its_budget() {
         let env = vec![
