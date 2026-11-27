@@ -387,7 +387,11 @@ impl<'a> StepRunner<'a> {
                             r.tool_calls.push(name);
                         }
                     }
-                    Some(ev @ (AgentEvent::Plan { .. } | AgentEvent::Skill { .. })) => {
+                    Some(
+                        ev @ (AgentEvent::Plan { .. }
+                        | AgentEvent::Skill { .. }
+                        | AgentEvent::FileEdit { .. }),
+                    ) => {
                         if let Some(f) = &spec.on_agent_event {
                             f(&ev);
                         }
