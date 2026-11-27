@@ -1131,6 +1131,9 @@ pub async fn run_command_as(
         req = req.header("content-type", "application/json");
     }
     req = req.header("x-mason-client", client);
+    if peer.is_some() {
+        req = req.header("x-mason-paired", "1");
+    }
     if !c.actor.is_empty() {
         req = req.header("x-mason-as", c.actor.replace(['\r', '\n'], " "));
     }

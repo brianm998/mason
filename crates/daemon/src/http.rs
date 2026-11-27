@@ -3629,12 +3629,27 @@ async fn remote_set(
     r.map(Json).map_err(|(c, m)| fail(code(c), m))
 }
 
-async fn project_settings_get(Shared(d): Shared<Arc<Daemon>>, Path(name): Path<String>) -> Res {
+/// Who is asking, for the Project page: the identity the request names, and whether it came
+/// through a paired device (the LAN guard and the relay set `x-mason-paired`; this Mac's own
+/// loopback requests never carry it).
+fn caller_of(h: &axum::http::HeaderMap) -> crate::projsettings::Caller {
+    crate::projsettings::Caller {
+        who: who_of(h),
+        paired: h.contains_key("x-mason-paired"),
+    }
+}
+
+async fn project_settings_get(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Path(name): Path<String>,
+) -> Res {
     project_of(&d, &name)?;
+    let caller = caller_of(&headers);
     let d2 = d.clone();
     let r = d
         .pool
-        .run(move || crate::settings::get_project(&d2, &name))
+        .run(move || crate::settings::get_project_as(&d2, &name, &caller))
         .await
         .map_err(pool_err)?;
     r.map(Json).map_err(|(c, m)| fail(code(c), m))
@@ -3650,10 +3665,11 @@ async fn project_settings_set(
 ) -> Res {
     owner_only(&d, &who_of(&headers), "change project settings")?;
     project_of(&d, &name)?;
+    let caller = caller_of(&headers);
     let d2 = d.clone();
     let r = d
         .pool
-        .run(move || crate::settings::set_project(&d2, &name, &b))
+        .run(move || crate::settings::set_project_as(&d2, &name, &b, &caller))
         .await
         .map_err(pool_err)?;
     r.map(Json).map_err(|(c, m)| fail(code(c), m))

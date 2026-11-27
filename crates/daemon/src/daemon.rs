@@ -556,9 +556,12 @@ impl Daemon {
             .collect()
     }
 
-    /// Re-read a project's registration file (`<config>/projects/<name>.toml`) and
-    /// apply it to tasks admitted from now on; tasks already running keep what they
-    /// started with. Returns what changed, as the top-level keys of the file. A file
+    /// Re-read a project's registration file (`<config>/projects/<name>.toml`) and make it the
+    /// current registration. Every step run reads the current registration when it starts
+    /// (`jobs::ctx`), so the next step run of any task uses it, admitted before the reload or not;
+    /// a step already running keeps what it started with, except the limits read through
+    /// `Ctx::live`. (Pipeline definitions differ: a task keeps the definition it was admitted
+    /// under.) Returns what changed, as the top-level keys of the file. A file
     /// that does not parse, or that changes something fixed at start (the repository
     /// path, the base branch, the remote, `[self]`), is refused whole and the current
     /// registration keeps running.

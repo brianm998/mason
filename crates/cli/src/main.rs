@@ -1372,7 +1372,7 @@ fn main() {
             }
             match r["result"].as_str() {
                 Some("applied") => println!(
-                    "Reloaded {project}.toml; changed: {}. Tasks admitted from now on use it",
+                    "Reloaded {project}.toml; changed: {}. The next step run of every task uses it; a step already running keeps what it started with",
                     r["changed"]
                         .as_array()
                         .into_iter()
