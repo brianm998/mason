@@ -83,6 +83,7 @@ internal fun AddProjectStepView(model: MonitorModel, w: AddProjectWizard) {
                     w.busy -> Text("Working…", style = theme.body(color = theme.muted), modifier = Modifier.testTag("add-project-working"))
                     w.appliedId != null -> Text("Added ${w.appliedId}.", style = theme.body(FontWeight.SemiBold), modifier = Modifier.testTag("add-project-done"))
                 }
+                (w.applyWarnings + w.applyNotes).forEach { Text(it, style = theme.small(color = theme.attention), modifier = Modifier.testTag("add-project-warning")) }
             }
         }
         w.error?.let { Text(it, style = theme.body(color = theme.attention), modifier = Modifier.testTag("add-project-error")) }
@@ -116,6 +117,7 @@ private fun ReviewStep(w: AddProjectWizard) {
         Text(f.path, style = theme.small(FontWeight.SemiBold), modifier = Modifier.testTag("add-project-file:${f.path}"))
         Text(f.contents, style = theme.small(), fontFamily = FontFamily.Monospace)
     }
+    w.plan?.warnings?.forEach { Text(it, style = theme.small(color = theme.attention), modifier = Modifier.testTag("add-project-warning")) }
     Text("Land the setup branch?", style = theme.body(FontWeight.SemiBold))
     Row(horizontalArrangement = Arrangement.spacedBy(theme.spacingSmall)) {
         landChoices.forEach { c -> Pill(c, prominent = w.land == c, modifier = Modifier.testTag("add-project-land:$c")) { w.land = c } }
