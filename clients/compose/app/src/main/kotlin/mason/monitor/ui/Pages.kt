@@ -513,6 +513,9 @@ private fun TaskDetail(model: MonitorModel, d: TaskDetailView, loading: Boolean 
                     Text(c.timeText(now), style = theme.body(color = if (c.isStale(now)) theme.slow else theme.muted))
                 }
             }
+            if (s.context.isNotEmpty()) {
+                Text(s.context, style = theme.small(color = theme.muted), modifier = Modifier.padding(start = theme.spacingLarge))
+            }
             // Every session this run started, so a retry up the ladder shows.
             s.launches.forEach { l ->
                 LinkedText(model, "${l.kind}: ${l.display}", theme.small(color = theme.muted), Modifier.padding(start = theme.spacingLarge))

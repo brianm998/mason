@@ -1320,6 +1320,7 @@ impl<'a> Ctx<'a> {
     pub fn task_detail(&self, id: u64) -> Option<TaskDetailView> {
         let t = self.w.tasks.get(&TaskId(id))?;
         let p = self.d.project(t.project);
+        let context = crate::context::of_task(self.d, id);
         let mut steps: Vec<StepLine> = self
             .runs
             .of_task(t.id)
@@ -1335,6 +1336,7 @@ impl<'a> Ctx<'a> {
                 ),
                 started_ms: r.started_at.0,
                 launches: crate::launchview::history(self.d, r.id.0),
+                context: context.get(&r.id.0).map_or_else(String::new, |f| f.line()),
             })
             .collect();
         steps.sort_by_key(|s| s.run);

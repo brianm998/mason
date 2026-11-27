@@ -1215,6 +1215,9 @@ message StepLine {
   uint64 started_ms = 6;
   // Every session this run started: the first, resumes, and each ladder retry.
   repeated ModelUse launches = 7;
+  // How full the run's agent sessions got, such as `context peak 62%, final 40%,
+  // 1 compaction`; empty when nothing reported it.
+  string context = 8;
 }
 
 message DebtLine {
