@@ -149,6 +149,7 @@ fn world_full_window(
         test_cmd,
         test_step,
         window_always,
+        setup,
         &cfg,
     )
 }
@@ -159,7 +160,7 @@ pub fn world_cfg(
     extra: &dyn Fn(&Scratch) -> String,
     cfg: &dyn Fn(&mut mason_daemon::config::DaemonConfig),
 ) -> W {
-    world_configured(landing_toml, extra, &[], "true", false, true, cfg)
+    world_configured(landing_toml, extra, &[], "true", false, true, None, cfg)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -170,6 +171,7 @@ fn world_configured(
     test_cmd: &str,
     test_step: bool,
     window_always: bool,
+    setup: Option<&str>,
     cfg: &dyn Fn(&mut mason_daemon::config::DaemonConfig),
 ) -> W {
     let s = Scratch::new("true", json!({"steps": {}}));
