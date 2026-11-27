@@ -613,6 +613,8 @@ fn run_hosted_resuming(
     let mut fallback: Option<crate::sched::Lease> = None;
     // A node returns the same `Ran` GitHub does (`run_on_node`, the multi-machine plan).
     let exec = crate::remote::executor_for(d, project, crate::remote::Kind::Suite, place);
+    // Why a node cannot be sent the run at all (not a loss that a wait mends).
+    let mut refused: Option<String> = None;
     if exec.is_off_machine() {
         let build = place.and_then(|(_, s)| s.build.as_deref());
         let ran = match &exec {
@@ -639,7 +641,20 @@ fn run_hosted_resuming(
                 // A batch's runner units are not what a node run uses.
                 cover.release_units();
                 run_on_node(
-                    d, project, id, build, cmd, cwd, limit, log_dir, &check, run, watch, &env, nid,
+                    d,
+                    project,
+                    id,
+                    build,
+                    cmd,
+                    cwd,
+                    limit,
+                    log_dir,
+                    &check,
+                    run,
+                    watch,
+                    &env,
+                    nid,
+                    &mut refused,
                 )?
             }
             crate::remote::Executor::Local => None,
@@ -656,11 +671,47 @@ fn run_hosted_resuming(
             if let Some(room) = crate::nodes::best_room(d, project, place.map(|(_, s)| s)) {
                 let build = place.and_then(|(_, s)| s.build.as_deref());
                 if let Some(ran) = run_on_node(
-                    d, project, id, build, cmd, cwd, limit, log_dir, &check, run, watch, &env,
+                    d,
+                    project,
+                    id,
+                    build,
+                    cmd,
+                    cwd,
+                    limit,
+                    log_dir,
+                    &check,
+                    run,
+                    watch,
+                    &env,
                     &room.nid,
+                    &mut refused,
                 )? {
                     return Ok(ran);
                 }
+            }
+        }
+        // A project that may not run this here (`remote` mode, fallback none) does not: GitHub,
+        // then a node with room, then a wait. Nothing takes a local slot or starts a step host.
+        if let Some((task, suite)) = place {
+            if crate::hostedcheck::stays_off_for(d, project, task.map(|t| t.0)) {
+                let ran = off_machine_until_placed(
+                    d,
+                    project,
+                    id,
+                    cmd,
+                    cwd,
+                    limit,
+                    log_dir,
+                    &check,
+                    run,
+                    watch,
+                    &env,
+                    place,
+                    cover,
+                    &mut refused,
+                    suite,
+                )?;
+                return Ok(ran);
             }
         }
         // `fallback = "local"` (or no node with room) sent it here. Its step holds runner pool units, not this
@@ -766,6 +817,115 @@ fn run_hosted_resuming(
                     None => hl::lost_text(&rep),
                 });
             }
+        }
+    }
+}
+
+/// A suite that came back from where it was sent, in a project that may not run it on this
+/// machine: it is placed again until something takes it. Each round asks GitHub (when placement
+/// says so), then a node with room; it waits with backoff when a paired node may yet take it, and
+/// is an outage (`env_err`, charged to no task) when no place ever can or the node lacks the base.
+/// It honours a skip and a daemon shutdown. It takes no local slot and starts no step host.
+#[allow(clippy::too_many_arguments)]
+fn off_machine_until_placed(
+    d: &Arc<Daemon>,
+    project: &str,
+    id: &str,
+    cmd: &str,
+    cwd: &Path,
+    limit: Duration,
+    log_dir: &Path,
+    check: &Check,
+    run: Option<StepRunId>,
+    watch: Option<&Suite>,
+    env: &[(String, String)],
+    place: Option<(Option<TaskId>, &Suite)>,
+    cover: &Cover,
+    refused: &mut Option<String>,
+    suite: &Suite,
+) -> Result<Ran, String> {
+    use crate::remote as rm;
+    let build = suite.build.as_deref();
+    let step = crate::node_exec::poll_interval();
+    let mut failed = 0u32;
+    loop {
+        if let Some(why) = refused.take() {
+            return Err(rm::env_err(&why));
+        }
+        let exec = rm::executor_for(d, project, rm::Kind::Suite, place);
+        let mut ran = match &exec {
+            rm::Executor::GitHub { runs_on } => run_remote(
+                d,
+                project,
+                id,
+                build,
+                cmd,
+                cwd,
+                limit,
+                log_dir,
+                check,
+                run,
+                watch,
+                env,
+                runs_on,
+                cover.covered,
+                cover.giver.clone(),
+                cover.runners,
+                cover.units_held(),
+            )?,
+            rm::Executor::Node { nid, .. } => run_on_node(
+                d, project, id, build, cmd, cwd, limit, log_dir, check, run, watch, env, nid,
+                refused,
+            )?,
+            rm::Executor::Local => None,
+        };
+        cover.release_units();
+        if ran.is_none() && refused.is_none() {
+            if let Some(room) = crate::nodes::best_room(d, project, Some(suite)) {
+                ran = run_on_node(
+                    d, project, id, build, cmd, cwd, limit, log_dir, check, run, watch, env,
+                    &room.nid, refused,
+                )?;
+            }
+        }
+        if let Some(ran) = ran {
+            return Ok(ran);
+        }
+        if let Some(why) = refused.take() {
+            return Err(rm::env_err(&why));
+        }
+        if !matches!(exec, rm::Executor::Node { .. }) && !crate::nodes::may_take(d, project) {
+            return Err(rm::env_err(
+                "no GitHub runner or node could take the suite, and this project's mode does not \
+                 run it on this Mac",
+            ));
+        }
+        tracing::warn!(run = %id, "the suite was given back; waiting for a place (this project does not run suites here)");
+        let rest = step * (1u32 << failed.min(6));
+        failed += 1;
+        let began = std::time::Instant::now();
+        while began.elapsed() < rest {
+            match check() {
+                Stop::No => {}
+                stop => {
+                    return Ok(Ran {
+                        code: -1,
+                        signal: 9,
+                        output: String::new(),
+                        stop,
+                        timed_out: false,
+                        stalled: None,
+                        ran_ms: None,
+                        narrowed: false,
+                        resumed: None,
+                        ran_on: None,
+                    })
+                }
+            }
+            if d.is_shutting_down() {
+                return Err(rm::env_err("the daemon is stopping; run the suite again"));
+            }
+            std::thread::sleep(Duration::from_millis(200).min(rest));
         }
     }
 }
@@ -900,7 +1060,9 @@ fn run_remote(
 
 /// A suite command run on a node: the same `Ran` a step host or a GitHub run gives, so the code
 /// that judges a run never knows where it was. `Ok(None)`: no node had room (or the one chosen
-/// went away), and the caller runs it here with the slots a local run holds. The suite's build
+/// went away), and the caller places it again: here, with the slots a local run holds, or, where
+/// the project may not run it here, somewhere else. `refused` gets the reason when waiting for
+/// a node would not help. The suite's build
 /// comes first in the job, as its own process.
 #[allow(clippy::too_many_arguments)]
 fn run_on_node(
@@ -917,9 +1079,11 @@ fn run_on_node(
     watch: Option<&Suite>,
     env: &[(String, String)],
     nid: &str,
+    refused: &mut Option<String>,
 ) -> Result<Option<Ran>, String> {
     use crate::remote as rm;
     let Some(base_ref) = rm::base_ref_of(d, project) else {
+        *refused = Some("the project's base ref is unknown, so no node can be sent the run".into());
         return Ok(None);
     };
     let spec = rm::with_build(
@@ -967,7 +1131,11 @@ fn run_on_node(
             ran_on: None,
         })),
         Err(rm::Fail::Environmental(why)) => {
-            tracing::warn!(run = %id, "{why}; running it here instead");
+            tracing::warn!(run = %id, "{why}; not on this node");
+            // A node without the run's base is no passing fault: a wait would not mend it (#1197).
+            if crate::node_exec::is_base_failure(&why) {
+                *refused = Some(why);
+            }
             Ok(None)
         }
         Err(rm::Fail::Error(e)) => Err(e),
