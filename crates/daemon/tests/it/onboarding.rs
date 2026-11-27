@@ -280,3 +280,64 @@ fn a_path_inside_a_registered_project_is_refused_and_nothing_is_written() {
     );
     assert_eq!(code, 409, "the registered path itself");
 }
+
+#[test]
+fn an_agent_binary_that_is_not_there_is_refused_and_nothing_is_registered() {
+    let t = start();
+    let r = repo_at(t.root.path(), "noagent");
+    let mut a = answers();
+    a["agent_bin"] = json!("/nonexistent/claude");
+    let (code, v) = call(
+        &t.d,
+        "POST",
+        &t.owner,
+        "/onboarding/apply",
+        json!({"path": r, "answers": a}),
+    );
+    assert_eq!(code, 400, "{v}");
+    assert!(v["error"].as_str().unwrap().contains("--agent-bin"), "{v}");
+    assert!(!t.s.config_dir.join("projects/noagent.toml").exists());
+    assert!(!r.join(".mason").exists());
+    let (_, st) = call(&t.d, "GET", &t.owner, "/status", json!(null));
+    assert!(
+        !st["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p == "noagent"),
+        "{st}"
+    );
+}
+
+#[test]
+fn the_overlay_holds_the_absolute_agent_path_and_plan_and_apply_return_warnings() {
+    let t = start();
+    let r = repo_at(t.root.path(), "withbin");
+    let (_, v) = call(
+        &t.d,
+        "POST",
+        &t.owner,
+        "/onboarding/plan",
+        json!({"path": r, "answers": answers()}),
+    );
+    assert!(v["warnings"].is_array(), "{v}");
+    let (code, v) = call(
+        &t.d,
+        "POST",
+        &t.owner,
+        "/onboarding/apply",
+        json!({"path": r, "answers": answers()}),
+    );
+    assert_eq!(code, 200, "{v}");
+    assert!(v["warnings"].is_array(), "{v}");
+    let overlay = std::fs::read_to_string(t.s.config_dir.join("projects/withbin.toml")).unwrap();
+    // Taken from the project that was already registered, as an absolute path.
+    let line = overlay
+        .lines()
+        .find(|l| l.starts_with("claude_bin = "))
+        .expect(&overlay);
+    assert!(
+        line.trim_start_matches("claude_bin = \"").starts_with('/'),
+        "{line}"
+    );
+}
