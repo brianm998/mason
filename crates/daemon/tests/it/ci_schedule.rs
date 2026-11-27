@@ -882,3 +882,46 @@ fn a_manual_run_cancels_the_rerun_of_an_outdated_commit_but_respects_one_of_the_
     assert!(r.follow.is_empty());
     assert!(f.calls().contains(&"cancel 7".to_string()));
 }
+
+#[test]
+fn a_full_run_is_deferred_while_the_pool_is_over_its_share_and_a_forced_run_is_not() {
+    use mason_daemon::ci_schedule::dispatch_as;
+    let (_s, d, pid) = start();
+    let f = Fake::default();
+    let ci = spec(6);
+    let mut r = row();
+    // Other workflows hold 8 of the pool's units; the share is 0%.
+    d.broker.set_limit("gha_full_share", 0).unwrap();
+    d.broker.set_other_jobs(mason_daemon::sched::OtherJobs {
+        gha_running: 8,
+        ..Default::default()
+    });
+    let say = dispatch_as(
+        &d,
+        pid,
+        &ci,
+        &f,
+        &repo_at("tip1", None),
+        &mut r,
+        100,
+        &asked("nightly", false),
+    );
+    assert!(say.starts_with("deferred: "), "{say}");
+    assert_eq!(dispatches(&f), 0);
+    assert!(d.store.full_tests("scratch", "nightly").unwrap().is_empty());
+    assert!(r.follow.is_empty());
+    // Forced: dispatched regardless.
+    let say = dispatch_as(
+        &d,
+        pid,
+        &ci,
+        &f,
+        &repo_at("tip1", None),
+        &mut r,
+        200,
+        &asked("manual", true),
+    );
+    assert!(say.contains("dispatched"), "{say}");
+    assert_eq!(dispatches(&f), 1);
+    assert_eq!(d.store.full_tests("scratch", "nightly").unwrap().len(), 1);
+}

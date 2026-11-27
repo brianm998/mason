@@ -89,6 +89,10 @@ pub(crate) fn sync_table(
     now: &[(String, String, String)],
 ) -> (Vec<String>, Vec<String>) {
     let at = now_ms();
+    // The finished pipeline review's one line is an alert of its own for a day.
+    let mut now = now.to_vec();
+    now.extend(crate::review::alert(d, at));
+    let now = now.as_slice();
     let held: Vec<(String, u64)> = d
         .notify
         .mem()

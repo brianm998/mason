@@ -748,6 +748,14 @@ ios = "done"
 android = "todo"
 android_reason = "Not in the first Android phone app (stage 469): the Android module has no Settings page yet"
 
+[feature.settings-review]
+description = "Settings starts with a Pipeline review section: an on/off switch, the time of day, every N days (with Daily and Weekly), each saved through POST /review; the last run with links to the proposals it filed and its summary, the next run, any problem with review.toml, and Run now through POST /review/run, off while a review is running (s1093)"
+swift = "done"
+compose = "done"
+ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no Settings page yet"
+
 [feature.step-context-fill]
 description = "A task page's step row shows how full the run's agent sessions got their context window, as the daemon's own line such as 'context peak 62%, final 40%, 1 compaction'; nothing when the run reported none; a filter or search finds it (s1108)"
 swift = "done"
