@@ -29,12 +29,23 @@ public enum Mascot {
         if let o = ProcessInfo.processInfo.environment["MASON_MASCOT_DIR"] {
             dirs.insert(URL(fileURLWithPath: o), at: 0)
         }
+        return artFolder(in: dirs)
+    }()
+
+    /// The art folder inside the resource bundle that sits in the first of `dirs` that has one.
+    /// SwiftPM's classic build lays the bundle out flat (`<bundle>/Art`); the newer build system
+    /// (Swift 6.4, Xcode 27) makes a macOS bundle (`<bundle>/Contents/Resources/Art`). Both are
+    /// looked for, so the art is found whichever toolchain built the package.
+    static func artFolder(in dirs: [URL]) -> URL? {
         for d in dirs {
-            let art = d.appendingPathComponent(resourceBundleName).appendingPathComponent("Art")
-            if FileManager.default.fileExists(atPath: art.path) { return art }
+            let bundle = d.appendingPathComponent(resourceBundleName)
+            for sub in ["Art", "Contents/Resources/Art"] {
+                let art = bundle.appendingPathComponent(sub)
+                if FileManager.default.fileExists(atPath: art.path) { return art }
+            }
         }
         return nil
-    }()
+    }
 
     // MARK: Data (what the tests and tools read)
 

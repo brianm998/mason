@@ -15,7 +15,9 @@
 //! `{"api_retry": {"attempt": 1, "status": 529}}`, `{"sleep_ms": 100}`,
 //! `{"result": {"is_error": false, "text": "...", "api_error_status": null}}`,
 //! `{"todo": [{"content": "...", "status": "pending|in_progress|completed"}, ...]}` (a
-//! `TodoWrite` call), `{"tool": {"name": "Edit", "input": {...}}}` (a built-in tool call
+//! `TodoWrite` call), `{"write": {"file_path": "...", "content": "..."}}` (a `Write` call:
+//! the `--settings` file's `PreToolUse` hooks are asked, and the file is written unless
+//! one denies it), `{"tool": {"name": "Edit", "input": {...}}}` (a built-in tool call
 //! that goes nowhere), `{"stderr": "..."}`, `{"exit": 1}` (die with no result) and
 //! `{"sh": "..."}` (run a shell command in the working directory, so the
 //! "agent" can really edit and commit; the prompt is in `$FAKE_PROMPT`). In a call's arguments the string
@@ -116,6 +118,52 @@ fn call(tool: &str, args: &Value) -> (bool, String) {
         v["ok"].as_bool().unwrap_or(false),
         v["text"].as_str().unwrap_or_default().to_string(),
     )
+}
+
+/// What the `PreToolUse` hooks of the `--settings` file say about a tool call: each
+/// matching command run in the shell with the call on its stdin, as the real CLI does.
+fn hooks(args: &[String], input: &Value) -> Vec<Value> {
+    let Some(settings) = args
+        .iter()
+        .position(|a| a == "--settings")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+    else {
+        return vec![];
+    };
+    let tool = input["tool_name"].as_str().unwrap_or_default();
+    let mut said = vec![];
+    for entry in settings["hooks"]["PreToolUse"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        let matcher = entry["matcher"].as_str().unwrap_or_default();
+        if !matcher.split('|').any(|m| m == tool) {
+            continue;
+        }
+        for hook in entry["hooks"].as_array().into_iter().flatten() {
+            let command = hook["command"].as_str().unwrap_or_default();
+            let child = std::process::Command::new("sh")
+                .args(["-c", command])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn();
+            let Ok(mut child) = child else { continue };
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = write!(stdin, "{input}");
+            }
+            if let Some(v) = child
+                .wait_with_output()
+                .ok()
+                .and_then(|o| serde_json::from_slice::<Value>(&o.stdout).ok())
+            {
+                said.push(v["hookSpecificOutput"].clone());
+            }
+        }
+    }
+    said
 }
 
 /// The skills of the plugin directories named on the command line.
@@ -269,6 +317,43 @@ fn main() {
                 &json!({"type": "assistant", "session_id": sid, "message": {"role": "assistant",
                 "content": [{"type": "tool_use", "id": format!("toolu_fake_{calls}"),
                 "name": t["name"], "input": t["input"]}]}}),
+            );
+        } else if let Some(w) = a.get("write") {
+            calls += 1;
+            let tid = format!("toolu_fake_{calls}");
+            let path = std::path::Path::new(&cwd).join(w["file_path"].as_str().unwrap_or_default());
+            let content = w["content"].as_str().unwrap_or_default();
+            let input = json!({"file_path": path.display().to_string(), "content": content});
+            msgs += 1;
+            message(
+                partial,
+                &sid,
+                msgs,
+                json!([{"type": "tool_use", "id": tid, "name": "Write", "input": input}]),
+            );
+            let said = hooks(
+                &args,
+                &json!({"hook_event_name": "PreToolUse", "tool_name": "Write", "cwd": cwd,
+                    "tool_input": input}),
+            );
+            let denied = said.iter().find(|s| s["permissionDecision"] == "deny");
+            let (ok, text) = match denied {
+                Some(s) => (false, s["permissionDecisionReason"].clone()),
+                None => {
+                    if let Some(dir) = path.parent() {
+                        let _ = std::fs::create_dir_all(dir);
+                    }
+                    let ok = std::fs::write(&path, content).is_ok();
+                    let context: Vec<&str> = said
+                        .iter()
+                        .filter_map(|s| s["additionalContext"].as_str())
+                        .collect();
+                    (ok, json!(format!("written. {}", context.join(" "))))
+                }
+            };
+            out(
+                &json!({"type": "user", "session_id": sid, "message": {"role": "user", "content": [
+                {"tool_use_id": tid, "type": "tool_result", "is_error": !ok, "content": [{"type": "text", "text": text}]}]}}),
             );
         } else if let Some(r) = a.get("rate_limit") {
             // `resets_in` (seconds) is relative to the moment of emission, so a loaded
