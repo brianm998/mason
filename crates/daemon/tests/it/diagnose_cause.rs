@@ -304,6 +304,7 @@ fn a_file_task_that_repeats_an_open_ticket_is_refused_and_the_card_says_which() 
             blocks_task: false,
             explored: false,
             estimate: None,
+            lookback: None,
         },
     )
     .unwrap();

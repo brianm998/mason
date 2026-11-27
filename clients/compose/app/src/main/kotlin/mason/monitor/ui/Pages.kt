@@ -976,6 +976,11 @@ fun SettingsPage(model: MonitorModel) {
     Scrolling(model) {
         Text("Settings", style = theme.title())
         model.settingsNotice?.let { Text(it, style = theme.body(color = theme.muted), modifier = Modifier.testTag("settings:notice")) }
+        Section("Pipeline review") {
+            val r = model.reviewSettings
+            if (r == null) Text("Loading the pipeline review.", style = theme.body(color = theme.muted))
+            else ReviewSectionBody(model, r, { model.changeReviewSetting(it) }, { model.runReview() })
+        }
         val s = model.settings
         if (s == null) {
             Text("Loading the project's settings.", style = theme.body(color = theme.muted))
@@ -1045,6 +1050,61 @@ fun SettingsPage(model: MonitorModel) {
         }
         DevicesSection(model)
     }
+}
+
+/**
+ * The body of the "Pipeline review" section (s1093): on or off, the time, how often, the last run
+ * with its proposals, the next run and Run now.
+ */
+@Composable
+internal fun ReviewSectionBody(model: MonitorModel, review: ReviewSettings, change: (String) -> Unit, runNow: () -> Unit) {
+    val theme = LocalTheme.current
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        androidx.compose.material3.Checkbox(
+            checked = review.enabled,
+            onCheckedChange = { change(SettingsPayload.reviewEnabled(it)) },
+            modifier = Modifier.testTag("settings:review:enabled"),
+        )
+        Text("Review the pipeline", style = theme.body())
+    }
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(theme.spacing)) {
+        Text("At ${review.at}", style = theme.body())
+        listOf(
+            Triple("hour:less", "-1 h", review.atMoved(hours = -1)),
+            Triple("hour:more", "+1 h", review.atMoved(hours = 1)),
+            Triple("minute:less", "-5 min", review.atMoved(minutes = -5)),
+            Triple("minute:more", "+5 min", review.atMoved(minutes = 5)),
+        ).forEach { (tag, label, at) ->
+            androidx.compose.material3.TextButton(
+                onClick = { change(SettingsPayload.reviewAt(at)) }, enabled = review.enabled,
+                modifier = Modifier.testTag("settings:review:$tag"),
+            ) { Text(label) }
+        }
+    }
+    SettingStepper(review.everyText, review.everyDays, 1, 30, "settings:review:every") { change(SettingsPayload.reviewEvery(it)) }
+    Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing)) {
+        ReviewSettings.PRESETS.forEach { (name, days) ->
+            androidx.compose.material3.TextButton(
+                onClick = { change(SettingsPayload.reviewEvery(days)) }, enabled = review.enabled && review.everyDays != days,
+                modifier = Modifier.testTag("settings:review:${name.lowercase()}"),
+            ) { Text(name) }
+        }
+    }
+    review.problem?.let { Text(it, style = theme.small(color = theme.muted)) }
+    val last = review.lastTask
+    if (last == null) {
+        Text("Last run: none yet", style = theme.body(color = theme.muted))
+    } else {
+        LinkedText(model, "Last run: ${review.lastAt.orEmpty()} (#$last)", theme.body())
+        LinkedText(model, review.filedText, theme.body())
+        Text(review.lastSummary, style = theme.small(color = theme.muted))
+    }
+    LinkedText(model, review.nextText, theme.body())
+    androidx.compose.material3.TextButton(
+        onClick = runNow, enabled = review.runningTask == null && review.project.isNotEmpty(),
+        modifier = Modifier.testTag("settings:review:run"),
+    ) { Text("Run now") }
+    Text(ReviewSettings.EXPLANATION, style = theme.small(color = theme.muted))
 }
 
 /** The body of the "Where runs go" section (#891): the global mode and the project's. */
