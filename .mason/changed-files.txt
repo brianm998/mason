@@ -1,0 +1,12 @@
+.mason/run.json
+crates/adapter-api/src/contract.rs
+crates/daemon/src/criteria.rs
+crates/daemon/src/diagnose.rs
+crates/daemon/src/jobs.rs
+crates/daemon/src/lib.rs
+crates/daemon/src/plan_view.rs
+crates/daemon/src/suites.rs
+crates/daemon/src/views.rs
+docs/decisions/1235-criteria-name-a-check-each.md
+docs/stages/s1245.md
+scripts/exit/s1245.sh
