@@ -64,8 +64,11 @@ fn review(verdict: &str, summary: &str, findings: Value) -> Value {
         "args": {"verdict": verdict, "summary": summary, "findings": findings}}})
 }
 
+/// A line of every diff these tests make.
+const REAL_LINE: &str = "diff --git a/a.txt b/a.txt";
+
 fn minor(issue: &str) -> Value {
-    json!({"issue": issue, "file": "a.txt", "severity": "minor"})
+    json!({"issue": issue, "file": "a.txt", "severity": "minor", "quote": REAL_LINE})
 }
 
 fn shown(d: &std::sync::Arc<mason_daemon::Daemon>, t: TaskId) -> Value {
@@ -121,7 +124,10 @@ fn an_approval_with_minor_findings_lands_and_keeps_them() {
     let (_s, v) = run(1, &[1], vec![approve], rec.path());
     assert_eq!(
         v["review_findings"],
-        json!(["minor: FIRST-NIT (a.txt)", "minor: SECOND-NIT (a.txt)"]),
+        json!([
+            format!("minor: FIRST-NIT (a.txt)\n    > {REAL_LINE}"),
+            format!("minor: SECOND-NIT (a.txt)\n    > {REAL_LINE}")
+        ]),
         "{v}"
     );
     let history = v["history"].as_str().unwrap();
@@ -160,11 +166,18 @@ fn changes_with_only_minor_findings_is_refused_and_a_blocking_one_sends_back_mar
     let reviews = vec![
         json!([
             review("changes", "REFUSED-SUMMARY", json!([minor("ONLY-A-NIT")])),
+            // A quote that is not in the diff, the file or the task is refused too.
+            review(
+                "changes",
+                "INVENTED-SUMMARY",
+                json!([{"issue": "INVENTED", "file": "a.txt", "severity": "blocking",
+                        "quote": "this line is nowhere at all"}])
+            ),
             review(
                 "changes",
                 "ACCEPTED-SUMMARY",
                 json!([
-                    {"issue": "REAL-BUG", "file": "a.txt", "severity": "blocking"},
+                    {"issue": "REAL-BUG", "file": "a.txt", "severity": "blocking", "quote": REAL_LINE},
                     minor("SMALL-NIT")
                 ])
             )
@@ -179,6 +192,8 @@ fn changes_with_only_minor_findings_is_refused_and_a_blocking_one_sends_back_mar
     let again = std::fs::read_to_string(rec.path().join("dev2.txt")).unwrap();
     assert!(again.contains("ACCEPTED-SUMMARY"), "{again}");
     assert!(!again.contains("REFUSED-SUMMARY"), "{again}");
+    assert!(!again.contains("INVENTED"), "{again}");
+    assert!(again.contains(&format!("> {REAL_LINE}")), "{again}");
     assert!(again.contains("- [blocking] REAL-BUG (a.txt)"), "{again}");
     assert_eq!(again.matches("[minor] SMALL-NIT").count(), 1, "{again}");
     let history = v["history"].as_str().unwrap();
@@ -189,7 +204,7 @@ fn changes_with_only_minor_findings_is_refused_and_a_blocking_one_sends_back_mar
     assert!(history.contains("- [minor] SMALL-NIT (a.txt)"), "{history}");
     assert_eq!(
         v["review_findings"],
-        json!(["minor: SMALL-NIT (a.txt)"]),
+        json!([format!("minor: SMALL-NIT (a.txt)\n    > {REAL_LINE}")]),
         "{v}"
     );
 }

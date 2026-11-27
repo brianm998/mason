@@ -42,7 +42,7 @@ public enum Discovery {
 }
 
 /// What a `_mason._tcp` Bonjour record says (TXT: proto, fp, version; the instance is
-/// "MASON on <host>").
+/// "MASON on <host> (<fp8>)").
 public struct ServiceRecord: Equatable, Sendable {
     public static let type = "_mason._tcp"
     public var instance: String

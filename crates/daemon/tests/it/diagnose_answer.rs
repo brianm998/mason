@@ -472,6 +472,7 @@ fn context_on_an_open_question_reaches_the_next_round() {
 fn the_cli_answers_a_failed_tasks_card_with_context() {
     let card = json!([{"call": {"tool": "submit_diagnosis", "args": {
         "summary": "the gate file is missing",
+        "quote": "Answered from the shell",
         "options": [
             {"label": "Cancel the task", "recommended": true, "action": "cancel"},
             {"label": "Retry the work", "recommended": false, "action": "retry",

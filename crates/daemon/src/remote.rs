@@ -2184,39 +2184,10 @@ fn dispatch(site: &Site, spec: &RunSpec, st: &mut State, rec: &Path) -> Result<(
 /// Waits before the second, third and fourth tries of a push (ms).
 const PUSH_BACKOFF_MS: [u64; 3] = [10_000, 30_000, 90_000];
 
-/// Whether a push error is the credential being refused: waiting will not change that.
-fn push_refused(e: &str) -> bool {
-    let l = e.to_ascii_lowercase();
-    [
-        "authentication failed",
-        "permission denied",
-        "could not read username",
-        "invalid username or password",
-        "bad credentials",
-        "error: 401",
-        "error: 403",
-        "protected branch",
-    ]
-    .iter()
-    .any(|m| l.contains(m))
-}
-
-/// Whether a push error came from GitHub's side (a rejection, a 5xx, a dropped connection):
-/// the next try may well work (#772).
+/// Whether a push error came from GitHub's side or the network (a rejection, a 5xx, a dropped
+/// connection, no name resolution): the next try may well work (#772, #1185).
 fn push_transient(e: &str) -> bool {
-    if push_refused(e) {
-        return false;
-    }
-    let l = e.to_ascii_lowercase();
-    l.contains("remote rejected")
-        || l.contains("connection reset")
-        || l.contains("rpc failed")
-        || l.contains("early eof")
-        || l.contains("the remote end hung up")
-        || l.contains("timed out")
-        || ["500", "502", "503", "504"]
-            .iter()
-            .any(|c| l.contains(&format!("error: {c}")))
+    crate::net::is_transient(e)
 }
 
 fn push_once(site: &Site, st: &State) -> Result<(), String> {
@@ -3068,6 +3039,13 @@ impl Grant {
             }
             Err(_) => false,
         }
+    }
+    /// Can the pool ever grant `units`? A grant with no queue behind it can.
+    fn pool_fits(&self, units: &std::collections::BTreeMap<String, u32>) -> bool {
+        self.lock()
+            .giver
+            .as_ref()
+            .is_none_or(|g| g.pool_fits(units))
     }
     /// Ask for `units` again if the lease has given back runner units this run needs (jobs of an
     /// earlier run finished, or a run waited again at its place). `false`: told to stop while it waited.
@@ -4274,12 +4252,22 @@ fn wait_for_grant(
     let Some(resplit) = site.resplit.as_ref() else {
         return Waited::NotNeeded;
     };
-    let Some(barred) = barred_here(site) else {
-        return Waited::NotNeeded;
+    let note = match barred_here(site) {
+        Some(barred) => format!(
+            "{why}; this Mac can't run it ({barred}), so it waits on GitHub for at least {want}"
+        ),
+        // No local fallback: GitHub is the only place it can run, so it waits for a grant
+        // instead of ending as a failed check (#1222), unless the pool can never give it.
+        None if !site.fallback_local => {
+            if !grant.pool_fits(&units_for(&spec.runs_on, want)) {
+                return Waited::NotNeeded;
+            }
+            format!(
+                "{why}; this run has no local fallback, so it waits on GitHub for at least {want}"
+            )
+        }
+        None => return Waited::NotNeeded,
     };
-    let note = format!(
-        "{why}; this Mac can't run it ({barred}), so it waits on GitHub for at least {want}"
-    );
     tracing::warn!(run = %spec.id, "{note}");
     if let Some(f) = &site.on_phase {
         f(&note);
@@ -5124,7 +5112,7 @@ mod tests {
     #[test]
     fn a_refused_credential_is_not_retried() {
         let auth = "fatal: Authentication failed for 'https://github.com/o/r'";
-        assert!(push_refused(auth));
+        assert!(crate::net::refused(auth));
         assert!(!push_transient(auth));
         assert!(!push_transient(
             "! [remote rejected] x (protected branch hook declined)"
@@ -8501,6 +8489,49 @@ mod tests {
             assert_eq!(dispatched_inputs(&gh)["inputs"]["matrix"], "[1,2,3,4]");
             assert_eq!(sg.grant.units(), units_of(4));
         }
+    }
+
+    #[test]
+    fn a_short_grant_with_no_fallback_waits_for_runners_instead_of_erroring() {
+        token();
+        let r = repo();
+        let zip = artifact(r._t.path(), GREEN, 0, None);
+        let gh = FakeGh::new(&r, &zip, Mode::NeverPicked);
+        let mut s = site(&r, gh.clone(), clock(), false);
+        s.resplit = Some(Arc::new(|mut rs: RunSpec, n| {
+            rs.shards = n;
+            rs.shard_command = Some("shard-cmd".into());
+            rs.shard_lists = vec![vec![]; n as usize];
+            rs
+        }));
+        let said: Mutex<Vec<String>> = Mutex::new(vec![]);
+        let mut sg = short_grant();
+        let (sp, dir) = (sg.spec.clone(), r._t.path().join("runs"));
+        let stop = stop_once_pushed(&gh);
+        let out = run_while_short(&mut sg, |grant| {
+            run_retrying(
+                &s,
+                &sp,
+                &dir,
+                &stop,
+                &|t| said.lock().unwrap().push(t.into()),
+                grant,
+            )
+        });
+        // Not an environmental error: it waited, was pushed, and was then stopped.
+        let (o, notes) = out.unwrap();
+        assert!(
+            matches!(o, Some(Outcome::Stopped(StopWhy::Skipped))),
+            "{o:?}"
+        );
+        let said = said.into_inner().unwrap();
+        assert!(
+            said[0].contains("granted 1 of 8 runner units")
+                && said[0].contains("waits on GitHub for at least 4"),
+            "{said:?}"
+        );
+        assert_eq!(notes[0], said[0]);
+        assert_eq!(dispatched_inputs(&gh)["inputs"]["matrix"], "[1,2,3,4]");
     }
 
     #[test]

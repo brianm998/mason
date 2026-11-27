@@ -91,7 +91,7 @@ fn develop(rec: &Path, name: &str, marker: &str) -> Value {
 
 fn changes(finding: &str) -> Value {
     json!([{"call": {"tool": "submit_review", "args": {
-        "verdict": "changes", "summary": "not yet", "findings": [{"issue": finding, "severity": "blocking"}]}}}])
+        "verdict": "changes", "summary": "not yet", "findings": [{"issue": finding, "severity": "blocking", "quote": "diff --git"}]}}}])
 }
 
 /// A later round's send-back: it answers the earlier finding and raises its own on the changed
@@ -100,7 +100,7 @@ fn changes_again(finding: &str, round: u64) -> Value {
     json!([{"call": {"tool": "submit_review", "args": {
         "verdict": "changes", "summary": "not yet",
         "earlier": [{"round": round, "index": 0, "status": "fixed", "note": "done"}],
-        "findings": [{"issue": finding, "severity": "blocking", "file": "marker.txt", "line": 1}]}}}])
+        "findings": [{"issue": finding, "severity": "blocking", "quote": "diff --git", "file": "marker.txt", "line": 1}]}}}])
 }
 
 /// An approval that answers round `round`'s only blocking finding (task 1135).
@@ -109,11 +109,12 @@ fn approve(round: u64) -> Value {
         "earlier": [{"round": round, "index": 0, "status": "fixed", "note": "done"}]}}})
 }
 
-fn diagnosis(rec: &Path) -> Value {
+fn diagnosis(rec: &Path, quote: &str) -> Value {
     json!([
         record(rec, "diagnosis"),
         {"call": {"tool": "submit_diagnosis", "args": {
             "summary": "the last round was red",
+            "quote": quote,
             "options": [
                 {"label": "Cancel the task", "recommended": true, "action": "cancel"},
                 {"label": "Develop again", "recommended": false, "action": "retry",
@@ -189,7 +190,7 @@ fn the_last_reviews_findings_reach_the_history_the_diagnosis_and_the_retried_dev
                     approve(2)
                 ],
             ],
-            "diagnose": [diagnosis(r)],
+            "diagnose": [diagnosis(r, "not yet")],
         }),
         "",
     );
@@ -239,7 +240,7 @@ fn a_test_step_red_to_the_last_round_keeps_its_output_for_the_diagnosis() {
         TESTED,
         json!({
             "develop": [develop(r, "dev1", "RED-ONE"), develop(r, "dev2", "RED-TWO")],
-            "diagnose": [diagnosis(r)],
+            "diagnose": [diagnosis(r, "RED-TWO")],
         }),
         "",
     );

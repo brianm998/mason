@@ -38,6 +38,9 @@ type = "landing"
 category = "landing"
 "#;
 
+/// A line of every diff this test makes, so the quote check passes.
+const QUOTE: &str = "diff --git a/a.txt b/a.txt";
+
 fn develop(n: u32) -> Value {
     json!([
         {"sh": format!("echo {n} >> a.txt && git add a.txt && git -c user.name=t -c user.email=t@t commit -qm round{n}")},
@@ -52,7 +55,7 @@ fn review(args: Value) -> Value {
 #[test]
 fn a_new_blocking_finding_on_an_untouched_line_is_accepted_only_as_minor() {
     let rec = tempfile::tempdir().unwrap();
-    let blocking = |issue: &str, line: u64| json!({"issue": issue, "file": "a.txt", "line": line, "quote": "q", "severity": "blocking"});
+    let blocking = |issue: &str, line: u64| json!({"issue": issue, "file": "a.txt", "line": line, "quote": QUOTE, "severity": "blocking"});
     let round1 = json!([review(json!({
         "verdict": "changes", "summary": "FIRST",
         "findings": [blocking("ONE", 1), blocking("TWO", 1)]}))]);
@@ -65,7 +68,7 @@ fn a_new_blocking_finding_on_an_untouched_line_is_accepted_only_as_minor() {
             "earlier": [
                 {"round": 1, "index": 0, "status": "fixed", "note": "done"},
                 {"round": 1, "index": 1, "status": "fixed", "note": "done"}],
-            "findings": [{"issue": "NEW-ON-OLD-LINE", "file": "a.txt", "line": 1, "severity": "minor"}]}))
+            "findings": [{"issue": "NEW-ON-OLD-LINE", "file": "a.txt", "line": 1, "quote": QUOTE, "severity": "minor"}]}))
     ]);
     let s = Scratch::new(
         "false",

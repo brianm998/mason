@@ -431,7 +431,16 @@ impl Ctx {
                 // Hand the resources back before the task shows as failed, so nobody
                 // can see a failed task still holding its device.
                 self.release_lease();
-                let class = Some(FailClass::classify(self.state, &reason));
+                // A suite that could not reach the network says nothing about the code
+                // (#1185): only `fail` carries that reason, never a red.
+                let network = outcome == Outcome::Fail
+                    && reason.starts_with("suite `")
+                    && reason.contains(crate::net::SUITE_REASON);
+                let class = Some(if network {
+                    FailClass::Outside
+                } else {
+                    FailClass::classify(self.state, &reason)
+                });
                 self.emit(EventKind::StepFailed {
                     task: self.task,
                     reason,
@@ -3890,6 +3899,58 @@ struct PlannedChange {
 
 /// Wrap `inner` so a `submit_change` whose head tree was red on the test step for this
 /// command, and has not changed since, is refused with the failing tests and the run.
+/// The path a finding's `file` names: `tools.rs:472`, `a/b.rs:3-9` and `a/b.rs (line 3)` all
+/// give the part before the line. `None` for a path that leaves the repository.
+fn finding_path(file: &str) -> Option<&str> {
+    let p = file
+        .trim()
+        .split(|c: char| c == ':' || c == '#' || c.is_whitespace())
+        .next()
+        .unwrap_or("");
+    (!p.is_empty() && !p.starts_with('/') && !p.split('/').any(|c| c == "..")).then_some(p)
+}
+
+/// The review contract's check of a finding's `quote` (task 1133): it must be in the diff
+/// against the base, in the named file at the branch head, or in the task text or the plan.
+/// A quote not found is refused with where the contract looked, and the reviewer fixes it
+/// in the same session.
+fn review_validator(wt: PathBuf, base_ref: String, task_text: String) -> Validator {
+    Box::new(move |tool, args| {
+        if tool != "submit_review" {
+            return Ok(());
+        }
+        let diff = git::run(&wt, &["diff", &format!("{base_ref}...HEAD")]).unwrap_or_default();
+        let mut problems = vec![];
+        for (i, f) in args["findings"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            let Some(q) = f["quote"].as_str() else {
+                continue;
+            };
+            let mut m = vec![
+                (format!("the diff against {base_ref}"), diff.clone()),
+                ("the task text and plan".to_string(), task_text.clone()),
+            ];
+            if let Some(path) = f["file"].as_str().and_then(finding_path) {
+                if let Ok(t) = git::run(&wt, &["show", &format!("HEAD:{path}")]) {
+                    m.insert(1, (format!("{path} at the branch head"), t));
+                }
+            }
+            if let Err(why) = mason_adapter_api::contract::check_quote(q, &m) {
+                problems.push(format!("findings[{i}].quote: {why}"));
+            }
+        }
+        if problems.is_empty() {
+            Ok(())
+        } else {
+            Err(problems)
+        }
+    })
+}
+
 fn refuse_known_red(inner: Validator, d: Arc<Daemon>, wt: PathBuf, key: String) -> Validator {
     Box::new(move |tool, args| {
         let mut problems = inner(tool, args).err().unwrap_or_default();
@@ -4050,10 +4111,29 @@ fn agent_job(c: &Ctx) {
         }
     }
     let decisions = std::fs::read_to_string(dir.join("decisions.txt")).ok();
+    // The pipeline review's task: its facts go into the worktree now, it takes no numbers,
+    // and its submission is the result file, with nothing committed.
+    let review_task = kind == StepKind::Develop
+        && crate::introspect::is_analyst_task(&c.d, c.task, &c.project.id);
+    if review_task {
+        if let Err(why) = crate::review::write_facts(&c.d, c.task, &c.wt) {
+            return c.fail(format!("the review's facts could not be written: {why}"));
+        }
+    }
     // What earlier rounds tried and gave up, for the next developer and the reviewer (#1128).
     let tried = matches!(kind, StepKind::Develop | StepKind::Review)
         .then(|| crate::prompts::tried_block(&crate::tried::rounds(&dir)))
         .flatten();
+    // How the change was built, per file, for the reviewer (#1130).
+    let tried = match (
+        tried,
+        (kind == StepKind::Review)
+            .then(|| crate::prompts::edits_block(&dir))
+            .flatten(),
+    ) {
+        (Some(t), Some(e)) => Some(format!("{t}\n\n{e}")),
+        (t, e) => t.or(e),
+    };
     let pack_name = match kind {
         StepKind::Develop => "develop",
         StepKind::Review => "review",
@@ -4188,6 +4268,8 @@ fn agent_job(c: &Ctx) {
             Some(block) => format!("{prompt}\n\n{block}"),
             None => prompt,
         }
+    } else if review_task {
+        prompt
     } else {
         // A base that cannot be read right now is waited for; it must not look like
         // a base with no numbered files.
@@ -4285,7 +4367,7 @@ fn agent_job(c: &Ctx) {
         check_failing: Default::default(),
         replay: Default::default(),
     });
-    let validator = (kind == StepKind::Develop).then(|| {
+    let validator = (kind == StepKind::Develop && !review_task).then(|| {
         let (d, task, project) = (c.d.clone(), c.task, c.project.id.clone());
         change_validator(
             c.wt.clone(),
@@ -4316,20 +4398,27 @@ fn agent_job(c: &Ctx) {
             Box::new(move || crate::introspect::is_analyst_task(&d, task, &project)),
         )
     });
-    // A review from round 2 on answers the earlier findings and keeps to the line rule (task 1135).
     let validator = validator.or_else(|| {
         (kind == StepKind::Review).then(|| -> Validator {
+            let mut text = format!("{}\n{}", c.title, c.body);
+            if let Some(p) = &plan {
+                text.push('\n');
+                text.push_str(&p.to_string().replace("\\n", "\n"));
+            }
+            let quotes = review_validator(c.wt.clone(), c.project.base_ref(), text);
+            // A review from round 2 on answers the earlier findings and keeps to the line rule
+            // (task 1135).
             let (dir, wt) = (dir.clone(), c.wt.clone());
             Box::new(move |tool, args| {
-                if tool != "submit_review" {
-                    return Ok(());
+                let mut p = quotes(tool, args).err().unwrap_or_default();
+                if tool == "submit_review" {
+                    let all = crate::reviewrounds::rounds(&dir);
+                    let last = all.last().and_then(|r| r["head"].as_str()).unwrap_or("");
+                    let diff = (!last.is_empty())
+                        .then(|| git::run(&wt, &["diff", "-U0", last, "HEAD"]).ok())
+                        .flatten();
+                    p.extend(crate::reviewrounds::problems(&all, args, diff.as_deref()));
                 }
-                let all = crate::reviewrounds::rounds(&dir);
-                let last = all.last().and_then(|r| r["head"].as_str()).unwrap_or("");
-                let diff = (!last.is_empty())
-                    .then(|| git::run(&wt, &["diff", "-U0", last, "HEAD"]).ok())
-                    .flatten();
-                let p = crate::reviewrounds::problems(&all, args, diff.as_deref());
                 if p.is_empty() {
                     Ok(())
                 } else {
@@ -4342,6 +4431,10 @@ fn agent_job(c: &Ctx) {
     let validator = match (validator, reuse_key) {
         (Some(v), Some(key)) => Some(refuse_known_red(v, c.d.clone(), c.wt.clone(), key)),
         (v, _) => v,
+    };
+    let validator = match validator {
+        None if review_task => Some(crate::review::validator(c.wt.clone())),
+        v => v,
     };
     let contract = ContractHandle::with_validator(kind, checks, validator);
     if let Some(tools) = &c.step.tools {
@@ -4410,7 +4503,10 @@ fn agent_job(c: &Ctx) {
     for p in &eff.problems {
         tracing::warn!(project = %c.project.id, "{p}");
     }
-    let launched = mason_definition::tiers::launch(&c.res, &eff.mapping, &agent.ladder);
+    let mut launched = mason_definition::tiers::launch(&c.res, &eff.mapping, &agent.ladder);
+    if review_task {
+        crate::review::pin_effort(&c.d, c.task, &c.step.name, &mut launched);
+    }
     let rec = LaunchRec {
         launched: &launched,
         provider: crate::tiermap::name(agent.provider),
@@ -4590,6 +4686,7 @@ fn agent_job(c: &Ctx) {
             if let mason_adapter_api::AgentEvent::Skill { name } = ev {
                 crate::skills::record(&task_dir, run.0, name);
             }
+            crate::edits::record(&task_dir, run.0, ev);
             d.progress_agent_event(run, ev)
         }));
     }
@@ -4988,7 +5085,7 @@ fn finish_agent(c: &Ctx, report: StepReport, dir: &Path) {
         StepEnd::Asked { question } => Some(question.clone()),
         _ => None,
     };
-    // The analyst's findings (Part 14), read from the file it wrote in its worktree. Its
+    // The pipeline review's findings (Part 14), read from the file it wrote in its worktree. Its
     // result is the findings: a readable file ends the task here, with no test, review or
     // land (its branch is never merged, so any commit it made is dropped); a missing or
     // unreadable one sends it back to develop.
@@ -5000,7 +5097,7 @@ fn finish_agent(c: &Ctx, report: StepReport, dir: &Path) {
             crate::introspect::Ingest::Missing => {
                 c.conclude(
                     Outcome::Red,
-                    "no analyst result".into(),
+                    "no review result".into(),
                     Some(format!(
                         "There is no {} in the root of your worktree. Write it as the task says.",
                         crate::introspect::ANALYST_FILE
@@ -5012,7 +5109,7 @@ fn finish_agent(c: &Ctx, report: StepReport, dir: &Path) {
             crate::introspect::Ingest::Unreadable(e) => {
                 c.conclude(
                     Outcome::Red,
-                    "analyst result unreadable".into(),
+                    "review result unreadable".into(),
                     Some(format!(
                         "{} could not be read: {e}. Write it again as the task says.",
                         crate::introspect::ANALYST_FILE
@@ -5026,7 +5123,7 @@ fn finish_agent(c: &Ctx, report: StepReport, dir: &Path) {
         let _ = std::fs::remove_file(dir.join("feedback.txt"));
         c.emit(EventKind::ClosedNoChange {
             task: c.task,
-            reason: "analyst result ingested; the findings are filed".into(),
+            reason: "review result ingested; the findings are filed".into(),
         });
     } else {
         finish_agent_inner(c, report, dir);
