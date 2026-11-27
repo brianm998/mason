@@ -2189,7 +2189,20 @@ async fn skip_task(
     let d2 = d.clone();
     let debt = d
         .pool
-        .run(move || crate::suites::skip(&d2, TaskId(id), &scope, &reason, &owner, deferred))
+        .run(move || {
+            // A task that has not started is judged by the project's current pipeline, which is
+            // the built-in one until the definition has loaded: load it first.
+            let unstarted = d2.world().ok().and_then(|w| {
+                w.tasks
+                    .get(&TaskId(id))
+                    .map(|t| (t.project, t.def.is_empty()))
+            });
+            if let Some((pid, true)) = unstarted {
+                // A refused reload keeps the current pipeline, as before.
+                let _ = d2.reload_definition(pid);
+            }
+            crate::suites::skip(&d2, TaskId(id), &scope, &reason, &owner, deferred)
+        })
         .await
         .map_err(pool_err)?
         .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
