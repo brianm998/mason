@@ -98,12 +98,12 @@ fn approve() -> Value {
     json!({"call": {"tool": "submit_review", "args": {"verdict": "approve", "summary": "fine"}}})
 }
 
-fn diagnosis(rec: &Path) -> Value {
+fn diagnosis(rec: &Path, quote: &str) -> Value {
     json!([
         record(rec, "diagnosis"),
         {"call": {"tool": "submit_diagnosis", "args": {
             "summary": "the last round was red",
-            "quote": "not yet",
+            "quote": quote,
             "options": [
                 {"label": "Cancel the task", "recommended": true, "action": "cancel"},
                 {"label": "Develop again", "recommended": false, "action": "retry",
@@ -179,7 +179,7 @@ fn the_last_reviews_findings_reach_the_history_the_diagnosis_and_the_retried_dev
                     approve()
                 ],
             ],
-            "diagnose": [diagnosis(r)],
+            "diagnose": [diagnosis(r, "not yet")],
         }),
         "",
     );
@@ -229,7 +229,7 @@ fn a_test_step_red_to_the_last_round_keeps_its_output_for_the_diagnosis() {
         TESTED,
         json!({
             "develop": [develop(r, "dev1", "RED-ONE"), develop(r, "dev2", "RED-TWO")],
-            "diagnose": [diagnosis(r)],
+            "diagnose": [diagnosis(r, "RED-TWO")],
         }),
         "",
     );
