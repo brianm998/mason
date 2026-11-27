@@ -192,7 +192,8 @@ extension MonitorModel {
             out.append(contentsOf: d.row.progressItems(now: daemonNow()))
             out.append(contentsOf: d.row.blockerItems(owner: canAct))
             for (i, s) in d.steps.enumerated() {
-                out.append(Item(id: "step:\(s.run)", texts: [s.name, s.outcome] + s.launches.map { $0.display }, order: i))
+                let context = s.context.isEmpty ? [] : [s.context]
+                out.append(Item(id: "step:\(s.run)", texts: [s.name, s.outcome] + s.launches.map { $0.display } + context, order: i))
             }
             if d.hasCard { out.append(d.card.item(task: d.row.id, owner: canAct)) }
             if d.hasApproval { out.append(d.approval.item(task: d.row.id, owner: canAct)) }

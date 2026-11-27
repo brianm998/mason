@@ -187,6 +187,25 @@ pub struct UsageRun {
     pub at: u64,
 }
 
+/// How full one agent session's context window got, in tokens.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ContextRun {
+    pub attempt: String,
+    /// The CLI's session id; empty when it never said.
+    pub session: String,
+    /// The step run.
+    pub run: u64,
+    pub task: u64,
+    pub project: String,
+    pub step: String,
+    pub peak_used: u64,
+    pub final_used: u64,
+    /// 0 when only a compaction was seen.
+    pub window: u64,
+    pub compactions: u32,
+    pub at_ms: u64,
+}
+
 /// One reading per window per account is kept per this many seconds, unless
 /// the window's state or reset changed.
 pub const READING_GAP_SECS: u64 = 300;
@@ -4484,6 +4503,75 @@ impl Store {
                     cache_create: u(r, 9)?,
                     cost_usd: r.get(10)?,
                     at: r.get::<_, i64>(11)? as u64,
+                })
+            })?;
+            rows.collect()
+        })
+    }
+
+    /// Store one session's context figures. A second write for the same attempt and
+    /// session (the journal read again after a restart, or the session resumed) keeps
+    /// the larger peak, window and compaction count, so nothing is counted twice.
+    pub fn record_context_run(&self, r: ContextRun) -> Result<(), StoreError> {
+        self.write(move |c| {
+            c.execute(
+                "INSERT INTO context_runs(attempt, session, run, task, project, step, peak_used, \
+                 final_used, window, compactions, at_ms) \
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11) \
+                 ON CONFLICT(attempt, session) DO UPDATE SET \
+                 peak_used = MAX(peak_used, excluded.peak_used), \
+                 final_used = excluded.final_used, \
+                 window = MAX(window, excluded.window), \
+                 compactions = MAX(compactions, excluded.compactions), \
+                 at_ms = excluded.at_ms",
+                params![
+                    r.attempt,
+                    r.session,
+                    r.run as i64,
+                    r.task as i64,
+                    r.project,
+                    r.step,
+                    r.peak_used as i64,
+                    r.final_used as i64,
+                    r.window as i64,
+                    r.compactions,
+                    r.at_ms as i64
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Context rows written at or after `since_ms`, oldest first.
+    pub fn context_runs_since(&self, since_ms: u64) -> Result<Vec<ContextRun>, StoreError> {
+        self.context_runs("at_ms >= ?1", since_ms)
+    }
+
+    /// One task's context rows, oldest first.
+    pub fn context_runs_of_task(&self, task: u64) -> Result<Vec<ContextRun>, StoreError> {
+        self.context_runs("task = ?1", task)
+    }
+
+    fn context_runs(&self, filter: &'static str, n: u64) -> Result<Vec<ContextRun>, StoreError> {
+        self.read(move |c| {
+            let mut st = c.prepare(&format!(
+                "SELECT attempt, session, run, task, project, step, peak_used, final_used, \
+                 window, compactions, at_ms FROM context_runs WHERE {filter} \
+                 ORDER BY at_ms, attempt, session"
+            ))?;
+            let rows = st.query_map(params![n as i64], |r| {
+                Ok(ContextRun {
+                    attempt: r.get(0)?,
+                    session: r.get(1)?,
+                    run: r.get::<_, i64>(2)? as u64,
+                    task: r.get::<_, i64>(3)? as u64,
+                    project: r.get(4)?,
+                    step: r.get(5)?,
+                    peak_used: r.get::<_, i64>(6)? as u64,
+                    final_used: r.get::<_, i64>(7)? as u64,
+                    window: r.get::<_, i64>(8)? as u64,
+                    compactions: r.get(9)?,
+                    at_ms: r.get::<_, i64>(10)? as u64,
                 })
             })?;
             rows.collect()
