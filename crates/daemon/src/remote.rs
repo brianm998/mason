@@ -8526,7 +8526,13 @@ mod tests {
         let r = repo();
         let zip = artifact(r._t.path(), GREEN, 0, None);
         let gh = FakeGh::new(&r, &zip, Mode::NeverPicked);
-        let s = site(&r, gh.clone(), clock(), false);
+        let mut s = site(&r, gh.clone(), clock(), false);
+        s.resplit = Some(Arc::new(|mut rs: RunSpec, n| {
+            rs.shards = n;
+            rs.shard_command = Some("shard-cmd".into());
+            rs.shard_lists = vec![vec![]; n as usize];
+            rs
+        }));
         let said: Mutex<Vec<String>> = Mutex::new(vec![]);
         let mut sg = short_grant();
         let (sp, dir) = (sg.spec.clone(), r._t.path().join("runs"));
