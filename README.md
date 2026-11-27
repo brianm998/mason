@@ -843,4 +843,5 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s1170**: push_candidate waits and retries (up to the outage limit) when git cannot reach the remote (DNS, route, timeout), instead of failing the landing step.
 - **s1172**: The skills tests build colon-named skills as commands on Windows, where NTFS rejects a `:` in a directory name.
 - **s1173**: A queued task kept back by the file hold or the check-queue hold now says so in the monitor's `why_waiting` and `activity` (same text as `mason task show`), instead of "Waiting for an LLM session to be free".
+- **s1180**: The red CI/monitor-compose run 45883735030 names no failing step in the supplied log tail, so no code changed and decision 1170 records how to classify it from the full log.
 <!-- status:end -->
