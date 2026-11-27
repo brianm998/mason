@@ -3089,6 +3089,10 @@ async fn open_session(Shared(d): Shared<Arc<Daemon>>, Path(id): Path<u64>) -> Re
     let v = d
         .pool
         .run(move || {
+            // `mason task open` runs in the worktree, which may have been removed (s1145).
+            if let Err(e) = crate::worktrees::restore(&d2, TaskId(id)) {
+                tracing::warn!(task = id, "the worktree could not be added again: {e}");
+            }
             let v = crate::attention::session_for(&d2, TaskId(id));
             if v.is_ok() {
                 let who = d2.cfg.owner_names.first().cloned().unwrap_or_default();
@@ -3923,6 +3927,37 @@ async fn disk_history(
         .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
+/// What the pipeline's worktrees take and what the next sweep would free (`mason disk`): the
+/// last measurement, with `measuring` true while a new one is being made.
+async fn disk_worktrees(Shared(d): Shared<Arc<Daemon>>) -> Res {
+    let d2 = d.clone();
+    let v = d
+        .view_pool
+        .run(move || crate::worktrees::report_async(&d2, crate::daemon::now_ms()))
+        .await
+        .map_err(pool_err)?;
+    Ok(Json(v))
+}
+
+/// `mason disk clean [--dry-run]`: run the worktree sweep now. Removing is the owner's.
+async fn disk_clean(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    body: Option<Json<Value>>,
+) -> Res {
+    let dry_run = body.is_some_and(|b| b.0["dry_run"].as_bool() == Some(true));
+    if !dry_run {
+        owner_only(&d, &who_of(&headers), "remove worktrees")?;
+    }
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || crate::worktrees::clean(&d2, crate::daemon::now_ms(), dry_run))
+        .await
+        .map_err(pool_err)?;
+    Ok(Json(v))
+}
+
 /// The home view, as the monitors get it (proto3 JSON).
 async fn home_view(
     Shared(d): Shared<Arc<Daemon>>,
@@ -4624,6 +4659,8 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/cpu", get(cpu_usage))
         .route("/cpu/history", get(cpu_history))
         .route("/disk/history", get(disk_history))
+        .route("/disk/worktrees", get(disk_worktrees))
+        .route("/disk/clean", post(disk_clean))
         .route("/views/home", get(home_view))
         .route("/targets", get(targets))
         .route("/health", get(health))
