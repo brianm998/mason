@@ -73,7 +73,8 @@ kill -9 "$daemon"; wait "$daemon" 2>/dev/null || true; daemon=""
 host_pid=""
 for kv in "$root"/d/h/t0r1-*/host.kv; do
   [ -f "$kv" ] || continue
-  p=$(sed -n 's/^host_pid=//p' "$kv")
+  # A host directory can be moved or removed while we look, so the read must tolerate it.
+  p=$(sed -n 's/^host_pid=//p' "$kv" 2>/dev/null) || continue
   if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then host_pid=$p; break; fi
 done
 [ -n "$host_pid" ] || {
