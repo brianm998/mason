@@ -111,6 +111,17 @@ pub fn run(a: &mut Args, d: &Daemon, json_out: bool) {
                 r["jobs"]["running"],
                 r["jobs"]["max"],
             );
+            for v in r["disks"].as_array().into_iter().flatten() {
+                println!(
+                    "disk {}: {} GB free (needs {})",
+                    s(&v["path"]),
+                    v["free_gb"],
+                    v["needs_gb"]
+                );
+            }
+            for p in r["disks_unreadable"].as_array().into_iter().flatten() {
+                println!("disk {}: free space could not be read", s(p));
+            }
             println!("serving as a node: {}", r["serving"]);
             println!("settings in force: {}", r["settings"]);
             let cs = r["coordinators"].as_array().cloned().unwrap_or_default();
