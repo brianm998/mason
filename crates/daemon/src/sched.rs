@@ -477,6 +477,9 @@ enum Meta {
 struct State {
     ledger: Ledger,
     meta: HashMap<u64, Meta>,
+    /// Adopted remote runs a newer check took over (#1253): no longer counted, but their hold,
+    /// record and ref remain until the reaper has judged them.
+    taken_over: Vec<(String, std::path::PathBuf)>,
     by_task: HashMap<TaskId, u64>,
     /// The task a `mason run` lease was opened for, when it names one.
     lease_tasks: HashMap<u64, TaskId>,
@@ -1112,6 +1115,7 @@ impl Broker {
             st: Mutex::new(State {
                 ledger,
                 meta: HashMap::new(),
+                taken_over: Vec::new(),
                 by_task: HashMap::new(),
                 fixed,
                 pools,
@@ -2346,6 +2350,17 @@ impl Broker {
             .collect()
     }
 
+    /// The runs taken over by a newer check whose hold, record and ref the reaper still owes a
+    /// verdict (#1253).
+    pub fn taken_over_remote(&self) -> Vec<(String, std::path::PathBuf)> {
+        lock(&self.st).taken_over.clone()
+    }
+
+    /// Stop tracking taken-over runs whose `keep` says no (their record is gone).
+    pub fn forget_taken_over(&self, keep: &dyn Fn(&std::path::Path) -> bool) {
+        lock(&self.st).taken_over.retain(|(_, r)| keep(r));
+    }
+
     /// The run `key` asks for its units again after a restart: give back those adopted for it,
     /// so it is not counted twice. Returns whether there were any.
     pub fn take_over_remote(&self, key: &str) -> bool {
@@ -2379,7 +2394,11 @@ impl Broker {
             .collect();
         for id in &ids {
             st.ledger.release(*id);
-            st.meta.remove(id);
+            if let Some(Meta::Remote { key, record }) = st.meta.remove(id) {
+                if !st.taken_over.iter().any(|(_, r)| *r == record) {
+                    st.taken_over.push((key, record));
+                }
+            }
         }
         !ids.is_empty()
     }
@@ -5919,6 +5938,13 @@ pub(crate) mod tests {
             held(&b, next),
             "its lease replaces the adopted hold: counted once"
         );
+        // The run is not orphaned: the reaper still owes it a verdict (#1253).
+        let taken = b.taken_over_remote();
+        assert_eq!(taken.len(), 1);
+        assert_eq!(taken[0].0, "t5r7-check-cargo-workspace0");
+        assert!(b.adopted_remote().is_empty());
+        b.forget_taken_over(&|_| false);
+        assert!(b.taken_over_remote().is_empty());
         assert!(!b.take_over_remote_where(&|k| crate::jobs::run_of_prefix(
             k,
             "t5r7-check-cargo-workspace"
