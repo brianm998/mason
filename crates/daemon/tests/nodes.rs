@@ -3308,7 +3308,7 @@ fn a_rerun_off_this_mac_skips_the_passes_the_coordinator_kept() {
         "{}",
         first.full
     );
-    assert_eq!(marks(&mark), ["1", "2"]);
+    assert_eq!(marks(&mark), ["1", "2"], "{}", first.full);
     // The same tree: nothing runs again.
     let second = go("t2r1-b", true, "tree-1");
     assert!(second.passed, "{}", second.full);
