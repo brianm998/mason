@@ -236,6 +236,11 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
                 "skills": crate::skills::invoked(&d.task_dir(t.id), r.id.0),
             }))
             .collect::<Vec<_>>());
+        // What each run said it tried and gave up (task 1128), newest first.
+        v["tried"] = json!(crate::tried::rounds(&d.task_dir(t.id))
+            .iter()
+            .map(crate::tried::Round::to_json)
+            .collect::<Vec<_>>());
     }
     v
 }

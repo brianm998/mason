@@ -732,3 +732,12 @@ compose = "done"
 ios = "done"
 android = "todo"
 android_reason = "Not in the first Android phone app (stage 469): the Android module has no Settings page yet"
+
+[feature.home-hosts]
+description = "Home's Hosts section: one block per host (this Mac, each node, GitHub) with its status line and the tasks running on it now, each a link to the task with its pipeline state, what runs and for how long, and the GitHub run link; 'idle' for a host with none; one line per host with a run count that opens to the rows on a phone. The task page has a 'Running on' line (#1156)"
+swift = "done"
+compose = "todo"
+ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
+platform_reason = "Swift monitor first (#1156 scopes the Compose client out); the Compose desktop monitor gets it when the owner asks for it"

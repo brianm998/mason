@@ -3355,24 +3355,8 @@ fn main() {
                             println!("            ({w})");
                         }
                     }
-                    for r in t["steps"].as_array().into_iter().flatten() {
-                        for l in r["launches"].as_array().into_iter().flatten() {
-                            println!(
-                                "  run {:<4} {:<9} {}",
-                                r["run"],
-                                l["kind"].as_str().unwrap_or(""),
-                                l["display"].as_str().unwrap_or("")
-                            );
-                        }
-                        let skills: Vec<&str> = r["skills"]
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .filter_map(|s| s.as_str())
-                            .collect();
-                        if !skills.is_empty() {
-                            println!("  run {:<4} skills    {}", r["run"], skills.join(", "));
-                        }
+                    for l in run_lines(&t) {
+                        println!("{l}");
                     }
                     if let Some(l) = t["run_on"]["line"].as_str() {
                         println!("  {l}");
@@ -4391,6 +4375,59 @@ fn print_digest_projects(r: &serde_json::Value) {
     }
 }
 
+/// The step runs `task show` lists: each launch, and under its run what the agent said it
+/// tried and gave up. The agent's words are printed on one line, without control characters.
+fn run_lines(t: &serde_json::Value) -> Vec<String> {
+    let plain = |v: &serde_json::Value| {
+        v.as_str()
+            .unwrap_or("")
+            .replace(|c: char| c.is_control(), " ")
+    };
+    let mut out = vec![];
+    for r in t["steps"].as_array().into_iter().flatten() {
+        let launches = r["launches"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+        for l in launches {
+            out.push(format!(
+                "  run {:<4} {:<9} {}",
+                r["run"],
+                l["kind"].as_str().unwrap_or(""),
+                l["display"].as_str().unwrap_or("")
+            ));
+        }
+        let skills: Vec<&str> = r["skills"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|s| s.as_str())
+            .collect();
+        if !skills.is_empty() {
+            out.push(format!(
+                "  run {:<4} skills    {}",
+                r["run"],
+                skills.join(", ")
+            ));
+        }
+        let tried: Vec<&serde_json::Value> = t["tried"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|x| x["run"] == r["run"])
+            .flat_map(|x| x["tried"].as_array().into_iter().flatten())
+            .collect();
+        if launches.is_empty() && !tried.is_empty() {
+            out.push(format!("  run {:<4} {}", r["run"], plain(&r["name"])));
+        }
+        for e in tried {
+            out.push(format!(
+                "    tried   {} (dropped: {})",
+                plain(&e["approach"]),
+                plain(&e["why_dropped"])
+            ));
+        }
+    }
+    out
+}
+
 fn print_digest(r: &serde_json::Value) {
     let n = |k: &str| r[k].to_string();
     println!("Landed: {}", n("landed"));
@@ -4896,6 +4933,27 @@ mod answer_tests {
         assert_eq!(super::task_id(&mut a), 12);
         assert_eq!(a.opt("--as").as_deref(), Some("me"));
         assert_eq!(answer_text(&a.rest), "1,3");
+    }
+
+    #[test]
+    fn task_show_lists_what_a_run_tried_under_it() {
+        let t = serde_json::json!({
+            "steps": [
+                {"run": 3, "name": "develop", "launches": [{"kind": "launch", "display": "m"}]},
+                {"run": 4, "name": "test", "launches": []},
+                {"run": 5, "name": "develop", "launches": []},
+            ],
+            "tried": [
+                {"run": 5, "step": "develop", "tried": [{"approach": "a cache", "why_dropped": "stale\u{1b}[2J"}]},
+                {"run": 3, "step": "develop", "tried": [{"approach": "a lock", "why_dropped": "deadlock"}]},
+            ],
+        });
+        let lines = super::run_lines(&t);
+        assert_eq!(lines.len(), 4, "{lines:?}");
+        assert!(lines[0].starts_with("  run 3"), "{lines:?}");
+        assert_eq!(lines[1], "    tried   a lock (dropped: deadlock)");
+        assert!(lines[2].starts_with("  run 5") && lines[2].ends_with("develop"));
+        assert_eq!(lines[3], "    tried   a cache (dropped: stale [2J)");
     }
 
     #[test]
