@@ -183,6 +183,7 @@ pub fn gather(d: &Arc<Daemon>, now: u64) -> Facts {
                         }
                     })
                     .collect(),
+                remote: crate::remote_runs::open_of(&d.cfg.hosts_dir(), t.id.0, now),
             });
             x.tasks.push(TaskFact {
                 id: t.id.0,
