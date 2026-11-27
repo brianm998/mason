@@ -270,7 +270,8 @@ fi
 echo "answered tasks resumed and landed; cancelled tasks are cancelled; skipped tasks landed:"
 m task show "$s2" | grep -E 'tests |debt'
 m task show "$s2" | grep -q 'tests     unverified: .*slow: skipped by force'
-m debt list | grep -q "task #$s2 .*step:test"
+# `--all`: the landing's own run of the slow suite may already have paid the debt by now.
+m debt list --all | grep -q "task #$s2 .*step:test"
 m metrics
 n=$(m metrics --json | tr -d ' \n')
 want=1; [ $swift_ok = 1 ] && want=2

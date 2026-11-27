@@ -204,16 +204,28 @@ public final class MainThreadWatchdog: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         guard timer == nil else { return }
-        self.config = config
-        stats = LatenessStats(thresholdMs: config.thresholdMs)
-        inFlight = false
-        if let log { self.log = log }
+        armLocked(config: config, log: log)
         let t = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "mason.watchdog", qos: .utility))
         let every = DispatchTimeInterval.milliseconds(Int(config.intervalMs))
         t.schedule(deadline: .now() + every, repeating: every)
         t.setEventHandler { [weak self] in self?.tick() }
         t.resume()
         timer = t
+    }
+
+    /// Configure without a timer, so tests can drive `tick()` by hand with no
+    /// background queue touching their state.
+    func arm(config: WatchdogConfig, log: (@Sendable (String) -> Void)? = nil) {
+        lock.lock()
+        defer { lock.unlock() }
+        armLocked(config: config, log: log)
+    }
+
+    private func armLocked(config: WatchdogConfig, log: (@Sendable (String) -> Void)?) {
+        self.config = config
+        stats = LatenessStats(thresholdMs: config.thresholdMs)
+        inFlight = false
+        if let log { self.log = log }
     }
 
     public func stop() {
