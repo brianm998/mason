@@ -3167,3 +3167,157 @@ fn a_node_job_whose_host_dies_leaves_no_grandchild_behind() {
         !mason_step_host::registry::pid_alive(pid)
     });
 }
+
+// ---- #1252: a sharded suite on a node, and passes kept between reruns ---------------------------
+
+/// A sharded `exit-scripts` suite whose shard command is `shard_cmd`.
+fn sharded_suite(shards: u32, shard_cmd: &str) -> Box<mason_testing::Suite> {
+    let mut s = mason_testing::Suite::new(
+        "exit-scripts",
+        "echo whole-suite-ran-on-one-job",
+        mason_testing::ParserKind::Tap,
+    );
+    s.shards = shards;
+    s.shard_command = Some(shard_cmd.to_string());
+    Box::new(s)
+}
+
+fn sharded_check(
+    p: &Pair,
+    logs: &Path,
+    id: &str,
+    suite: &mason_testing::Suite,
+    env: Vec<(String, String)>,
+    tree: &str,
+) -> mason_daemon::hostedcheck::CheckSpec {
+    mason_daemon::hostedcheck::CheckSpec {
+        id_prefix: id.into(),
+        log_dir: logs.to_path_buf(),
+        cmd: suite.command.clone(),
+        build: None,
+        cwd: p.sa.repo.clone(),
+        env,
+        limit: std::time::Duration::from_secs(120),
+        tree: tree.into(),
+        stop: None,
+        holds: Default::default(),
+        label: String::new(),
+        place: Some((None, Box::new(suite.clone()))),
+        global: true,
+    }
+}
+
+fn marks(path: &Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .map(String::from)
+        .collect();
+    v.sort();
+    v
+}
+
+/// Every shard runs once, with fewer free slots than shards too (the node has two job slots, so
+/// a check takes one at a time), and one red shard makes the check red.
+#[test]
+fn a_sharded_suite_on_a_node_runs_every_shard_once_and_a_red_one_makes_it_red() {
+    use mason_daemon::hostedcheck::run as run_check;
+    let p = working_pair(2);
+    mason_daemon::place::set_global(&p.a, mason_daemon::place::Mode::Remote, "test").unwrap();
+    let logs = tempfile::tempdir().unwrap();
+    let m = tempfile::tempdir().unwrap();
+    let mark = m.path().join("mark");
+    let env = vec![("MASON_TEST_MARK".to_string(), mark.display().to_string())];
+    let cmd =
+        r#"echo "$MASON_SHARD/$MASON_SHARDS" >> "$MASON_TEST_MARK"; echo "PASS s$MASON_SHARD""#;
+    let suite = sharded_suite(4, cmd);
+    let green = run_check(
+        &p.a,
+        &sharded_check(&p, logs.path(), "t1r1-green", &suite, env.clone(), "tree-g"),
+        &mason_daemon::remote::Grant::attached(),
+    )
+    .unwrap();
+    assert!(green.passed, "{}", green.full);
+    assert!(
+        green.output.contains("split 4 ways, 1 at a time"),
+        "{}",
+        green.output
+    );
+    for i in 1..=4 {
+        assert!(
+            green.full.contains(&format!("PASS s{i}\n")),
+            "{}",
+            green.full
+        );
+    }
+    assert!(!green.full.contains("whole-suite-ran"), "{}", green.full);
+    assert_eq!(marks(&mark), ["1/4", "2/4", "3/4", "4/4"]);
+
+    let red_cmd =
+        r#"echo "PASS s$MASON_SHARD"; if [ "$MASON_SHARD" = 3 ]; then echo "FAIL s3"; exit 1; fi"#;
+    let suite = sharded_suite(4, red_cmd);
+    let red = run_check(
+        &p.a,
+        &sharded_check(&p, logs.path(), "t1r1-red", &suite, env, "tree-r"),
+        &mason_daemon::remote::Grant::attached(),
+    )
+    .unwrap();
+    assert!(!red.passed, "{}", red.full);
+    assert!(red.full.contains("FAIL s3"), "{}", red.full);
+}
+
+/// A rerun of an agent's check on the same tree skips what the first one passed; a check without
+/// `MASON_EXIT_CACHE` (a test step, a landing run) keeps and sends nothing.
+#[test]
+fn a_rerun_off_this_mac_skips_the_passes_the_coordinator_kept() {
+    use mason_daemon::hostedcheck::run as run_check;
+    let p = working_pair(4);
+    mason_daemon::place::set_global(&p.a, mason_daemon::place::Mode::Remote, "test").unwrap();
+    let logs = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let m = tempfile::tempdir().unwrap();
+    let mark = m.path().join("mark");
+    // A fake runner with the protocol of scripts/run-changed-exit-scripts.sh: a script (here a
+    // shard's one) whose key is in MASON_EXIT_PASSES is `(cached)`; else it runs and reports its key.
+    let cmd = r#"k=$(printf '%s%s' "$MASON_EXIT_TREE_KEY" "$MASON_SHARD" | shasum -a 256 | cut -d' ' -f1); case " $MASON_EXIT_PASSES " in *" $k "*) echo "PASS s$MASON_SHARD (cached)";; *) echo "$MASON_SHARD" >> "$MASON_TEST_MARK"; echo "PASS s$MASON_SHARD"; echo "MASON-EXIT-KEY $k";; esac"#;
+    let suite = sharded_suite(2, cmd);
+    let env = |cache_on: bool| {
+        let mut e = vec![
+            ("MASON_TEST_MARK".to_string(), mark.display().to_string()),
+            (
+                "MASON_TASK_CACHE".to_string(),
+                cache.path().display().to_string(),
+            ),
+        ];
+        if cache_on {
+            e.push(("MASON_EXIT_CACHE".to_string(), "1".to_string()));
+        }
+        e
+    };
+    let go = |id: &str, on: bool, tree: &str| {
+        run_check(
+            &p.a,
+            &sharded_check(&p, logs.path(), id, &suite, env(on), tree),
+            &mason_daemon::remote::Grant::attached(),
+        )
+        .unwrap()
+    };
+    let first = go("t2r1-a", true, "tree-1");
+    assert!(
+        first.passed && !first.full.contains("MASON-EXIT-KEY"),
+        "{}",
+        first.full
+    );
+    assert_eq!(marks(&mark), ["1", "2"]);
+    // The same tree: nothing runs again.
+    let second = go("t2r1-b", true, "tree-1");
+    assert!(second.passed, "{}", second.full);
+    assert!(second.full.contains("PASS s1 (cached)") && second.full.contains("PASS s2 (cached)"));
+    assert_eq!(marks(&mark), ["1", "2"]);
+    // Another tree, or a run that counts only what it ran itself: everything runs.
+    go("t2r1-c", true, "tree-2");
+    assert_eq!(marks(&mark), ["1", "1", "2", "2"]);
+    let step = go("t2r1-d", false, "tree-1");
+    assert!(!step.full.contains("(cached)"), "{}", step.full);
+    assert_eq!(marks(&mark), ["1", "1", "1", "2", "2", "2"]);
+}

@@ -636,6 +636,23 @@ fn attempt(
     stop: &dyn Fn() -> Option<StopWhy>,
     live: &mut dyn FnMut(u64, &[u8]),
 ) -> Result<Outcome, Fail> {
+    attempt_noting(d, want, spec, cwd, base_ref, dir, stop, live, &|| {})
+}
+
+/// [`attempt`], telling `on_start` once a node has the job (or already had it): a run split into
+/// jobs (#1252) waits for room only while one of its own jobs is out.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn attempt_noting(
+    d: &Arc<Daemon>,
+    want: Option<&str>,
+    spec: &RunSpec,
+    cwd: &Path,
+    base_ref: &str,
+    dir: &Path,
+    stop: &dyn Fn() -> Option<StopWhy>,
+    live: &mut dyn FnMut(u64, &[u8]),
+    on_start: &dyn Fn(),
+) -> Result<Outcome, Fail> {
     let rec = match load(&record_path(dir, &spec.id)) {
         // The node it names is paired still: ask it for the job it has, taking no new snapshot.
         Some(r) if d.nodes.client_for(d, &r.nid).is_some() => r,
@@ -645,6 +662,7 @@ fn attempt(
         }
         None => start(d, want, spec, cwd, base_ref, dir)?,
     };
+    on_start();
     follow(d, &rec, spec, cwd, base_ref, dir, stop, live)
 }
 
