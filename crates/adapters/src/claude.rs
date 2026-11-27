@@ -710,6 +710,101 @@ pub struct ParseState {
     /// whoever reports them live ([`ParseState::take_live`]).
     live: Option<TokenReport>,
     last_live: Option<TokenReport>,
+    context: ContextTrack,
+}
+
+/// What is known of the context window's fill.
+#[derive(Default, Debug)]
+struct ContextTrack {
+    /// The main conversation's model, from `system/init`.
+    model: String,
+    /// The window the stream stated (`system/init` or a `result`).
+    reported: Option<u64>,
+    /// The input of the latest message; `None` before one, and after a compaction.
+    used: Option<u64>,
+    /// The `(used, window)` last sent.
+    sent: Option<(u64, u64)>,
+}
+
+impl ContextTrack {
+    fn window(&self, used: u64) -> u64 {
+        if let Some(w) = self.reported {
+            return w;
+        }
+        let w = known_window(&self.model);
+        // More in use than the assumed window holds: it is the large one.
+        if used > w {
+            LARGE_WINDOW
+        } else {
+            w
+        }
+    }
+
+    /// The event for the figures as they stand, if they moved by a percentage point
+    /// or the window changed since the last one sent.
+    fn event(&mut self) -> Option<AgentEvent> {
+        let used = self.used?;
+        let window = self.window(used);
+        let moved = self.sent.is_none_or(|(u, w)| {
+            w != window || u128::from(u.abs_diff(used)) * 100 >= u128::from(window)
+        });
+        moved.then(|| {
+            self.sent = Some((used, window));
+            AgentEvent::Context { used, window }
+        })
+    }
+
+    /// A message of the main conversation said what its input was.
+    fn message(&mut self, usage: &Value) -> Option<AgentEvent> {
+        let used: u64 = [
+            "input_tokens",
+            "cache_read_input_tokens",
+            "cache_creation_input_tokens",
+        ]
+        .iter()
+        .filter_map(|k| num(usage, k))
+        .sum();
+        if used == 0 {
+            return None;
+        }
+        self.used = Some(used);
+        self.event()
+    }
+
+    /// A `result` line's `modelUsage.<model>.contextWindow`: the main model's entry, or
+    /// else the one that read the most.
+    fn result(&mut self, model_usage: &Value) -> Option<AgentEvent> {
+        let entries = model_usage.as_object()?;
+        let read = |v: &Value| {
+            [
+                "inputTokens",
+                "cacheReadInputTokens",
+                "cacheCreationInputTokens",
+            ]
+            .iter()
+            .filter_map(|k| num(v, k))
+            .sum::<u64>()
+        };
+        let main = entries
+            .iter()
+            .find(|(k, _)| !self.model.is_empty() && k.starts_with(&self.model))
+            .or_else(|| entries.iter().max_by_key(|(_, v)| read(v)))?;
+        self.reported = Some(num(main.1, "contextWindow").filter(|w| *w > 0)?);
+        self.event()
+    }
+}
+
+const SMALL_WINDOW: u64 = 200_000;
+const LARGE_WINDOW: u64 = 1_000_000;
+
+/// The window assumed for a model until the stream states it. Only Haiku 5.5's was seen
+/// in a capture; a `[1m]` name asks for the large one; the rest get the small one.
+fn known_window(model: &str) -> u64 {
+    if model.contains("[1m]") || model.starts_with("claude-haiku-5-5") {
+        LARGE_WINDOW
+    } else {
+        SMALL_WINDOW
+    }
 }
 
 /// input, output, cache read, cache write.
@@ -989,7 +1084,11 @@ pub fn parse_line(line: &str, st: &mut ParseState) -> Vec<AgentEvent> {
     match (v["type"].as_str(), v["subtype"].as_str()) {
         (Some("system"), Some("init")) => {
             st.session_id = v["session_id"].as_str().map(String::from);
+            if let Some(w) = num(&v, "contextWindow").filter(|w| *w > 0) {
+                st.context.reported = Some(w);
+            }
             if let Some(m) = v["model"].as_str().filter(|m| !m.is_empty()) {
+                st.context.model = m.to_string();
                 out.push(AgentEvent::Model(m.to_string()));
             }
             if v["apiKeySource"].as_str().is_some_and(|k| k != "none") {
@@ -1001,7 +1100,28 @@ pub fn parse_line(line: &str, st: &mut ParseState) -> Vec<AgentEvent> {
             status: num(&v, "error_status").map(|n| n as u32),
             delay_ms: num(&v, "retry_delay_ms"),
         }),
+        (Some("system"), Some(subtype)) if subtype.contains("compact") => {
+            let meta = [&v["compact_metadata"], &v["compactMetadata"]];
+            let figure = |keys: [&str; 2]| {
+                meta.iter()
+                    .find_map(|m| keys.iter().find_map(|k| num(m, k)))
+            };
+            let before = figure(["pre_tokens", "preTokens"]).or(st.context.used);
+            let after = figure(["post_tokens", "postTokens"]);
+            // The next message's fill is a new one, however close to the last.
+            st.context.used = None;
+            st.context.sent = None;
+            out.push(AgentEvent::Compacted {
+                subtype: subtype.to_string(),
+                before,
+                after,
+            });
+        }
         (Some("assistant"), _) => {
+            // A subagent's messages fill its own window, not this session's.
+            if v["parent_tool_use_id"].is_null() {
+                out.extend(st.context.message(&v["message"]["usage"]));
+            }
             for block in v["message"]["content"].as_array().into_iter().flatten() {
                 match block["type"].as_str() {
                     Some("text") => {
@@ -1039,6 +1159,9 @@ pub fn parse_line(line: &str, st: &mut ParseState) -> Vec<AgentEvent> {
                     st.closed = st.closed.plus(open);
                     st.open = Some(Tally::of(&e["message"]["usage"]));
                     st.publish(None);
+                    if v["parent_tool_use_id"].is_null() {
+                        out.extend(st.context.message(&e["message"]["usage"]));
+                    }
                 }
                 Some("message_delta") => {
                     let cur = st.open.unwrap_or_default();
@@ -1066,6 +1189,7 @@ pub fn parse_line(line: &str, st: &mut ParseState) -> Vec<AgentEvent> {
                 cache_create: num(u, "cache_creation_input_tokens"),
                 cost_usd: v["total_cost_usd"].as_f64(),
             }));
+            out.extend(st.context.result(&v["modelUsage"]));
             // The final figures replace the running tally.
             st.closed = Tally::of(u);
             st.open = None;
@@ -1280,6 +1404,91 @@ mod tests {
                 "Editing crates/daemon/src/views.rs",
                 "Running cargo test"
             ]
+        );
+    }
+
+    fn contexts(ev: &[AgentEvent]) -> Vec<(u64, u64)> {
+        ev.iter()
+            .filter_map(|e| match e {
+                AgentEvent::Context { used, window } => Some((*used, *window)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The peak percent and compaction count a step would record from these events,
+    /// printed for the s1108 exit test.
+    fn fill(name: &str, ev: &[AgentEvent]) -> (u64, u32) {
+        let mut c = crate::runner::ContextStats::default();
+        ev.iter().for_each(|e| c.observe(e));
+        let peak = c.peak_used * 100 / c.window;
+        println!("{name}: peak {peak}% compactions {}", c.compactions);
+        (peak, c.compactions)
+    }
+
+    #[test]
+    fn context_fill_of_the_captured_runs() {
+        let (ev, _) = parse("real_tool_suspend.jsonl");
+        // The second message moved less than a point, so it sends nothing.
+        assert_eq!(contexts(&ev), [(34_300, 1_000_000)]);
+        assert_eq!(fill("real_tool_suspend.jsonl", &ev), (3, 0));
+        let (ev, _) = parse("real_plain.jsonl");
+        assert_eq!(contexts(&ev), [(35_278, 1_000_000)]);
+        let (ev, _) = parse("real_partial_messages.jsonl");
+        assert_eq!(contexts(&ev), [(7_505, 1_000_000)]);
+    }
+
+    #[test]
+    fn context_fill_around_a_compaction() {
+        // Synthetic fixture (not a capture): see fixtures/claude/README.md.
+        let (ev, _) = parse("synthetic_compaction.jsonl");
+        assert_eq!(
+            contexts(&ev),
+            [
+                (100_000, 200_000),
+                (170_000, 200_000),
+                (184_000, 200_000),
+                (30_000, 200_000)
+            ]
+        );
+        let compacted: Vec<&AgentEvent> = ev
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::Compacted { .. }))
+            .collect();
+        assert_eq!(
+            compacted,
+            [&AgentEvent::Compacted {
+                subtype: "compact_boundary".into(),
+                before: Some(185_000),
+                after: None,
+            }]
+        );
+        assert_eq!(fill("synthetic_compaction.jsonl", &ev), (92, 1));
+    }
+
+    #[test]
+    fn context_window_is_corrected_by_the_result_and_other_system_lines_pass() {
+        let mut st = ParseState::default();
+        let mut feed = |l: &str| parse_line(l, &mut st);
+        feed(r#"{"type":"system","subtype":"init","model":"claude-new-9"}"#);
+        let ev = feed(
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{"usage":{"input_tokens":50000}}}}"#,
+        );
+        assert_eq!(contexts(&ev), [(50_000, 200_000)]);
+        assert!(feed(r#"{"type":"system","subtype":"thinking_tokens"}"#).is_empty());
+        let ev = feed(
+            r#"{"type":"result","is_error":false,"usage":{},"modelUsage":{"claude-new-9[1m]":{"contextWindow":1000000}}}"#,
+        );
+        assert_eq!(contexts(&ev), [(50_000, 1_000_000)]);
+        // A later CLI's name for it is still seen, with the last fill as what was there.
+        let ev = feed(r#"{"type":"system","subtype":"auto_compaction"}"#);
+        assert_eq!(
+            ev,
+            [AgentEvent::Compacted {
+                subtype: "auto_compaction".into(),
+                before: Some(50_000),
+                after: None,
+            }]
         );
     }
 

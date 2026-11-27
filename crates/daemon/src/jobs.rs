@@ -4827,6 +4827,8 @@ fn record_usage(c: &Ctx, spec: &SessionSpec, report: &StepReport) {
             model: spec.model.as_deref(),
         };
         crate::usage::record_tokens(&c.d, &who, &report.tokens);
+        let session = report.session_id.as_deref().unwrap_or_default();
+        crate::context::record(&c.d, &who, c.run.0, session, &report.context);
     }
 }
 

@@ -61,3 +61,15 @@ The login failures (`synthetic_not_logged_in.jsonl`, `synthetic_auth_401.jsonl`,
 `synthetic_authentication_error.jsonl`) are each one recogniser in
 `claude::is_auth_failure`: a 401/403 status, or one of `AUTH_FAILURE_WORDS`. All but
 the first are synthetic, written from the wording in the task, not captured.
+
+## Context fill and compaction (s1108)
+
+`synthetic_compaction.jsonl` is hand-written, **not a capture**: five messages of the main
+conversation, one of a subagent (`parent_tool_use_id` set), one `system` line with subtype
+`compact_boundary` and `compact_metadata.pre_tokens`, and a `result` whose
+`modelUsage.<model>.contextWindow` is 200000. No compaction was captured, so the subtype and
+the metadata field names are assumptions; the parser matches `compact` anywhere in the
+subtype and records the subtype it saw.
+
+The window in `real_plain.jsonl` and `real_tool_suspend.jsonl` is the captured
+`contextWindow` (1000000 for `claude-haiku-5-5`).
