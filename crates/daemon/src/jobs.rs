@@ -1382,12 +1382,13 @@ pub(crate) fn prepare_for(c: &Ctx, resumable: bool) -> Result<Option<String>, St
                     c,
                     &format!("resumed after a restart on {on}; base not merged"),
                 );
-                return wait_out_environment(c, "preparing the worktree", || {
+                wait_out_environment(c, "preparing the worktree", || {
                     let lock = c.d.repo_lock(c.project_id);
                     let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
                     git::ensure_worktree(&c.project.path, &c.wt, &c.branch, &c.project.base_ref())
-                })
-                .map(|_| None);
+                })?;
+                crate::worktrees::run_due_setup(c)?;
+                return Ok(None);
             }
             say_resumed(
                 c,
@@ -1433,7 +1434,12 @@ pub(crate) fn prepare_for(c: &Ctx, resumable: bool) -> Result<Option<String>, St
             "fetching the remote failed ({why}); going on from the last-known {base}"
         );
     }
-    wait_out_environment(c, "preparing the worktree", || prepare_locked(c))
+    let conflicts = wait_out_environment(c, "preparing the worktree", || prepare_locked(c))?;
+    // A merge that conflicted leaves the setup due: the agent resolves it first.
+    if conflicts.is_none() {
+        crate::worktrees::run_due_setup(c)?;
+    }
+    Ok(conflicts)
 }
 
 fn prepare_locked(c: &Ctx) -> Result<Option<String>, git::GitError> {
@@ -1624,7 +1630,7 @@ pub(crate) fn prepare_worktree_only(c: &Ctx) -> Result<(), String> {
     crate::taskcache::point_cargo_at_task_cache(&c.d, &c.project, c.task.0, &c.wt);
     // A new task's directory starts as a clone of the landing area's warm build (off by default).
     crate::taskcache::seed_task_cache(&c.d, &c.project, c.task.0, &c.wt);
-    Ok(())
+    crate::worktrees::run_due_setup(c)
 }
 
 /// How long a worktree setup step may take when it has no `budget`.
@@ -2749,7 +2755,16 @@ impl CheckHandler for TestChecks {
                         "run_check: base fold"
                     );
                 }
-                let note = crate::basefold::note(base, &fold);
+                let tip = mason_landing::git::run(&self.wt, &["rev-parse", base])
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_default();
+                let in_a_row = crate::basefold::record_fold(
+                    &self.slots.d.task_dir(mason_core::TaskId(self.task)),
+                    self.run,
+                    &fold,
+                    &tip,
+                );
+                let note = crate::basefold::note_bounded(base, &fold, in_a_row);
                 if let Some(c) = &scope.call {
                     self.remember_call(c, note.as_deref().unwrap_or(""));
                 }
@@ -4140,6 +4155,7 @@ fn agent_job(c: &Ctx) {
         StepKind::Explore => "explore",
         // A diagnosis session is run by `diagnose`, not as a step of the graph.
         StepKind::Diagnose => "diagnose",
+        StepKind::Validate => "validate",
         StepKind::Chat => "chat",
         StepKind::Health => "health",
     };
@@ -4221,7 +4237,9 @@ fn agent_job(c: &Ctx) {
                     None => p,
                 }
             }
-            StepKind::Diagnose | StepKind::Chat | StepKind::Health => String::new(),
+            StepKind::Diagnose | StepKind::Validate | StepKind::Chat | StepKind::Health => {
+                String::new()
+            }
         }
     };
 
@@ -4851,7 +4869,7 @@ impl LaunchRec<'_> {
 
 /// Keep what the attempt reported: the provider's limits as the latest for the
 /// account, and the tokens and cost against project, task, step and model.
-fn record_usage(c: &Ctx, spec: &SessionSpec, report: &StepReport) {
+pub(crate) fn record_usage(c: &Ctx, spec: &SessionSpec, report: &StepReport) {
     if let Some(u) = &report.usage {
         crate::usage::record_snapshot(&c.d, &c.project.account, u);
     }
@@ -5153,6 +5171,20 @@ fn finish_agent_inner(c: &Ctx, report: StepReport, dir: &Path) {
                     crate::reviewfindings::advice_given(dir);
                 }
                 _ => {}
+            }
+            // A `changes` verdict is checked by a read-only session before it sends the task back
+            // (task 1134); what it does not confirm becomes a minor note.
+            let plan: Option<serde_json::Value> = std::fs::read_to_string(dir.join("plan.json"))
+                .ok()
+                .and_then(|t| serde_json::from_str(&t).ok());
+            let mut submission = submission;
+            if c.state == State::Review && submission["verdict"] == "changes" {
+                match crate::validate::run(c, plan.as_ref(), &submission) {
+                    crate::validate::Outcome::Stands => {}
+                    crate::validate::Outcome::Changes(s) | crate::validate::Outcome::Overruled(s) => {
+                        submission = s
+                    }
+                }
             }
             // An approval that settles replaced base lines declares them as the task's removals.
             if c.state == State::Review && submission["verdict"] == "approve" {

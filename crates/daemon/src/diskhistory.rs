@@ -211,6 +211,8 @@ impl DiskRing {
         seen.sort();
         seen.dedup();
         DiskHistory {
+            // Filled by `Daemon::disk_history`.
+            worktrees: vec![],
             span_ms,
             step_ms,
             volumes: seen

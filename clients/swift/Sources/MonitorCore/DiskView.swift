@@ -180,3 +180,13 @@ public final class DiskModel {
 
     public var chart: DiskChart? { history.map { diskChart($0, hidden: hidden, colors: colors) } }
 }
+
+/// What the pipeline's worktrees take, the same totals as `mason disk`: a line for all of it,
+/// then one per kind and task state. Empty until the daemon has measured them.
+public func diskWorktreeLines(_ h: Mason_V1_DiskHistory) -> [String] {
+    guard !h.worktrees.isEmpty else { return [] }
+    let all = h.worktrees.reduce(UInt64(0)) { $0 + $1.bytes }
+    let next = h.worktrees.reduce(UInt64(0)) { $0 + $1.freeNextBytes }
+    return ["Worktrees \(Format.bytes(all)) · next sweep frees \(Format.bytes(next))"]
+        + h.worktrees.map { "\($0.kind), \($0.state): \($0.count), \(Format.bytes($0.bytes))" }
+}
