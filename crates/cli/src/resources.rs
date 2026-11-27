@@ -615,6 +615,13 @@ pub fn gha_line(g: &Value, now: u64) -> Option<String> {
         "MASON {mason}, other {other} running{queued}{label}, ceiling {}",
         g["ceiling"].as_u64().unwrap_or(0)
     );
+    if let Some(share) = g["full_share_pct"].as_u64() {
+        line.push_str(&format!("; full CI share {share}%"));
+        match g["full_deferred"].as_str() {
+            Some(why) => line.push_str(&format!(" (a full run is deferred: {why})")),
+            None => line.push_str(" (a full run may start)"),
+        }
+    }
     if g["macos"].is_object() {
         line.push_str(&format!(
             "; macOS: other {} running, {} queued, ceiling {}",

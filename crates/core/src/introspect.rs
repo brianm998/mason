@@ -299,10 +299,14 @@ impl Default for Thresholds {
     }
 }
 
-/// What a detector or the analyst found. It becomes a proposal with this evidence and metric.
+/// The six questions the pipeline review asks, as the category a finding of it names.
+pub const CATEGORIES: [&str; 6] = ["stuck", "speed", "narrow", "coverage", "crash", "automate"];
+
+/// What a detector or the pipeline review found. It becomes a proposal with this evidence.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Finding {
-    /// The rule that found it (`retry_loop`, ...), or `analyst`.
+    /// The rule that found it (`retry_loop`, ...), or `review` (the pipeline review; findings
+    /// recorded before it are `analyst`).
     pub rule: String,
     /// Part of the dedupe key: one finding per rule and subject while it is open.
     pub subject: String,
@@ -310,8 +314,10 @@ pub struct Finding {
     pub title: String,
     pub body: String,
     pub evidence: String,
-    /// The metric expected to move once this is fixed.
+    /// The metric expected to move once this is fixed. A review finding may leave it empty.
     pub metric: String,
+    /// Which of [`CATEGORIES`] a review finding answers; empty for any other.
+    pub category: String,
     /// The metric as it stood when found.
     pub before: Option<Measure>,
     /// How much it matters and how big the fix looks, which with the owner's
@@ -328,7 +334,8 @@ pub fn estimate(_rule: &str) -> (crate::proposal::Impact, crate::proposal::Cost)
 }
 
 impl Finding {
-    /// A finding without evidence, or naming no known metric, is refused.
+    /// A finding without evidence is refused. A review finding must name a category and may
+    /// name a metric; any other finding must name a known metric.
     pub fn check(&self) -> Result<(), String> {
         if self.title.trim().is_empty() || self.title.chars().count() > 120 {
             return Err("a finding needs a title of 1 to 120 characters".into());
@@ -337,7 +344,16 @@ impl Finding {
             return Err("a finding needs a body".into());
         }
         evidence_ok(&self.evidence)?;
-        if !known_metric(&self.metric) {
+        let review = self.rule == "review";
+        if review && !CATEGORIES.contains(&self.category.as_str()) {
+            return Err(format!(
+                "unknown category {:?}: name one of {}",
+                self.category,
+                CATEGORIES.join(", ")
+            ));
+        }
+        let optional = review && self.metric.is_empty();
+        if !optional && !known_metric(&self.metric) {
             return Err(format!(
                 "unknown metric {:?}: name one of {}",
                 self.metric,
@@ -399,6 +415,7 @@ pub fn detect(project: &str, s: &Stats, f: &Facts, t: &Thresholds) -> Vec<Findin
         body,
         evidence: format!("{evidence}; look at {}", pointer(rule)),
         metric: metric.into(),
+        category: String::new(),
         before,
         impact: estimate(rule).0,
         cost: estimate(rule).1,
@@ -767,12 +784,15 @@ pub fn due(last_run: Option<u64>, now: u64, every_ms: u64) -> bool {
 
 // ---- the analyst's output -----------------------------------------------------------------
 
-/// A finding the analyst wrote, before it is checked.
+/// A finding the pipeline review wrote, before it is checked.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Draft {
     pub title: String,
     pub body: String,
     pub evidence: String,
+    /// One of [`CATEGORIES`].
+    pub category: String,
+    /// Optional: one of [`METRICS`].
     pub metric: String,
     /// `low` or `high`; empty means high.
     pub severity: String,
@@ -780,7 +800,7 @@ pub struct Draft {
     pub cost: String,
 }
 
-/// Turn the analyst's drafts into findings; every one that fails its check is refused, with
+/// Turn the review's drafts into findings; every one that fails its check is refused, with
 /// the reason, and nothing from it is kept.
 pub fn accept_drafts(project: &str, drafts: &[Draft]) -> (Vec<Finding>, Vec<(String, String)>) {
     let (mut ok, mut refused) = (vec![], vec![]);
@@ -813,13 +833,14 @@ pub fn accept_drafts(project: &str, drafts: &[Draft]) -> (Vec<Finding>, Vec<(Str
             },
         };
         let f = Finding {
-            rule: "analyst".into(),
+            rule: "review".into(),
             subject: crate::proposal::normalise(&d.title),
             project: project.into(),
             title: d.title.trim().into(),
             body: d.body.trim().into(),
             evidence: d.evidence.trim().into(),
             metric: d.metric.trim().into(),
+            category: d.category.trim().into(),
             before: None,
             impact,
             cost,
@@ -1123,6 +1144,7 @@ mod tests {
             title: "Reviews wait for a slot".into(),
             body: "Review steps queue behind develop.".into(),
             evidence: "crates/daemon/src/sched.rs:120 ranks review below develop".into(),
+            category: "speed".into(),
             metric: "wait_share".into(),
             ..Default::default()
         };
@@ -1141,12 +1163,61 @@ mod tests {
     }
 
     #[test]
+    fn a_review_finding_names_a_category_and_may_leave_the_metric_out() {
+        let draft = |category: &str, evidence: &str| Draft {
+            title: "No test covers the takeover".into(),
+            body: "A takeover is never exercised.".into(),
+            evidence: evidence.into(),
+            category: category.into(),
+            ..Default::default()
+        };
+        let ev = "crates/daemon/src/update.rs:771 has no test";
+        for c in CATEGORIES {
+            let (ok, refused) = accept_drafts("p", &[draft(c, ev)]);
+            assert_eq!((ok.len(), refused.len()), (1, 0), "{c}: {refused:?}");
+            assert_eq!(ok[0].category, c);
+        }
+        let (ok, refused) = accept_drafts("p", &[draft("coverage", ev)]);
+        assert_eq!((ok.len(), refused.len()), (1, 0));
+        assert!(ok[0].metric.is_empty());
+        let (ok, refused) = accept_drafts("p", &[draft("morale", ev), draft("", ev)]);
+        assert!(ok.is_empty());
+        assert!(
+            refused.iter().all(|r| r.1.contains("unknown category")),
+            "{refused:?}"
+        );
+        let (ok, refused) =
+            accept_drafts("p", &[draft("coverage", ""), draft("crash", "it broke")]);
+        assert!(ok.is_empty());
+        assert_eq!(refused.len(), 2);
+    }
+
+    #[test]
+    fn a_detector_finding_still_needs_a_metric() {
+        let mut f = accept_drafts(
+            "p",
+            &[Draft {
+                title: "Reviews wait for a slot".into(),
+                body: "b".into(),
+                evidence: "crates/daemon/src/sched.rs:120 ranks review below develop".into(),
+                category: "speed".into(),
+                ..Default::default()
+            }],
+        )
+        .0
+        .remove(0);
+        f.rule = "wait_share".into();
+        assert!(f.check().unwrap_err().contains("unknown metric"));
+    }
+
+    #[test]
     fn a_draft_gives_severity_and_cost_and_absent_means_high_and_large() {
         use crate::proposal::{Cost, Impact};
         let d = |sev: &str, cost: &str| Draft {
             title: "Reviews wait for a slot".into(),
             body: "Review steps queue behind develop.".into(),
             evidence: "crates/daemon/src/sched.rs:120 ranks review below develop".into(),
+            category: "speed".into(),
             metric: "wait_share".into(),
             severity: sev.into(),
             cost: cost.into(),

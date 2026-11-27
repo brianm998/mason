@@ -1297,7 +1297,44 @@ fn run_cause(
     guard.ran_on(&ran_on);
     let adapter = crate::jobs::adapter_for(d, &c.project, &wt);
     let runner = StepRunner::new(adapter.as_ref(), RunnerConfig::default());
-    let contract = ContractHandle::new(StepKind::Diagnose, Box::new(NoChecks));
+    // The quote must be in what the agent was given or can read: the facts of the prompt, the
+    // tasks' text and whole logs.
+    let materials = {
+        let mut m = vec![("the facts it was given".to_string(), facts.clone())];
+        for t in &tasks {
+            let dir = d.cfg.task_dir(*t);
+            m.push((
+                format!("task #{t}'s logs"),
+                crate::diagnose::log_tails(&dir, 20, 200_000),
+            ));
+            if let Some(task) = d
+                .world()
+                .ok()
+                .and_then(|w| w.tasks.get(&TaskId(*t)).cloned())
+            {
+                m.push((
+                    format!("task #{t}'s text and failure"),
+                    format!(
+                        "{}\n{}\n{}",
+                        task.title,
+                        task.body,
+                        task.failure.unwrap_or_default()
+                    ),
+                ));
+            }
+        }
+        m
+    };
+    let validator: mason_adapter_api::contract::Validator =
+        Box::new(move |tool, args| match (tool, args["quote"].as_str()) {
+            ("submit_diagnosis", Some(q)) => {
+                mason_adapter_api::contract::check_quote(q, &materials)
+                    .map_err(|why| vec![format!("quote: {why}")])
+            }
+            _ => Ok(()),
+        });
+    let contract =
+        ContractHandle::with_validator(StepKind::Diagnose, Box::new(NoChecks), Some(validator));
     let sock = format!("t{primary}r{}cause{so_far}", run.0);
     if contract
         .serve(&d.cfg.sockets_dir().join(format!("{sock}.sock")))
@@ -1637,6 +1674,7 @@ pub fn file_task(d: &Arc<Daemon>, task: u64, a: &Value) -> Result<String, String
         blocks_task: false,
         explored: false,
         estimate: None,
+        lookback: None,
     };
     let filed =
         crate::proposals::file(d, &f).map_err(|why| format!("the ticket was refused: {why}"))?;

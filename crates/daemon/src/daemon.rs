@@ -65,6 +65,8 @@ pub struct Daemon {
     fetch_locks: Mutex<HashMap<PathBuf, Arc<Mutex<Option<std::time::Instant>>>>>,
     /// Per project: when its fetches began failing (ms) and the last error. A success removes it.
     fetch_failures: Mutex<HashMap<ProjectId, (u64, String)>>,
+    /// The network failures met lately, for the one "network outage" alert (#1185).
+    pub net: crate::net::Outages,
     repo_locks: Mutex<HashMap<PathBuf, RepoLock>>,
     /// When the definitions thread last finished a pass (ms; the start time before the first).
     pub(crate) defs_pass_ended_ms: AtomicU64,
@@ -321,6 +323,7 @@ impl Daemon {
             repo_locks: Mutex::default(),
             fetch_locks: Mutex::default(),
             fetch_failures: Mutex::default(),
+            net: Default::default(),
             defs_pass_ended_ms: AtomicU64::new(now_ms()),
             defs_ready: AtomicBool::new(false),
             stalls: AtomicU64::new(0),

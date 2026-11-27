@@ -67,7 +67,7 @@ data class SpeechSettings(
     companion object {
         /** Kinds added after the first release. A saved list gains them once (see Announcer.load). */
         val ADDED_KINDS = setOf("disk", "environment", "blocked", "host_lost", "runtime", "definition", "tracker", "provider_limit", "provider_overage", "provider_budget")
-        val DEFAULT_KINDS = setOf("needs_you", "failed", "landing", "daemon_down", "credentials", "provider_outage", "stalled", "landed") + ADDED_KINDS
+        val DEFAULT_KINDS = setOf("needs_you", "failed", "landing", "daemon_down", "credentials", "provider_outage", "stalled", "landed", "review") + ADDED_KINDS
     }
 }
 

@@ -141,6 +141,39 @@ fn world_full_window(
     window_always: bool,
     setup: Option<&str>,
 ) -> W {
+    let cfg = |_: &mut mason_daemon::config::DaemonConfig| {};
+    world_configured(
+        landing_toml,
+        extra,
+        files,
+        test_cmd,
+        test_step,
+        window_always,
+        setup,
+        &cfg,
+    )
+}
+
+/// `world_with`, with the daemon's own configuration changed by `cfg`.
+pub fn world_cfg(
+    landing_toml: &str,
+    extra: &dyn Fn(&Scratch) -> String,
+    cfg: &dyn Fn(&mut mason_daemon::config::DaemonConfig),
+) -> W {
+    world_configured(landing_toml, extra, &[], "true", false, true, None, cfg)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn world_configured(
+    landing_toml: &str,
+    extra: &dyn Fn(&Scratch) -> String,
+    files: &[(&str, &str)],
+    test_cmd: &str,
+    test_step: bool,
+    window_always: bool,
+    setup: Option<&str>,
+    cfg: &dyn Fn(&mut mason_daemon::config::DaemonConfig),
+) -> W {
     let s = Scratch::new("true", json!({"steps": {}}));
     s.write_project("scratch", test_cmd, &extra(&s));
     let mut definition = def();
@@ -173,6 +206,7 @@ fn world_full_window(
     let d = s.start_with(|c| {
         c.env_retry = Duration::from_millis(200);
         c.landing_window_always = window_always;
+        cfg(c);
     });
     // Nothing is claimed by the scheduler: the test places tasks itself.
     mason_daemon::attention::pause(&d, "", "claims", "test", 3600).unwrap();

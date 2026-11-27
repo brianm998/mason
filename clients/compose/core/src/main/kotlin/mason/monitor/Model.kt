@@ -57,6 +57,7 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     var notifySettings by mutableStateOf<NotifySettings?>(null)
     var settingsNotice by mutableStateOf<String?>(null)
     var remoteSettings by mutableStateOf<RemoteSettings?>(null)
+    var reviewSettings by mutableStateOf<ReviewSettings?>(null)
     /** The Devices section (s433): LAN state, paired devices, the code on show, and what the last action said. */
     var lanStatus by mutableStateOf<LanStatus?>(null)
     var devices by mutableStateOf<DeviceList?>(null)
@@ -910,6 +911,19 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         if (p.isNotEmpty()) raw("GET", SettingsPayload.path(p), id = "settings")
         raw("GET", "/notify/settings", id = "notify-settings")
         raw("GET", "/remote", id = "remote")
+        raw("GET", "/review", id = "review")
+    }
+
+    /** Change one setting of the pipeline review (a body from [SettingsPayload]). */
+    fun changeReviewSetting(body: String) {
+        settingsNotice = null
+        raw("POST", "/review", id = "review-save", json = body)
+    }
+
+    /** File a pipeline review now. */
+    fun runReview() {
+        settingsNotice = null
+        raw("POST", "/review/run", id = "review-run", json = "{}")
     }
 
     /** Change the global placement mode; the page reloads `/remote` on the answer. */
@@ -1153,6 +1167,12 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
             }
             if (r.id == "notify-settings" && r.ok) notifySettings = NotifySettings.parse(r.json)
             if (r.id == "remote" && r.ok) remoteSettings = RemoteSettings.parse(r.json)
+            if (r.id == "review" && r.ok) reviewSettings = ReviewSettings.parse(r.json)
+            // The answer to a change is the review as it stands; a refusal asks for it again.
+            if (r.id == "review-save") {
+                if (r.ok) reviewSettings = ReviewSettings.parse(r.json) else raw("GET", "/review", id = "review")
+            }
+            if (r.id == "review-run" && r.ok) raw("GET", "/review", id = "review")
             if (r.id in SETTINGS_RESULTS) {
                 settingsNotice = if (r.ok) SettingsPayload.done(r.id) else r.error
                 if (r.ok && (r.id == "settings-save" || r.id == "notify-save")) loadSettings()
