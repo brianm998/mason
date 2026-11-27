@@ -1234,6 +1234,7 @@ impl<'a> Ctx<'a> {
                 })
                 .collect(),
             remote: remote_summary(self.d, &holds),
+            runner_pools: runner_pools(self.d),
             developing: {
                 let kinds: Vec<mason_core::checks::PhaseKind> = tasks
                     .iter()
@@ -2348,6 +2349,58 @@ fn queued_why(
         Some((_, w)) if w > 0 => format!("waiting for the {w}s window to close"),
         _ => "waiting for the next batch".into(),
     }
+}
+
+/// The `gha` and `gha-macos` pools for the monitors' limit control (#1261): the limit, the
+/// account ceiling, MASON's units and the other workflows', and how many requests wait. Always
+/// sent, so an idle view can still raise the limit. A pool the daemon has no capacity for is left
+/// out.
+pub fn runner_pools(d: &crate::daemon::Daemon) -> Vec<mason_protocol::RunnerPool> {
+    let snap = d.broker.snapshot();
+    let gha = &snap["gha"];
+    let num = |v: &serde_json::Value| v.as_u64().unwrap_or(0).min(u64::from(u32::MAX)) as u32;
+    let mut waiting = [0u32; 2];
+    for w in gha["waiters"].as_array().into_iter().flatten() {
+        for (i, name) in [mason_scheduler::GHA, mason_scheduler::GHA_MACOS]
+            .iter()
+            .enumerate()
+        {
+            if w["uses"].get(*name).is_some() {
+                waiting[i] += 1;
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for (i, name) in [mason_scheduler::GHA, mason_scheduler::GHA_MACOS]
+        .into_iter()
+        .enumerate()
+    {
+        let Some(limit) = d.broker.limit(name) else {
+            continue;
+        };
+        let (ceiling, other) = if i == 0 {
+            (num(&gha["ceiling"]), num(&gha["other"]))
+        } else {
+            (num(&gha["macos"]["ceiling"]), num(&gha["macos"]["other"]))
+        };
+        let used = d.broker.used(name);
+        // MASON's share: what is held beyond the other workflows' jobs and the part of the limit
+        // above the ceiling.
+        let phantom = other.min(limit)
+            + limit
+                .saturating_sub(ceiling)
+                .min(limit.saturating_sub(other.min(limit)));
+        out.push(mason_protocol::RunnerPool {
+            name: name.into(),
+            limit,
+            ceiling,
+            used,
+            mason: used.saturating_sub(phantom),
+            other,
+            waiting: waiting[i],
+        });
+    }
+    out
 }
 
 /// The runs out on GitHub now, by pool and by what they are for. `None` when there are none.

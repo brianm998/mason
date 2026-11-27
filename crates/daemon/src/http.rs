@@ -4031,7 +4031,15 @@ async fn targets(Shared(d): Shared<Arc<Daemon>>) -> Res {
     Ok(Json(v))
 }
 
-async fn resource_limit(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
+/// Change a resource's limit. Owner only (#1261): a monitor sends it as the owner's identity (a
+/// paired viewer is refused before it gets here, and a LAN device's identity is its token's), and
+/// `mason resources limit` says who it is the way `resources gate` does.
+async fn resource_limit(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Json(b): Json<Value>,
+) -> Res {
+    owner_only(&d, &who_of(&headers), "change a resource limit")?;
     let (name, units) = (
         b["resource"].as_str().unwrap_or_default().to_string(),
         b["units"].as_u64(),

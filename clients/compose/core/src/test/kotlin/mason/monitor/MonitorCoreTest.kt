@@ -587,6 +587,46 @@ class MonitorCoreTest {
         assertEquals(1, sent[5].set_limit?.units, "the stepper never asks for zero compiles")
     }
 
+    private fun runnerModel(limit: Int, ceiling: Int, mac: Int = 4): Pair<MonitorModel, MutableList<Command>> {
+        val m = MonitorModel()
+        val sent = mutableListOf<Command>()
+        m.sender = { sent += it }
+        m.home = HomeView(runner_pools = listOf(
+            RunnerPool(name = "gha", limit = limit, ceiling = ceiling, used = 5, mason = 3, other = 2, waiting = 1),
+            RunnerPool(name = "gha-macos", limit = mac, ceiling = 6),
+        ))
+        return m to sent
+    }
+
+    @Test fun theRunnerLimitPlusAndMinusSendSetLimitForGhaAndStopAtTheBounds() {
+        val (m, sent) = runnerModel(16, 20)
+        m.stepRunnerLimit("gha", 1)
+        m.stepRunnerLimit("gha", -1)
+        assertEquals(listOf("gha" to 17, "gha" to 15), sent.map { it.set_limit!!.resource to it.set_limit!!.units })
+        val (top, sentTop) = runnerModel(20, 20)
+        top.stepRunnerLimit("gha", 1)
+        assertTrue(sentTop.isEmpty(), "plus at the ceiling sends nothing")
+        val (zero, sentZero) = runnerModel(0, 20)
+        zero.stepRunnerLimit("gha", -1)
+        assertTrue(sentZero.isEmpty(), "minus at 0 sends nothing")
+        val (over, sentOver) = runnerModel(25, 20)
+        over.stepRunnerLimit("gha", -1)
+        assertEquals(20, sentOver[0].set_limit?.units, "a limit above the ceiling steps down to it")
+    }
+
+    @Test fun theMacosRunnerPoolHasItsOwnCeilingAndTheWordsSayWhatTheLimitDoes() {
+        val (m, sent) = runnerModel(16, 20, mac = 6)
+        m.stepRunnerLimit("gha-macos", 1)
+        assertTrue(sent.isEmpty())
+        m.stepRunnerLimit("gha-macos", -1)
+        assertEquals("gha-macos" to 5, sent[0].set_limit!!.resource to sent[0].set_limit!!.units)
+        val p = RunnerPool(name = "gha", limit = 0, ceiling = 20)
+        assertTrue(RunnerLimit.notes(p).any { "no check goes to GitHub" in it })
+        assertTrue(RunnerLimit.notes(p).any { "running finish" in it })
+        assertTrue(RunnerLimit.detail(p.copy(limit = 25)).contains("ceiling caps the limit to 20"))
+        assertTrue(MonitorModel().runnerPools.isEmpty())
+    }
+
     @Test fun theCpuGateStepperSendsASetGateAndStaysWithinTenToAHundred() {
         val m = MonitorModel()
         val sent = mutableListOf<Command>()

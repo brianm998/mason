@@ -920,6 +920,23 @@ message PoolUse {
   uint32 limit = 3;
 }
 
+// A GitHub runner pool as the monitors' control shows it (#1261): `gha` or `gha-macos`. Always
+// sent, with or without runs in flight, so the limit can be changed from an idle view.
+message RunnerPool {
+  string name = 1;
+  // The limit set (`mason resources limit gha N`).
+  uint32 limit = 2;
+  // The account-wide ceiling (`gha_ceiling`, `gha_macos_ceiling`); the effective limit is the
+  // smaller of the two.
+  uint32 ceiling = 3;
+  // Units in use: MASON's own and the other workflows' (and any part of the limit above the ceiling).
+  uint32 used = 4;
+  uint32 mason = 5;
+  uint32 other = 6;
+  // Requests waiting for units in this pool.
+  uint32 waiting = 7;
+}
+
 // A run in flight on GitHub.
 message RemoteRun {
   // check, test_step, batch or debt.
@@ -1003,6 +1020,9 @@ message HomeView {
   // The hosts and the runs on them (#1155). In a view of one project, only its runs; the hosts
   // are all sent. Additive; an older daemon sends none.
   repeated HostView hosts = 16;
+  // The `gha` and `gha-macos` runner pools, for the limit control (#1261). Additive; an older
+  // daemon sends none.
+  repeated RunnerPool runner_pools = 17;
 }
 
 // One job of a remote run, from the Actions jobs API.
