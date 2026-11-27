@@ -3222,10 +3222,11 @@ fn a_node_job_whose_host_dies_leaves_no_grandchild_behind() {
 // ---- #1237: a test step without suites follows placement ---------------------------------------
 
 /// A coordinator whose project has only a `test` command (no suites) and is nodes only. The
-/// command writes `marker` only where `MASON_NODE` is set, so the file says where it ran.
+/// command appends the directory it ran in to `marker`: a node's slot is under the node's data
+/// directory, the coordinator's worktree under its own.
 fn suiteless_pair(test_tail: &str, marker: &Path, build: bool, extra: &str) -> Pair {
     let cmd = format!(
-        "test -f hello.txt && {{ [ ${{MASON_NODE:-0}} = 0 ] || echo node >> {m}; [ ${{MASON_NODE:-0}} != 0 ] || echo here >> {m}.here; }}; {test_tail}",
+        "test -f hello.txt && pwd >> {m}; {test_tail}",
         m = marker.display()
     );
     let extra = if build {
@@ -3251,6 +3252,33 @@ fn suiteless_pair(test_tail: &str, marker: &Path, build: bool, extra: &str) -> P
             .unwrap();
     assert_eq!(set["mode"], "remote", "{set}");
     p
+}
+
+/// The directories the test command ran in, one per run.
+fn ran_in(marker: &Path) -> Vec<String> {
+    std::fs::read_to_string(marker)
+        .unwrap_or_default()
+        .lines()
+        .map(String::from)
+        .collect()
+}
+
+fn root_name(s: &Scratch) -> String {
+    s.root
+        .path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn only_on_the_node(p: &Pair, dirs: &[String]) {
+    assert!(!dirs.is_empty(), "the command ran");
+    assert!(
+        dirs.iter()
+            .all(|d| d.contains(&root_name(&p.sb)) && !d.contains(&root_name(&p.sa))),
+        "ran on the node, not in the coordinator's worktree: {dirs:?}"
+    );
 }
 
 /// The step hosts this daemon started for the test step of run `run` of `t`: none when it ran
@@ -3284,15 +3312,7 @@ fn a_test_step_without_suites_runs_on_the_node_with_its_build_and_starts_nothing
     let t = file_task(&p.a, "Suite-less test step");
     wait_state(&p.a, t, mason_core::State::Landed, 240);
     let run = testing_run(&p.a, t).expect("the task had a test step");
-    let on_node = std::fs::read_to_string(&marker).unwrap_or_default();
-    assert!(
-        on_node.lines().any(|l| l == "node"),
-        "ran on the node: {on_node:?}"
-    );
-    assert!(
-        !marks.path().join("ran.here").exists(),
-        "nothing of it ran on the coordinator"
-    );
+    only_on_the_node(&p, &ran_in(&marker));
     assert_eq!(local_test_hosts(&p.a, t, run), Vec::<String>::new());
     let note = std::fs::read_to_string(p.a.task_dir(t).join(format!("test-r{run}.ran")))
         .expect("the step records where it ran");
@@ -3312,14 +3332,14 @@ fn a_test_step_without_suites_waits_for_a_node_and_never_runs_here() {
     poll(&p);
     let t = file_task(&p.a, "Waits for a node");
     wait_state(&p.a, t, mason_core::State::Testing, 120);
-    // The step is waiting for a node: at its lease, or in the run it asked for. Either way
-    // nothing started here, and nothing ran at all.
     let run = loop {
         if let Some(r) = testing_run(&p.a, t) {
             break r;
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     };
+    // The step is waiting for a node: at its lease, or in the run it asked for. Either way
+    // nothing started here, and nothing ran at all.
     wait_for("the step to be waiting for a node", 60, || {
         let w = p.a.world().unwrap();
         matches!(w.tasks[&t].activity, mason_core::Activity::Waiting(_))
@@ -3329,7 +3349,7 @@ fn a_test_step_without_suites_waits_for_a_node_and_never_runs_here() {
                 .exists()
     });
     assert_eq!(local_test_hosts(&p.a, t, run), Vec::<String>::new());
-    assert!(!marker.exists() && !marks.path().join("ran.here").exists());
+    assert!(!marker.exists(), "nothing ran while no node took work");
     assert_ne!(
         mason_core::State::Landed,
         state_of(&p.a, t),
@@ -3339,9 +3359,7 @@ fn a_test_step_without_suites_waits_for_a_node_and_never_runs_here() {
     set_switch(&p, true);
     poll(&p);
     wait_state(&p.a, t, mason_core::State::Landed, 240);
-    let on_node = std::fs::read_to_string(&marker).unwrap_or_default();
-    assert!(on_node.lines().any(|l| l == "node"), "{on_node:?}");
-    assert!(!marks.path().join("ran.here").exists());
+    only_on_the_node(&p, &ran_in(&marker));
 }
 
 #[test]
@@ -3371,6 +3389,7 @@ fn a_red_run_on_the_node_is_judged_red_as_a_local_one_is() {
         !p.sa.origin_log().contains(&"add hello".to_string()),
         "nothing red may land"
     );
+    only_on_the_node(&p, &ran_in(&marker));
     let log = std::fs::read_to_string(p.a.task_dir(t).join(format!("test-r{run}.log"))).unwrap();
     assert!(log.contains("nope-from-the-node"), "{log}");
     assert_eq!(local_test_hosts(&p.a, t, run), Vec::<String>::new());
@@ -3380,10 +3399,7 @@ fn a_red_run_on_the_node_is_judged_red_as_a_local_one_is() {
 fn a_local_project_runs_its_suiteless_test_step_here_as_before() {
     let marks = tempfile::tempdir().unwrap();
     let marker = marks.path().join("ran");
-    let cmd = format!(
-        "test -f hello.txt && echo here >> {} && [ ${{MASON_NODE:-0}} = 0 ]",
-        marker.display()
-    );
+    let cmd = format!("test -f hello.txt && pwd >> {}", marker.display());
     let p = working_pair_scripted(
         Project {
             test: cmd,
@@ -3402,10 +3418,10 @@ fn a_local_project_runs_its_suiteless_test_step_here_as_before() {
     let t = file_task(&p.a, "Local");
     wait_state(&p.a, t, mason_core::State::Landed, 240);
     let run = testing_run(&p.a, t).unwrap();
-    assert!(std::fs::read_to_string(&marker).unwrap().contains("here"));
+    let dirs = ran_in(&marker);
     assert!(
-        !local_test_hosts(&p.a, t, run).is_empty()
-            || p.a.task_dir(t).join(format!("test-r{run}.log")).exists()
+        !dirs.is_empty() && dirs.iter().all(|d| d.contains(&root_name(&p.sa))),
+        "ran here: {dirs:?}"
     );
     assert!(!p.a.task_dir(t).join(format!("test-r{run}.ran")).exists());
 }
