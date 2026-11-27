@@ -1199,6 +1199,10 @@ mod tests {
             workflow: Some("solo".into()),
             landing: Some("direct".into()),
             alerts: Some("none".into()),
+            machine: Machine {
+                known_bins: vec![(Agent::Claude, std::env::current_exe().unwrap())],
+                ..Default::default()
+            },
             ..Default::default()
         };
         let (r, asked) = run(&f, &detected(), true);
