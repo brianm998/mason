@@ -410,9 +410,17 @@ pub struct FileId(u64, u64, std::time::SystemTime);
 
 impl FileId {
     pub fn of(path: &Path) -> Option<FileId> {
-        use std::os::unix::fs::MetadataExt;
         let m = std::fs::metadata(path).ok()?;
-        Some(FileId(m.ino(), m.len(), m.modified().ok()?))
+        #[cfg(unix)]
+        let ino = {
+            use std::os::unix::fs::MetadataExt;
+            m.ino()
+        };
+        // The inode is not read off Unix (std's windows file_index is unstable); size and
+        // mtime still identify a replaced binary.
+        #[cfg(not(unix))]
+        let ino = 0u64;
+        Some(FileId(ino, m.len(), m.modified().ok()?))
     }
 }
 
