@@ -185,9 +185,15 @@ impl World {
     }
     fn start(&self, t: TaskId) -> Result<Started, String> {
         let k = task_of(&self.d, t);
+        self.start_keyed(
+            t,
+            diagcause::key_for_failure("scratch", &k.failure.unwrap_or_default()),
+        )
+    }
+    fn start_keyed(&self, t: TaskId, key: String) -> Result<Started, String> {
         diagcause::start_cause(
             &self.d,
-            diagcause::key_for_failure("scratch", &k.failure.unwrap_or_default()),
+            key,
             self.pid(),
             vec![t.0],
             StepRunId(mason_daemon::http::latest_run(&self.d.world().unwrap(), t)),
@@ -326,9 +332,12 @@ fn two_tasks_of_one_cause_get_one_diagnosis_and_one_card_that_acts_on_both() {
     let w = world(vec![card], "");
     let a = w.failed_task("First rejected");
     let b = w.failed_task("Second rejected");
-    assert_eq!(w.start(a).unwrap(), Started::Began);
-    // The second failure with the same signature joins; it starts no session.
-    assert!(matches!(w.start(b).unwrap(), Started::Joined(_)));
+    // The two failures are one cause (the push hook's message carries a commit id, which a
+    // signature does not fold, so the key is given).
+    let key = "sig:scratch:push rejected by the hook".to_string();
+    assert_eq!(w.start_keyed(a, key.clone()).unwrap(), Started::Began);
+    // The second failure of the cause joins; it starts no session.
+    assert!(matches!(w.start_keyed(b, key).unwrap(), Started::Joined(_)));
     wait_for("the card", 180, || {
         w.rows().iter().any(|r| r.status == "pending")
     });
