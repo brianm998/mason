@@ -34,7 +34,13 @@ pub enum StepKind {
 }
 
 /// The operational actions a health session may take, each one the owner can already take.
-pub const HEALTH_ACTIONS: [&str; 4] = ["retry", "unblock", "release_holder", "rerun_diagnosis"];
+pub const HEALTH_ACTIONS: [&str; 5] = [
+    "retry",
+    "unblock",
+    "release_holder",
+    "rerun_diagnosis",
+    "restart_round",
+];
 
 pub const ALL_TOOLS: [&str; 11] = [
     "submit_health",
@@ -271,12 +277,22 @@ pub fn tool_spec(tool: &str) -> Option<(String, Value)> {
             &["summary", "options"],
         ),
         "submit_review" => s(
-            "Submit your review. verdict is 'approve' or 'changes'. 'changes' needs at least one finding.",
+            "Submit your review. verdict is 'approve' or 'changes'. Every finding has a severity: only \
+             'blocking' sends the task back, so 'changes' needs at least one; 'approve' may carry \
+             'minor' ones. Blocking: it won't build, it is wrong for every input, a new or changed test \
+             passes on the base code too, an error is swallowed or a fallback hides a failure, or it \
+             breaks a CLAUDE.md or prompt-pack rule that the finding quotes. Not findings: problems \
+             already on the base branch, what a linter or the test step catches, wording, style, naming \
+             and nits a senior engineer would not raise; a wording error in docs is minor unless the \
+             task is about that doc.",
             json!({
                 "verdict": {"type": "string", "enum": ["approve", "changes"]},
                 "summary": {"type": "string"},
                 "findings": {"type": "array", "items": {"type": "object", "properties": {
-                    "issue": {"type": "string"}, "file": {"type": "string"}}, "required": ["issue"]}},
+                    "issue": {"type": "string"}, "file": {"type": "string"},
+                    "severity": {"type": "string", "enum": ["blocking", "minor"],
+                        "description": "'blocking' sends the task back; 'minor' is kept as advice"}},
+                    "required": ["issue", "severity"]}},
                 "removes": {"type": "array", "items": {"type": "object", "properties": {
                     "file": {"type": "string"}, "line": {"type": "string"}, "reason": {"type": "string"}},
                     "required": ["file", "line", "reason"]},
@@ -638,28 +654,42 @@ pub fn validate(tool: &str, a: &Value) -> Result<(), Vec<String>> {
         "submit_diagnosis" => diagnosis_problems(a, &mut p),
         "submit_review" => {
             text(a, "summary", 4000, &mut p);
-            let findings = a
+            let findings: &[Value] = a
                 .get("findings")
                 .and_then(Value::as_array)
-                .map_or(0, Vec::len);
+                .map_or(&[], Vec::as_slice);
+            let blocking = findings
+                .iter()
+                .any(|f| f.get("severity").and_then(Value::as_str) == Some("blocking"));
             match a.get("verdict").and_then(Value::as_str) {
+                Some("approve") if blocking => p.push(
+                    "verdict: 'approve' cannot carry a finding with severity 'blocking'; submit 'changes', or give it severity 'minor'"
+                        .into(),
+                ),
                 Some("approve") => {}
-                Some("changes") if findings == 0 => {
-                    p.push("findings: verdict 'changes' needs at least one finding".into())
-                }
+                Some("changes") if !blocking => p.push(
+                    "findings: verdict 'changes' needs at least one finding with severity 'blocking'; if all are 'minor', submit 'approve' with them"
+                        .into(),
+                ),
                 Some("changes") => {}
                 Some(v) => p.push(format!("verdict: {v:?} must be 'approve' or 'changes'")),
                 None => p.push("verdict: required, 'approve' or 'changes'".into()),
             }
             removes(a, &mut p);
-            if let Some(Value::Array(fs)) = a.get("findings") {
-                for (i, f) in fs.iter().enumerate() {
-                    if f.get("issue")
-                        .and_then(Value::as_str)
-                        .is_none_or(|s| s.trim().is_empty())
-                    {
-                        p.push(format!("findings[{i}].issue: required"));
-                    }
+            for (i, f) in findings.iter().enumerate() {
+                if f.get("issue")
+                    .and_then(Value::as_str)
+                    .is_none_or(|s| s.trim().is_empty())
+                {
+                    p.push(format!("findings[{i}].issue: required"));
+                }
+                if !matches!(
+                    f.get("severity").and_then(Value::as_str),
+                    Some("blocking" | "minor")
+                ) {
+                    p.push(format!(
+                        "findings[{i}].severity: required, 'blocking' (sends the task back) or 'minor' (advice)"
+                    ));
                 }
             }
         }
@@ -1498,6 +1528,37 @@ mod tests {
         }
         assert!(!c.flag().is_set());
         assert_eq!(c.state().rejections, 1);
+    }
+
+    #[test]
+    fn only_a_blocking_finding_can_ask_for_changes() {
+        let review = |verdict: &str, findings: Value| {
+            validate(
+                "submit_review",
+                &json!({"verdict": verdict, "summary": "s", "findings": findings}),
+            )
+        };
+        let minor = json!({"issue": "a nit", "severity": "minor"});
+        let blocking = json!({"issue": "broken", "severity": "blocking"});
+        let why = review("changes", json!([minor, minor]))
+            .unwrap_err()
+            .join("\n");
+        assert!(why.contains("severity 'blocking'"), "{why}");
+        assert_eq!(review("approve", json!([minor, minor])), Ok(()));
+        assert_eq!(review("changes", json!([blocking, minor])), Ok(()));
+        for bad in [
+            json!({"issue": "x"}),
+            json!({"issue": "x", "severity": "major"}),
+        ] {
+            for verdict in ["approve", "changes"] {
+                let why = review(verdict, json!([blocking, bad]))
+                    .unwrap_err()
+                    .join("\n");
+                assert!(why.contains("findings[1].severity: required"), "{why}");
+            }
+        }
+        let why = review("approve", json!([blocking])).unwrap_err().join("\n");
+        assert!(why.contains("'approve' cannot carry"), "{why}");
     }
 
     #[test]

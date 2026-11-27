@@ -1262,6 +1262,9 @@ message TaskDetailView {
   repeated CiLink ci_links = 23;
   // Where this task's runs go and who decided it (#834). Additive.
   Placement placement = 24;
+  // The reviewer's minor findings, one line each ("minor: issue (file)"), oldest first (#1132).
+  // Additive.
+  repeated string review_findings = 26;
   // The task's runs in flight now, with the host of each (#1155). Additive.
   repeated HostRun running_on = 25;
   // A diagnosis session of this failed task is running now. Unset otherwise. Additive (#1046).
