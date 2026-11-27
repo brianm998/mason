@@ -512,6 +512,9 @@ private fun TaskDetail(model: MonitorModel, d: TaskDetailView, loading: Boolean 
         }
     }
     if (d.closing.isNotEmpty()) Section("Tests") { LinkedText(model, d.closing, theme.body(), Modifier.testTag("detail:closing")) }
+    if (d.review_findings.isNotEmpty()) Section("Review findings") {
+        d.review_findings.forEach { LinkedText(model, it, theme.body()) }
+    }
     if (d.debts.isNotEmpty()) Section("Debts") {
         // The debt's own `#id` is not a task, so only the rest is linked.
         d.debts.forEach {

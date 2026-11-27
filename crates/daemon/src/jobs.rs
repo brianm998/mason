@@ -110,6 +110,16 @@ pub(crate) fn first_step_in(d: &Arc<Daemon>, t: &Task, state: State) -> Option<S
 const ROUND_REASON: &str = "round-reason.txt";
 const FEEDBACK_HISTORY: &str = "feedback-history.txt";
 
+/// Add one round's entry to the task's feedback history.
+fn append_history(dir: &Path, run: u64, step: &str, reason: &str, text: &str) {
+    let entry = format!("## After run {run} ({step}): {reason}\n{text}\n\n");
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join(FEEDBACK_HISTORY))
+        .and_then(|mut h| std::io::Write::write_all(&mut h, entry.as_bytes()));
+}
+
 /// Is the next test round the last one the test step will give (another red would fail the
 /// task), after at least one red round? `done`: test rounds that went red so far.
 pub(crate) fn last_round_ahead(done: u32, max_rounds: u32) -> bool {
@@ -397,15 +407,7 @@ impl Ctx {
                     // two cannot get out of step: it picks the `fix` or `conflict` pack.
                     let _ = std::fs::write(self.task_dir().join(ROUND_REASON), round_reason);
                     // Every round's feedback is kept for the last round's fresh session (s251).
-                    let entry = format!(
-                        "## After run {} ({}): {}\n{}\n\n",
-                        self.run.0, self.step.name, reason, f
-                    );
-                    let _ = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(self.task_dir().join(FEEDBACK_HISTORY))
-                        .and_then(|mut h| std::io::Write::write_all(&mut h, entry.as_bytes()));
+                    append_history(&self.task_dir(), self.run.0, &self.step.name, &reason, &f);
                 }
                 let step = repin_for_send_back(
                     &self.d,
@@ -4011,6 +4013,8 @@ fn agent_job(c: &Ctx) {
     let mut feedback = std::fs::read_to_string(dir.join("feedback.txt")).ok();
     let one_shot = take_retry_note(&dir);
     let note_shown = one_shot.is_some();
+    // The default explore prompt has no place for feedback, so it takes the note by itself.
+    let explore_note = with_retry_note(None, one_shot.clone());
     feedback = with_retry_note(feedback, one_shot);
     if let Some(files) = &conflicts {
         if kind == StepKind::Develop {
@@ -4115,7 +4119,13 @@ fn agent_job(c: &Ctx) {
                 plan.as_ref(),
             ),
             StepKind::Explore => {
-                crate::prompts::explore_prompt(c.task.0, &c.title, &c.body, c.trust, &c.project)
+                let p = crate::prompts::explore_prompt(
+                    c.task.0, &c.title, &c.body, c.trust, &c.project,
+                );
+                match &explore_note {
+                    Some(n) => format!("{p}\n\n{n}"),
+                    None => p,
+                }
             }
             StepKind::Diagnose | StepKind::Chat | StepKind::Health => String::new(),
         }
@@ -4127,6 +4137,12 @@ fn agent_job(c: &Ctx) {
         Some(b) if kind == StepKind::Review || (kind == StepKind::Develop && !note_shown) => {
             format!("{prompt}\n\n{b}")
         }
+        _ => prompt,
+    };
+
+    // The minor findings of an approval, for the develop round that follows one, if any does.
+    let prompt = match crate::reviewfindings::pending_advice(&dir) {
+        Some(a) if kind == StepKind::Develop => format!("{prompt}\n\n{a}"),
         _ => prompt,
     };
 
@@ -5001,6 +5017,7 @@ fn finish_agent_inner(c: &Ctx, report: StepReport, dir: &Path) {
                     // What landing's dropped-line audit reads: the lines removed on purpose.
                     let _ = std::fs::write(dir.join("change.json"), submission.to_string());
                     let _ = std::fs::remove_file(dir.join("feedback.txt"));
+                    crate::reviewfindings::advice_given(dir);
                 }
                 _ => {}
             }
@@ -5008,16 +5025,23 @@ fn finish_agent_inner(c: &Ctx, report: StepReport, dir: &Path) {
             if c.state == State::Review && submission["verdict"] == "approve" {
                 add_removals(dir, &submission["removes"]);
             }
+            if c.state == State::Review {
+                crate::reviewfindings::keep(dir, c.run.0, &submission["findings"]);
+            }
             // A reviewer who asks for changes is red, not an error.
             if c.state == State::Review && submission["verdict"] == "changes" {
-                let findings: Vec<String> = submission["findings"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .map(|f| format!("- {}{}", f["issue"].as_str().unwrap_or(""), f["file"].as_str().map(|p| format!(" ({p})")).unwrap_or_default()))
-                    .collect();
-                let feedback = format!("The reviewer asked for changes: {}\n{}", submission["summary"].as_str().unwrap_or(""), findings.join("\n"));
+                let feedback = crate::reviewfindings::changes_feedback(
+                    submission["summary"].as_str().unwrap_or(""),
+                    &submission["findings"],
+                );
                 return c.conclude(Outcome::Red, "the reviewer asked for changes".into(), Some(feedback));
+            }
+            if c.state == State::Review {
+                // Approved, with advice: kept in the history and for a later develop round.
+                if let Some(advice) = crate::reviewfindings::advice(&submission["findings"]) {
+                    crate::reviewfindings::keep_advice(dir, &advice);
+                    append_history(dir, c.run.0, &c.step.name, "approved with minor findings", &advice);
+                }
             }
             c.green();
         }

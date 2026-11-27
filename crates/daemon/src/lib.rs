@@ -93,6 +93,7 @@ pub mod report;
 pub mod rerun;
 pub mod resume;
 pub mod reuse;
+pub mod reviewfindings;
 pub mod running;
 pub mod runtimes;
 pub mod sched;
