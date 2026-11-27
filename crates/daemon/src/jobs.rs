@@ -1382,12 +1382,13 @@ pub(crate) fn prepare_for(c: &Ctx, resumable: bool) -> Result<Option<String>, St
                     c,
                     &format!("resumed after a restart on {on}; base not merged"),
                 );
-                return wait_out_environment(c, "preparing the worktree", || {
+                wait_out_environment(c, "preparing the worktree", || {
                     let lock = c.d.repo_lock(c.project_id);
                     let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
                     git::ensure_worktree(&c.project.path, &c.wt, &c.branch, &c.project.base_ref())
-                })
-                .map(|_| None);
+                })?;
+                crate::worktrees::run_due_setup(c)?;
+                return Ok(None);
             }
             say_resumed(
                 c,
@@ -1433,7 +1434,12 @@ pub(crate) fn prepare_for(c: &Ctx, resumable: bool) -> Result<Option<String>, St
             "fetching the remote failed ({why}); going on from the last-known {base}"
         );
     }
-    wait_out_environment(c, "preparing the worktree", || prepare_locked(c))
+    let conflicts = wait_out_environment(c, "preparing the worktree", || prepare_locked(c))?;
+    // A merge that conflicted leaves the setup due: the agent resolves it first.
+    if conflicts.is_none() {
+        crate::worktrees::run_due_setup(c)?;
+    }
+    Ok(conflicts)
 }
 
 fn prepare_locked(c: &Ctx) -> Result<Option<String>, git::GitError> {
@@ -1624,7 +1630,7 @@ pub(crate) fn prepare_worktree_only(c: &Ctx) -> Result<(), String> {
     crate::taskcache::point_cargo_at_task_cache(&c.d, &c.project, c.task.0, &c.wt);
     // A new task's directory starts as a clone of the landing area's warm build (off by default).
     crate::taskcache::seed_task_cache(&c.d, &c.project, c.task.0, &c.wt);
-    Ok(())
+    crate::worktrees::run_due_setup(c)
 }
 
 /// How long a worktree setup step may take when it has no `budget`.

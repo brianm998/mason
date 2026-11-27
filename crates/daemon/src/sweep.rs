@@ -254,6 +254,10 @@ pub fn sweep_once(d: &Arc<Daemon>) -> Vec<String> {
     crate::taskcache::sweep(d, &w);
     crate::taskcache::sweep_own(d, &w);
 
+    // 4b2. Worktrees and build output nothing needs any more (s1145). Housekeeping: it files
+    // nothing, and what it cannot remove it leaves for the next pass.
+    crate::worktrees::pass(d, crate::daemon::now_ms());
+
     // 4c. Host directories of closed step runs move out of the registry, old ones are deleted,
     // and the config directories of ended sessions go. Housekeeping: it files nothing, and a
     // failure is logged and retried next pass.

@@ -124,5 +124,9 @@ fun DiskSection(model: MonitorModel, open: (() -> Unit)? = null) {
                 Text(latest?.let { Format.freeOf(it.first, it.second) } ?: "not read", style = theme.body(color = theme.muted), maxLines = 1)
             }
         }
+        history?.let(::diskWorktreeLines).orEmpty().forEachIndexed { i, line ->
+            Text(line, style = theme.small(color = if (i == 0) theme.text else theme.muted),
+                modifier = Modifier.testTag(if (i == 0) "disk-worktrees" else "disk-worktrees:$i"))
+        }
     }
 }

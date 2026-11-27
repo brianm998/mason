@@ -372,6 +372,7 @@ mod tests {
             rerun_filter: None,
             task_cache: None,
             task_cache_keep_days: None,
+            keep: Default::default(),
             task_cache_seed: false,
             clarity_classifier: None,
             priority_jump: false,

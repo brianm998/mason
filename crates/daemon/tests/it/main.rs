@@ -121,4 +121,5 @@ mod update_release;
 mod usage;
 mod version_flag;
 mod waits_snapshot;
+mod worktrees;
 mod write_rules;
