@@ -1268,7 +1268,7 @@ message TaskDetailView {
   // The task's runs in flight now, with the host of each (#1155). Additive.
   repeated HostRun running_on = 25;
   // A diagnosis session of this failed task is running now. Unset otherwise. Additive (#1046).
-  DiagnosisRunning diagnosis_running = 26;
+  DiagnosisRunning diagnosis_running = 27;
 }
 
 // A running diagnosis: when it started (daemon time, ms) and the model and effort it runs on.
