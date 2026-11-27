@@ -82,6 +82,15 @@ pub struct DaemonConfig {
     /// How long a suite waits before trying again after an environmental
     /// failure (no device, the stack would not come up). Charged to no task.
     pub env_retry: Duration,
+    /// The waits between the tries of a landing's git call that met a network error (#1185).
+    pub network_backoff: Vec<Duration>,
+    /// How long before a suite that was red only because the network failed runs again.
+    pub network_rerun: Duration,
+    /// How often a batch held because a push met no network looks whether a fetch works.
+    pub network_probe: Duration,
+    /// How long a batch held because a suite could not reach the network waits before it looks:
+    /// a fetch of the base may work while the host the suite needs does not.
+    pub network_suite_hold: Duration,
     /// Wait out the landing window even when no other task is moving toward landing (the
     /// behaviour before #731). Off in production; tests that file several tasks one after the
     /// other and expect one batch turn it on.
@@ -127,8 +136,6 @@ pub struct DaemonConfig {
     pub adhoc_exit_start: u32,
     /// How often the detector cycle runs (Part 14: daily).
     pub introspect_interval: Duration,
-    /// How often the analyst agent is asked (weekly).
-    pub analyst_interval: Duration,
     /// How often the daemon looks at what is due among the recurring jobs.
     pub schedule_tick: Duration,
 }
@@ -1079,6 +1086,10 @@ impl DaemonConfig {
             speech_timeout: Duration::from_secs(30),
             attention_interval: Duration::from_secs(5),
             env_retry: Duration::from_secs(30),
+            network_backoff: [10, 30, 90].map(Duration::from_secs).to_vec(),
+            network_rerun: Duration::from_secs(30),
+            network_probe: Duration::from_secs(15),
+            network_suite_hold: Duration::from_secs(600),
             landing_window_always: false,
             base_red_poll: Duration::from_secs(60),
             auto_retry_delays: vec![Duration::from_secs(120), Duration::from_secs(600)],
@@ -1098,7 +1109,6 @@ impl DaemonConfig {
                 .filter(|n| (1..=crate::numbers::EXIT_CEILING).contains(n))
                 .unwrap_or(crate::numbers::DEFAULT_ADHOC_START),
             introspect_interval: Duration::from_secs(24 * 3600),
-            analyst_interval: Duration::from_secs(7 * 24 * 3600),
             schedule_tick: Duration::from_secs(30),
             owner_names: vec![std::env::var("USER")
                 .or_else(|_| std::env::var("LOGNAME"))
