@@ -1098,17 +1098,23 @@ fn with_node_failure(r: Shared, failed: Option<String>) -> Shared {
 /// else the global one) and whose fallback is not `local`. A project without `[remote_runs]`
 /// keeps the way back here that a node gives it.
 fn stays_off_this_mac(d: &Arc<Daemon>, spec: &CheckSpec) -> bool {
-    use crate::place::Mode;
     let Some(project) = crate::remote::project_of(d, &spec.cwd) else {
         return false;
     };
-    let Some(cfg) = crate::remote::remote_cfg(d, &project) else {
+    let task = spec.place.as_ref().and_then(|(t, _)| t.map(|t| t.0));
+    stays_off_for(d, &project, task)
+}
+
+/// The rule of [`stays_off_this_mac`] for a run of `project`: `task` is the task that owns it
+/// (`None` for a landing batch or a debt, which follow the project's mode).
+pub(crate) fn stays_off_for(d: &Arc<Daemon>, project: &str, task: Option<u64>) -> bool {
+    use crate::place::Mode;
+    let Some(cfg) = crate::remote::remote_cfg(d, project) else {
         return false;
     };
-    let task = spec.place.as_ref().and_then(|(t, _)| t.map(|t| t.0));
     !cfg.fallback_local
         && crate::place::task_choice(d, task)
-            .unwrap_or_else(|| crate::place::project_effective(d, &project).0)
+            .unwrap_or_else(|| crate::place::project_effective(d, project).0)
             == Mode::Remote
 }
 

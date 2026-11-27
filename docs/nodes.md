@@ -628,9 +628,15 @@ node the ref only moves forward. Both commands need a node on this runtime (`mas
 - **You turn the switch off.** No new job starts. Jobs already running finish and the iMac collects
   them as usual (`on_switch_off = "drain"`). If you need the machine back at once: `mason node
   stop-jobs` (or set `on_switch_off = "cancel"` for that node on the iMac, which does it whenever
-  the switch goes off). The iMac then runs those jobs somewhere else, and no task is charged.
+  the switch goes off). Where the job goes next depends on the project's mode, and no task is charged:
+  with `remote` and `fallback` not `local`, a suite (a task's test step or a landing batch's) never
+  starts on the iMac. It goes to GitHub if that can take it, else to a node with room, else waits
+  with backoff for a node (a skip or a daemon stop ends the wait), and with no place that can ever
+  take it, or a node without the base, it is reported as an outage, never a red. With
+  `fallback = "local"` or a `favor-*` mode it runs on the iMac under the usual slots after GitHub
+  and other nodes were tried.
 - **The Studio sleeps or leaves the network.** After `lost_after_polls` polls in a row with no
-  answer the iMac gives up on the job and runs it somewhere else. The Studio, when it is back, kills
+  answer the iMac gives up on the job and places it again by the same rule as above. The Studio, when it is back, kills
   the orphan once its lease (`lease_s`) has run out with nobody asking after it.
 - **The node is too hot or busy with your own work.** It takes no new job; a job already running
   continues, since there is no pre-emption.

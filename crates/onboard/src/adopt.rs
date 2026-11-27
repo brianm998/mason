@@ -139,7 +139,9 @@ fn prepare(d: &Detected, args: &Args, config_dir: Option<&Path>) -> Result<Prepa
         ci_workflow: false,
         land: Land::No,
         prove: false,
+        token: Some("env:GITHUB_TOKEN".into()),
         notes: vec![],
+        warnings: vec![],
     };
     let overlay_text = render_overlay(&a, d, args.test.as_deref().unwrap_or("true"));
     Ok(Prepared {

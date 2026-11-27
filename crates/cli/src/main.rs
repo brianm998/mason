@@ -27,6 +27,7 @@
 //! mason hosts [--json]
 //! mason run --needs compile[=N],... [--exclusive] [--label L] [--origin O] -- <cmd>...
 //! mason hold --needs R[,R...] [--exclusive] --pipeline NAME --label L [--pid P]
+//! mason disk [--json] | mason disk clean [--dry-run]
 //! mason targets list [--json]
 //! mason cpu [--json] | mason resources [--json] | mason resources limit <resource> <units>
 //! mason resources gate <name> <value> | mason resources gate <name> --reset
@@ -42,6 +43,7 @@ mod adopt;
 mod batch_ci;
 mod client;
 mod definition;
+mod disk;
 mod doctor;
 mod guard;
 mod hosts;
@@ -160,6 +162,9 @@ mason: command-line client for the MASON pipeline
                                       hold resources for a process's life: prints `granted`, then holds until
                                       stdin closes, --pid exits or it is signalled
   mason resources [--json]            limits, who holds what, and every wait explained
+  mason disk [--json]                 what the pipeline's worktrees take, by kind and task state, and
+                                      what the next sweep would free
+  mason disk clean [--dry-run]        run that sweep now (owner only), or only list what it would remove
   mason cpu [--json]                  where the machine's CPU goes, by task (share of all cores)
   mason targets list [--json]         simulators, emulators and phones, and who has each
   mason resources limit <resource> <units>   change a limit while things run (llm:claude, compile, ...)
@@ -2333,6 +2338,36 @@ fn main() {
                 _ => die("usage: mason triage list | review <id> (--agree | --disagree)"),
             }
         }
+        "disk" => match a.pos().as_deref() {
+            None => {
+                finish(&a);
+                let r = disk::report(
+                    || d.call("GET", "/disk/worktrees", None),
+                    || std::thread::sleep(Duration::from_secs(2)),
+                );
+                let r = or_die(r);
+                if json_out {
+                    return println!("{r:#}");
+                }
+                print!("{}", disk::report_text(&r));
+            }
+            Some("clean") => {
+                let dry_run = a.flag("--dry-run");
+                finish(&a);
+                if std::env::var("MASON_AS").is_err() {
+                    if let Ok(u) = std::env::var("USER") {
+                        std::env::set_var("MASON_AS", u);
+                    }
+                }
+                let body = json!({"dry_run": dry_run});
+                let r = or_die(d.call("POST", "/disk/clean", Some(&body)));
+                if json_out {
+                    return println!("{r:#}");
+                }
+                print!("{}", disk::clean_text(&r));
+            }
+            Some(other) => die(&format!("unknown disk command {other:?}\n\n{HELP}")),
+        },
         "metrics" => {
             let days = a.opt("--days").unwrap_or_else(|| "0".into());
             finish(&a);

@@ -74,6 +74,17 @@ class AddProjectTest {
         assertEquals("not a git repository", w.error)
     }
 
+    @Test fun planWarningsAndApplyWarningsAndNotesAreReadBack() {
+        val w = AddProjectWizard()
+        w.planArrived(plan(null, files = true).replace("\"errors\"", "\"warnings\":[\"no claude on PATH\"],\"errors\""))
+        assertEquals(listOf("no claude on PATH"), w.plan?.warnings)
+        w.startApply()
+        w.applyArrived(true, """{"id":"web","registered":true,"progress":["x"],"warnings":["the test step runs true"],"notes":["chose main"]}""", "")
+        assertEquals(listOf("the test step runs true"), w.applyWarnings)
+        assertEquals(listOf("chose main"), w.applyNotes)
+        assertEquals("web", w.appliedId)
+    }
+
     @Test fun backFromReviewForgetsTheLastAnswer() {
         val w = AddProjectWizard()
         w.planArrived(plan(q("tracker", "local")))

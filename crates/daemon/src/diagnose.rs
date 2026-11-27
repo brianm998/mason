@@ -548,6 +548,10 @@ fn diagnose(d: &Arc<Daemon>, task: TaskId, run: StepRunId, failed_at: u64, mark:
     let Ok(c) = crate::jobs::ctx(d, task, run) else {
         return;
     };
+    // A diagnosis asked for late reads a worktree the sweep may have removed (s1145).
+    if let Err(e) = crate::worktrees::restore(d, task) {
+        tracing::warn!(task = task.0, "the worktree could not be added again: {e}");
+    }
     let dir = c.task_dir();
     let plan: Option<Value> = std::fs::read_to_string(dir.join("plan.json"))
         .ok()

@@ -248,7 +248,9 @@ mod tests {
             ci_workflow: false,
             land: Land::No,
             prove: true,
+            token: Some("env:GITHUB_TOKEN".into()),
             notes: vec![],
+            warnings: vec![],
         }
     }
 

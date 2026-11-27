@@ -107,6 +107,10 @@ pub fn setup(
     validate: Validator,
 ) -> Result<String, String> {
     // Refusals first, before anything is written.
+    if a.agent_bin.is_none() {
+        let n = a.agent.name();
+        return Err(format!("no `{n}` executable was found on PATH, in another project's setting or in ~/.local/bin, so the project could not start an agent; nothing was written. Pass --agent-bin PATH (the absolute path of `{n}`)"));
+    }
     if git::rev_parse(&d.root, "HEAD").is_err() {
         return Err(
             "the repository has no commits yet; make one first (the setup is a branch from it)"
@@ -404,6 +408,9 @@ pub struct Plan {
     /// ones, not yet run. Empty while `errors` is not.
     pub files: Vec<(String, String)>,
     pub errors: Vec<String>,
+    /// Things that would leave the setup unable to run as written (no agent binary, a token
+    /// variable the daemon does not have).
+    pub warnings: Vec<String>,
 }
 
 /// Resolve every answered question, name the first unanswered one and render the files. Writes
@@ -418,6 +425,7 @@ pub fn plan(path: &Path, answers: &Flags) -> Plan {
                 next: None,
                 files: vec![],
                 errors: vec![e],
+                warnings: vec![],
             }
         }
     };
@@ -433,6 +441,7 @@ pub fn plan(path: &Path, answers: &Flags) -> Plan {
         next: None,
         files: vec![],
         errors: vec![],
+        warnings: vec![],
     };
     let mut flags = answers.clone();
     flags.yes = false;
@@ -462,6 +471,7 @@ pub fn plan(path: &Path, answers: &Flags) -> Plan {
             return p;
         }
     };
+    p.warnings.extend(a.warnings.iter().cloned());
     match kind {
         Kind::Adopt => {
             if let Err(e) = adopt::check(&d, &adopt::Args::from_flags(answers)) {
@@ -519,6 +529,7 @@ pub struct Applied {
     /// The closing report of `setup` (empty for an adopt).
     pub report: String,
     pub notes: Vec<String>,
+    pub warnings: Vec<String>,
     pub detected: Detected,
 }
 
@@ -545,7 +556,13 @@ pub fn apply_validated(
     let d = detect::detect(path)?;
     let on_head = git::ok(&d.root, &["cat-file", "-e", "HEAD:.mason/mason.toml"]);
     if (d.existing_mason || on_head) && !answers.force {
-        let args = adopt::Args::from_flags(answers);
+        let mut args = adopt::Args::from_flags(answers);
+        if args.agent_bin.is_none() {
+            let found = answers.machine.find_agent(questions::Agent::Claude).ok_or(
+                "no `claude` executable was found on PATH, in another project's setting or in ~/.local/bin, so the project could not start an agent; nothing was written. Pass --agent-bin PATH (the absolute path of `claude`)",
+            )?;
+            args.agent_bin = Some(found.display().to_string());
+        }
         let id = args.id.clone().unwrap_or_else(|| d.id.clone());
         let ad = adopt::adopt(&d, &args, config_dir, validate).map_err(|e| e.message)?;
         return Ok(Applied {
@@ -556,6 +573,7 @@ pub fn apply_validated(
             overlay: ad.overlay,
             report: String::new(),
             notes: vec![],
+            warnings: vec![],
             detected: d,
         });
     }
@@ -568,7 +586,22 @@ pub fn apply_validated(
         },
         &mut |_| {},
     )?;
-    let report = setup(answers, &d, &a, config_dir, progress, validate)?;
+    // A warning the setup only says in its progress (no test suite, a suite's problem) is also a
+    // warning of the answer, so a client can show it apart from the log.
+    let mut warnings = a.warnings.clone();
+    let report = setup(
+        answers,
+        &d,
+        &a,
+        config_dir,
+        &mut |l| {
+            if let Some(w) = l.trim_start().strip_prefix("warning: ") {
+                warnings.push(w.trim_end().to_string());
+            }
+            progress(l);
+        },
+        validate,
+    )?;
     let landed = land::apply(&d, &a, progress);
     Ok(Applied {
         overlay: overlay_path(config_dir, &a.id),
@@ -578,6 +611,7 @@ pub fn apply_validated(
         landed,
         report,
         notes: a.notes,
+        warnings,
         detected: d,
     })
 }
@@ -609,6 +643,122 @@ mod tests {
         git(dir.path(), &["add", "-A"]);
         git(dir.path(), &["commit", "-qm", "init"]);
         dir
+    }
+
+    /// A HOME whose `.local/bin` holds a fake `claude` (when asked), and a PATH with nothing.
+    fn machine(with_claude: bool) -> (tempfile::TempDir, questions::Machine) {
+        let home = tempfile::tempdir().unwrap();
+        if with_claude {
+            let bin = home.path().join(".local/bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            std::fs::write(bin.join("claude"), "#!/bin/sh\n").unwrap();
+            mason_platform::fs::set_executable(&bin.join("claude"), true).unwrap();
+        }
+        let m = questions::Machine {
+            path: Some(home.path().join("empty-path").into()),
+            home: Some(home.path().to_path_buf()),
+            known_bins: vec![],
+            env: Some(vec![]),
+        };
+        (home, m)
+    }
+
+    #[test]
+    fn no_findable_agent_is_asked_for_and_apply_writes_nothing() {
+        let d = repo(&[]);
+        let cfg = tempfile::tempdir().unwrap();
+        let (_h, m) = machine(false);
+        let mut f = all_answered();
+        f.machine = m;
+        let p = plan(d.path(), &f);
+        assert_eq!(p.next.as_ref().map(|q| q.id), Some("agent-bin"), "{p:?}");
+        assert!(p.warnings.iter().any(|w| w.contains("claude")), "{p:?}");
+        let e = apply(d.path(), &f, cfg.path(), &mut |_| {}).unwrap_err();
+        assert!(e.contains("--agent-bin"), "{e}");
+        assert!(!cfg.path().join("projects").exists());
+        assert!(!git::ok(
+            d.path(),
+            &["rev-parse", "--verify", "-q", "refs/heads/mason/setup"]
+        ));
+    }
+
+    #[test]
+    fn an_agent_only_in_local_bin_is_written_as_an_absolute_path() {
+        let d = repo(&[]);
+        let cfg = tempfile::tempdir().unwrap();
+        let (h, m) = machine(true);
+        let mut f = all_answered();
+        f.machine = m;
+        let a = apply(d.path(), &f, cfg.path(), &mut |_| {}).unwrap();
+        let overlay = std::fs::read_to_string(&a.overlay).unwrap();
+        let want = h.path().join(".local/bin/claude");
+        assert!(
+            overlay.contains(&format!("claude_bin = {:?}", want.display().to_string())),
+            "{overlay}"
+        );
+    }
+
+    #[test]
+    fn an_agent_on_path_is_written_as_an_absolute_path() {
+        let d = repo(&[]);
+        let (h, mut m) = machine(false);
+        let bin = h.path().join("pathbin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("claude"), "#!/bin/sh\n").unwrap();
+        mason_platform::fs::set_executable(&bin.join("claude"), true).unwrap();
+        m.path = Some(bin.clone().into());
+        let mut f = all_answered();
+        f.machine = m;
+        let p = plan(d.path(), &f);
+        let overlay = &p
+            .files
+            .iter()
+            .find(|(n, _)| n.starts_with("projects/"))
+            .unwrap()
+            .1;
+        assert!(
+            overlay.contains(&format!(
+                "claude_bin = {:?}",
+                bin.join("claude").display().to_string()
+            )),
+            "{overlay}"
+        );
+        assert!(p.warnings.is_empty(), "{:?}", p.warnings);
+        // A file that is not executable is not an agent.
+        mason_platform::fs::set_executable(&bin.join("claude"), false).unwrap();
+        assert!(f.machine.find_agent(questions::Agent::Claude).is_none());
+    }
+
+    #[test]
+    fn an_unset_token_variable_is_a_warning_and_none_leaves_the_sections_out() {
+        let d = repo(&[]);
+        git(
+            d.path(),
+            &["remote", "add", "origin", "git@github.com:o/r.git"],
+        );
+        let (_h, m) = machine(true);
+        let mut f = all_answered();
+        f.machine = m;
+        f.tracker = Some("github".into());
+        let p = plan(d.path(), &f);
+        assert!(
+            p.warnings.iter().any(|w| w.contains("GITHUB_TOKEN")),
+            "{p:?}"
+        );
+        f.token = Some("none".into());
+        let p = plan(d.path(), &f);
+        assert!(p.warnings.is_empty(), "{:?}", p.warnings);
+        let overlay = &p
+            .files
+            .iter()
+            .find(|(n, _)| n.starts_with("projects/"))
+            .unwrap()
+            .1;
+        assert!(!overlay.contains("[tracker]"), "{overlay}");
+        f.token = Some("env:GITHUB_TOKEN".into());
+        f.machine.env = Some(vec![("GITHUB_TOKEN".into(), "x".into())]);
+        let p = plan(d.path(), &f);
+        assert!(p.warnings.is_empty(), "{:?}", p.warnings);
     }
 
     fn all_answered() -> Flags {
@@ -644,7 +794,10 @@ mod tests {
     #[test]
     fn answering_everything_leaves_no_question_and_lists_the_files() {
         let d = repo(&[]);
-        let p = plan(d.path(), &all_answered());
+        let (_h, m) = machine(true);
+        let mut f = all_answered();
+        f.machine = m;
+        let p = plan(d.path(), &f);
         assert!(p.errors.is_empty(), "{:?}", p.errors);
         assert!(p.next.is_none());
         let names: Vec<&str> = p.files.iter().map(|(n, _)| n.as_str()).collect();
@@ -685,10 +838,10 @@ mod tests {
         let d = repo(&[]);
         let cfg = tempfile::tempdir().unwrap();
         let mut said = vec![];
-        let a = apply(d.path(), &all_answered(), cfg.path(), &mut |t| {
-            said.push(t.to_string())
-        })
-        .unwrap();
+        let (_h, m) = machine(true);
+        let mut f = all_answered();
+        f.machine = m;
+        let a = apply(d.path(), &f, cfg.path(), &mut |t| said.push(t.to_string())).unwrap();
         assert_eq!(a.kind, Kind::Init);
         assert_eq!(a.base, "main");
         assert!(a.overlay.is_file());
@@ -698,5 +851,22 @@ mod tests {
             &["rev-parse", "--verify", "-q", "refs/heads/mason/setup"]
         ));
         assert!(!a.landed.merged);
+    }
+
+    #[test]
+    fn apply_returns_the_true_test_command_warning_in_warnings() {
+        let d = repo(&[]);
+        let cfg = tempfile::tempdir().unwrap();
+        let (_h, m) = machine(true);
+        let mut f = all_answered();
+        f.machine = m;
+        let a = apply(d.path(), &f, cfg.path(), &mut |_| {}).unwrap();
+        assert!(
+            a.warnings
+                .iter()
+                .any(|w| w.contains("test step runs `true`")),
+            "{:?}",
+            a.warnings
+        );
     }
 }
