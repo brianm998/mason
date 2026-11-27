@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# CLAUDE.md, Sharing the machine: nothing ever appears on the Mac's screen.
+id = "caffeinate-user-active"
+paths = ["**/*.rs", "**/*.sh", "**/*.py", "**/*.swift", "**/*.kt", "**/*.kts", "**/*.yml", "**/Makefile"]
+action = "block"
+# `caffeinate ... -u` outside a comment, as a command line or as arguments.
+pattern = '(?m)^(?:[^#/\n]|/[^/\n])*?/?(?:\bcaffeinate(?:[ \t]+-[a-z]+(?:[ \t]+[0-9]+)?)*[ \t]+-[a-z]*u[a-z]*\b|"caffeinate"[^;]*?"-[a-z]*u[a-z]*")'
+message = """
+Never `caffeinate -u`: it turns a sleeping display on, and nothing ever appears on the Mac's
+screen. Leave `-u` out; render screenshots offscreen (ImageRenderer / cacheDisplay).
+"""
