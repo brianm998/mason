@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# CLAUDE.md, Sharing the machine: steps never run macOS XCUITests.
+id = "xcuitest-run"
+paths = ["**/*.rs", "**/*.sh", "**/*.py", "**/*.yml", "**/Makefile"]
+action = "block"
+# An `xcodebuild` test action that names a `UITests` target (not one that skips it).
+pattern = '(?m)^(?:[^#/\n]|/[^/\n])*?/?\bxcodebuild\b(?:(?:[^\n]|\\\n)*?[ \t](?:test|test-without-building)[ \t](?:[^\n]|\\\n)*?(?:-only-testing[: ]|-scheme |-target |-testPlan )[^ \t\n]*UITests|(?:[^\n]|\\\n)*?(?:-only-testing[: ]|-scheme |-target |-testPlan )[^ \t\n]*UITests(?:[^\n]|\\\n)*?[ \t](?:test|test-without-building)\b)'
+message = """
+Steps never run macOS XCUITests: nothing ever appears on the Mac's screen, and MASON's
+`xcodebuild` shim refuses such a run (exit 69). Leave the UI test bundle out
+(`-skip-testing:<name>UITests`), build it with `build-for-testing`, and render screenshots
+offscreen (ImageRenderer / cacheDisplay).
+"""

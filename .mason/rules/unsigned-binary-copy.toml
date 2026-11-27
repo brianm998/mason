@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# CLAUDE.md, Tests: test fixtures must ad-hoc sign any binary they copy.
+id = "unsigned-binary-copy"
+paths = ["crates/**/tests/**/*.rs", "crates/**/src/**/tests.rs", "scripts/exit/**/*.sh"]
+cfg_test_paths = ["crates/**/src/**/*.rs"]
+action = "block"
+# `fs::copy` of something that reads as an executable, or `cp` of one in a script.
+pattern = '(?m)\bfs::copy\s*\([^;]*?(?:current_exe|CARGO_BIN_EXE|\bbin\s*\(|\b(?:exe|bin|binary)\b|_(?:exe|bin|binary)\b)|^[^#\n]*?\bcp\s[^\n]*?(?:target/(?:debug|release)/|\$\{?mason\b|/bin/)'
+unless = 'codesign'
+message = """
+Test fixtures must ad-hoc sign any binary they copy (`codesign -s -`). If an unsigned Mach-O is
+deleted while macOS is scanning it, `syspolicyd` segfaults, and until launchd restarts it every
+new non-Apple process hangs at 0% CPU. Sign the copy in this file, before it can be run or
+deleted.
+"""
