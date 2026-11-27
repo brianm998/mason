@@ -82,6 +82,12 @@ public enum QueueWait {
 
     /// A row's second line: "[badge] sentence" while it waits on the scheduler, else its activity.
     public static func line(_ r: Mason_V1_TaskRow) -> String {
+        let base = lineWithoutDiagnosis(r)
+        guard let d = diagnosisBadge(r.diagnosis) else { return base }
+        return base.isEmpty ? d : "\(base) · \(d)"
+    }
+
+    private static func lineWithoutDiagnosis(_ r: Mason_V1_TaskRow) -> String {
         let why = shorten(r.whyWaiting, blockers: r.blockers)
         if r.hasWait && !why.isEmpty { return "[\(badge(r.wait.cause))] \(why)" }
         return why.isEmpty ? shorten(r.activity, blockers: r.blockers) : why
