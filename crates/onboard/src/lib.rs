@@ -586,7 +586,22 @@ pub fn apply_validated(
         },
         &mut |_| {},
     )?;
-    let report = setup(answers, &d, &a, config_dir, progress, validate)?;
+    // A warning the setup only says in its progress (no test suite, a suite's problem) is also a
+    // warning of the answer, so a client can show it apart from the log.
+    let mut warnings = a.warnings.clone();
+    let report = setup(
+        answers,
+        &d,
+        &a,
+        config_dir,
+        &mut |l| {
+            if let Some(w) = l.trim_start().strip_prefix("warning: ") {
+                warnings.push(w.trim_end().to_string());
+            }
+            progress(l);
+        },
+        validate,
+    )?;
     let landed = land::apply(&d, &a, progress);
     Ok(Applied {
         overlay: overlay_path(config_dir, &a.id),
@@ -596,7 +611,7 @@ pub fn apply_validated(
         landed,
         report,
         notes: a.notes,
-        warnings: a.warnings,
+        warnings,
         detected: d,
     })
 }
@@ -836,5 +851,22 @@ mod tests {
             &["rev-parse", "--verify", "-q", "refs/heads/mason/setup"]
         ));
         assert!(!a.landed.merged);
+    }
+
+    #[test]
+    fn apply_returns_the_true_test_command_warning_in_warnings() {
+        let d = repo(&[]);
+        let cfg = tempfile::tempdir().unwrap();
+        let (_h, m) = machine(true);
+        let mut f = all_answered();
+        f.machine = m;
+        let a = apply(d.path(), &f, cfg.path(), &mut |_| {}).unwrap();
+        assert!(
+            a.warnings
+                .iter()
+                .any(|w| w.contains("test step runs `true`")),
+            "{:?}",
+            a.warnings
+        );
     }
 }
