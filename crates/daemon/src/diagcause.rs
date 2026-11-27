@@ -1453,6 +1453,9 @@ pub fn record_cause(d: &Arc<Daemon>, primary: TaskId, mut a: Value) {
         no_code_change: rec_args["no_code_change"].as_bool().unwrap_or(false),
         applied_recently: recent,
         auto_retry_pending: crate::autoretry::pending(d, t),
+        card_only: false,
+        // A cause speaks for several tasks: a repair of one branch is for the task's own session.
+        repaired_before: true,
     });
     drop(w);
     let status = if action == crate::diagnose::Action::Apply {

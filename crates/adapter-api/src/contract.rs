@@ -279,16 +279,21 @@ pub fn tool_spec(tool: &str) -> Option<(String, Value)> {
              an option may also 'file_task' (a ticket for the cause), 'land_now' (the owner's Land \
              now, with its debt), 'wait_for' (hold behind an open task) or 'open_session' (an owner \
              session seeded with your findings), and carries several as `actions`, applied in order. \
-             Splitting, landing a part or re-scoping are notes on a retry or explore. You may not \
+             Splitting, landing a part or re-scoping are notes on a retry or explore. When the cause \
+             is in the task's own branch or worktree state and a small change puts it right, an \
+             option may 'repair' it (a separate session makes the change under the develop step's \
+             guards, then the task runs again from `to_step`); for a task stuck in a step, \
+             'unblock' or 'release_holder' act on this task. When you can neither fix it nor \
+             recommend an option, give `handoff` with a brief instead of `options`. You may not \
              change files.",
             json!({
                 "summary": {"type": "string", "description": "What went wrong and why, and why the recommended option beats the others; up to 2000 characters"},
                 "options": {"type": "array", "minItems": 2, "maxItems": 4, "items": {"type": "object", "properties": {
                     "label": {"type": "string", "description": "What choosing it does, up to 160 characters"},
                     "recommended": {"type": "boolean", "description": "true on exactly one option"},
-                    "action": {"type": "string", "enum": ["retry", "explore", "close", "cancel", "file_task", "land_now", "wait_for", "open_session"]},
+                    "action": {"type": "string", "enum": ["retry", "explore", "close", "cancel", "file_task", "land_now", "wait_for", "open_session", "repair", "unblock", "release_holder"]},
                     "actions": {"type": "array", "minItems": 1, "maxItems": 4, "description": "Instead of `action`: several actions applied in order, each an object with its own `action` and fields, e.g. file_task then land_now", "items": {"type": "object", "properties": {
-                        "action": {"type": "string", "enum": ["retry", "explore", "close", "cancel", "file_task", "land_now", "wait_for", "open_session"]},
+                        "action": {"type": "string", "enum": ["retry", "explore", "close", "cancel", "file_task", "land_now", "wait_for", "open_session", "repair", "unblock", "release_holder"]},
                         "step": {"type": "string"}, "note": {"type": "string"}, "reason": {"type": "string"},
                         "kind": {"type": "string"}, "duplicate_of": {"type": "integer"}, "evidence": {"type": "string"},
                         "project": {"type": "string", "description": "file_task: the project the ticket goes to (MASON's own for a pipeline defect)"},
@@ -297,15 +302,22 @@ pub fn tool_spec(tool: &str) -> Option<(String, Value)> {
                         "after": {"type": "array", "items": {"type": "integer"}},
                         "task": {"type": "integer", "description": "wait_for: the open task to wait for"},
                         "where": {"type": "string", "enum": ["task", "base"], "description": "open_session: in the task's worktree or in a fresh worktree at the base"},
-                        "brief": {"type": "string"}},
+                        "brief": {"type": "string"},
+                        "summary": {"type": "string", "description": "repair: what the change does, up to 2000 characters"},
+                        "to_step": {"type": "string", "description": "repair: the step to run again from once the change is committed (default: the step after develop)"}},
                         "required": ["action"]}},
                     "step": {"type": "string", "description": "retry: the step to run again from (default: the step that failed)"},
                     "note": {"type": "string", "description": "retry: what the next agent must know, up to 2000 characters"},
                     "reason": {"type": "string", "description": "explore: why the plan does not hold, and what to do instead"},
                     "kind": {"type": "string", "enum": ["already_done", "duplicate"], "description": "close: which"},
                     "duplicate_of": {"type": "integer", "description": "close, duplicate: the other task's number"},
-                    "evidence": {"type": "string", "description": "close: what shows it (commit, file, test, task)"}},
+                    "evidence": {"type": "string", "description": "close: what shows it (commit, file, test, task)"},
+                    "summary": {"type": "string", "description": "repair: what the change does, up to 2000 characters"},
+                    "to_step": {"type": "string", "description": "repair: the step to run again from once the change is committed (default: the step after develop)"}},
                     "required": ["label", "recommended", "action"]}},
+                "handoff": {"type": "object", "description": "Instead of `options`, when you can neither fix the task nor recommend an option: a brief the owner or another agent can pick up from", "properties": {
+                    "brief": {"type": "string", "description": "What failed, what was tried, what is suspected and ruled out, and how to resume; up to 4000 characters"}},
+                    "required": ["brief"]},
                 "cause": {"type": "string", "enum": ["code", "outside", "base", "pipeline"], "description": "Whose fault it is: the task's own code, or something outside it (outside), the base branch (base) or MASON (pipeline). When it is not the code, the recommended option must contain a fix-later action (file_task, or wait_for on an open task) and a fix-now action (land_now, retry, wait_for or open_session). land_now is allowed only when every one of the task's own suites is green, or red the same way on the base"},
                 "no_code_change": {"type": "boolean", "description": "true only if the task's code needs no change and running it again is expected to pass (a flaky or environment failure); a recommended retry is then applied by itself"},
                 "evidence_lines": {"type": "array", "maxItems": 10, "items": {"type": "string"}, "description": "The decisive lines, at most 10"}
@@ -470,6 +482,19 @@ fn diagnosis_problems(a: &Value, p: &mut Vec<String>) {
             crate::card::EVIDENCE_LINES
         )),
     }
+    // A hand-off stands in for the card: a brief for whoever picks the task up.
+    if let Some(h) = a.get("handoff") {
+        if a.get("options").is_some() {
+            p.push("handoff: give either `handoff` or `options`, not both".into());
+        }
+        match h.as_object() {
+            Some(_) => {
+                text(h, "brief", HANDOFF_BRIEF_MAX, p);
+            }
+            None => p.push("handoff: must be an object with a `brief`".into()),
+        }
+        return;
+    }
     let Some(opts) = a.get("options").and_then(Value::as_array) else {
         p.push(
             "options: required, 2 to 4 options (a single `verdict` is no longer accepted)".into(),
@@ -544,6 +569,9 @@ fn diagnosis_problems(a: &Value, p: &mut Vec<String>) {
     }
 }
 
+/// The longest recovery brief a session may hand off with.
+pub const HANDOFF_BRIEF_MAX: usize = 4000;
+
 /// Most actions one option may carry out, in order.
 pub const MAX_ACTIONS: usize = 4;
 
@@ -554,7 +582,15 @@ pub const DIAGNOSIS_CAUSES: [&str; 4] = ["code", "outside", "base", "pipeline"];
 pub const FIX_LATER: [&str; 2] = ["file_task", "wait_for"];
 
 /// Actions that get the task moving now.
-pub const FIX_NOW: [&str; 4] = ["land_now", "retry", "wait_for", "open_session"];
+pub const FIX_NOW: [&str; 7] = [
+    "land_now",
+    "retry",
+    "wait_for",
+    "open_session",
+    "repair",
+    "unblock",
+    "release_holder",
+];
 
 /// One action of an option: its name, or `None` when it has problems (pushed to `q`).
 fn one_action(o: &Value, q: &mut Vec<String>) -> Option<String> {
@@ -624,14 +660,23 @@ fn one_action(o: &Value, q: &mut Vec<String>) -> Option<String> {
             }
             "open_session"
         }
+        Some("repair") => {
+            text(o, "summary", 2000, q);
+            if o.get("to_step").is_some_and(|s| !s.is_string()) {
+                q.push("to_step: must be a string".into());
+            }
+            "repair"
+        }
+        Some("unblock") => "unblock",
+        Some("release_holder") => "release_holder",
         Some(v) => {
             q.push(format!(
-                "action: {v:?} must be one of retry, explore, close, cancel, file_task, land_now, wait_for, open_session"
+                "action: {v:?} must be one of retry, explore, close, cancel, file_task, land_now, wait_for, open_session, repair, unblock, release_holder"
             ));
             return None;
         }
         None => {
-            q.push("action: required (retry, explore, close, cancel, file_task, land_now, wait_for or open_session), or `actions`: a list of them".into());
+            q.push("action: required (retry, explore, close, cancel, file_task, land_now, wait_for, open_session, repair, unblock or release_holder), or `actions`: a list of them".into());
             return None;
         }
     };
@@ -1615,6 +1660,47 @@ mod tests {
         // At most four actions, at least one.
         assert!(ok(card("code", vec![retry.clone(); 5])).is_err());
         assert!(ok(card("code", vec![])).is_err());
+    }
+
+    #[test]
+    fn a_diagnosis_may_repair_unblock_or_hand_off() {
+        let ok = |v: Value| validate("submit_diagnosis", &v).is_ok();
+        let cancel = json!({"label": "Cancel it", "recommended": false, "action": "cancel"});
+        let repair = |rec: bool, extra: Value| {
+            let mut o = json!({"label": "Repair", "recommended": rec, "action": "repair",
+                "summary": "add the missing file"});
+            for (k, v) in extra.as_object().cloned().unwrap_or_default() {
+                o[k] = v;
+            }
+            o
+        };
+        let card = |o: Vec<Value>| json!({"summary": "s", "options": o});
+        assert!(ok(card(vec![repair(true, json!({})), cancel.clone()])));
+        assert!(ok(card(vec![
+            repair(true, json!({"to_step": "test"})),
+            cancel.clone()
+        ])));
+        assert!(!ok(card(vec![
+            repair(true, json!({"summary": ""})),
+            cancel.clone()
+        ])));
+        assert!(!ok(card(vec![
+            repair(true, json!({"to_step": 3})),
+            cancel.clone()
+        ])));
+        let unblock = json!({"label": "Unblock", "recommended": true, "action": "unblock"});
+        let release = json!({"label": "Release", "recommended": false, "action": "release_holder"});
+        assert!(ok(card(vec![unblock, release])));
+        // A hand-off stands in for the options, and not beside them.
+        assert!(ok(
+            json!({"summary": "s", "handoff": {"brief": "what failed, how to resume"}})
+        ));
+        assert!(!ok(json!({"summary": "s", "handoff": {"brief": " "}})));
+        assert!(!ok(json!({"summary": "s", "handoff": {}})));
+        assert!(!ok(json!({"summary": "s", "handoff": {"brief": "b"},
+            "options": [repair(true, json!({})), cancel.clone()]})));
+        let long = "x".repeat(HANDOFF_BRIEF_MAX + 1);
+        assert!(!ok(json!({"summary": "s", "handoff": {"brief": long}})));
     }
 
     #[test]

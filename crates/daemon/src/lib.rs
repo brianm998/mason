@@ -84,6 +84,7 @@ pub mod prompts;
 pub mod proposals;
 pub mod protect;
 pub mod providers;
+pub mod recovery;
 pub mod redwatch;
 pub mod release;
 pub mod remote;

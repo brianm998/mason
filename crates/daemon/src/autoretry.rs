@@ -4,7 +4,8 @@
 //!
 //! A task that failed with class `outside` (a lost host, a fetch that timed out, a refused push)
 //! is retried from the failed step: first 10 minutes after the failure, then 60 minutes after the
-//! next one. A third outside failure within 24 hours stays failed and raises the usual alert.
+//! next one. A third outside failure within 24 hours stays failed and raises the usual alert;
+//! the recovery entry point (`recovery::on_stuck`) sends an agent to it (task 1111).
 //! The retries are counted in the store (`auto_retries`), so a restart neither forgets nor
 //! repeats one. Failures about the code are never retried here.
 //!
@@ -191,8 +192,14 @@ pub fn pass(d: &Arc<Daemon>) {
             .auto_retries_since(f.task, since)
             .unwrap_or_default()
             .len();
-        if due(&d.cfg.auto_retry_delays, done, f.at_ms, now) != Due::Now {
-            continue;
+        match due(&d.cfg.auto_retry_delays, done, f.at_ms, now) {
+            Due::Now => {}
+            // The retries are used up: the task stays failed, and an agent looks at it (task 1111).
+            Due::GiveUp => {
+                crate::recovery::on_stuck(d, TaskId(f.task), crate::recovery::Cause::GaveUp);
+                continue;
+            }
+            Due::At(_) => continue,
         }
         let latest = crate::http::latest_run(&w, TaskId(f.task));
         // A retry the guard refuses (the owner got there first) is not counted. It is counted

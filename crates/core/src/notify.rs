@@ -80,6 +80,7 @@ const fn rule(channel: Channel, after_min: u64) -> Rule {
 pub const CONDITIONS: &[&str] = &[
     "needs_you",
     "diagnosis",
+    "recovery_handoff",
     "failed",
     "landing",
     "daemon_down",
@@ -104,6 +105,7 @@ pub const CONDITIONS: &[&str] = &[
 pub const ALERT_KINDS: &[&str] = &[
     "needs_you",
     "diagnosis",
+    "recovery_handoff",
     "failed",
     "landing",
     "landed",
@@ -221,7 +223,10 @@ impl Routing {
         ];
         put("needs_you", decision.clone());
         // A diagnosis card of a cause outside the task (s1176): the owner decides it like any card.
-        put("diagnosis", decision);
+        put("diagnosis", decision.clone());
+        // The recovery agent could neither fix a task nor recommend an option, and hands it to the
+        // owner with a brief (task 1111): as urgent as a decision.
+        put("recovery_handoff", decision);
         let broke = vec![
             rule(Monitor, 0),
             rule(Sound, 0),
@@ -451,7 +456,7 @@ impl Sound {
 
 pub fn sound_for(kind: &str) -> Sound {
     match kind {
-        "needs_you" | "diagnosis" => Sound::Decision,
+        "needs_you" | "diagnosis" | "recovery_handoff" => Sound::Decision,
         "failed" | "daemon_bug" | "landing" | "daemon_down" | "credentials" | "provider_outage"
         | "stalled" | "environment" | "runtime" | "definition" | "disk" | "blocked"
         | "host_lost" | "tracker" | "provider_limit" | "provider_overage" | "provider_budget"
@@ -592,7 +597,7 @@ pub fn summary_sentence(items: &[(String, String)]) -> String {
 /// follows the short subject, and nothing in the result is all capitals.
 pub fn sentence(kind: &str, subject: &str, detail: &str, reminder: bool) -> String {
     // A diagnosis' line is already the sentence: `#<task>: <cause>. Recommended: <label>.`
-    if kind == "diagnosis" && !detail.trim().is_empty() {
+    if matches!(kind, "diagnosis" | "recovery_handoff") && !detail.trim().is_empty() {
         let text = speakable(&one_line(detail, 400));
         let text = if reminder {
             format!("Reminder: {text}")

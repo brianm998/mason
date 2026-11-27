@@ -468,12 +468,8 @@ impl Ctx {
                     reason,
                     class,
                 });
-                // Every failure gets one look from a diagnosis session (s250, s1048), unless a
-                // retry is already coming.
-                // A landing failure, or the same outside failure again, is looked at as a cause
-                // (s1176) first: it takes the task's diagnosis mark, so #1044's does not also run.
-                crate::diagcause::on_step_failed(&self.d, self.task, self.run, self.state);
-                crate::diagnose::on_failed(&self.d, self.task, self.run);
+                // The recovery entry point looks at it from `Daemon::emit` (task 1111): every
+                // way into Failed goes through there, this one included.
             }
         }
         self.release_lease();
@@ -717,6 +713,8 @@ pub fn run(d: &Arc<Daemon>, task: TaskId, step: State, run: StepRunId) {
 }
 
 fn run_inner(d: &Arc<Daemon>, task: TaskId, step: State, run: StepRunId) {
+    // A test hook (`MASON_PANIC_AT=job`): the job's thread panics, as a pipeline bug would.
+    d.crash.panic_point("job");
     let c = match ctx(d, task, run) {
         Ok(c) => c,
         Err(why) => {
@@ -1599,6 +1597,52 @@ pub(crate) fn tool_timeout_for(kind: StepKind, project: &ProjectCfg) -> Duration
             .max(project.test_timeout + Duration::from_secs(60)),
         _ => project.tool_timeout,
     }
+}
+
+/// The contract of a recovery session that repairs a task's branch (task 1111): a develop
+/// step's own `run_check` and the same guards on `submit_change` (protected paths, no weakening
+/// edits, a head that is the branch's tip, a clean tree), and nothing else. The repair is not
+/// pushed or landed here: the task runs on from a step, which tests and reviews it.
+pub(crate) fn repair_contract(c: &Ctx) -> ContractHandle {
+    let tests_cmd = test_commands(&c.d, &c.def, c.project_id, Some(c.task));
+    let extra = mason_adapter_api::DeadlineExtra::kept_in(
+        c.task_dir().join(format!("repair-credit-r{}", c.run.0)),
+    );
+    let checks = Box::new(TestChecks {
+        cmd: tests_cmd,
+        wt: c.wt.clone(),
+        timeout: c.live().test_timeout,
+        slots: CheckSlots::new(c),
+        extra,
+        id_prefix: format!("t{}r{}-repair-check", c.task.0, c.run.0),
+        log_dir: c.task_dir(),
+        suites: DevSuites::of(&c.def, c.project.base_ref()),
+        task: c.task.0,
+        run: c.run.0,
+        base_fold: None,
+        project: c.project.id.clone(),
+        reds: Default::default(),
+        last_red: std::sync::Mutex::new(None),
+        check_failing: Default::default(),
+        replay: Default::default(),
+    });
+    let validator = change_validator(
+        c.wt.clone(),
+        c.project.base_ref(),
+        c.branch.clone(),
+        c.d.caps_for(&c.project),
+        c.project.self_cfg.as_ref().map(|s| WeakeningCheck {
+            base: c.project.base.clone(),
+            holds: s.holds,
+            note_file: c
+                .task_dir()
+                .join(format!("weakening-note-repair-r{}.txt", c.run.0)),
+        }),
+        None,
+        crate::contentscan::Source::new(&c.d.cfg.config_dir, &c.project.id),
+        Box::new(|| false),
+    );
+    ContractHandle::with_validator(StepKind::Develop, checks, Some(validator))
 }
 
 /// The tool-call limit of a develop agent once the step's budget is known. A `run_check`
@@ -6094,7 +6138,7 @@ pub fn conclude_approval(
             keep();
             EventKind::StepFailed {
                 task,
-                reason: format!("rejected by the owner: {reason} ({why})"),
+                reason: format!("{}{reason} ({why})", crate::recovery::REJECTED_PREFIX),
                 class: Some(FailClass::Code),
             }
         }
