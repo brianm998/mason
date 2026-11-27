@@ -50,9 +50,13 @@ pub fn intervene(
     );
 }
 
-/// The card a task is waiting on, with its hash. Older logs stored the bare
-/// question; it is shown as a card with no options.
+/// The card a task is waiting on, with its hash. A failed task holds its pending
+/// diagnosis' card, if it has one. Older logs stored the bare question; it is
+/// shown as a card with no options.
 pub fn card_of(d: &Daemon, t: &Task) -> Option<(Card, String)> {
+    if t.state == State::Failed {
+        return crate::diagnose::pending_card(d, t).and_then(|r| crate::diagnose::row_card(&r));
+    }
     let w = d.world().ok()?;
     let id = t.decision?;
     let text = &w.decisions.get(&id)?.question;
@@ -82,9 +86,19 @@ pub fn card_json(card: &Card, hash: &str) -> Value {
     v
 }
 
-/// Answer a task's open question. `hash` is the hash of the card the answerer
-/// was looking at: a late tap on a stale card is refused. `answer` is an
-/// option number, an option's label, or free text (the "Other" box).
+/// The most characters an answer's context may have.
+pub const CONTEXT_MAX: usize = 2000;
+
+/// `text` followed by the owner's context, labelled as the owner's words.
+pub fn with_context(text: &str, context: Option<&str>) -> String {
+    match context.map(str::trim).filter(|c| !c.is_empty()) {
+        None => text.to_string(),
+        Some(c) if text.trim().is_empty() => format!("Owner's context: {c}"),
+        Some(c) => format!("{text}\nOwner's context: {c}"),
+    }
+}
+
+/// [`answer_with`] without context.
 pub fn answer(
     d: &Arc<Daemon>,
     task: TaskId,
@@ -92,12 +106,37 @@ pub fn answer(
     hash: &str,
     who: &str,
 ) -> Result<String, Refusal> {
+    answer_with(d, task, answer, hash, who, None)
+}
+
+/// Answer a task's open question, or the diagnosis card a failed task holds.
+/// `hash` is the hash of the card the answerer was looking at: a late tap on a
+/// stale card is refused. `answer` is an option number, an option's label, or
+/// free text (the "Other" box). `context` is the owner's added words: it is
+/// stored with the answer and shown to the next agent, never read for an option.
+pub fn answer_with(
+    d: &Arc<Daemon>,
+    task: TaskId,
+    answer: &str,
+    hash: &str,
+    who: &str,
+    context: Option<&str>,
+) -> Result<String, Refusal> {
+    // Held until a diagnosis' status is written: two answers cannot both act.
+    let _gate = crate::diagnose::decide_gate();
     let w = d.world().map_err(|e| (500, e.to_string()))?;
     let t = w
         .tasks
         .get(&task)
         .ok_or((404, format!("no task #{}", task.0)))?;
-    let Some((card, current)) = card_of(d, t).filter(|_| t.state == State::NeedsAttention) else {
+    // Read once: the diagnosis whose card is checked is the one carried out.
+    let diagnosis = crate::diagnose::pending_card(d, t);
+    let open = match t.state {
+        State::Failed => diagnosis.as_ref().and_then(crate::diagnose::row_card),
+        State::NeedsAttention => card_of(d, t),
+        _ => None,
+    };
+    let Some((card, current)) = open else {
         return Err((409, format!("task #{} has no open question", task.0)));
     };
     if !is_owner(d, who) {
@@ -118,6 +157,13 @@ pub fn answer(
         return Err((
             409,
             "stale: that card has changed since you looked (it was answered, replaced or asked again). Look at the current one.".into(),
+        ));
+    }
+    let context = context.map(str::trim).filter(|c| !c.is_empty());
+    if context.is_some_and(|c| c.chars().count() > CONTEXT_MAX) {
+        return Err((
+            400,
+            format!("the context is at most {CONTEXT_MAX} characters"),
         ));
     }
     let multi = if card.multi_select {
@@ -151,6 +197,22 @@ pub fn answer(
             None => format!("Other: {}", answer.trim()),
         },
     };
+    // The owner's answer as it is kept.
+    let stored = with_context(&text, context);
+    if let Some(row) = &diagnosis {
+        let picked = card
+            .pick(answer)
+            .and_then(|o| card.options.iter().position(|x| std::ptr::eq(x, o)));
+        // Written first: the retried step reads it as it starts.
+        let before = decisions_len(d, task);
+        remember(d, task, &card.ask, &stored);
+        if let Err(why) = crate::diagnose::answer_card(d, row, picked, answer.trim(), context) {
+            forget_after(d, task, before);
+            return Err((409, why));
+        }
+        intervene(d, "answer", Some(task), who, &stored, "");
+        return Ok(stored);
+    }
     let def = d
         .pinned_def(&t.def)
         .unwrap_or_else(|| d.current_def(t.project));
@@ -171,8 +233,8 @@ pub fn answer(
                 StoreError::Rejected(r) => (409, format!("not allowed: {r:?}")),
                 other => (500, other.to_string()),
             })?;
-            intervene(d, "answer", Some(task), who, &text, "");
-            return Ok(text);
+            intervene(d, "answer", Some(task), who, &stored, "");
+            return Ok(stored);
         }
         step = def
             .first_in(State::Exploring)
@@ -180,19 +242,19 @@ pub fn answer(
             .unwrap_or(step);
     }
     let decision = t.decision.expect("checked by card_of");
-    remember(d, task, &card.ask, &text);
+    remember(d, task, &card.ask, &stored);
     d.emit(EventKind::Answered {
         task,
         decision,
-        answer: text.clone(),
+        answer: stored.clone(),
         step,
     })
     .map_err(|e| match e {
         StoreError::Rejected(r) => (409, format!("not allowed: {r:?}")),
         other => (500, other.to_string()),
     })?;
-    intervene(d, "answer", Some(task), who, &text, "");
-    Ok(text)
+    intervene(d, "answer", Some(task), who, &stored, "");
+    Ok(stored)
 }
 
 /// Keep what the owner decided where the resumed agent will read it.
@@ -206,6 +268,18 @@ pub fn remember(d: &Daemon, task: TaskId, ask: &str, answer: &str) {
         .open(dir.join("decisions.txt"))
     {
         let _ = writeln!(f, "You asked: {ask}\nThe owner answered: {answer}\n");
+    }
+}
+
+fn decisions_len(d: &Daemon, task: TaskId) -> u64 {
+    std::fs::metadata(d.cfg.task_dir(task.0).join("decisions.txt")).map_or(0, |m| m.len())
+}
+
+/// Take back what [`remember`] added after `len`: the answer could not be carried out.
+fn forget_after(d: &Daemon, task: TaskId, len: u64) {
+    let path = d.cfg.task_dir(task.0).join("decisions.txt");
+    if let Ok(f) = std::fs::OpenOptions::new().write(true).open(path) {
+        let _ = f.set_len(len);
     }
 }
 
