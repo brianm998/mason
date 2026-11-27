@@ -63,7 +63,7 @@ public struct SpeechSettings: Equatable, Sendable {
     ]
 
     public static let defaultKinds: Set<String> = Set([
-        "needs_you", "failed", "landing", "daemon_down", "credentials", "provider_outage", "stalled", "landed",
+        "needs_you", "failed", "landing", "daemon_down", "credentials", "provider_outage", "stalled", "landed", "review",
     ]).union(addedKinds)
 
     public init(kinds: Set<String> = SpeechSettings.defaultKinds, sounds: [String: String]? = nil, voice: String = "", volume: Double = 1.0) {

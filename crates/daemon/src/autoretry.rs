@@ -10,7 +10,8 @@
 //!
 //! Three or more tasks failing outside with the same normalised reason within ten minutes are
 //! one host-wide event: one alert (attention.rs asks [`bursts`]), and when the reason is a failed
-//! fetch their retries wait until a fetch works.
+//! fetch their retries wait until a fetch works. Network failures are one such event whatever
+//! their wording ([`outage`], #1185).
 
 use crate::config::ProjectCfg;
 use crate::daemon::{now_ms, Daemon};
@@ -121,6 +122,89 @@ fn candidates(d: &Daemon, w: &World) -> Vec<(Failed, bool)> {
 pub fn current_bursts(d: &Daemon, w: &World) -> Vec<Burst> {
     let failed: Vec<Failed> = candidates(d, w).into_iter().map(|(f, _)| f).collect();
     bursts(&failed, now_ms(), d.cfg.burst_window, d.cfg.burst_min)
+}
+
+/// What the one host-wide outage entry groups every network failure under.
+const OUTAGE: &str = "network outage";
+
+/// Is the reason of a failed task a network failure? As narrow as for a suite's log: a timeout
+/// alone does not say the network was away.
+fn is_network_failure(reason: &str) -> bool {
+    reason.contains(crate::net::SUITE_REASON) || crate::net::log_failure(reason).is_some()
+}
+
+/// The network failures inside the window as one burst, whatever their project or wording:
+/// `events` are the failures the daemon met (`(when, task or 0)`), `failed` the tasks that
+/// failed outside the code. `None` with fewer than `min` (#1185).
+pub fn outage(
+    events: &[(u64, u64)],
+    failed: &[Failed],
+    now: u64,
+    window: Duration,
+    min: usize,
+) -> Option<Burst> {
+    let one = |task: u64, at_ms: u64| Failed {
+        task,
+        project: ProjectId(0),
+        reason: OUTAGE.into(),
+        at_ms,
+    };
+    let all: Vec<Failed> = events
+        .iter()
+        .map(|(at, task)| one(*task, *at))
+        .chain(
+            failed
+                .iter()
+                .filter(|f| is_network_failure(&f.reason))
+                .map(|f| one(f.task, f.at_ms)),
+        )
+        .collect();
+    let mut b = bursts(&all, now, window, min).pop()?;
+    b.tasks.retain(|t| *t != 0);
+    b.tasks.dedup();
+    Some(b)
+}
+
+/// The alerts about failures outside the code that come in groups, and the failed tasks the
+/// outage entry covers (they get no alert of their own meanwhile).
+pub fn burst_alerts(d: &Daemon, w: &World) -> (Vec<(String, String, String)>, Vec<u64>) {
+    let mut failed: Vec<Failed> = candidates(d, w).into_iter().map(|(f, _)| f).collect();
+    let (now, window, min) = (now_ms(), d.cfg.burst_window, d.cfg.burst_min);
+    let minutes = window.as_secs() / 60;
+    let mut out = vec![];
+    let mut covered = vec![];
+    if let Some(b) = outage(&d.net.all(), &failed, now, window, min) {
+        let tasks = if b.tasks.is_empty() {
+            String::new()
+        } else {
+            let list: Vec<String> = b.tasks.iter().map(|t| format!("#{t}")).collect();
+            format!("; tasks touched: {}", list.join(", "))
+        };
+        out.push((
+            "network-outage".to_string(),
+            "environment".to_string(),
+            format!(
+                "Network outage: several network failures within {minutes} minutes{tasks}. Landing waits and retries by itself"
+            ),
+        ));
+        failed.retain(|f| !is_network_failure(&f.reason));
+        covered = b.tasks;
+    }
+    for b in bursts(&failed, now, window, min) {
+        let key: u64 = b.reason.bytes().fold(0xcbf2_9ce4_8422_2325, |h, c| {
+            (h ^ u64::from(c)).wrapping_mul(0x0100_0000_01b3)
+        });
+        out.push((
+            format!("outside-burst:{key:016x}"),
+            "environment".to_string(),
+            format!(
+                "{} tasks failed outside the code with the same reason within {minutes} minutes: {}",
+                b.tasks.len(),
+                b.reason
+            ),
+        ));
+    }
+    (out, covered)
 }
 
 /// What `mason task show` says about a failed task: retries made in the window, and when the
@@ -249,6 +333,30 @@ mod tests {
         assert_eq!(due(&delays, 1, t0, t0 + 3_599_000), Due::At(t0 + 3_600_000));
         assert_eq!(due(&delays, 1, t0, t0 + 3_600_000), Due::Now);
         assert_eq!(due(&delays, 2, t0, t0 + 9_999_999_999), Due::GiveUp);
+    }
+
+    #[test]
+    fn network_failures_of_any_wording_are_one_outage() {
+        let f = |task: u64, reason: &str, at_ms: u64| Failed {
+            task,
+            project: ProjectId(task % 2),
+            reason: reason.into(),
+            at_ms,
+        };
+        let now = 10_000_000;
+        let window = Duration::from_secs(600);
+        let list = vec![
+            f(
+                1,
+                "landing failed: Could not resolve hostname github.com",
+                now,
+            ),
+            f(2, "suite `x` could not reach the network: x", now),
+            f(3, "the step host was lost 2 times", now),
+        ];
+        assert_eq!(outage(&[], &list, now, window, 3), None);
+        let b = outage(&[(now, 0), (now - 700_000, 9)], &list, now, window, 3).unwrap();
+        assert_eq!(b.tasks, vec![1, 2]);
     }
 
     #[test]

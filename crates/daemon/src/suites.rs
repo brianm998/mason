@@ -1764,6 +1764,9 @@ enum SuiteRun {
         failing: Vec<String>,
         red: Option<(RedKind, String)>,
     },
+    /// Red only for want of the network, after its reruns: nothing was proven about the
+    /// change, and nothing is held against it (#1185). `line`: what the log said.
+    Network { line: String, feedback: String },
     /// The task went away while this ran.
     Gone,
 }
@@ -2387,6 +2390,7 @@ fn run_suite(
     let mut attempt = 0u32;
     let mut recovered: Option<Recovered> = None;
     let mut remote_env_fails = 0u32;
+    let mut network_reds = 0usize;
     let mut waiting = false;
     // The lease whose runner units a run gives back when GitHub fails it, and asks for again at
     // its place in line (#822). It holds what was asked again until this function returns.
@@ -2880,6 +2884,22 @@ fn run_suite(
                         excused,
                         flaky,
                     } => {
+                        // No test failed and the log says the network was not there: nothing
+                        // was proven about the change (#1185).
+                        if let Some(line) = network_red(failures, &j.results, &ran, &j.output) {
+                            env_down(who, def, suite, cwd, dev.as_ref());
+                            if network_again(who, &suite.name, &mut network_reds, &line) {
+                                attempt += 1;
+                                continue;
+                            }
+                            if waiting {
+                                on_wait(None);
+                            }
+                            return SuiteRun::Network {
+                                line,
+                                feedback: out(""),
+                            };
+                        }
                         // develop's answer is unknown (the run on it did not finish twice):
                         // the round is not the task's to answer for (#494).
                         if tests.iter().any(|t| unknown_at_base.contains(t)) {
@@ -3241,6 +3261,7 @@ pub fn run_alone(
         notes: vec![],
         failing: Default::default(),
         unfinished: Default::default(),
+        network: None,
     };
     let mut ran_before = false;
     for (name, tests) in failing {
@@ -3286,6 +3307,11 @@ pub fn run_alone(
                         red(&mut out, format!("{name}: {}", tail(&why, 12)));
                         continue;
                     }
+                    Built::Network { line, .. } => {
+                        out.network = Some(network_reason(name, &line));
+                        red(&mut out, format!("{name}: {line}"));
+                        continue;
+                    }
                 }
             }
         }
@@ -3314,6 +3340,11 @@ pub fn run_alone(
 enum Built {
     Ok,
     Red(String),
+    /// Red only for want of the network, after its reruns.
+    Network {
+        line: String,
+        feedback: String,
+    },
     Gone,
 }
 
@@ -3781,9 +3812,62 @@ fn held_env(c: &Ctx, held: &Needs) -> Vec<(String, String)> {
     env
 }
 
-/// A suite's build, in a worktree, under a step host. Green is exit status 0.
+/// How often a suite that is red only for want of the network is run again.
+const NETWORK_RERUNS: usize = 2;
+
+/// The log line that makes a red the network's: the command ran to its own end, failed, no
+/// test is reported failing, and the end of its log says the network was not there.
+fn network_red(failures: &[String], results: &Results, ran: &Ran, output: &str) -> Option<String> {
+    let proves_nothing = failures.is_empty()
+        && results.failed_names().is_empty()
+        && !ran.timed_out
+        && ran.stalled.is_none()
+        && (ran.code != 0 || ran.signal != 0);
+    proves_nothing
+        .then(|| crate::net::log_failure(output))
+        .flatten()
+}
+
+/// Note a network red. `true`: it was waited for and the command is to run again.
+fn network_again(who: &Who, suite: &str, seen: &mut usize, line: &str) -> bool {
+    let d = &who.d;
+    d.net.note(now_ms(), who.task.map_or(0, |t| t.0 .0));
+    if *seen >= NETWORK_RERUNS {
+        return false;
+    }
+    *seen += 1;
+    tracing::warn!(%suite, %line, "red for want of the network: running it again");
+    if let Some(run) = who.run() {
+        let note = format!(
+            "{suite}: the network failed ({line}); running it again ({seen} of {NETWORK_RERUNS})"
+        );
+        d.progress_report(run, |p, now| p.set_message(&note, now));
+    }
+    std::thread::sleep(d.cfg.network_rerun);
+    true
+}
+
+/// A suite's build, in a worktree, under a step host. Green is exit status 0. A build that
+/// fails for want of the network is run again, as a suite is (#1185).
 fn run_build(who: &Who, suite: &Suite, build: &str, n: usize, cwd: &Path) -> Built {
-    let id = format!("{}-b{n}-{}", who.id_prefix, suite.name);
+    let mut seen = 0;
+    loop {
+        let id = match seen {
+            0 => format!("{}-b{n}-{}", who.id_prefix, suite.name),
+            k => format!("{}-b{n}n{k}-{}", who.id_prefix, suite.name),
+        };
+        match run_build_once(who, suite, build, id, cwd) {
+            Built::Network { line, feedback } => {
+                if !network_again(who, &suite.name, &mut seen, &line) {
+                    return Built::Network { line, feedback };
+                }
+            }
+            done => return done,
+        }
+    }
+}
+
+fn run_build_once(who: &Who, suite: &Suite, build: &str, id: String, cwd: &Path) -> Built {
     let limit = suite.timeout.unwrap_or(Duration::from_secs(1800));
     // Object sets of older crate hashes pile up in a build directory (#476). Every directory a
     // build runs in is prepared: a task's, a landing slot's, `wt`'s (#556).
@@ -3828,11 +3912,15 @@ fn run_build(who: &Who, suite: &Suite, build: &str, n: usize, cwd: &Path) -> Bui
         ));
     }
     if ran.code != 0 || ran.signal != 0 {
-        return Built::Red(format!(
+        let feedback = format!(
             "Building `{}` failed (`{build}`). Last output:\n{}",
             suite.name,
             tail(&ran.output, 40)
-        ));
+        );
+        return match crate::net::log_failure(&ran.output) {
+            Some(line) => Built::Network { line, feedback },
+            None => Built::Red(feedback),
+        };
     }
     Built::Ok
 }
@@ -4122,6 +4210,13 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
                                 let reason = format!("the build of suite `{name}` is red");
                                 return c.conclude(Outcome::Red, reason, Some(feedback));
                             }
+                            Built::Network { line, feedback } => {
+                                let _ = std::fs::write(
+                                    c.task_dir().join("network-failure.txt"),
+                                    feedback,
+                                );
+                                return c.fail(network_reason(&name, &line));
+                            }
                             Built::Ok => built.push(b.clone()),
                         }
                     }
@@ -4209,6 +4304,11 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
         }
         match ran {
             SuiteRun::Gone => return,
+            // Not a red round: the step fails outside the code, and is retried (#1185).
+            SuiteRun::Network { line, feedback } => {
+                let _ = std::fs::write(c.task_dir().join("network-failure.txt"), feedback);
+                return c.fail(network_reason(&name, &line));
+            }
             SuiteRun::Done {
                 outcome,
                 results,
@@ -5563,6 +5663,7 @@ fn pay_with(d: &Arc<Daemon>, debt: u64, only: Option<&str>) -> Result<String, St
     // The tests a red run named, for the backoff (#774).
     let mut red_tests: Vec<String> = vec![];
     let mut red_suite: Option<String> = None;
+    let mut network: Option<String> = None;
     for s in &suites {
         let r = run_suite(&who, &p.path, &lock, &def, s, &wt, &tree, &mut |_| {});
         match r {
@@ -5590,6 +5691,11 @@ fn pay_with(d: &Arc<Daemon>, debt: u64, only: Option<&str>) -> Result<String, St
                 red_tests.extend(failing);
                 verdicts.push(feedback.lines().next().unwrap_or("red").to_string());
             }
+            SuiteRun::Network { line, .. } => {
+                all_green = false;
+                network = Some(network_reason(&s.name, &line));
+                break;
+            }
             SuiteRun::Gone => all_green = false,
         }
     }
@@ -5601,6 +5707,9 @@ fn pay_with(d: &Arc<Daemon>, debt: u64, only: Option<&str>) -> Result<String, St
         let _ = d
             .store
             .put_suite_red(&row.project, name, &tip, &red_tests, now_ms());
+    } else if let Some(why) = network {
+        // Neither paid nor red: it is tried again, as a run that could not start is.
+        return Err(why);
     }
     if all_green {
         for s in &suites {
@@ -5869,6 +5978,7 @@ pub fn run_whole(
         tree: tree_hash,
         base: tip.clone(),
     };
+    let mut network: Option<String> = None;
     for s in &todo {
         let r = run_suite(&who, &p.path, &lock, &def, s, &wt, &tree, &mut |_| {});
         let part = |state, note: String, failing: Vec<String>| WholeSuite {
@@ -5904,6 +6014,11 @@ pub fn run_whole(
                 feedback, failing, ..
             } => part(WholeState::Red, feedback, failing),
             SuiteRun::Gone => part(WholeState::Red, format!("{}: went away", s.name), vec![]),
+            // Not a red of the tip: the run is given up, to be made again.
+            SuiteRun::Network { line, .. } => {
+                network = Some(network_reason(&s.name, &line));
+                break;
+            }
         };
         if part.state == WholeState::Red {
             let _ = d
@@ -5918,6 +6033,9 @@ pub fn run_whole(
     }
     // Every green recorded at the tip closes the debts it covers.
     settle_debts(d);
+    if let Some(why) = network {
+        return Err(why);
+    }
     Ok(out)
 }
 
@@ -6212,6 +6330,10 @@ pub fn ledger_run(d: &Arc<Daemon>, task: TaskId) -> Result<String, String> {
                 report.push(format!("{name}: stopped"));
                 continue;
             }
+            SuiteRun::Network { line, .. } => {
+                report.push(format!("{}; left in place", network_reason(&name, &line)));
+                continue;
+            }
         };
         let seen_tail = tail(&red, 30);
         for t in tests.iter().filter(|t| red.contains(t.as_str())) {
@@ -6297,6 +6419,14 @@ fn timeout_names(feedback: &str) -> Option<Vec<String>> {
         })
 }
 
+fn network_reason(suite: &str, line: &str) -> String {
+    format!(
+        "suite `{suite}` {} in {} runs and no test failed: {line}",
+        crate::net::SUITE_REASON,
+        NETWORK_RERUNS + 1
+    )
+}
+
 /// What running suites over a batch's integration branch said.
 #[derive(Default)]
 pub struct OverRun {
@@ -6312,6 +6442,9 @@ pub struct OverRun {
     /// the tests still running at the kill (possibly none read): a timeout is not a red to
     /// bisect (s702).
     pub unfinished: std::collections::BTreeMap<String, Vec<String>>,
+    /// A suite could not reach the network, after its reruns: the run proves nothing, and the
+    /// batch waits (#1185).
+    pub network: Option<String>,
 }
 
 static LAST_FULL: std::sync::Mutex<Vec<(String, u64)>> = std::sync::Mutex::new(Vec::new());
@@ -6454,6 +6587,7 @@ pub fn run_over(
         notes: vec![],
         failing: Default::default(),
         unfinished: Default::default(),
+        network: None,
     };
     for name in suites {
         let Some(suite) = def.testing.suite(name) else {
@@ -6494,7 +6628,7 @@ pub fn run_over(
         // Whatever the run did not give back as its jobs ended goes now: the next suite takes
         // its own units when it goes to GitHub.
         who.cover.release_units();
-        if full && !matches!(res, SuiteRun::Gone) {
+        if full && !matches!(res, SuiteRun::Gone | SuiteRun::Network { .. }) {
             note_full_run(&p.id);
         }
         // A red on the full run where reuse had said green points at the key computation: every
@@ -6560,6 +6694,14 @@ pub fn run_over(
                     out.failing.insert(name.clone(), failing);
                 }
                 out.notes.push(format!("{name}: {}", tail(&feedback, 12)));
+            }
+            SuiteRun::Network { line, .. } => {
+                out.green = false;
+                out.failed.insert(name.clone());
+                let why = network_reason(name, &line);
+                out.notes.push(why.clone());
+                out.network = Some(why);
+                break;
             }
             SuiteRun::Gone => {
                 out.green = false;

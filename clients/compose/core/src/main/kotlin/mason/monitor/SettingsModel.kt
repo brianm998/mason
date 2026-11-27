@@ -2,7 +2,7 @@
 package mason.monitor
 
 /** The ids of the commands whose answer the Settings page reports. */
-internal val SETTINGS_RESULTS = setOf("settings-save", "notify-save", "notify-test", "schedule-run", "remote-save")
+internal val SETTINGS_RESULTS = setOf("settings-save", "notify-save", "notify-test", "schedule-run", "remote-save", "review-save", "review-run")
 
 /**
  * The Settings page's data (s430): a project's proposal policy, schedules and tracker, as the
@@ -117,6 +117,90 @@ data class RemoteSettings(
     }
 }
 
+/** `GET /review`: the nightly pipeline review's settings, its last and next run. */
+data class ReviewSettings(
+    val enabled: Boolean = true,
+    /** Local time of day, "HH:MM". */
+    val at: String = "00:00",
+    val everyDays: Int = 1,
+    val model: String = "",
+    val effort: String = "",
+    val maxProposals: Int = 10,
+    /** MASON's own project, where the review is filed; empty when none is registered. */
+    val project: String = "",
+    val problem: String? = null,
+    val runningTask: Long? = null,
+    val nextRun: String? = null,
+    val lastTask: Long? = null,
+    val lastAt: String? = null,
+    val lastSummary: String = "",
+    /** The proposals the last completed review filed. */
+    val filed: List<Long> = emptyList(),
+    val lastStatus: String = "",
+) {
+    val everyText: String get() = if (everyDays == 1) "Every day" else "Every $everyDays days"
+
+    /** The task numbers of the last run's proposals, as text a task link is made from. */
+    val filedText: String
+        get() = if (filed.isEmpty()) "No proposals filed" else "Proposals filed: " + filed.joinToString(", ") { "#$it" }
+
+    val nextText: String
+        get() = when {
+            runningTask != null -> "Running now: #$runningTask"
+            project.isEmpty() -> "No project of MASON's own is registered, so no review runs"
+            !enabled -> "Next run: none (off)"
+            else -> "Next run: ${nextRun ?: "not known"}"
+        }
+
+    /** [at] moved by whole hours and minutes, round the clock. */
+    fun atMoved(hours: Int = 0, minutes: Int = 0): String {
+        val now = minutes(at) ?: 0
+        return timeText(Math.floorMod(now + hours * 60 + minutes, 24 * 60))
+    }
+
+    companion object {
+        /** The frequencies offered by name, in days. */
+        val PRESETS = listOf("Daily" to 1, "Weekly" to 7)
+        const val EXPLANATION = "An agent asks where the pipeline was stuck, slow, over-tested, untested, crashing or needing you, and files what it finds as proposals for you to approve."
+
+        /** "HH:MM" as minutes after midnight; null when it is not a time. */
+        fun minutes(at: String): Int? {
+            val p = at.split(":")
+            if (p.size != 2) return null
+            val h = p[0].toIntOrNull() ?: return null
+            val m = p[1].toIntOrNull() ?: return null
+            return if (h in 0..23 && m in 0..59) h * 60 + m else null
+        }
+
+        fun timeText(minutes: Int): String = "${(minutes / 60).toString().padStart(2, '0')}:${(minutes % 60).toString().padStart(2, '0')}"
+
+        @Suppress("UNCHECKED_CAST")
+        fun parse(json: String): ReviewSettings {
+            val v = Codec.json(json) ?: return ReviewSettings()
+            val s = v["settings"] as? Map<String, Any?> ?: emptyMap()
+            val l = v["last"] as? Map<String, Any?>
+            fun long(x: Any?): Long? = (x as? Number)?.toLong()
+            return ReviewSettings(
+                enabled = s["enabled"] as? Boolean ?: true,
+                at = s["at"] as? String ?: "00:00",
+                everyDays = (s["every_days"] as? Number)?.toInt() ?: 1,
+                model = s["model"] as? String ?: "",
+                effort = s["effort"] as? String ?: "",
+                maxProposals = (s["max_proposals"] as? Number)?.toInt() ?: 10,
+                project = v["project"] as? String ?: "",
+                problem = (v["problem"] as? String)?.ifEmpty { null },
+                runningTask = long(v["running_task"]),
+                nextRun = v["next_run_text"] as? String,
+                lastTask = long(l?.get("task")),
+                lastAt = l?.get("completed_text") as? String,
+                lastSummary = l?.get("summary") as? String ?: "",
+                filed = (l?.get("filed") as? List<Any?> ?: emptyList()).mapNotNull { long(it) },
+                lastStatus = v["last_status"] as? String ?: "",
+            )
+        }
+    }
+}
+
 /** `GET /notify/settings`: where each alert goes. */
 data class NotifySettings(
     val routes: List<Route> = emptyList(),
@@ -166,6 +250,11 @@ object SettingsPayload {
     fun remoteMode(mode: String, project: String? = null) =
         Codec.body(if (project == null) mapOf("mode" to mode) else mapOf("mode" to mode, "project" to project))
 
+    /** `POST /review`: one setting of the pipeline review. */
+    fun reviewEnabled(on: Boolean) = Codec.body(mapOf("enabled" to on))
+    fun reviewAt(at: String) = Codec.body(mapOf("at" to at))
+    fun reviewEvery(days: Int) = Codec.body(mapOf("every_days" to days))
+
     fun disposition(key: String, value: String) = Codec.body(mapOf("proposals" to mapOf(key to value)))
     fun introspection(key: String, value: String) = Codec.body(mapOf("proposals" to mapOf("introspection" to mapOf(key to value))))
     fun cap(key: String, value: Int) = Codec.body(mapOf("proposals" to mapOf(key to value)))
@@ -182,7 +271,7 @@ object SettingsPayload {
 
     fun done(id: String) = when (id) {
         "notify-test" -> "Test notification sent."
-        "schedule-run" -> "Started."
+        "schedule-run", "review-run" -> "Started."
         else -> "Saved. It applies now, with no restart."
     }
 }
