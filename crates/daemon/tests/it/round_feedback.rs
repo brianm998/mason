@@ -91,7 +91,7 @@ fn develop(rec: &Path, name: &str, marker: &str) -> Value {
 
 fn changes(finding: &str) -> Value {
     json!([{"call": {"tool": "submit_review", "args": {
-        "verdict": "changes", "summary": "not yet", "findings": [{"issue": finding}]}}}])
+        "verdict": "changes", "summary": "not yet", "findings": [{"issue": finding, "severity": "blocking"}]}}}])
 }
 
 fn approve() -> Value {
