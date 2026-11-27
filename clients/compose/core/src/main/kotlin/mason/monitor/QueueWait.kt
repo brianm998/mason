@@ -74,6 +74,12 @@ object QueueWait {
 
     /** A row's second line: "[badge] sentence" while it waits on the scheduler, else its activity. */
     fun line(r: TaskRow): String {
+        val base = lineWithoutDiagnosis(r)
+        val d = diagnosisBadge(r.diagnosis) ?: return base
+        return if (base.isEmpty()) d else "$base · $d"
+    }
+
+    private fun lineWithoutDiagnosis(r: TaskRow): String {
         val w = r.wait
         return if (w != null && r.why_waiting.isNotEmpty()) "[${badge(w.cause)}] ${r.why_waiting}" else r.why_waiting.ifEmpty { r.activity }
     }
