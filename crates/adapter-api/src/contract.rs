@@ -34,7 +34,13 @@ pub enum StepKind {
 }
 
 /// The operational actions a health session may take, each one the owner can already take.
-pub const HEALTH_ACTIONS: [&str; 4] = ["retry", "unblock", "release_holder", "rerun_diagnosis"];
+pub const HEALTH_ACTIONS: [&str; 5] = [
+    "retry",
+    "unblock",
+    "release_holder",
+    "rerun_diagnosis",
+    "restart_round",
+];
 
 pub const ALL_TOOLS: [&str; 11] = [
     "submit_health",
