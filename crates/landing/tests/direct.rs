@@ -55,12 +55,24 @@ impl Fx {
 
     fn landing(&self, remote: bool) -> DirectLanding<'_> {
         DirectLanding {
+            push_backoff: &[],
+            ..self.landing_with(remote, &[])
+        }
+    }
+
+    fn landing_with<'a>(
+        &'a self,
+        remote: bool,
+        push_backoff: &'a [std::time::Duration],
+    ) -> DirectLanding<'a> {
+        DirectLanding {
             repo: &self.repo,
             task_wt: &self.wt,
             task_branch: "mason/t1",
             landing_wt: &self.landing,
             base: "main",
             remote: remote.then_some("origin"),
+            push_backoff,
         }
     }
 
@@ -347,5 +359,87 @@ fn a_push_refused_for_another_reason_is_an_error_not_a_race() {
             "{e}"
         ),
         other => panic!("expected a git error, got {other:?}"),
+    }
+}
+
+#[cfg(unix)]
+fn pre_receive(origin: &Path, script: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let hook = origin.join("hooks/pre-receive");
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    std::fs::write(&hook, format!("#!/bin/sh\n{script}")).unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// Rejects the first `n` pushes, counting them in a file next to the hook.
+#[cfg(unix)]
+fn reject_first(origin: &Path, n: u32, text: &str) {
+    pre_receive(
+        origin,
+        &format!(
+            "c=$(cat \"$GIT_DIR/count\" 2>/dev/null || echo 0)\n\
+             echo $((c+1)) > \"$GIT_DIR/count\"\n\
+             if [ \"$c\" -lt {n} ]; then echo '{text}' >&2; exit 1; fi\n"
+        ),
+    );
+}
+
+#[cfg(unix)]
+fn pushes_seen(origin: &Path) -> u32 {
+    std::fs::read_to_string(origin.join("count"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap()
+}
+
+#[cfg(unix)]
+const SHORT: [std::time::Duration; 3] = [std::time::Duration::ZERO; 3];
+
+#[cfg(unix)]
+#[test]
+fn a_push_the_remote_rejects_once_is_tried_again() {
+    let fx = Fx::new();
+    fx.task("a.txt");
+    reject_first(&fx.origin, 1, "try later");
+    let landed = fx
+        .landing_with(true, &SHORT)
+        .land(&mut || true, &no_point)
+        .unwrap();
+    let Landed::Promoted { commit } = landed else {
+        panic!("{landed:?}")
+    };
+    assert_eq!(sh(&fx.origin, &["rev-parse", "main"]), commit);
+    assert_eq!(pushes_seen(&fx.origin), 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_remote_that_always_rejects_is_given_up_on_after_the_bounded_tries() {
+    let fx = Fx::new();
+    fx.task("a.txt");
+    reject_first(&fx.origin, 1000, "no pushes today");
+    match fx.landing_with(true, &SHORT).land(&mut || true, &no_point) {
+        Err(LandError::Git(e)) => assert!(e.stderr.contains("no pushes today"), "{e}"),
+        other => panic!("expected a git error, got {other:?}"),
+    }
+    assert_eq!(pushes_seen(&fx.origin), 4);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_refusal_is_not_tried_again() {
+    for text in [
+        "remote: Permission denied",
+        "protected branch hook declined",
+    ] {
+        let fx = Fx::new();
+        fx.task("a.txt");
+        reject_first(&fx.origin, 1000, text);
+        assert!(matches!(
+            fx.landing_with(true, &SHORT).land(&mut || true, &no_point),
+            Err(LandError::Git(_))
+        ));
+        assert_eq!(pushes_seen(&fx.origin), 1, "{text}");
     }
 }
