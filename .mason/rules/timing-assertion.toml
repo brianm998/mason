@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# CLAUDE.md, Tests: no timing assertions.
+id = "timing-assertion"
+paths = ["crates/**/tests/**/*.rs", "crates/**/src/**/tests.rs"]
+cfg_test_paths = ["crates/**/src/**/*.rs"]
+action = "block"
+# An `assert!` whose comparison has `.elapsed()`, `Instant::now()` or `Duration::` on a side.
+pattern = '''(?x)
+    \bassert(?:_eq|_ne)?!\s*\(
+    (?: [^;{}]*? (?:\.elapsed\(\) | \bInstant::now\(\) | \bDuration::) [^;{}]*? \s(?:<=?|>=?)\s
+      | [^;{}]*? \s(?:<=?|>=?)\s [^;{}"]*? (?:\.elapsed\(\) | \bInstant::now\(\) | \bDuration::)
+    )
+'''
+message = """
+No timing assertions. They go red when the machine is busy, which it usually is. Assert what
+happened (order, counts, state) instead. If the test must not hang, use a generous hang guard:
+wait for the condition with a long timeout (for example `recv_timeout` of 60 s, or a
+`wait_for` helper) and assert that it happened, not how fast.
+"""

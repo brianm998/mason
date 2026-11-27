@@ -119,3 +119,4 @@ mod update_release;
 mod usage;
 mod version_flag;
 mod waits_snapshot;
+mod write_rules;
