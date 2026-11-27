@@ -890,7 +890,7 @@ pub fn start(d: &Arc<Daemon>) {
                 std::thread::sleep(Duration::from_secs(every));
             }
         });
-    if std::env::var_os("MASON_NO_MDNS").is_some() {
+    if crate::lan::mdns_off() {
         return;
     }
     let weak = Arc::downgrade(d);
