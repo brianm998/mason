@@ -2020,10 +2020,10 @@ mod tests {
         }
         let (data, others) = measure_volumes(
             &Blind,
-            &[(PathBuf::from("/a"), true), (PathBuf::from("/b"), false)],
+            &[(PathBuf::from("/"), true), (PathBuf::from("/tmp"), false)],
         );
-        assert_eq!(data, Some(("/a".into(), None)));
-        assert_eq!(others, vec![vol("/b", None, false)]);
+        assert_eq!(data, Some(("/".into(), None)));
+        assert_eq!(others, vec![vol("/tmp", None, false)]);
     }
 
     #[test]
