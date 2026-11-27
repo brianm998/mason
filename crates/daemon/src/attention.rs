@@ -215,6 +215,7 @@ pub fn answer_with(
     }
     let def = d
         .pinned_def(&t.def)
+        .filter(|_| !t.def.is_empty())
         .unwrap_or_else(|| d.current_def(t.project));
     let mut step = def
         .first_in(State::Developing)

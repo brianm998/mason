@@ -4730,8 +4730,12 @@ pub fn skip(
     let (kind, name) = scope
         .split_once(':')
         .ok_or("scope is `suite:NAME`, `step:NAME` or `tests:all`")?;
+    // A task that has not started yet is pinned to nothing (an empty hash), and
+    // `pinned_def("")` is the built-in graph: judge it by the project's current one instead
+    // (s1007 went red when its task was still queued at the skip).
     let def = d
         .pinned_def(&t.def)
+        .filter(|_| !t.def.is_empty())
         .unwrap_or_else(|| d.current_def(t.project));
     // A client that has no step name for the row (a task waiting in `base-red` shows none)
     // leaves it empty: that means the task's test step.
@@ -4788,6 +4792,7 @@ pub fn skip_has_no_effect(d: &Arc<Daemon>, debt: &mason_store::DebtRow) -> bool 
     };
     let def = d
         .pinned_def(&t.def)
+        .filter(|_| !t.def.is_empty())
         .unwrap_or_else(|| d.current_def(t.project));
     def.step(name)
         .is_some_and(|s| s.kind != mason_definition::StepType::Test)
