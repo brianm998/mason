@@ -4111,10 +4111,29 @@ fn agent_job(c: &Ctx) {
         }
     }
     let decisions = std::fs::read_to_string(dir.join("decisions.txt")).ok();
+    // The pipeline review's task: its facts go into the worktree now, it takes no numbers,
+    // and its submission is the result file, with nothing committed.
+    let review_task = kind == StepKind::Develop
+        && crate::introspect::is_analyst_task(&c.d, c.task, &c.project.id);
+    if review_task {
+        if let Err(why) = crate::review::write_facts(&c.d, c.task, &c.wt) {
+            return c.fail(format!("the review's facts could not be written: {why}"));
+        }
+    }
     // What earlier rounds tried and gave up, for the next developer and the reviewer (#1128).
     let tried = matches!(kind, StepKind::Develop | StepKind::Review)
         .then(|| crate::prompts::tried_block(&crate::tried::rounds(&dir)))
         .flatten();
+    // How the change was built, per file, for the reviewer (#1130).
+    let tried = match (
+        tried,
+        (kind == StepKind::Review)
+            .then(|| crate::prompts::edits_block(&dir))
+            .flatten(),
+    ) {
+        (Some(t), Some(e)) => Some(format!("{t}\n\n{e}")),
+        (t, e) => t.or(e),
+    };
     let pack_name = match kind {
         StepKind::Develop => "develop",
         StepKind::Review => "review",
@@ -4243,6 +4262,8 @@ fn agent_job(c: &Ctx) {
             Some(block) => format!("{prompt}\n\n{block}"),
             None => prompt,
         }
+    } else if review_task {
+        prompt
     } else {
         // A base that cannot be read right now is waited for; it must not look like
         // a base with no numbered files.
@@ -4340,7 +4361,7 @@ fn agent_job(c: &Ctx) {
         check_failing: Default::default(),
         replay: Default::default(),
     });
-    let validator = (kind == StepKind::Develop).then(|| {
+    let validator = (kind == StepKind::Develop && !review_task).then(|| {
         let (d, task, project) = (c.d.clone(), c.task, c.project.id.clone());
         change_validator(
             c.wt.clone(),
@@ -4385,6 +4406,10 @@ fn agent_job(c: &Ctx) {
     let validator = match (validator, reuse_key) {
         (Some(v), Some(key)) => Some(refuse_known_red(v, c.d.clone(), c.wt.clone(), key)),
         (v, _) => v,
+    };
+    let validator = match validator {
+        None if review_task => Some(crate::review::validator(c.wt.clone())),
+        v => v,
     };
     let contract = ContractHandle::with_validator(kind, checks, validator);
     if let Some(tools) = &c.step.tools {
@@ -4453,7 +4478,10 @@ fn agent_job(c: &Ctx) {
     for p in &eff.problems {
         tracing::warn!(project = %c.project.id, "{p}");
     }
-    let launched = mason_definition::tiers::launch(&c.res, &eff.mapping, &agent.ladder);
+    let mut launched = mason_definition::tiers::launch(&c.res, &eff.mapping, &agent.ladder);
+    if review_task {
+        crate::review::pin_effort(&c.d, c.task, &c.step.name, &mut launched);
+    }
     let rec = LaunchRec {
         launched: &launched,
         provider: crate::tiermap::name(agent.provider),
@@ -4633,6 +4661,7 @@ fn agent_job(c: &Ctx) {
             if let mason_adapter_api::AgentEvent::Skill { name } = ev {
                 crate::skills::record(&task_dir, run.0, name);
             }
+            crate::edits::record(&task_dir, run.0, ev);
             d.progress_agent_event(run, ev)
         }));
     }
@@ -5031,7 +5060,7 @@ fn finish_agent(c: &Ctx, report: StepReport, dir: &Path) {
         StepEnd::Asked { question } => Some(question.clone()),
         _ => None,
     };
-    // The analyst's findings (Part 14), read from the file it wrote in its worktree. Its
+    // The pipeline review's findings (Part 14), read from the file it wrote in its worktree. Its
     // result is the findings: a readable file ends the task here, with no test, review or
     // land (its branch is never merged, so any commit it made is dropped); a missing or
     // unreadable one sends it back to develop.
@@ -5043,7 +5072,7 @@ fn finish_agent(c: &Ctx, report: StepReport, dir: &Path) {
             crate::introspect::Ingest::Missing => {
                 c.conclude(
                     Outcome::Red,
-                    "no analyst result".into(),
+                    "no review result".into(),
                     Some(format!(
                         "There is no {} in the root of your worktree. Write it as the task says.",
                         crate::introspect::ANALYST_FILE
@@ -5055,7 +5084,7 @@ fn finish_agent(c: &Ctx, report: StepReport, dir: &Path) {
             crate::introspect::Ingest::Unreadable(e) => {
                 c.conclude(
                     Outcome::Red,
-                    "analyst result unreadable".into(),
+                    "review result unreadable".into(),
                     Some(format!(
                         "{} could not be read: {e}. Write it again as the task says.",
                         crate::introspect::ANALYST_FILE
@@ -5069,7 +5098,7 @@ fn finish_agent(c: &Ctx, report: StepReport, dir: &Path) {
         let _ = std::fs::remove_file(dir.join("feedback.txt"));
         c.emit(EventKind::ClosedNoChange {
             task: c.task,
-            reason: "analyst result ingested; the findings are filed".into(),
+            reason: "review result ingested; the findings are filed".into(),
         });
     } else {
         finish_agent_inner(c, report, dir);
