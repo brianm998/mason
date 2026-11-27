@@ -72,6 +72,9 @@ pub struct Inputs {
     /// `(tool, Ok(what it printed) | Err(why it did not run))`, for `cargo`, `xcode-select` and
     /// `java`.
     pub tools: Vec<(String, Result<String, String>)>,
+    /// Whether `com.apple.testmanagerd.control` can be looked up from this process: `None` when
+    /// not asked (not macOS, or a test).
+    pub xctest: Option<bool>,
 }
 
 /// One line of the report.
@@ -267,7 +270,60 @@ pub fn evaluate(i: &Inputs, at_ms: u64) -> Report {
             ),
         }
     }
+    match i.xctest {
+        Some(true) => add(
+            "xctest",
+            true,
+            false,
+            "testmanagerd is reachable: `xcodebuild test` can run".into(),
+        ),
+        // Only a run that tests needs it (a build does not), so this does not stop the node: the
+        // coordinator keeps `xcodebuild test` runs away from it (`nodes::covers_run`).
+        Some(false) => add(
+            "xctest",
+            false,
+            false,
+            "testmanagerd is not reachable from this node's launchd domain, so `xcodebuild test` fails at once (\"Connection init failed at lookup with error 3\"): it is a per-login-session service (LimitLoadToSessionType Aqua), and this user has no GUI session. Builds still work; test runs stay on the coordinator until the node user is logged in at the console".into(),
+        ),
+        None => {}
+    }
     Report { at_ms, checks }
+}
+
+// ---- testmanagerd ------------------------------------------------------------------------------
+
+/// The mach service `xcodebuild test` looks up first; it is what fails with "error 3" when the
+/// caller's bootstrap namespace has no such service.
+pub const TESTMANAGERD_SERVICE: &str = "com.apple.testmanagerd.control";
+
+/// Can `service` be looked up in this process's bootstrap namespace? A LaunchDaemon that runs as
+/// a user, with nobody logged in, has only the system domain, and a per-session agent such as
+/// testmanagerd is not in it. `None` where there is no bootstrap namespace to ask.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+pub fn service_reachable(service: &str) -> Option<bool> {
+    use std::ffi::CString;
+    use std::os::raw::{c_char, c_int};
+    extern "C" {
+        static bootstrap_port: u32;
+        fn bootstrap_look_up(bp: u32, name: *const c_char, sp: *mut u32) -> c_int;
+    }
+    let name = CString::new(service).ok()?;
+    let mut port: u32 = 0;
+    // SAFETY: `bootstrap_port` is libSystem's own global; `name` is a live NUL-terminated string
+    // and `port` a live `mach_port_t` for the call to fill in.
+    let kr = unsafe { bootstrap_look_up(bootstrap_port, name.as_ptr(), &mut port) };
+    Some(kr == 0)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn service_reachable(_service: &str) -> Option<bool> {
+    None
+}
+
+/// [`service_reachable`] for testmanagerd.
+pub fn testmanagerd_reachable() -> Option<bool> {
+    service_reachable(TESTMANAGERD_SERVICE)
 }
 
 // ---- reading the signature --------------------------------------------------------------------
@@ -641,6 +697,7 @@ pub fn gather_in(
         listener_bound,
         mdns,
         tools,
+        xctest: testmanagerd_reachable(),
     }
 }
 
@@ -682,6 +739,7 @@ mod tests {
                 ),
                 ("java".into(), Ok("openjdk 21\n".into())),
             ],
+            xctest: Some(true),
         }
     }
 
@@ -972,6 +1030,29 @@ mod tests {
                 .unwrap()
                 .trim(),
             "hi"
+        );
+    }
+
+    #[test]
+    fn an_unreachable_testmanagerd_is_reported_and_does_not_stop_the_node() {
+        let mut i = good();
+        i.xctest = Some(false);
+        let r = evaluate(&i, 1);
+        assert_eq!(r.problem(), None, "{:?}", r.checks);
+        let c = r.checks.iter().find(|c| c.name == "xctest").unwrap();
+        assert!(!c.ok && !c.blocks);
+        assert!(c.detail.contains("error 3"), "{}", c.detail);
+        // Not asked (not macOS): no line at all.
+        i.xctest = None;
+        assert!(evaluate(&i, 1).checks.iter().all(|c| c.name != "xctest"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_service_nobody_registered_is_not_reachable() {
+        assert_eq!(
+            service_reachable("com.mason.no-such-service-xyz"),
+            Some(false)
         );
     }
 }

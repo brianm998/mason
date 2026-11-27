@@ -258,7 +258,11 @@ private fun TaskPage(model: MonitorModel, id: Long) {
     d.card?.takeIf { it.ask.isNotEmpty() || it.options.isNotEmpty() }?.let { DecisionCardView(model, id, it) }
     if (d.failure.isNotEmpty()) Text(d.failure, Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error)
     if (d.closing.isNotEmpty()) Text(d.closing, Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
-    TaskActions(model, row) { confirmCancel = true }
+    val failedPage = if (row.state == "failed") mason.monitor.FailedPage.choose(d.card != null, d.diagnosis_running != null, row.allowed_actions) else null
+    d.diagnosis_running?.takeIf { failedPage == mason.monitor.FailedPage.Diagnosing }?.let {
+        Text(mason.monitor.diagnosingLine(it.started_ms, it.ran_on, model.daemonNow()), Modifier.padding(horizontal = 16.dp, vertical = 4.dp), color = MaterialTheme.colorScheme.error)
+    }
+    TaskActions(model, row, failedPage) { confirmCancel = true }
     d.plan_view?.let { p ->
         Heading("Plan")
         Text(PlanText.copyAsText(p), Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodyMedium)
@@ -285,10 +289,17 @@ private fun TaskPage(model: MonitorModel, id: Long) {
 
 /** Cancel, skip testing and land now, each only when the daemon allows it for this task and this device may act. */
 @Composable
-private fun TaskActions(model: MonitorModel, row: TaskRow, askCancel: () -> Unit) {
+private fun TaskActions(model: MonitorModel, row: TaskRow, failedPage: mason.monitor.FailedPage?, askCancel: () -> Unit) {
     if (!model.canAct) return
+    var otherOpen by remember(row.id) { mutableStateOf(false) }
+    // Behind a diagnosis, Cancel folds into a collapsed "Other actions" row.
+    val folded = failedPage?.hidesUnderOther("cancel") == true
     Row(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        if ("cancel" in row.allowed_actions) OutlinedButton(onClick = askCancel) { Text("Cancel") }
+        if ("diagnose" in row.allowed_actions) OutlinedButton(onClick = { model.diagnose(row.id) }) { Text("Diagnose") }
+        if (folded && "cancel" in row.allowed_actions) {
+            TextButton(onClick = { otherOpen = !otherOpen }) { Text(if (otherOpen) "Other actions ▾" else "Other actions ▸") }
+            if (otherOpen) OutlinedButton(onClick = askCancel) { Text("Cancel") }
+        } else if ("cancel" in row.allowed_actions) OutlinedButton(onClick = askCancel) { Text("Cancel") }
         if ("skip_test" in row.allowed_actions) OutlinedButton(onClick = { model.skipTest(row.id, row.step) }) { Text("Skip testing") }
         if ("land_now" in row.allowed_actions) OutlinedButton(onClick = { model.landNow(row.id) }) { Text("Land now") }
     }
@@ -299,6 +310,7 @@ private fun TaskActions(model: MonitorModel, row: TaskRow, askCancel: () -> Unit
 private fun DecisionCardView(model: MonitorModel, task: Long, card: DecisionCard) {
     var selection by remember(card.hash) { mutableStateOf(MultiSelection.starting(card.options.size, card.options.indexOfFirst { it.recommended }.takeIf { it >= 0 })) }
     var other by remember(card.hash) { mutableStateOf("") }
+    var context by remember(card.hash) { mutableStateOf("") }
     Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = MaterialTheme.shapes.medium, modifier = Modifier.padding(16.dp).fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(card.ask, style = MaterialTheme.typography.titleMedium)
@@ -312,14 +324,15 @@ private fun DecisionCardView(model: MonitorModel, task: Long, card: DecisionCard
                         Text(label)
                     }
                 } else {
-                    Button(onClick = { model.answer(task, (i + 1).toString(), card.hash) }, enabled = model.canAct, modifier = Modifier.fillMaxWidth()) { Text(label) }
+                    Button(onClick = { model.answer(task, mason.monitor.AnswerRequest.option(i, context), card.hash); context = "" }, enabled = model.canAct, modifier = Modifier.fillMaxWidth()) { Text(label) }
                 }
             }
             if (card.multi_select) {
-                Button(onClick = { selection.answer?.let { model.answer(task, it, card.hash) } }, enabled = model.canAct && selection.answer != null) { Text("Send") }
+                Button(onClick = { selection.answer?.let { model.answer(task, mason.monitor.AnswerRequest.multi(it, context), card.hash); context = "" } }, enabled = model.canAct && selection.answer != null) { Text("Send") }
             }
+            OutlinedTextField(value = context, onValueChange = { context = it }, label = { Text("Add context (optional)") }, enabled = model.canAct, modifier = Modifier.fillMaxWidth())
             OutlinedTextField(value = other, onValueChange = { other = it }, label = { Text("Other") }, enabled = model.canAct, modifier = Modifier.fillMaxWidth())
-            Button(onClick = { otherAnswer(other)?.let { model.answer(task, it, card.hash); other = "" } }, enabled = model.canAct && otherAnswer(other) != null) { Text("Send other") }
+            Button(onClick = { mason.monitor.AnswerRequest.other(other, context)?.let { model.answer(task, it, card.hash); other = ""; context = "" } }, enabled = model.canAct && otherAnswer(other) != null) { Text("Send other") }
             if (!model.canAct) Text("This device can look but not answer.", style = MaterialTheme.typography.bodySmall)
         }
     }
