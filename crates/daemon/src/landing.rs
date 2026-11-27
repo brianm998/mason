@@ -1753,7 +1753,7 @@ impl Runner {
                 let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
                 batch.assemble(&active, &point)
             };
-            let mut asm = match asm {
+            let asm = match asm {
                 Ok(a) => a,
                 // A fetch that fails decides nothing (decision 0105): the batch waits for the
                 // remote and assembles again, and its tasks stay in landing meanwhile. Waiting
@@ -1776,14 +1776,6 @@ impl Runner {
             // that fails is logged, not fatal: landing went without it before.
             if let Err(e) = crate::jobs::setup_checkout(&def, &int_wt) {
                 tracing::warn!(batch = batch_id, "{e}");
-            }
-            // MASON, not the tasks, writes the README status block, from the stage notes
-            // the batch brings. It is committed here so the union that is verified is the
-            // union that lands.
-            if !asm.merged.is_empty() && batch.regenerate_status() {
-                if let Ok(h) = git::rev_parse(&int_wt, "HEAD") {
-                    asm.head = h;
-                }
             }
             for t in &asm.already {
                 landed.push(*t);
