@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use std::io::Write;
 use std::path::Path;
 
-/// One JSON object per line: `{"run", "issue", "file"}`. The minor findings, oldest first.
+/// One JSON object per line: `{"run", "issue", "file", "quote"}`. The minor findings, oldest first.
 const FILE: &str = "review-findings";
 
 /// An approval's advice that no develop round has acted on yet.
@@ -21,6 +21,19 @@ fn of_severity<'a>(findings: &'a Value, severity: &'a str) -> impl Iterator<Item
         .into_iter()
         .flatten()
         .filter(move |f| f["severity"] == severity)
+}
+
+/// The quote under a finding, each line marked with `> `; empty when there is none.
+fn quoted(f: &Value) -> String {
+    f["quote"]
+        .as_str()
+        .map(|q| {
+            q.lines()
+                .filter(|l| !l.trim().is_empty())
+                .map(|l| format!("\n    > {}", l.trim_end()))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// `issue (file)`, the file only when there is one.
@@ -35,7 +48,7 @@ fn text(f: &Value) -> String {
 
 fn bullets(findings: &Value, severity: &str) -> String {
     of_severity(findings, severity)
-        .map(|f| format!("\n- [{severity}] {}", text(f)))
+        .map(|f| format!("\n- [{severity}] {}{}", text(f), quoted(f)))
         .collect()
 }
 
@@ -69,7 +82,8 @@ pub fn keep(dir: &Path, run: u64, findings: &Value) {
     for f in of_severity(findings, "minor") {
         let t = text(f);
         if !seen.contains(&t) {
-            let kept = json!({"run": run, "issue": f["issue"], "file": f["file"]});
+            let kept =
+                json!({"run": run, "issue": f["issue"], "file": f["file"], "quote": f["quote"]});
             lines.push_str(&format!("{kept}\n"));
             seen.push(t);
         }
@@ -102,7 +116,7 @@ fn list(dir: &Path) -> Vec<Value> {
 pub fn lines(dir: &Path) -> Vec<String> {
     list(dir)
         .iter()
-        .map(|f| format!("minor: {}", text(f)))
+        .map(|f| format!("minor: {}{}", text(f), quoted(f)))
         .collect()
 }
 
@@ -145,6 +159,21 @@ mod tests {
         keep(d.path(), 3, &f);
         keep(d.path(), 5, &f);
         assert_eq!(lines(d.path()), vec!["minor: a nit (a.rs)"]);
+    }
+
+    #[test]
+    fn the_quote_is_shown_under_each_finding() {
+        let d = tempfile::tempdir().unwrap();
+        let f = json!([
+            {"severity": "blocking", "issue": "broken", "quote": "let x = 1;"},
+            {"severity": "minor", "issue": "a nit", "file": "a.rs", "quote": "l1\nl2"},
+        ]);
+        keep(d.path(), 3, &f);
+        assert_eq!(
+            lines(d.path()),
+            vec!["minor: a nit (a.rs)\n    > l1\n    > l2"]
+        );
+        assert!(changes_feedback("s", &f).contains("- [blocking] broken\n    > let x = 1;"));
     }
 
     #[test]
