@@ -12,9 +12,24 @@ import XCTest
 /// `HOSTS_SNAPSHOT_DIR` names a folder the pictures are written there.
 @MainActor
 final class HostsSnapshotTests: XCTestCase {
+    // The same recorded view as MonitorCoreTests/HostsTests (the test targets cannot share code).
+    private static let json = #"""
+    {"status": "ok", "github": {"enabled": true}, "hosts": [
+      {"kind": "local", "name": "this Mac", "status": "held for heat: die 95 °C", "runs": []},
+      {"kind": "node", "name": "marmot", "status": "accepting, 2 of 4 jobs", "runs": [
+        {"task": {"id": "7", "key": "mason #7", "title": "Fix the thing", "project": "mason",
+                  "state": "developing", "activity": "writing the tests"},
+         "kind": "agent", "name": "develop", "host": "node:marmot", "sinceMs": "1000"},
+        {"kind": "batch", "name": "b12", "host": "node:marmot"}]},
+      {"kind": "github", "name": "GitHub", "status": "6 of 20 runners", "runs": [
+        {"task": {"id": "9", "key": "mason #9", "title": "Other", "state": "testing"},
+         "kind": "check", "name": "cargo-workspace", "host": "github:macos",
+         "sinceMs": "61000", "url": "https://github.com/o/r/actions/runs/1"}]}]}
+    """#
+
     private func model() throws -> MonitorModel {
         let m = MonitorModel()
-        m.home = try HomeView(jsonString: HostsTests.json)
+        m.home = try HomeView(jsonString: Self.json)
         return m
     }
 
