@@ -151,7 +151,7 @@ pub fn exit_warning(highest: u32) -> Option<String> {
     }
     Some(format!(
         "{left} stage and exit-script numbers left: the highest handed out is {highest} and the ceiling is {EXIT_CEILING}. \
-         Another digit is a change to scripts/run-exit-scripts.sh and scripts/gen-status.sh; make it before the numbers run out."
+         Another digit is a change to scripts/run-exit-scripts.sh; make it before the numbers run out."
     ))
 }
 
@@ -175,9 +175,8 @@ pub fn prompt_block(m: &Mine) -> String {
     format!(
         "Your numbers were handed out by MASON: your stage note is {note}, your decision record is {dec}, \
          your exit script is {script} (and {script_real}, {script_manual} if you need them). Do not look for \
-         the next number yourself; do not take another number. Do not edit the `Status:` block in README.md: \
-         put your one-sentence summary in your stage note as a line starting `Summary: ` instead, and \
-         MASON builds the status block from the stage notes when your change lands.",
+         the next number yourself; do not take another number. Do not add an entry to README.md for your \
+         change; edit README.md only when your change makes something it says wrong.",
         script_real = script.replace(".sh", "-real.sh"),
         script_manual = script.replace(".sh", "-manual.sh"),
     )
@@ -503,12 +502,30 @@ mod tests {
             w.contains("highest handed out is 9949") && w.contains("ceiling is 9999"),
             "{w}"
         );
-        assert!(
-            w.contains("scripts/run-exit-scripts.sh") && w.contains("scripts/gen-status.sh"),
-            "{w}"
-        );
+        assert!(w.contains("scripts/run-exit-scripts.sh"), "{w}");
         let w = exit_warning(EXIT_CEILING).expect("none left");
         assert!(w.starts_with("0 stage and exit-script numbers left"), "{w}");
+    }
+
+    #[test]
+    fn the_prompt_keeps_changes_out_of_the_readme_and_asks_for_no_summary() {
+        let p = prompt_block(&Mine {
+            decision: Some(7),
+            exit: Some(41),
+            from_stage: false,
+        });
+        assert!(
+            p.contains("Do not add an entry to README.md for your change"),
+            "{p}"
+        );
+        assert!(
+            p.contains("edit README.md only when your change makes something it says wrong"),
+            "{p}"
+        );
+        assert!(
+            !p.contains("Summary:") && !p.to_lowercase().contains("status"),
+            "{p}"
+        );
     }
 
     #[test]
