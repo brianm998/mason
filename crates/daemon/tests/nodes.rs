@@ -3142,6 +3142,13 @@ fn a_node_job_whose_host_dies_leaves_no_grandchild_behind() {
         support::wait_for("the job's grandchild to run", 60, || {
             grandchild_pid(&pidfile).is_some()
         });
+        // The host writes its record after it has spawned the command, so the grandchild can
+        // run before the host is on record.
+        support::wait_for("the job's host to be on record", 60, || {
+            mason_step_host::registry::Registry::new(&hosts)
+                .scan()
+                .is_ok_and(|f| !f.is_empty())
+        });
         let found = mason_step_host::registry::Registry::new(&hosts)
             .scan()
             .unwrap();
