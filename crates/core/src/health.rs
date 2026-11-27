@@ -181,6 +181,8 @@ pub struct RoundFact {
     pub attempt: u32,
     /// The last few rounds, newest last: `green` or `red (n failing)`.
     pub last_checks: Vec<String>,
+    /// One line per open remote run of the task (kind, runs_on, waiting, poll age).
+    pub remote: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -464,6 +466,9 @@ pub fn judge(x: &Facts, l: &Limits) -> Vec<Finding> {
                 if let Some(r) = round {
                     for c in &r.last_checks {
                         ev.push(format!("check: {c}"));
+                    }
+                    for c in &r.remote {
+                        ev.push(format!("remote run: {c}"));
                     }
                 }
                 ev.push(format!("no progress for {} min", mins(t.silent_ms)));
@@ -879,6 +884,7 @@ mod tests {
                 rounds,
                 attempt: 2,
                 last_checks: vec!["red (3 failing)".into()],
+                remote: Vec::new(),
             }],
             ..Default::default()
         };
@@ -900,6 +906,40 @@ mod tests {
         assert_eq!(
             keys(&judge(&x(t, 0), &l())),
             vec!["stuck:long:5".to_string()]
+        );
+    }
+
+    #[test]
+    fn stuck_long_names_open_remote_runs() {
+        let mut x = Facts {
+            tasks: vec![TaskFact {
+                id: 5,
+                state: "developing".into(),
+                is_step: true,
+                in_state_ms: 7 * H,
+                typical_hi_ms: Some(20 * MIN),
+                silent_ms: 0,
+                waiting: None,
+                holders: None,
+            }],
+            rounds: vec![RoundFact {
+                task: 5,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let out = judge(&x, &l());
+        assert!(!out[0].evidence.iter().any(|e| e.contains("remote")));
+        x.rounds[0].remote =
+            vec!["test step on node marmot, waiting false, polled 1 min ago".into()];
+        let out = judge(&x, &l());
+        assert_eq!(
+            out[0]
+                .evidence
+                .iter()
+                .filter(|e| e.contains("remote run"))
+                .count(),
+            1
         );
     }
 
