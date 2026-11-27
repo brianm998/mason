@@ -118,6 +118,7 @@ pub mod taskedit;
 pub mod thermal;
 pub mod tiermap;
 pub mod tracker;
+pub mod tried;
 pub mod update;
 pub mod update_plan;
 pub mod usage;
