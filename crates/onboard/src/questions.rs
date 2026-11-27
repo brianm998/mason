@@ -1177,7 +1177,15 @@ mod tests {
 
     #[test]
     fn a_terminal_is_asked_in_part_21s_order_and_only_what_flags_leave() {
-        let (r, asked) = run(&Flags::default(), &detected(), true);
+        // An agent the machine can see, so `agent-bin` is not asked.
+        let f = Flags {
+            machine: Machine {
+                known_bins: vec![(Agent::Claude, std::env::current_exe().unwrap())],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (r, asked) = run(&f, &detected(), true);
         r.unwrap();
         assert_eq!(
             asked,

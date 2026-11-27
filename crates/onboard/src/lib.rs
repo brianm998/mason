@@ -784,7 +784,10 @@ mod tests {
     #[test]
     fn answering_everything_leaves_no_question_and_lists_the_files() {
         let d = repo(&[]);
-        let p = plan(d.path(), &all_answered());
+        let (_h, m) = machine(true);
+        let mut f = all_answered();
+        f.machine = m;
+        let p = plan(d.path(), &f);
         assert!(p.errors.is_empty(), "{:?}", p.errors);
         assert!(p.next.is_none());
         let names: Vec<&str> = p.files.iter().map(|(n, _)| n.as_str()).collect();
