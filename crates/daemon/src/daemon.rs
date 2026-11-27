@@ -1451,6 +1451,7 @@ impl Daemon {
                 crate::hung::check(&d, &mut tracker, now_ms());
                 crate::hostedcheck::stop_unwanted(&d);
                 crate::remote::reap_adopted(&d);
+                crate::remote::reap_untracked(&d);
             }
             let c = d.broker.compilation();
             let mut now = format!("{} {}", c.limit, c.used);
