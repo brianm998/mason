@@ -749,7 +749,7 @@ mod tests {
         let mut p = crate::config::parse_project(
             "p",
             &format!(
-                "path = \"{}\"\nbase = \"main\"\ntest_cmd = \"true\"\n",
+                "path = \"{}\"\nbase = \"main\"\ntest = \"true\"\n",
                 dir.display()
             ),
         )
