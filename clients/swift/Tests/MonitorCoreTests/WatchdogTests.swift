@@ -31,10 +31,9 @@ final class WatchdogTests: XCTestCase {
         final class Lines: @unchecked Sendable { var all: [String] = [] }
         let lines = Lines()
         let w = MainThreadWatchdog()
-        w.start(config: .release, log: { lines.all.append($0) })
+        w.arm(config: .release, log: { lines.all.append($0) })
         w.note(lateMs: 500)
         w.note(lateMs: 1500)
-        w.stop()
         XCTAssertEqual(lines.all, ["main thread blocked for 1500 ms"])
     }
 
@@ -58,8 +57,7 @@ final class WatchdogTests: XCTestCase {
     func testABlockedMainQueueIsOneSampleAndOneLine() {
         let f = Fake()
         let w = f.make()
-        w.start(config: .release, log: { f.lines.append($0) })
-        w.stop()  // drive the ticks by hand
+        w.arm(config: .release, log: { f.lines.append($0) })  // no timer: ticks are driven by hand
         for _ in 0..<14 { w.tick(); f.now += 250 }
         XCTAssertEqual(f.held.count, 1)
         f.now = 3500
@@ -73,8 +71,7 @@ final class WatchdogTests: XCTestCase {
     func testAHiddenPingCountsInTheBackgroundWindowOnly() {
         let f = Fake()
         let w = f.make()
-        w.start(config: .release, log: { f.lines.append($0) })
-        w.stop()
+        w.arm(config: .release, log: { f.lines.append($0) })
         f.state = .hidden
         w.tick(); f.now = 1500
         f.held.removeFirst()()

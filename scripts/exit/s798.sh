@@ -112,12 +112,14 @@ echo "== the fast-tracked task's run_check is red, naming the new test"
 m task add "Add a test" --project alpha --body "x" > /dev/null
 m task skip 0 --all --reason "exit test" > /dev/null
 end=$((SECONDS + 240))
-until m logs 0 2>&1 | grep -q 'needs_the_code'; do
+# The failing test's line is streamed into the log while the check is still running; the verdict
+# (`RED`) is only logged when run_check returns, so wait for the verdict, not the first line.
+until m logs 0 2>&1 | grep -q 'RED'; do
   [ "$(m task show 0 --json 2>/dev/null | jq_state)" != landed ] || fail "the task landed with a failing test"
-  [ $SECONDS -lt $end ] || fail "run_check never named the failing test"
+  [ $SECONDS -lt $end ] || fail "run_check never reported red"
   sleep 0.5
 done
-m logs 0 2>&1 | grep -q 'RED' || fail "run_check was not red"
+m logs 0 2>&1 | grep -q 'needs_the_code' || fail "run_check did not name the failing test"
 
 echo "== the task does not land"
 for _ in $(seq 1 100); do
