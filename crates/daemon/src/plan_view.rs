@@ -38,7 +38,7 @@ pub fn parse_plan(raw: &str) -> PlanView {
         v.steps_are_list = is_list;
     }
     v.files = strings(obj.get("files"));
-    v.criteria = strings(obj.get("acceptance_criteria"));
+    v.criteria = crate::criteria::lines(&Value::Object(obj.clone()), None);
     for (k, val) in &obj {
         if KNOWN.contains(&k.as_str()) {
             continue;
@@ -193,6 +193,13 @@ mod tests {
 
     fn approach(a: &str) -> PlanView {
         parse(json!({ "approach": a }))
+    }
+
+    #[test]
+    fn criteria_with_checks_render_with_their_check() {
+        let v = parse(json!({"acceptance_criteria": [
+            {"criterion": "x works", "check": "test x"}, "old style"]}));
+        assert_eq!(v.criteria, vec!["x works — check: test x", "old style"]);
     }
 
     #[test]

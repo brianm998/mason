@@ -1343,7 +1343,19 @@ impl<'a> Ctx<'a> {
         let tail = log_tail(self.d, id);
         let plan =
             std::fs::read_to_string(self.d.cfg.task_dir(id).join("plan.json")).unwrap_or_default();
-        let plan_view = (!plan.is_empty()).then(|| crate::plan_view::parse_plan(&plan));
+        let mut plan_view = (!plan.is_empty()).then(|| crate::plan_view::parse_plan(&plan));
+        // Develop's status for each criterion, once it has reported (task 1136).
+        if let (Some(v), Ok(p), Some(ch)) = (
+            plan_view.as_mut(),
+            serde_json::from_str::<serde_json::Value>(&plan),
+            std::fs::read_to_string(self.d.cfg.task_dir(id).join("change.json"))
+                .ok()
+                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()),
+        ) {
+            if crate::criteria::is_graded(&p) {
+                v.criteria = crate::criteria::lines(&p, Some(&ch));
+            }
+        }
         let removes = crate::landing::removals_view(&self.d.cfg.task_dir(id));
         Some(TaskDetailView {
             running_on: self.running_on(id),

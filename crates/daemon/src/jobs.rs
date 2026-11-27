@@ -4258,6 +4258,19 @@ fn agent_job(c: &Ctx) {
         _ => prompt,
     };
 
+    // The acceptance criteria with develop's report, for review (task 1136).
+    let prompt = if kind == StepKind::Review {
+        let change: Option<Value> = std::fs::read_to_string(dir.join("change.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok());
+        match crate::criteria::block(plan.as_ref(), change.as_ref()) {
+            Some(b) => format!("{prompt}\n\n{b}"),
+            None => prompt,
+        }
+    } else {
+        prompt
+    };
+
     // The minor findings of an approval, for the develop round that follows one, if any does.
     let prompt = match crate::reviewfindings::pending_advice(&dir) {
         Some(a) if kind == StepKind::Develop => format!("{prompt}\n\n{a}"),
@@ -4443,6 +4456,29 @@ fn agent_job(c: &Ctx) {
                     Err(p)
                 }
             })
+        })
+    });
+    // Each acceptance criterion is reported on by develop and graded by review (task 1136).
+    let validator = validator.map(|inner| -> Validator {
+        let (plan, dir) = (plan.clone(), dir.clone());
+        Box::new(move |tool, args| {
+            let mut p = inner(tool, args).err().unwrap_or_default();
+            if let Some(plan) = &plan {
+                if tool == "submit_change" {
+                    p.extend(crate::criteria::change_problems(plan, args));
+                } else if tool == "submit_review" {
+                    let change: Value = std::fs::read_to_string(dir.join("change.json"))
+                        .ok()
+                        .and_then(|t| serde_json::from_str(&t).ok())
+                        .unwrap_or_default();
+                    p.extend(crate::criteria::review_problems(plan, &change, args));
+                }
+            }
+            if p.is_empty() {
+                Ok(())
+            } else {
+                Err(p)
+            }
         })
     });
     // A head whose tree was red on the test step, unchanged since, is not submitted again.
@@ -5203,6 +5239,13 @@ fn finish_agent_inner(c: &Ctx, report: StepReport, dir: &Path) {
                 .ok()
                 .and_then(|t| serde_json::from_str(&t).ok());
             let mut submission = submission;
+            if c.state == State::Review {
+                let change: Option<serde_json::Value> =
+                    std::fs::read_to_string(dir.join("change.json"))
+                        .ok()
+                        .and_then(|t| serde_json::from_str(&t).ok());
+                submission = crate::criteria::apply_review(plan.as_ref(), change.as_ref(), submission);
+            }
             if c.state == State::Review && submission["verdict"] == "changes" {
                 match crate::validate::run(c, plan.as_ref(), &submission) {
                     crate::validate::Outcome::Stands => {}

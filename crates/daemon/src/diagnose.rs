@@ -567,12 +567,18 @@ fn diagnose(d: &Arc<Daemon>, task: TaskId, run: StepRunId, failed_at: u64, mark:
         plan.as_ref(),
         &reason,
         &history,
-        match (
-            crate::prompts::tried_block(&crate::tried::rounds(&dir)),
-            crate::prompts::edits_block(&dir),
-        ) {
-            (Some(t), Some(e)) => Some(format!("{t}\n\n{e}")),
-            (t, e) => t.or(e),
+        {
+            let change: Option<Value> = std::fs::read_to_string(dir.join("change.json"))
+                .ok()
+                .and_then(|t| serde_json::from_str(&t).ok());
+            [
+                crate::criteria::block(plan.as_ref(), change.as_ref()),
+                crate::prompts::tried_block(&crate::tried::rounds(&dir)),
+                crate::prompts::edits_block(&dir),
+            ]
+            .into_iter()
+            .flatten()
+            .reduce(|a, b| format!("{a}\n\n{b}"))
         }
         .as_deref(),
         &log_tails(&dir, 3, 40),
