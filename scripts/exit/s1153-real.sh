@@ -41,3 +41,4 @@ listed=$(grep -m1 '"subtype":"init"' "$root/out.jsonl" | sed 's/.*"skills":\[\([
 echo "skills: $listed"
 [ "$listed" = '"mason:fixture"' ] || { echo "FAILED: expected only mason:fixture" >&2; exit 1; }
 echo "OK s1153-real"
+echo "RESULT s1153-real: the init event listed only the plugin's skill, passed $(date +%F)"
