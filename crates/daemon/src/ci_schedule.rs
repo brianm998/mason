@@ -36,6 +36,8 @@ pub trait Host {
     fn jobs(&self, run: u64) -> Result<Vec<ActionsJob>, String>;
     fn log_tail(&self, job: u64) -> Option<String>;
     fn rerun_failed(&self, run: u64) -> Result<(), String>;
+    /// Cancel a run that is still going.
+    fn cancel_run(&self, run: u64) -> Result<(), String>;
 }
 
 impl Host for GitHub {
@@ -60,6 +62,9 @@ impl Host for GitHub {
     }
     fn rerun_failed(&self, run: u64) -> Result<(), String> {
         GitHub::rerun_failed(self, run).map_err(|e| e.to_string())
+    }
+    fn cancel_run(&self, run: u64) -> Result<(), String> {
+        GitHub::cancel_run(self, run).map_err(|e| e.to_string())
     }
 }
 
@@ -317,10 +322,28 @@ pub fn run(
         Ok((gh, _)) => gh,
         Err(e) => return (e, true),
     };
-    if !row.follow.is_empty() {
-        return (follow(d, pid, ci, &spec.name, &host, row, now), false);
-    }
     let repo = Git { d, p: project, pid };
+    let mut took = String::new();
+    if !row.follow.is_empty() {
+        let manual = d
+            .intro
+            .triggers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&crate::schedule::row_name(&project.id, &spec.name))
+            .is_some_and(|(t, _)| t == full::MANUAL);
+        if manual {
+            if let Some(say) = take_over_outdated(d, pid, ci, &spec.name, &host, &repo, row) {
+                took = format!("{say}; ");
+            }
+        }
+    }
+    if !row.follow.is_empty() {
+        return (
+            follow(d, pid, ci, &spec.name, &host, &repo, row, now),
+            false,
+        );
+    }
     let (trigger, force) = d
         .intro
         .triggers
@@ -333,7 +356,44 @@ pub fn run(
         trigger: &trigger,
         force,
     };
-    (dispatch_as(d, pid, ci, &host, &repo, row, now, &go), true)
+    let said = dispatch_as(d, pid, ci, &host, &repo, row, now, &go);
+    (format!("{took}{said}"), true)
+}
+
+/// A manual run asked while a rerun is followed: when the rerun is of a commit develop has moved
+/// past, cancel it and drop the follow, so a run on the current head can be dispatched. A rerun
+/// of the current head is left alone. Says what it did, or `None` when it did nothing.
+pub fn take_over_outdated(
+    d: &Daemon,
+    pid: ProjectId,
+    ci: &CiSpec,
+    name: &str,
+    host: &dyn Host,
+    repo: &dyn Repo,
+    row: &mut ScheduleRow,
+) -> Option<String> {
+    let f = decode(&row.follow)?;
+    if f.phase != Phase::Await2 {
+        return None;
+    }
+    let branch = branch_of(d, pid, ci).ok()?;
+    let runs = host.runs(&ci.workflow, &branch).ok()?;
+    let run = runs.iter().find(|r| r.id == f.run_id)?;
+    repo.fetch().ok()?;
+    let tip = repo.tip().ok()?;
+    if tip == run.sha {
+        return None;
+    }
+    if run.status != "completed" {
+        host.cancel_run(f.run_id).ok()?;
+    }
+    finish_full(d, pid, name, full::CUT_OFF, "");
+    row.follow.clear();
+    Some(format!(
+        "cancelled the rerun of run {} (commit {} is behind develop's head); dispatching on the current head",
+        f.run_id,
+        run.sha.chars().take(9).collect::<String>()
+    ))
 }
 
 // ---- the `suites` kind: MASON's own full test (#783) --------------------------------------------
@@ -587,6 +647,7 @@ pub fn follow(
     ci: &CiSpec,
     name: &str,
     host: &dyn Host,
+    repo: &dyn Repo,
     row: &mut ScheduleRow,
     now: u64,
 ) -> String {
@@ -639,32 +700,45 @@ pub fn follow(
                 f.run_id
             )
         }
-        (Step::Check, Some(_)) => match check(host, &mut f) {
-            Ok(Some(say)) => {
-                row.follow = encode(&f);
-                return say;
-            }
-            Ok(None) => {
-                finish_full(
-                    d,
-                    pid,
-                    name,
-                    full::GREEN,
-                    run.map_or("", |r| r.url.as_str()),
-                );
-                format!("run {} is green", f.run_id)
-            }
-            Err(e) => {
-                // Not asked again until it answers; give up when it never does.
-                if now.saturating_sub(f.at) > rules::GIVE_UP_MS {
-                    finish_full(d, pid, name, full::CUT_OFF, "");
-                    row.follow.clear();
-                    return format!("dropped run {}: {e}", f.run_id);
+        (Step::Check, Some(r)) if r.conclusion.as_deref() == Some("cancelled") => {
+            // Someone cancelled the run (a job cut off at its time limit leaves the run
+            // `failure`, not `cancelled`): nothing failed, so nothing is rerun or filed.
+            finish_full(d, pid, name, full::CUT_OFF, "");
+            format!("run {} was cancelled; not rerun, nothing filed", f.run_id)
+        }
+        (Step::Check, Some(r)) => {
+            let outdated = repo.fetch().is_ok() && repo.tip().is_ok_and(|t| t != r.sha);
+            match check(host, &mut f, outdated) {
+                Ok(Checked::Rerunning(say)) => {
+                    row.follow = encode(&f);
+                    return say;
                 }
-                row.follow = encode(&f);
-                return format!("run {}: {e}; will try again", f.run_id);
+                Ok(Checked::Superseded(say)) => {
+                    finish_full(d, pid, name, full::CUT_OFF, "");
+                    say
+                }
+                Ok(Checked::Green) => {
+                    finish_full(
+                        d,
+                        pid,
+                        name,
+                        full::GREEN,
+                        run.map_or("", |r| r.url.as_str()),
+                    );
+                    format!("run {} is green", f.run_id)
+                }
+                Err(e) => {
+                    // Not asked again until it answers; give up when it never does.
+                    if now.saturating_sub(f.at) > rules::GIVE_UP_MS {
+                        finish_full(d, pid, name, full::CUT_OFF, "");
+                        row.follow.clear();
+                        return format!("dropped run {}: {e}", f.run_id);
+                    }
+                    row.follow = encode(&f);
+                    return format!("run {}: {e}; will try again", f.run_id);
+                }
             }
-        },
+        }
         (Step::Classify, Some(r)) => {
             match classify_and_file(d, pid, ci, name, host, &f, r, &branch) {
                 Ok((say, verdict)) => {
@@ -693,14 +767,23 @@ pub fn follow(
 
 /// The first attempt finished. `Ok(None)` when it was green; otherwise the failures are taken
 /// (the rerun replaces them) and the failed jobs rerun.
-fn check(host: &dyn Host, f: &mut Follow) -> Result<Option<String>, String> {
+fn check(host: &dyn Host, f: &mut Follow, outdated: bool) -> Result<Checked, String> {
     let jobs = host.jobs(f.run_id)?;
     let red: Vec<&ActionsJob> = jobs
         .iter()
         .filter(|j| j.conclusion.as_deref().is_some_and(|c| !is_green(c)))
         .collect();
     if red.is_empty() {
-        return Ok(None);
+        return Ok(Checked::Green);
+    }
+    if outdated {
+        // Develop has moved on: a rerun would spend runners on code that may be fixed. The
+        // schedule dispatches on the current head at its next chance.
+        return Ok(Checked::Superseded(format!(
+            "run {}: {} job(s) failed, but develop has moved past its commit; superseded, not rerun, nothing filed",
+            f.run_id,
+            red.len()
+        )));
     }
     f.failures = red
         .iter()
@@ -721,11 +804,18 @@ fn check(host: &dyn Host, f: &mut Follow) -> Result<Option<String>, String> {
         .collect();
     host.rerun_failed(f.run_id)?;
     f.phase = Phase::Await2;
-    Ok(Some(format!(
+    Ok(Checked::Rerunning(format!(
         "run {}: {} job(s) failed; rerunning them once",
         f.run_id,
         f.failures.len()
     )))
+}
+
+/// What looking at a finished first attempt found.
+enum Checked {
+    Green,
+    Rerunning(String),
+    Superseded(String),
 }
 
 fn fence(s: &str) -> String {
