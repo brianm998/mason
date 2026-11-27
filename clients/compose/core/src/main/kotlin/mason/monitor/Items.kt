@@ -155,7 +155,7 @@ fun MonitorModel.visibleItems(): List<Item> {
             out += r.item("detail", 0)
             out += r.progressItems(daemonNow())
             out += r.blockerItems(canAct)
-            d.steps.forEachIndexed { i, s -> out += Item("step:${s.run}", listOf(s.name, s.outcome) + s.launches.map { it.display }, order = i) }
+            d.steps.forEachIndexed { i, s -> out += Item("step:${s.run}", listOf(s.name, s.outcome) + s.launches.map { it.display } + listOf(s.context).filter { it.isNotEmpty() }, order = i) }
             d.card?.let { out += it.item(r.id, canAct) }
             d.approval?.let { out += it.item(r.id, canAct) }
         }
