@@ -1928,6 +1928,7 @@ fn a_node_with_the_documented_length_of_data_dir_runs_jobs_with_long_ids() {
                 listener_bound: true,
                 mdns: node_doctor::Mdns::Off,
                 tools: vec![],
+                xctest: None,
             },
             1,
         );

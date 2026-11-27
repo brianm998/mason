@@ -325,6 +325,14 @@ is lost shows up before a job meets it:
 - **toolchains:** `cargo`, `xcode-select` and `java` run as that user without a prompt, found on
   the `PATH` a job gets (`~/.cargo/bin` first, whatever the daemon's own `PATH` is) and run from the
   user's home. A `cargo` with no default toolchain says to run `rustup default <version>`.
+- **xctest:** `com.apple.testmanagerd.control` can be looked up from the node's launchd domain.
+  testmanagerd is a per-login-session agent (`LimitLoadToSessionType` is `LoginWindow` and `Aqua`),
+  so a LaunchDaemon with nobody logged in as the node user has no such service, and
+  `xcodebuild test` ends in "Connection init failed at lookup with error 3" a couple of seconds
+  after the build. This does not stop the node (builds work); the node reports an empty `xctest`
+  toolchain, and the coordinator sends no `xcodebuild test` run to it. Hosted macOS app tests also
+  need a window server connection, so the only fix is a GUI session for the node user; with
+  FileVault on, that means someone logging in at the console after each boot.
 
 A failure that stops the node doing a job makes it `not accepting`, with the reason as `mason node
 list` shows it on the iMac. A new tool that does not run as `masonnode` is almost always a missing

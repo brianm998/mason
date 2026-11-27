@@ -60,6 +60,7 @@ data class PendingCommand(
             "skip_test" -> "Skipping…" to "Skipped"
             "skip_all_tests" -> "Skipping all testing…" to "Immune to testing"
             "answer" -> "Sending answer…" to "Answer sent"
+            "diagnose" -> "Asking…" to "Diagnosis started"
             "block" -> "Adding blocker…" to "Blocker added"
             "unblock" -> "Releasing…" to "Released"
             "pause" -> "Pausing…" to "Paused"
@@ -79,6 +80,7 @@ data class PendingCommand(
             c.reject != null -> "reject" to c.reject!!.task
             c.explore_anyway != null -> "explore_anyway" to c.explore_anyway!!.task
             c.answer != null -> "answer" to c.answer!!.task
+            c.diagnose != null -> "diagnose" to c.diagnose!!.task
             c.skip != null -> (if (c.skip!!.all_tests == true) "skip_all_tests" else "skip_test") to c.skip!!.task
             c.land_now != null -> "land_now" to c.land_now!!.task
             c.land_now_batch != null -> "land_now_batch" to batchKey(c.land_now_batch!!.batch)

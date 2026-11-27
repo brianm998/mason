@@ -449,7 +449,18 @@ private fun TaskDetail(model: MonitorModel, d: TaskDetailView, loading: Boolean 
         if (r.typical.isNotEmpty()) Text(r.typical, style = theme.small())
     }
     r.progress.running?.let { ProgressDetail(model, it) }
-    ActionButtons(model, r, hasApprovalView = d.approval != null)
+    val failedPage = if (r.state == "failed") FailedPage.choose(d.card != null, d.diagnosis_running != null, r.allowed_actions) else null
+    if (failedPage == FailedPage.Card) {
+        // The diagnosis first: its summary is the card's why, the failure line under it.
+        if (failedPage != FailedPage.Card) d.card?.let { DecisionCardView(model, r.id, it) }
+        if (d.failure.isNotEmpty() && failedPage != FailedPage.Card) LinkedText(model, "Failed: ${d.failure}", theme.body(color = theme.attention), Modifier.testTag("detail:failure"))
+    }
+    if (failedPage == FailedPage.Diagnosing) {
+        d.diagnosis_running?.let {
+            Text(diagnosingLine(it.started_ms, it.ran_on, model.daemonNow()), style = theme.body(color = theme.attention), modifier = Modifier.testTag("detail:diagnosing"))
+        }
+    }
+    ActionButtons(model, r, hasApprovalView = d.approval != null, failedPage = failedPage)
     if (loading) Text("Loading details…", style = theme.body(color = theme.muted), modifier = Modifier.testTag("detail:loading"))
     if (r.blockers.isNotEmpty()) {
         Row(horizontalArrangement = Arrangement.spacedBy(theme.spacingSmall), modifier = Modifier.testTag("waiting-for")) {

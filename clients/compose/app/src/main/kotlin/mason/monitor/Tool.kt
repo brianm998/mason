@@ -17,7 +17,7 @@ import kotlin.system.exitProcess
  *
  *     conformance --port P --out DIR     dump what the client shows at every demo checkpoint
  *     snapshot --port P --out DIR        render screenshots from `masond --demo-manual`
- *     answer --port P --task N [--option 1 | --text WORDS] [--hash H]   answer a task's open question as the card does
+ *     answer --port P --task N [--option 1 | --text WORDS] [--context TEXT] [--hash H]   answer a task's open question as the card does
  *     approve --port P --task N [--diff HASH]   what the Approve button sends (the hold's diff hash, as shown)
  *     reject --port P --task N [--reason WORDS]   what the Reject button sends
  *     dump --port P --out DIR            write what the home page shows now (a real daemon), as items
@@ -162,7 +162,7 @@ private fun answer(model: MonitorModel, args: List<String>) {
     if (!model.canAct) { println("not the owner: the card shows no buttons"); return }
     println("options: " + card.options.joinToString(" | ") { it.label + if (it.recommended) " (recommended)" else "" })
     // --hash sends a card hash the owner was not looking at, to see a stale card refused.
-    val r = call(model, Command(answer = Answer(task = t, answer = option, card_hash = args.opt("--hash") ?: card.hash), actor = model.identity), "answer")
+    val r = call(model, Command(answer = Answer(task = t, answer = option, card_hash = args.opt("--hash") ?: card.hash, context = contextText(args.opt("--context") ?: "") ?: ""), actor = model.identity), "answer")
     if (!r.ok) fail("the daemon refused the answer (${r.status}): ${r.error}")
     // What the daemon recorded as the answer ("Other: ..." for free text).
     (Codec.json(r.json)?.get("answer") as? String)?.let { println("the daemon recorded: $it") }

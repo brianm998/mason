@@ -335,6 +335,22 @@ impl<'a> Ctx<'a> {
         a
     }
 
+    /// What a failed task's row says about its diagnosis: "running", "ready" (it holds a card) or
+    /// "" (none, or not a failed task).
+    fn diagnosis_state(&self, t: &Task) -> String {
+        if t.state != State::Failed {
+            return String::new();
+        }
+        if crate::diagnose::running(self.d, t.id.0).is_some() {
+            return "running".into();
+        }
+        let rows = self.d.store.diagnoses(Some(t.id.0)).unwrap_or_default();
+        match crate::diagnose::pending_in(&rows, t).and_then(crate::diagnose::row_card) {
+            Some(_) => "ready".into(),
+            None => String::new(),
+        }
+    }
+
     /// A self-hosting hold nobody has approved yet, for a task still going.
     fn pending_hold(&self, t: &Task) -> Option<mason_store::HoldRow> {
         if !t.state.is_step() {
@@ -584,6 +600,7 @@ impl<'a> Ctx<'a> {
             in_state_ms: in_state / 60_000 * 60_000,
             state_since_ms: since,
             run_on_override: self.run_on.get(&t.id.0).cloned().unwrap_or_default(),
+            diagnosis: self.diagnosis_state(t),
             model,
             display: model_use
                 .as_ref()
@@ -1330,6 +1347,13 @@ impl<'a> Ctx<'a> {
         let removes = crate::landing::removals_view(&self.d.cfg.task_dir(id));
         Some(TaskDetailView {
             running_on: self.running_on(id),
+            diagnosis_running: (t.state == State::Failed)
+                .then(|| crate::diagnose::running(self.d, id))
+                .flatten()
+                .map(|(at, on)| DiagnosisRunning {
+                    started_ms: at,
+                    ran_on: on,
+                }),
             placement: Some(crate::place::task_placement(
                 self.d,
                 &self.project_name(t),

@@ -715,8 +715,11 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     fun skipTest(task: Long, step: String) = send(Command(skip = Skip(task = task, step = step)))
     /** Make a task immune to testing (a fast track): no test runs for it through landing; the full run is owed. */
     fun makeTestImmune(task: Long) = send(Command(skip = Skip(task = task, all_tests = true)))
-    fun answer(task: Long, text: String, cardHash: String) =
-        send(Command(answer = Answer(task = task, answer = text, card_hash = cardHash)))
+    fun answer(task: Long, text: String, cardHash: String, context: String = "") =
+        send(Command(answer = Answer(task = task, answer = text, card_hash = cardHash, context = context)))
+    fun answer(task: Long, r: AnswerRequest, cardHash: String) = answer(task, r.answer, cardHash, r.context)
+    /** Ask for a diagnosis of a failed task (owner only). */
+    fun diagnose(task: Long) = send(Command(diagnose = TaskRef(task = task)))
     fun addTask(project: String, title: String, body: String) =
         send(Command(add_task = AddTask(project = project, title = title, body = body)))
     fun setSessionLimit(units: Int) {
