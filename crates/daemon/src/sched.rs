@@ -889,6 +889,13 @@ impl Giver {
         self.b.lease_units(self.id)
     }
 
+    /// Can the pool ever grant `units`? `false` when a resource's limit is below what is asked.
+    pub fn pool_fits(&self, units: &BTreeMap<String, u32>) -> bool {
+        units
+            .iter()
+            .all(|(k, n)| self.b.limit(k).is_none_or(|l| l >= *n))
+    }
+
     /// Ask again for `units`, at the lease's rank and from when it first began to wait.
     /// Waits as [`Broker::acquire`] does.
     pub fn ask_again(
