@@ -677,6 +677,7 @@ fn an_answer_carries_the_card_hash_over_the_socket_too() {
             task: 2,
             answer: "1".into(),
             card_hash: hash.into(),
+            context: String::new(),
         })),
         actor: actor.into(),
         reason: String::new(),
