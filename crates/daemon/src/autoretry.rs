@@ -118,6 +118,12 @@ fn candidates(d: &Daemon, w: &World) -> Vec<(Failed, bool)> {
         .collect()
 }
 
+/// Every burst among the tasks failed outside the code right now (for the alert).
+pub fn current_bursts(d: &Daemon, w: &World) -> Vec<Burst> {
+    let failed: Vec<Failed> = candidates(d, w).into_iter().map(|(f, _)| f).collect();
+    bursts(&failed, now_ms(), d.cfg.burst_window, d.cfg.burst_min)
+}
+
 /// What the one host-wide outage entry groups every network failure under.
 const OUTAGE: &str = "network outage";
 
