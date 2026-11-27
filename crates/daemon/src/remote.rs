@@ -3994,7 +3994,18 @@ pub fn reap_adopted(d: &Arc<Daemon>) {
     if !any_remote(d) {
         return;
     }
-    let adopted = d.broker.adopted_remote();
+    // Runs a newer check took over are no longer counted but still owe a verdict (#1253); one
+    // whose record and hold are both gone is forgotten.
+    let holds_now = holds_dir(&d.cfg.hosts_dir());
+    d.broker.forget_taken_over(&|r| {
+        r.exists() || record_id(r).is_some_and(|id| hold_file(&holds_now, &id).exists())
+    });
+    let mut adopted = d.broker.adopted_remote();
+    for t in d.broker.taken_over_remote() {
+        if !adopted.contains(&t) {
+            adopted.push(t);
+        }
+    }
     if adopted.is_empty() || BUSY.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return;
     }
@@ -5870,6 +5881,34 @@ mod tests {
             .map(|h| h.record)
             .collect();
         assert_eq!(kept, vec![new]);
+    }
+
+    /// A run a newer check took over (#1253) is judged like an adopted one: cancelled, record
+    /// and hold gone, when its check record says superseded; kept when the new call attached.
+    #[test]
+    fn a_taken_over_run_is_cancelled_unless_the_new_call_attaches_to_it() {
+        token();
+        let r = repo();
+        let (gh, clk) = queued_gh(&r);
+        let logs = tempfile::tempdir().unwrap();
+        let (holds, gone) = adopted(&r, logs.path(), "t7r9-check-cargo-workspace-build19");
+        let (_, kept) = adopted(&r, logs.path(), "t7r9-check-cargo-workspace-other3");
+        std::fs::write(gone.with_extension("check"), "superseded=1\n").unwrap();
+        let b = crate::sched::tests::runner_broker(logs.path(), 4, 1, 0);
+        b.adopt_remote(&running_holds(&holds));
+        assert!(b.take_over_remote_where(&|k| k.starts_with("t7r9-check-cargo-workspace")));
+        assert!(b.adopted_remote().is_empty());
+        let ad = b.taken_over_remote();
+        assert_eq!(ad.len(), 2);
+        let mut memo = ReapMemo::default();
+        let done = pass(&r, &gh, &clk, &ad, &[], &holds, &mut memo, None);
+        assert_eq!(done.len(), 1, "{done:?}");
+        assert!(!gone.exists() && kept.exists());
+        let left: Vec<PathBuf> = running_holds(&holds)
+            .into_iter()
+            .map(|h| h.record)
+            .collect();
+        assert_eq!(left, vec![kept]);
     }
 
     #[test]
