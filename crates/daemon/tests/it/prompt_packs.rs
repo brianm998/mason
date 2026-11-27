@@ -133,6 +133,51 @@ fn without_a_fix_pack_the_round_gets_the_built_in_develop_prompt() {
 }
 
 #[test]
+fn what_earlier_rounds_tried_reaches_the_next_developer_and_the_reviewer() {
+    let rec = tempfile::tempdir().unwrap();
+    let r = rec.path();
+    let tried = |a: &str| json!([{"approach": a, "why_dropped": "it did not work"}]);
+    let s = Scratch::new(
+        "false",
+        json!({"steps": {
+            "develop": [
+                // Round one notes its dead end in a progress report and submits without one.
+                [{"call": {"tool": "report_progress",
+                           "args": {"message": "m", "tried": tried("FIRST-DEAD-END")}}},
+                 commit("echo a > a.txt && git add a.txt", "first"), submit()],
+                [commit("echo b > b.txt && git add b.txt", "second"),
+                 {"call": {"tool": "submit_change", "args": {
+                     "summary": "round", "head": "$HEAD", "tried": tried("SECOND-DEAD-END")}}}],
+                [record(r, "dev3"),
+                 commit("echo hello > hello.txt && git add hello.txt", "third"), submit()],
+            ],
+            "review": [[record(r, "review"),
+                {"call": {"tool": "submit_review", "args": {"verdict": "approve", "summary": "fine"}}}]],
+        }}),
+    );
+    s.push_files(
+        &[
+            (".mason/mason.toml", DEF),
+            (".mason/prompts/security-review.md", "SECURITY-PACK {task}"),
+        ],
+        "project setup",
+    );
+    let d = s.start();
+    let t = file_task(&d, "Two dead ends");
+    wait_state(&d, t, State::Landed, 600);
+    for name in ["dev3", "review"] {
+        let p = std::fs::read_to_string(r.join(format!("{name}.txt"))).unwrap_or_default();
+        let at = |s: &str| p.find(s).unwrap_or_else(|| panic!("no {s} in {name}: {p}"));
+        let (a, z) = (
+            at("=== Earlier rounds tried"),
+            at("=== end of Earlier rounds tried"),
+        );
+        let (newer, older) = (at("SECOND-DEAD-END"), at("FIRST-DEAD-END"));
+        assert!(a < newer && newer < older && older < z, "{name}: {p}");
+    }
+}
+
+#[test]
 fn a_step_whose_prompt_file_is_missing_fails_and_names_it() {
     let s = Scratch::new(
         "false",
