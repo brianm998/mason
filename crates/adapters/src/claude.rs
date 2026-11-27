@@ -711,6 +711,8 @@ pub struct ParseState {
     live: Option<TokenReport>,
     last_live: Option<TokenReport>,
     context: ContextTrack,
+    /// Assistant messages seen so far, for the turn of a file edit.
+    turns: u32,
 }
 
 /// What is known of the context window's fill.
@@ -804,6 +806,60 @@ fn known_window(model: &str) -> u64 {
         LARGE_WINDOW
     } else {
         SMALL_WINDOW
+    }
+}
+
+/// A string cut to at most `FILE_EDIT_TEXT_MAX` bytes on a character boundary.
+fn capped(s: &str, truncated: &mut bool) -> String {
+    let max = mason_adapter_api::FILE_EDIT_TEXT_MAX;
+    if s.len() <= max {
+        return s.to_string();
+    }
+    *truncated = true;
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
+}
+
+/// The file edits a `tool_use` block makes: one per `Edit`, one per entry of a `MultiEdit`,
+/// one per `Write`. Any other tool makes none.
+fn file_edits(name: &str, input: &Value, turn: u32) -> Vec<AgentEvent> {
+    let Some(path) = input["file_path"].as_str() else {
+        return vec![];
+    };
+    let one = |old: Option<&str>, new: &str| {
+        let mut truncated = false;
+        let old = old.map(|o| capped(o, &mut truncated));
+        let new = capped(new, &mut truncated);
+        AgentEvent::FileEdit {
+            tool: name.to_string(),
+            path: path.to_string(),
+            old,
+            new,
+            truncated,
+            turn,
+        }
+    };
+    match name {
+        "Edit" => vec![one(
+            Some(input["old_string"].as_str().unwrap_or("")),
+            input["new_string"].as_str().unwrap_or(""),
+        )],
+        "MultiEdit" => input["edits"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|e| {
+                one(
+                    Some(e["old_string"].as_str().unwrap_or("")),
+                    e["new_string"].as_str().unwrap_or(""),
+                )
+            })
+            .collect(),
+        "Write" => vec![one(None, input["content"].as_str().unwrap_or(""))],
+        _ => vec![],
     }
 }
 
@@ -1122,6 +1178,7 @@ pub fn parse_line(line: &str, st: &mut ParseState) -> Vec<AgentEvent> {
             if v["parent_tool_use_id"].is_null() {
                 out.extend(st.context.message(&v["message"]["usage"]));
             }
+            st.turns += 1;
             for block in v["message"]["content"].as_array().into_iter().flatten() {
                 match block["type"].as_str() {
                     Some("text") => {
@@ -1144,8 +1201,9 @@ pub fn parse_line(line: &str, st: &mut ParseState) -> Vec<AgentEvent> {
                         }
                         out.push(AgentEvent::ToolCall {
                             summary: tool_summary(&name, input),
-                            name,
+                            name: name.clone(),
                         });
+                        out.extend(file_edits(&name, input, st.turns));
                     }
                     _ => {}
                 }
@@ -2066,6 +2124,58 @@ mod tests {
             !c.args.iter().any(|x| x == "--setting-sources"),
             "the rest of the owner's settings still apply"
         );
+    }
+
+    #[test]
+    fn edit_write_and_multiedit_calls_make_file_edit_events_capped() {
+        let mut st = ParseState::default();
+        let big = "é".repeat(mason_adapter_api::FILE_EDIT_TEXT_MAX);
+        let line = |blocks: Value| {
+            serde_json::json!({"type":"assistant","message":{"content":blocks}}).to_string()
+        };
+        let edits = |ev: Vec<AgentEvent>| -> Vec<AgentEvent> {
+            ev.into_iter()
+                .filter(|e| matches!(e, AgentEvent::FileEdit { .. }))
+                .collect()
+        };
+        let ev = edits(parse_line(
+            &line(serde_json::json!([
+                {"type":"tool_use","id":"1","name":"Edit","input":{"file_path":"a.rs","old_string":"x","new_string":"y"}},
+                {"type":"tool_use","id":"2","name":"Write","input":{"file_path":"b.rs","content":"hi"}},
+                {"type":"tool_use","id":"3","name":"Read","input":{"file_path":"c.rs"}}
+            ])),
+            &mut st,
+        ));
+        let fe =
+            |tool: &str, path: &str, old: Option<&str>, new: &str, turn| AgentEvent::FileEdit {
+                tool: tool.into(),
+                path: path.into(),
+                old: old.map(str::to_string),
+                new: new.into(),
+                truncated: false,
+                turn,
+            };
+        assert_eq!(
+            ev,
+            [
+                fe("Edit", "a.rs", Some("x"), "y", 1),
+                fe("Write", "b.rs", None, "hi", 1)
+            ]
+        );
+        let ev = edits(parse_line(
+            &line(serde_json::json!([
+                {"type":"tool_use","id":"4","name":"MultiEdit","input":{"file_path":"d.rs","edits":[
+                    {"old_string":"a","new_string":"b"},{"old_string":"b","new_string":big}]}}
+            ])),
+            &mut st,
+        ));
+        assert_eq!(ev.len(), 2);
+        assert_eq!(ev[0], fe("MultiEdit", "d.rs", Some("a"), "b", 2));
+        let AgentEvent::FileEdit { new, truncated, .. } = &ev[1] else {
+            panic!()
+        };
+        assert!(*truncated);
+        assert_eq!(new.len(), mason_adapter_api::FILE_EDIT_TEXT_MAX);
     }
 
     #[test]

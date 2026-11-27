@@ -4124,6 +4124,16 @@ fn agent_job(c: &Ctx) {
     let tried = matches!(kind, StepKind::Develop | StepKind::Review)
         .then(|| crate::prompts::tried_block(&crate::tried::rounds(&dir)))
         .flatten();
+    // How the change was built, per file, for the reviewer (#1130).
+    let tried = match (
+        tried,
+        (kind == StepKind::Review)
+            .then(|| crate::prompts::edits_block(&dir))
+            .flatten(),
+    ) {
+        (Some(t), Some(e)) => Some(format!("{t}\n\n{e}")),
+        (t, e) => t.or(e),
+    };
     let pack_name = match kind {
         StepKind::Develop => "develop",
         StepKind::Review => "review",
@@ -4654,6 +4664,7 @@ fn agent_job(c: &Ctx) {
             if let mason_adapter_api::AgentEvent::Skill { name } = ev {
                 crate::skills::record(&task_dir, run.0, name);
             }
+            crate::edits::record(&task_dir, run.0, ev);
             d.progress_agent_event(run, ev)
         }));
     }
