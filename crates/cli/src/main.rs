@@ -6,7 +6,7 @@
 //! mason task add <title> [--project P] [--body TEXT | --body-file F | --body -] [--priority urgent|high|normal|low] [--proposed]
 //! mason task edit <id> [--title T] [--body TEXT | --body-file F | --body -] [--reason R]
 //! mason task list [--state S] [--json]
-//! mason task show <id> [--json] [--watch]
+//! mason task show <id> [--json] [--watch] [--edits [--run N]]
 //! mason task cancel <id> [--delete-branch]
 //! mason task retry <id> [--from exploring|developing|testing|review|landing]
 //! mason logs <id> [--follow]
@@ -78,6 +78,7 @@ mason: command-line client for the MASON pipeline
   mason task block <id> --after ID[,ID...]   add blockers to a task that has not started (owner only)
   mason task revive <id>              put a canceled task whose branch was kept back in the queue (owner only)
   mason task show <id> [--json] [--watch]   with --watch, follow the live step progress
+  mason task show <id> --edits [--run N]    the agent's file edits as compact diffs, and per file how often and whether undone
   mason task cancel <id> [--delete-branch]
   mason task retry <id> [--from STEP] [--restart] [--message TEXT]
                                       the message is shown once in the next round's prompt
@@ -3406,7 +3407,20 @@ fn main() {
                     let id = task_id(&mut a);
                     let watch = a.flag("--watch") || a.flag("-w");
                     let original = a.flag("--original");
+                    let edits = a.flag("--edits");
+                    let edits_run = a.opt("--run");
                     finish(&a);
+                    if edits {
+                        let q = edits_run.map(|r| format!("?run={r}")).unwrap_or_default();
+                        let e = or_die(d.call("GET", &format!("/tasks/{id}/edits{q}"), None));
+                        if json_out {
+                            return println!("{e:#}");
+                        }
+                        for l in mason_daemon::edits::report_lines(&e) {
+                            println!("{l}");
+                        }
+                        return;
+                    }
                     let t = or_die(d.call("GET", &format!("/tasks/{id}"), None));
                     if original {
                         match t["edited"].as_object() {
