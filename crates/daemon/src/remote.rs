@@ -7131,12 +7131,17 @@ mod tests {
             )
             .unwrap();
         let giver = lease.giver();
-        giver.shrink(&units_of(2));
-        assert_eq!((b.used("gha"), b.used("compile")), (0, 1));
-        // A grant that says its units are held does not ask: the lease is still held.
+        // A grant that says its units are held does not ask while the lease holds them.
         let held = Grant::borrowed(Some(giver.clone()), units_of(2));
         assert!(held.regain(units_of(2), &|| None));
-        assert_eq!(b.used("gha"), 0, "nothing was asked");
+        assert_eq!(
+            (b.used("gha"), b.used("compile")),
+            (2, 1),
+            "nothing was asked"
+        );
+        // The lease gives its units back (jobs of an earlier run finished).
+        giver.shrink(&units_of(2));
+        assert_eq!((b.used("gha"), b.used("compile")), (0, 1));
         // One that says they were given back asks, and holds them until it is dropped.
         let again = Grant::borrowed_given_up(Some(giver));
         assert!(again.regain(units_of(2), &|| None));
