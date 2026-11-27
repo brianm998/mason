@@ -34,6 +34,7 @@ pub mod daemon;
 pub mod deadline;
 pub mod defs;
 pub mod demo;
+pub mod diagcause;
 pub mod diagnose;
 pub mod disk;
 pub mod diskhistory;

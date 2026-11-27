@@ -68,8 +68,19 @@ until git -C "$root/repo" rev-list --count origin/main..mason/scratch/t0 2>/dev/
 echo "agent is mid-session: its branch has the commit, the submission is 5 s away"
 
 kill -9 "$daemon"; wait "$daemon" 2>/dev/null || true; daemon=""
-host_pid=$(sed -n 's/^host_pid=//p' "$root"/d/h/t0r1-1/host.kv)
-kill -0 "$host_pid" || { echo "the agent's step host died with the daemon" >&2; exit 1; }
+# The agent's host id is t0r1-<n>, and <n> is not always 1 (a full CI run on Linux had no
+# t0r1-1), so take the host of this run whose process is alive: only the agent's is.
+host_pid=""
+for kv in "$root"/d/h/t0r1-*/host.kv; do
+  [ -f "$kv" ] || continue
+  p=$(sed -n 's/^host_pid=//p' "$kv")
+  if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then host_pid=$p; break; fi
+done
+[ -n "$host_pid" ] || {
+  echo "the agent's step host died with the daemon; step hosts:" >&2
+  ls "$root"/d/h >&2 || true
+  exit 1
+}
 echo "daemon killed with kill -9; the agent's step host (pid $host_pid) is still running"
 sleep 1
 
