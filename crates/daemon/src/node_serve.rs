@@ -521,16 +521,33 @@ pub fn xcode_app_version(app: &std::path::Path) -> Option<String> {
     if !plist.is_file() {
         return None;
     }
-    let out = probe(
-        "/usr/libexec/PlistBuddy",
-        &[
-            "-c",
-            "Print :CFBundleShortVersionString",
-            &plist.to_string_lossy(),
-        ],
-    )?;
-    let v = out.trim();
+    let bytes = std::fs::read(&plist).ok()?;
+    let v = if bytes.starts_with(b"bplist") {
+        // A binary plist: only macOS's PlistBuddy reads it.
+        probe(
+            "/usr/libexec/PlistBuddy",
+            &[
+                "-c",
+                "Print :CFBundleShortVersionString",
+                &plist.to_string_lossy(),
+            ],
+        )?
+    } else {
+        plist_string(
+            &String::from_utf8_lossy(&bytes),
+            "CFBundleShortVersionString",
+        )?
+    };
+    let v = v.trim();
     (!v.is_empty() && v.chars().all(|c| c.is_ascii_digit() || c == '.')).then(|| v.to_string())
+}
+
+/// The `<string>` value that follows `<key>key</key>` in an XML property list.
+fn plist_string(xml: &str, key: &str) -> Option<String> {
+    let tag = format!("<key>{key}</key>");
+    let rest = xml[xml.find(&tag)? + tag.len()..].trim_start();
+    let rest = rest.strip_prefix("<string>")?;
+    Some(rest[..rest.find("</string>")?].to_string())
 }
 
 /// The Xcode versions of the apps in `dir` (and of `selected`, the app `xcode-select -p` names,

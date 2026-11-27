@@ -3573,6 +3573,13 @@ public nonisolated struct Mason_V1_TaskDetailView: @unchecked Sendable {
   /// Clears the value of `placement`. Subsequent reads from it will return its default value.
   public mutating func clearPlacement() {_uniqueStorage()._placement = nil}
 
+  /// The reviewer's minor findings, one line each ("minor: issue (file)"), oldest first (#1132).
+  /// Additive.
+  public var reviewFindings: [String] {
+    get {_storage._reviewFindings}
+    set {_uniqueStorage()._reviewFindings = newValue}
+  }
+
   /// The task's runs in flight now, with the host of each (#1155). Additive.
   public var runningOn: [Mason_V1_HostRun] {
     get {_storage._runningOn}
@@ -10464,7 +10471,7 @@ nonisolated extension Mason_V1_DebtLine: SwiftProtobuf.Message, SwiftProtobuf._M
 
 nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".TaskDetailView"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}row\0\u{1}steps\0\u{1}plan\0\u{1}card\0\u{1}closing\0\u{1}debts\0\u{3}log_tail\0\u{1}branch\0\u{1}worktree\0\u{1}definition\0\u{1}failure\0\u{1}body\0\u{1}route\0\u{3}started_at\0\u{3}explore_returns\0\u{2}\u{2}approval\0\u{1}numbers\0\u{3}plan_view\0\u{1}proposal\0\u{3}step_tokens\0\u{3}cpu_permille\0\u{3}ci_links\0\u{1}placement\0\u{3}running_on\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}row\0\u{1}steps\0\u{1}plan\0\u{1}card\0\u{1}closing\0\u{1}debts\0\u{3}log_tail\0\u{1}branch\0\u{1}worktree\0\u{1}definition\0\u{1}failure\0\u{1}body\0\u{1}route\0\u{3}started_at\0\u{3}explore_returns\0\u{2}\u{2}approval\0\u{1}numbers\0\u{3}plan_view\0\u{1}proposal\0\u{3}step_tokens\0\u{3}cpu_permille\0\u{3}ci_links\0\u{1}placement\0\u{3}running_on\0\u{3}review_findings\0")
 
   fileprivate class _StorageClass {
     var _row: Mason_V1_TaskRow? = nil
@@ -10490,6 +10497,7 @@ nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProto
     var _cpuPermille: Int32 = 0
     var _ciLinks: [Mason_V1_CiLink] = []
     var _placement: Mason_V1_Placement? = nil
+    var _reviewFindings: [String] = []
     var _runningOn: [Mason_V1_HostRun] = []
 
       // This property is used as the initial default value for new instances of the type.
@@ -10524,6 +10532,7 @@ nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProto
       _cpuPermille = source._cpuPermille
       _ciLinks = source._ciLinks
       _placement = source._placement
+      _reviewFindings = source._reviewFindings
       _runningOn = source._runningOn
     }
   }
@@ -10567,6 +10576,7 @@ nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProto
         case 23: try { try decoder.decodeRepeatedMessageField(value: &_storage._ciLinks) }()
         case 24: try { try decoder.decodeSingularMessageField(value: &_storage._placement) }()
         case 25: try { try decoder.decodeRepeatedMessageField(value: &_storage._runningOn) }()
+        case 26: try { try decoder.decodeRepeatedStringField(value: &_storage._reviewFindings) }()
         default: break
         }
       }
@@ -10651,6 +10661,9 @@ nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProto
       if !_storage._runningOn.isEmpty {
         try visitor.visitRepeatedMessageField(value: _storage._runningOn, fieldNumber: 25)
       }
+      if !_storage._reviewFindings.isEmpty {
+        try visitor.visitRepeatedStringField(value: _storage._reviewFindings, fieldNumber: 26)
+      }
     }
     try unknownFields.traverse(visitor: &visitor)
   }
@@ -10683,6 +10696,7 @@ nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProto
         if _storage._cpuPermille != rhs_storage._cpuPermille {return false}
         if _storage._ciLinks != rhs_storage._ciLinks {return false}
         if _storage._placement != rhs_storage._placement {return false}
+        if _storage._reviewFindings != rhs_storage._reviewFindings {return false}
         if _storage._runningOn != rhs_storage._runningOn {return false}
         return true
       }

@@ -117,6 +117,7 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
                 "reason": last["reason"], "original_title": edits[0]["title"], "original_body": edits[0]["body"]});
         }
         v["owner_notes"] = json!(crate::ownernotes::list(&d.task_dir(t.id)));
+        v["review_findings"] = json!(crate::reviewfindings::lines(&d.task_dir(t.id)));
         v["priority"] = json!(format!("{:?}", t.priority).to_lowercase());
         v["attempts"] = json!(t
             .attempts
