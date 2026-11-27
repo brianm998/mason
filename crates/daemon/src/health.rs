@@ -159,6 +159,31 @@ pub fn gather(d: &Arc<Daemon>, now: u64) -> Facts {
             if running && silent > 0 && wait.is_none() {
                 x.silent_hosts.push((t.id.0, silent));
             }
+            let runs = d.store.check_runs(t.id.0).unwrap_or_default();
+            let attempt = w
+                .step_runs
+                .values()
+                .filter(|r| r.task == t.id)
+                .max_by_key(|r| (r.started_at.0, r.id.0))
+                .map_or(0, |r| r.attempt);
+            x.rounds.push(health::RoundFact {
+                task: t.id.0,
+                rounds: runs.len() as u32,
+                attempt,
+                last_checks: runs
+                    .iter()
+                    .rev()
+                    .take(3)
+                    .rev()
+                    .map(|(_, green, tests)| {
+                        if *green {
+                            "green".to_string()
+                        } else {
+                            format!("red ({} failing)", tests.len())
+                        }
+                    })
+                    .collect(),
+            });
             x.tasks.push(TaskFact {
                 id: t.id.0,
                 state: mason_store::state_name(t.state).to_string(),
@@ -334,9 +359,57 @@ pub fn open_session(d: &Daemon) -> Option<mason_store::owner_sessions::OwnerSess
         .find(|s| s.kind == KIND)
 }
 
+/// The health session that is working now. One `open` session waits for the owner (its
+/// banner stays) and holds nothing back; only a working one does (s1175).
+pub fn working_session(d: &Daemon) -> Option<mason_store::owner_sessions::OwnerSessionRow> {
+    d.store
+        .open_owner_sessions()
+        .unwrap_or_default()
+        .into_iter()
+        .find(|s| s.kind == KIND && s.state == "working")
+}
+
+/// End a health session that has waited for the owner longer than `[health] needs_owner_ttl_m`
+/// as `timed_out`, with an alert. Its keys are fresh again: `tick` ignores `handled` rows of
+/// a timed-out session.
+pub fn expire_waiting(d: &Arc<Daemon>, now: u64) {
+    let ttl = d.cfg.health.needs_owner_ttl_m.saturating_mul(60_000);
+    for s in d.store.open_owner_sessions().unwrap_or_default() {
+        if s.kind != KIND || s.state != "open" || s.turns == 0 {
+            continue;
+        }
+        if now.saturating_sub(s.last_ms) <= ttl {
+            continue;
+        }
+        let _ = d
+            .store
+            .add_health("timed_out", "", Some(s.id), "needs_owner", now);
+        let _ = d.store.add_owner_message(
+            s.id,
+            "tool",
+            "no answer from the owner within the time limit: the session ended as timed_out",
+            now,
+        );
+        end_session(d, s.id);
+        crate::attention::intervene(
+            d,
+            "health_session_timed_out",
+            None,
+            WHO,
+            &format!(
+                "health session #{} waited {} min for the owner and was ended",
+                s.id,
+                now.saturating_sub(s.last_ms) / 60_000
+            ),
+            "",
+        );
+    }
+}
+
 /// One check at `now`. Callable directly: tests drive it with a time of their own.
 pub fn tick(d: &Arc<Daemon>, now: u64) -> Tick {
     let (_facts, findings) = report(d, now);
+    expire_waiting(d, now);
     note_late_loop(d, now);
     note_update(d, now);
     let keys: Vec<&str> = findings.iter().map(|f| f.key.as_str()).collect();
@@ -348,11 +421,20 @@ pub fn tick(d: &Arc<Daemon>, now: u64) -> Tick {
         now,
     );
     let limits = &d.cfg.health.limits;
-    let handled: Vec<(String, u64)> = d
+    let since = now.saturating_sub(limits.cooldown_ms);
+    let timed_out: Vec<Option<u64>> = d
         .store
-        .health_since(&["handled"], now.saturating_sub(limits.cooldown_ms))
+        .health_since(&["timed_out"], 0)
         .unwrap_or_default()
         .into_iter()
+        .map(|r| r.session)
+        .collect();
+    let handled: Vec<(String, u64)> = d
+        .store
+        .health_since(&["handled"], since)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| !timed_out.contains(&r.session))
         .map(|r| (r.key, r.at_ms))
         .collect();
     let fresh = health::fresh(&findings, &handled, now, limits.cooldown_ms);
@@ -364,8 +446,8 @@ pub fn tick(d: &Arc<Daemon>, now: u64) -> Tick {
     if fresh.is_empty() {
         return out;
     }
-    if open_session(d).is_some() {
-        out.held_back = "a health session is open".into();
+    if working_session(d).is_some() {
+        out.held_back = "a health session is working".into();
         return out;
     }
     let Some((pid, project)) = crate::proposals::self_project(d) else {
@@ -410,7 +492,7 @@ pub fn tick(d: &Arc<Daemon>, now: u64) -> Tick {
         .name(format!("health-{sid}"))
         .spawn(move || {
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                run_session(&d2, sid, &prompt, severe)
+                run_session(&d2, sid, &prompt, severe, now)
             }));
             if r.is_err() {
                 let _ = d2.store.add_owner_message(
@@ -537,6 +619,16 @@ pub fn prompt(d: &Arc<Daemon>, all: &[Finding], fresh: &[Finding], now: u64) -> 
             s.push_str(&format!("    - {e}\n"));
         }
     }
+    if fresh.iter().any(|f| f.key.starts_with("stuck:long:")) {
+        s.push_str(
+            "\nFor a `stuck:long:<id>` finding (a task in one state for hours, or on many check \
+             rounds, however busy it is): read the task's last check results and the agent's last \
+             messages (the progress lines below, `mason task show <id>`), then either restart the \
+             round with a note (`acted` with action `restart_round`: the task and the reason, \
+             which becomes the note; the same as `mason task retry <id> --from develop --restart \
+             --message ...`), or propose a fix, or ask the owner (`needs_owner`).\n",
+        );
+    }
     s.push_str("\n# New since the last session\n");
     for f in fresh {
         s.push_str(&format!("- `{}`\n", f.key));
@@ -626,7 +718,7 @@ fn make_checkout(d: &Daemon, sid: u64, p: &crate::config::ProjectCfg) -> std::pa
     }
 }
 
-fn run_session(d: &Arc<Daemon>, sid: u64, text: &str, severe: bool) {
+fn run_session(d: &Arc<Daemon>, sid: u64, text: &str, severe: bool, now: u64) {
     let Some((pid, project)) = crate::proposals::self_project(d) else {
         end_session(d, sid);
         return;
@@ -699,11 +791,11 @@ fn run_session(d: &Arc<Daemon>, sid: u64, text: &str, severe: bool) {
     };
     let _ = d
         .store
-        .finish_owner_turn(sid, report.session_id.as_deref(), now_ms());
-    let waits = apply(d, sid, pid, &submission, now_ms());
+        .finish_owner_turn(sid, report.session_id.as_deref(), now);
+    let waits = apply(d, sid, pid, &submission, now);
     if waits {
         // The session stays open for the owner, who can write in it.
-        let _ = d.store.set_owner_session_state(sid, "open", now_ms());
+        let _ = d.store.set_owner_session_state(sid, "open", now);
         d.poke();
     } else {
         end_session(d, sid);
@@ -738,7 +830,7 @@ pub fn apply(d: &Arc<Daemon>, sid: u64, self_pid: ProjectId, a: &Value, now: u64
             let action = x["action"].as_str().unwrap_or("");
             let task = x["task"].as_u64().unwrap_or(0);
             let reason = x["reason"].as_str().unwrap_or("");
-            let r = act(d, action, task);
+            let r = act(d, action, task, reason);
             crate::attention::intervene(
                 d,
                 &format!("health_{action}"),
@@ -851,7 +943,7 @@ fn file(d: &Arc<Daemon>, sid: u64, pid: ProjectId, key: &str, x: &Value) -> Stri
         explored: false,
         estimate: None,
     };
-    match crate::proposals::file(d, &f) {
+    match crate::proposals::file_from_health(d, &f) {
         Ok(filed) => {
             let _ = d.store.add_health(
                 "proposal",
@@ -867,7 +959,7 @@ fn file(d: &Arc<Daemon>, sid: u64, pid: ProjectId, key: &str, x: &Value) -> Stri
 }
 
 /// One owner-safe action, as the owner could take it.
-fn act(d: &Arc<Daemon>, action: &str, task: u64) -> Result<String, String> {
+fn act(d: &Arc<Daemon>, action: &str, task: u64, reason: &str) -> Result<String, String> {
     if !HEALTH_ACTIONS.contains(&action) {
         return Err(format!("{action:?} is not an allowed action"));
     }
@@ -892,6 +984,38 @@ fn act(d: &Arc<Daemon>, action: &str, task: u64) -> Result<String, String> {
                 },
             )
             .map(|(to, step)| format!("retried from `{step}` ({})", mason_store::state_name(to)))
+            .map_err(|(_, e)| e.0["error"].as_str().unwrap_or("refused").to_string())
+        }
+        "restart_round" => {
+            // `mason task retry <id> --from develop --restart --message <reason>`: the round
+            // starts again with the reason as its note.
+            if !t.state.is_step() {
+                return Err(format!(
+                    "#{task} is {}; only a task in a step has a round to restart",
+                    mason_store::state_name(t.state)
+                ));
+            }
+            if reason.trim().is_empty() {
+                return Err("a restart needs a note for the next round".into());
+            }
+            drop(w);
+            crate::http::retry_task(
+                d,
+                task,
+                crate::http::RetryAsk {
+                    to: Some("develop".into()),
+                    seen: Some(latest),
+                    restart: true,
+                    message: Some(reason.to_string()),
+                    ..Default::default()
+                },
+            )
+            .map(|(to, step)| {
+                format!(
+                    "round restarted from `{step}` ({})",
+                    mason_store::state_name(to)
+                )
+            })
             .map_err(|(_, e)| e.0["error"].as_str().unwrap_or("refused").to_string())
         }
         "unblock" => {

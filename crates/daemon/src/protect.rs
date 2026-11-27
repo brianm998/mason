@@ -217,6 +217,14 @@ const SKIP_CALL: &str = concat!(".sk", "ip(");
 const OR_TRUE: &str = concat!("|", "| true");
 
 /// A JavaScript or TypeScript test file: the skip-call, `xit(` and `xdescribe(` forms ignore a test there.
+/// A documentation file: its text may quote test code, but it holds no tests or assertions.
+fn is_doc(file: &str) -> bool {
+    let lower = file.to_ascii_lowercase();
+    [".md", ".markdown", ".txt", ".rst", ".adoc"]
+        .iter()
+        .any(|ext| lower.ends_with(ext))
+}
+
 fn is_js_test(file: &str) -> bool {
     matches!(
         extension(file).as_str(),
@@ -524,7 +532,10 @@ fn scan_full(diff: &str) -> (Vec<Finding>, Vec<Finding>, BTreeMap<String, usize>
             || file.contains("Test")
             || file.ends_with("_test.rs")
             || file.starts_with("tests/");
-        if f.deleted && is_test_path {
+        // Prose names tests and assertions without being them: a README sentence that says
+        // "new `#[test]` fns" is not a test, and deleting it removes none (#1142).
+        let doc = is_doc(file);
+        if f.deleted && is_test_path && !doc {
             out.push(Finding::new(
                 file,
                 "removed-test-file",
@@ -534,7 +545,7 @@ fn scan_full(diff: &str) -> (Vec<Finding>, Vec<Finding>, BTreeMap<String, usize>
             continue;
         }
         let (ra, aa) = (count_in(&f.removed, ASSERTS), count_in(&f.added, ASSERTS));
-        if ra > aa {
+        if ra > aa && !doc {
             out.push(Finding::new(
                 file,
                 "removed-assertion",
@@ -543,7 +554,7 @@ fn scan_full(diff: &str) -> (Vec<Finding>, Vec<Finding>, BTreeMap<String, usize>
             ));
         }
         let (rt, at) = (count_in(&f.removed, TESTS), count_in(&f.added, TESTS));
-        if rt > at {
+        if rt > at && !doc {
             out.push(Finding::new(
                 file,
                 "removed-test",
@@ -901,6 +912,30 @@ mod tests {
         );
         let deleted = "--- a/crates/x/tests/it.rs\n+++ /dev/null\n@@ -1 +0,0 @@\n-fn a() {}\n";
         assert_eq!(kinds(deleted), ["removed-test-file"]);
+    }
+
+    #[test]
+    fn prose_that_quotes_tests_is_not_a_removed_test() {
+        // #1142: a README line naming "`#[test]` fns" was deleted, and that sent it back.
+        assert!(kinds(&diff(
+            "README.md",
+            &["- **s798**: runs the tests it adds (new `#[test]` fns), `assert!(ok)` style"],
+            &[]
+        ))
+        .is_empty());
+        assert!(kinds(&diff(
+            "docs/Testing.rst",
+            &["#[test]", "assert_eq!(a, b);"],
+            &[]
+        ))
+        .is_empty());
+        let deleted = "--- a/docs/tests/notes.md\n+++ /dev/null\n@@ -1 +0,0 @@\n-#[test]\n";
+        assert!(kinds(deleted).is_empty());
+        // Code is still read: the same lines in a source file are findings.
+        assert_eq!(
+            kinds(&diff("src/a.rs", &["#[test]", "fn it_works() {}"], &[])),
+            ["removed-test"]
+        );
     }
 
     #[test]

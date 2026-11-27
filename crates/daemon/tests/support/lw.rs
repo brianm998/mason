@@ -105,13 +105,31 @@ pub fn world_full(
     test_cmd: &str,
     test_step: bool,
 ) -> W {
-    world_full_window(landing_toml, extra, files, test_cmd, test_step, true)
+    world_full_window(landing_toml, extra, files, test_cmd, test_step, true, None)
+}
+
+/// A `world_full` with a test step, whose definition has a worktree setup step that runs
+/// `hook` in the landing's integration worktree after each assembly: where a test announces
+/// that a batch is assembled and holds it while the base is moved. It runs in no other
+/// checkout (not a task's own worktree, nor a detached one MASON makes).
+pub fn world_assembled(extra: &dyn Fn(&Scratch) -> String, hook: &str, test_cmd: &str) -> W {
+    let hook = format!("case \"$(git rev-parse --abbrev-ref HEAD)\" in mason/int/*) {hook};; esac");
+    world_full_window(
+        "window = \"1s\"\n",
+        extra,
+        &[],
+        test_cmd,
+        true,
+        true,
+        Some(&hook),
+    )
 }
 
 /// A world whose landing queue forms a batch as soon as no other task is moving (#731), the
 /// way the daemon does outside tests; every other world waits out the window.
 pub fn world_collecting(landing_toml: &str) -> W {
-    world_full_window(landing_toml, &|_| String::new(), &[], "true", false, false)
+    let none = |_: &Scratch| String::new();
+    world_full_window(landing_toml, &none, &[], "true", false, false, None)
 }
 
 fn world_full_window(
@@ -121,6 +139,7 @@ fn world_full_window(
     test_cmd: &str,
     test_step: bool,
     window_always: bool,
+    setup: Option<&str>,
 ) -> W {
     let s = Scratch::new("true", json!({"steps": {}}));
     s.write_project("scratch", test_cmd, &extra(&s));
@@ -134,6 +153,13 @@ fn world_full_window(
         definition.push_str(
             "\n[step.test]\ntype = \"test\"\ncategory = \"testing\"\nuses = { compile = 1 }\nnext = \"land\"\non_red = \"develop\"\nmax_rounds = 3\n\n[resource.compile]\ncount = 1\n",
         );
+    }
+    if let Some(cmd) = setup {
+        definition = definition.replacen("start = \"develop\"", "start = \"assembled\"", 1);
+        // A literal TOML string: the command holds double quotes.
+        definition.push_str(&format!(
+            "\n[step.assembled]\ntype = \"command\"\ncategory = \"developing\"\ncommand = '''{cmd}'''\nnext = \"develop\"\n"
+        ));
     }
     let mut all: Vec<(&str, &str)> = vec![
         (".mason/mason.toml", &definition),

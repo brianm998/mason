@@ -38,16 +38,22 @@ fn submit(args: Value) -> Value {
 
 /// A world whose only project is MASON's own, with a developing task held at a gate.
 fn world(health_turns: Value) -> (Scratch, Arc<Daemon>, mason_core::TaskId, tempfile::TempDir) {
+    world_with(
+        health_turns,
+        "[self]\nmax_open = 50\nper_week = 50\nmax_steps = 500\n",
+    )
+}
+
+fn world_with(
+    health_turns: Value,
+    self_cfg: &str,
+) -> (Scratch, Arc<Daemon>, mason_core::TaskId, tempfile::TempDir) {
     let (g, gate) = gate_dir();
     let s = Scratch::new(
         "test -f hello.txt",
         json!({"steps": {"explore": [explore_turn()], "develop": [held(&gate)], "health": health_turns}}),
     );
-    s.write_project(
-        "scratch",
-        "test -f hello.txt",
-        "[self]\nmax_open = 50\nper_week = 50\nmax_steps = 500\n",
-    );
+    s.write_project("scratch", "test -f hello.txt", self_cfg);
     let d = s.start_with(|c| c.owner_names = vec!["brian".to_string()]);
     let t = file_task_as(
         &d,
@@ -391,4 +397,127 @@ fn exit_flow_stuck_task_session_banner_proposal_end() {
     let h = view(&d);
     assert!(h.banners.iter().all(|b| b.kind != "health"));
     assert!(h.active_sessions.is_empty());
+}
+
+#[test]
+fn a_busy_task_is_stuck_long_and_the_prompt_names_the_restart() {
+    let (_s, d, t, _g) = world(json!([submit(json!({
+        "summary": "long", "false_alarm": {"finding": "stuck:long", "why": "x"}
+    }))]));
+    // Seven full rounds in the current run, whatever the time.
+    for i in 0..7u64 {
+        d.store
+            .put_check_run(t.0, 1, 1_000 + i, false, &[])
+            .unwrap();
+    }
+    let (_x, findings) = health::report(&d, mason_daemon::daemon::now_ms());
+    let f = findings
+        .iter()
+        .find(|f| f.key == format!("stuck:long:{}", t.0))
+        .unwrap_or_else(|| panic!("{findings:?}"));
+    assert!(
+        f.evidence.iter().any(|e| e.contains("7 full check rounds")),
+        "{f:?}"
+    );
+    let text = health::prompt(
+        &d,
+        &findings,
+        std::slice::from_ref(f),
+        mason_daemon::daemon::now_ms(),
+    );
+    assert!(text.contains(&format!("stuck:long:{}", t.0)) && text.contains("restart_round"));
+}
+
+#[test]
+fn a_needs_owner_session_does_not_block_a_new_finding_and_times_out() {
+    let ask = submit(json!({"summary": "s",
+        "needs_owner": {"question": "Cancel?", "recommendation": "Cancel it"}}));
+    let (_s, d, t, _g) = world(json!([ask.clone(), ask]));
+    let now = later();
+    let sid = health::tick(&d, now).session.unwrap();
+    wait_verdict(&d, sid);
+    // A second task stalls: a different key, so a new session starts although #sid is open.
+    let t2 = file_task_as(
+        &d,
+        "Slow two",
+        "Takes long.",
+        true,
+        mason_core::TrustSource::Owner,
+        false,
+    );
+    wait_state(&d, t2, mason_core::State::Developing, 60);
+    let tick = health::tick(&d, now + 60_000);
+    assert!(
+        tick.fresh.contains(&format!("stuck:task:{}", t2.0)),
+        "{:?}",
+        tick.fresh
+    );
+    assert!(!tick.fresh.contains(&format!("stuck:task:{}", t.0)));
+    let sid2 = tick.session.expect("a new session starts");
+    assert_ne!(sid, sid2);
+    wait_for("the second verdict", 60, || {
+        d.store
+            .owner_session(sid2)
+            .unwrap()
+            .is_some_and(|s| s.state == "open")
+    });
+    // Past the TTL both waiting sessions end as timed_out and their keys are fresh again.
+    let late = now + 3 * H;
+    let tick = health::tick(&d, late);
+    for id in [sid, sid2] {
+        assert_eq!(d.store.owner_session(id).unwrap().unwrap().state, "ended");
+    }
+    assert!(!d.store.health_since(&["timed_out"], 0).unwrap().is_empty());
+    assert!(
+        tick.fresh.contains(&format!("stuck:task:{}", t.0)),
+        "{:?}",
+        tick.fresh
+    );
+}
+
+#[test]
+fn a_health_proposal_passes_the_weekly_self_task_cap_once() {
+    let (_s, d, _t, _g) = world_with(
+        json!([submit(json!({"summary": "x", "false_alarm": {"why": "w"}}))]),
+        "[self]\nmax_open = 50\nper_week = 1\nmax_steps = 500\n",
+    );
+    let pid = d.project_id_by_name("scratch").unwrap();
+    let id = d.project(pid).unwrap().id.clone();
+    // One agent-filed self-task uses up the week's cap of 1.
+    file_task_as(
+        &d,
+        "Agent filed",
+        "Work.",
+        true,
+        mason_core::TrustSource::OwnerAgent,
+        false,
+    );
+    assert!(
+        mason_daemon::selfguard::check_filing_as(&d, pid, mason_core::TrustSource::OwnerAgent)
+            .is_err()
+    );
+    let one = json!({"finding": "stuck:queue", "title": "Let the queue start work after a stall",
+        "body": "The queue held work while slots were free.",
+        "evidence": "README:1 shows the scratch repository the finding was seen in."});
+    let sid = d
+        .store
+        .add_owner_session(None, "health", "default", "health", 1)
+        .unwrap();
+    let before = d.store.proposals_in(&id).unwrap().len();
+    health::apply(
+        &d,
+        sid,
+        pid,
+        &json!({"summary": "p", "proposed": [one.clone()]}),
+        later(),
+    );
+    assert_eq!(d.store.proposals_in(&id).unwrap().len(), before + 1);
+    health::apply(
+        &d,
+        sid,
+        pid,
+        &json!({"summary": "p", "proposed": [one]}),
+        later(),
+    );
+    assert_eq!(d.store.proposals_in(&id).unwrap().len(), before + 1);
 }
