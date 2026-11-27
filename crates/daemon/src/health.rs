@@ -193,6 +193,7 @@ pub fn gather(d: &Arc<Daemon>, now: u64) -> Facts {
                 silent_ms: silent,
                 waiting: wait.clone().map(|r| (r, since_run)),
                 holders: hf.clone(),
+                pool_wait: crate::remote_runs::pool_waiting(&d.cfg.hosts_dir(), t.id.0),
             });
         } else if t.state == State::Queued {
             if let Some(r) = wait.clone() {
@@ -205,6 +206,7 @@ pub fn gather(d: &Arc<Daemon>, now: u64) -> Facts {
                     silent_ms: in_state,
                     waiting: Some((r, in_state)),
                     holders: hf.clone(),
+                    pool_wait: false,
                 });
             }
         }

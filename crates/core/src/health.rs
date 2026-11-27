@@ -140,6 +140,9 @@ pub struct TaskFact {
     pub waiting: Option<(String, u64)>,
     /// The holders of the slot it waits for; `None` when the wait has none (a gate, a pause).
     pub holders: Option<HolderFact>,
+    /// Waits for a GitHub runner pool unit: no progress is expected, overloaded:slots and
+    /// stuck:wait judge it.
+    pub pool_wait: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -483,7 +486,7 @@ pub fn judge(x: &Facts, l: &Limits) -> Vec<Finding> {
             // Without history for the step, only the floor applies.
             let hi = t.typical_hi_ms.unwrap_or(0);
             let limit = hi.saturating_mul(l.stuck_factor).max(l.stuck_min_ms);
-            if t.in_state_ms > limit && t.silent_ms >= l.stuck_min_ms {
+            if t.in_state_ms > limit && t.silent_ms >= l.stuck_min_ms && !t.pool_wait {
                 out.push(f(
                     format!("stuck:task:{}", t.id),
                     "stuck",
@@ -871,6 +874,7 @@ mod tests {
             silent_ms: MIN,
             waiting: None,
             holders: None,
+            pool_wait: false,
         };
         let x = |t: TaskFact, rounds: u32| Facts {
             tasks: vec![t],
@@ -916,6 +920,7 @@ mod tests {
                 silent_ms: MIN,
                 waiting: None,
                 holders: None,
+                pool_wait: false,
             }],
             load_pct: Some(40),
             ..Default::default()
@@ -934,6 +939,7 @@ mod tests {
             silent_ms: 2 * H,
             waiting: Some(("exclusive".into(), 52 * MIN)),
             holders: None,
+            pool_wait: false,
         };
         let x = Facts {
             tasks: vec![t.clone()],
@@ -961,6 +967,7 @@ mod tests {
             silent_ms: 2 * H,
             waiting: None,
             holders: None,
+            pool_wait: false,
         };
         let x = Facts {
             tasks: vec![t.clone()],
@@ -983,6 +990,34 @@ mod tests {
         assert_eq!(keys(&judge(&x, &l())), ["stuck:wait:7"]);
     }
 
+    #[test]
+    fn a_step_queued_for_a_runner_pool_is_not_stuck_task() {
+        let mut t = TaskFact {
+            id: 11,
+            state: "landing".into(),
+            is_step: true,
+            in_state_ms: 36 * MIN,
+            typical_hi_ms: None,
+            silent_ms: 36 * MIN,
+            waiting: Some(("a GitHub runner: 19 of 16 in use".into(), 36 * MIN)),
+            holders: None,
+            pool_wait: true,
+        };
+        let x = |t: &TaskFact| Facts {
+            tasks: vec![t.clone()],
+            slot_waits: vec![(11, "a GitHub runner: 19 of 16 in use".into(), 36 * MIN)],
+            ..Default::default()
+        };
+        assert_eq!(keys(&judge(&x(&t), &l())), ["overloaded:slots"]);
+        // Not a pool wait: judged as before.
+        t.pool_wait = false;
+        assert!(keys(&judge(&x(&t), &l())).contains(&"stuck:task:11".to_string()));
+        // A pool wait past wait_ms is still stuck:wait.
+        t.pool_wait = true;
+        t.waiting = Some(("a GitHub runner".into(), 3 * H));
+        assert!(keys(&judge(&x(&t), &l())).contains(&"stuck:wait:11".to_string()));
+    }
+
     fn waiter(id: u64, wait: u64, h: Option<HolderFact>) -> TaskFact {
         TaskFact {
             id,
@@ -993,6 +1028,7 @@ mod tests {
             silent_ms: MIN,
             waiting: Some(("compile".into(), wait)),
             holders: h,
+            pool_wait: false,
         }
     }
 
