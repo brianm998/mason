@@ -641,6 +641,7 @@ fn is_green(c: &str) -> bool {
 }
 
 /// Move the followed run one step. Nothing here waits: the next tick looks again.
+#[allow(clippy::too_many_arguments)]
 pub fn follow(
     d: &Arc<Daemon>,
     pid: ProjectId,
