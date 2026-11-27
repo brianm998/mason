@@ -29,6 +29,7 @@ data class WizardPlan(
     val next: WizardQuestion?,
     val files: List<WizardFile>,
     val errors: List<String>,
+    val warnings: List<String> = emptyList(),
 ) {
     companion object {
         fun parse(json: String): WizardPlan? {
@@ -57,7 +58,7 @@ data class WizardPlan(
             val files = o.optJSONArray("files")?.let { a ->
                 (0 until a.length()).map { i -> a.getJSONObject(i).let { WizardFile(it.optString("path"), it.optString("contents")) } }
             } ?: emptyList()
-            return WizardPlan(detected, o.optString("kind"), n, files, EditorJson.strings(o.optJSONArray("errors")))
+            return WizardPlan(detected, o.optString("kind"), n, files, EditorJson.strings(o.optJSONArray("errors")), EditorJson.strings(o.optJSONArray("warnings")))
         }
     }
 }
@@ -88,6 +89,11 @@ class AddProjectWizard {
     var land by mutableStateOf("no")
     var prove by mutableStateOf(true)
     var progress by mutableStateOf<List<String>>(emptyList())
+        private set
+    /** What the apply warned of, and what it noted; kept until the wizard is closed. */
+    var applyWarnings by mutableStateOf<List<String>>(emptyList())
+        private set
+    var applyNotes by mutableStateOf<List<String>>(emptyList())
         private set
     /** The project the apply registered. */
     var appliedId by mutableStateOf<String?>(null)
@@ -170,6 +176,8 @@ class AddProjectWizard {
         busy = true
         error = null
         progress = emptyList()
+        applyWarnings = emptyList()
+        applyNotes = emptyList()
         appliedId = null
     }
 
@@ -179,6 +187,8 @@ class AddProjectWizard {
         val o = EditorJson.parse(json)
         val lines = EditorJson.strings(o.optJSONArray("progress"))
         progress = lines
+        applyWarnings = EditorJson.strings(o.optJSONArray("warnings"))
+        applyNotes = EditorJson.strings(o.optJSONArray("notes"))
         if (!ok) { error = why.ifEmpty { "The daemon refused." }; return null }
         val err = o.optString("error").takeIf { it.isNotEmpty() && !o.isNull("error") }
         val id = o.optString("id").takeIf { it.isNotEmpty() }
