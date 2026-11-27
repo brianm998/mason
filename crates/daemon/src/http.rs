@@ -763,6 +763,24 @@ async fn owner_notes(Shared(d): Shared<Arc<Daemon>>, Path(id): Path<u64>) -> Res
     ))
 }
 
+/// The agent's file edits, per step run (task 1130); `?run=N` for one run.
+async fn task_edits(
+    Shared(d): Shared<Arc<Daemon>>,
+    Path(id): Path<u64>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Res {
+    if !d
+        .world()
+        .map_err(store_err)?
+        .tasks
+        .contains_key(&TaskId(id))
+    {
+        return Err(fail(StatusCode::NOT_FOUND, format!("no task #{id}")));
+    }
+    let run = q.get("run").and_then(|r| r.parse().ok());
+    Ok(Json(crate::edits::report(&d.task_dir(TaskId(id)), run)))
+}
+
 /// Remove them; the owner only.
 async fn owner_notes_clear(
     Shared(d): Shared<Arc<Daemon>>,
@@ -4506,6 +4524,7 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/tasks", get(list_tasks).post(add_task))
         .route("/tasks/{id}", get(task_detail))
         .route("/tasks/{id}/cancel", post(cancel))
+        .route("/tasks/{id}/edits", get(task_edits))
         .route("/tasks/{id}/owner-notes", get(owner_notes))
         .route("/tasks/{id}/owner-notes/clear", post(owner_notes_clear))
         .route("/tasks/{id}/retry", post(retry))

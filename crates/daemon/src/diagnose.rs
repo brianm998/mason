@@ -562,7 +562,14 @@ fn diagnose(d: &Arc<Daemon>, task: TaskId, run: StepRunId, failed_at: u64, mark:
         plan.as_ref(),
         &reason,
         &history,
-        crate::prompts::tried_block(&crate::tried::rounds(&dir)).as_deref(),
+        match (
+            crate::prompts::tried_block(&crate::tried::rounds(&dir)),
+            crate::prompts::edits_block(&dir),
+        ) {
+            (Some(t), Some(e)) => Some(format!("{t}\n\n{e}")),
+            (t, e) => t.or(e),
+        }
+        .as_deref(),
         &log_tails(&dir, 3, 40),
         &diffstat,
         &steps,
