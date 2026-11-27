@@ -237,7 +237,11 @@ fn run(point: &str, mode: &str) -> Result<(), String> {
             break;
         }
         if Instant::now() > end {
-            return Err(format!("integration branches left behind: {left}"));
+            let wts = sh(&s.repo, &["worktree", "list"]);
+            let all = sh(&s.repo, &["branch", "--list"]);
+            return Err(format!(
+                "integration branches left behind: {left}\nworktrees:\n{wts}\nbranches:\n{all}"
+            ));
         }
         std::thread::sleep(Duration::from_millis(100));
     }

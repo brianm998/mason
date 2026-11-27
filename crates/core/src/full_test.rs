@@ -54,7 +54,7 @@ pub fn short(sha: &str) -> &str {
 /// Start a full test of `tip` or skip, saying why. `runs` is the record, newest first.
 /// `changed(sha)` lists the files that differ from `sha` to the tip (`None` when the commit is
 /// not in the repository); `selects(files)` says whether any suite is selected by them (false
-/// for the README status block and docs); `when(ms)` writes a time for the reason.
+/// for README.md and docs); `when(ms)` writes a time for the reason.
 pub fn decide(
     tip: &str,
     runs: &[Tested],
