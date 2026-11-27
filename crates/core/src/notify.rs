@@ -79,6 +79,7 @@ const fn rule(channel: Channel, after_min: u64) -> Rule {
 /// The conditions Part 19 names, as the alert kinds that carry them.
 pub const CONDITIONS: &[&str] = &[
     "needs_you",
+    "diagnosis",
     "failed",
     "landing",
     "daemon_down",
@@ -102,6 +103,7 @@ pub const CONDITIONS: &[&str] = &[
 /// in `Routing::defaults` or name it in `MONITOR_ONLY`: a test fails until one of the two is done.
 pub const ALERT_KINDS: &[&str] = &[
     "needs_you",
+    "diagnosis",
     "failed",
     "landing",
     "landed",
@@ -209,17 +211,17 @@ impl Routing {
         let mut put = |k: &str, r: Vec<Rule>| {
             by_kind.insert(k.to_string(), r);
         };
-        put(
-            "needs_you",
-            vec![
-                rule(Monitor, 0),
-                rule(Sound, 0),
-                rule(Speech, 0),
-                rule(Push, 10),
-                rule(Email, 60),
-                rule(Apns, 0),
-            ],
-        );
+        let decision = vec![
+            rule(Monitor, 0),
+            rule(Sound, 0),
+            rule(Speech, 0),
+            rule(Push, 10),
+            rule(Email, 60),
+            rule(Apns, 0),
+        ];
+        put("needs_you", decision.clone());
+        // A diagnosis card of a cause outside the task (s1176): the owner decides it like any card.
+        put("diagnosis", decision);
         let broke = vec![
             rule(Monitor, 0),
             rule(Sound, 0),
@@ -449,7 +451,7 @@ impl Sound {
 
 pub fn sound_for(kind: &str) -> Sound {
     match kind {
-        "needs_you" => Sound::Decision,
+        "needs_you" | "diagnosis" => Sound::Decision,
         "failed" | "daemon_bug" | "landing" | "daemon_down" | "credentials" | "provider_outage"
         | "stalled" | "environment" | "runtime" | "definition" | "disk" | "blocked"
         | "host_lost" | "tracker" | "provider_limit" | "provider_overage" | "provider_budget"
@@ -589,6 +591,16 @@ pub fn summary_sentence(items: &[(String, String)]) -> String {
 /// is named aloud (see `spoken_subject`); `detail` is the question or the reason. The verb
 /// follows the short subject, and nothing in the result is all capitals.
 pub fn sentence(kind: &str, subject: &str, detail: &str, reminder: bool) -> String {
+    // A diagnosis' line is already the sentence: `#<task>: <cause>. Recommended: <label>.`
+    if kind == "diagnosis" && !detail.trim().is_empty() {
+        let text = speakable(&one_line(detail, 400));
+        let text = if reminder {
+            format!("Reminder: {text}")
+        } else {
+            text
+        };
+        return format!("{}.", text.trim_end_matches('.'));
+    }
     let subject = one_line(subject, 80);
     let detail = one_line(detail, 100);
     let text = match kind {
@@ -603,6 +615,8 @@ pub fn sentence(kind: &str, subject: &str, detail: &str, reminder: bool) -> Stri
         "failed" if detail.is_empty() => format!("{subject}, failed; open it to retry or cancel"),
         "failed" => format!("{subject}, failed because {detail}; open it to retry or cancel"),
         "landing" => format!("{subject}, {detail}; open the landing queue to see why"),
+        // The line is already the whole sentence: `#<task>: <cause>. Recommended: <label>.`
+        "diagnosis" => format!("{subject}, has a diagnosis to decide"),
         "disk" if detail.is_empty() => "MASON is stopped: disk is nearly full".into(),
         "disk" => format!("MASON is stopped: disk is nearly full, {detail}"),
         "landed" => format!("{subject}, has landed"),

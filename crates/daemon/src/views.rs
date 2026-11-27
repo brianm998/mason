@@ -273,7 +273,14 @@ impl<'a> Ctx<'a> {
                 "force",
                 "open_session",
             ],
-            State::Landing => vec!["cancel", "skip_test", "land_now", "force"],
+            State::Landing => {
+                let mut a = vec!["cancel", "skip_test", "land_now", "force"];
+                // A cause's card for a batch that is stuck (s1176).
+                if crate::diagcause::open_card_of(self.d, t).is_some() {
+                    a.insert(0, "answer");
+                }
+                a
+            }
             State::NeedsAttention => vec!["answer", "cancel", "retry", "open_session"],
             State::Failed => self.failed_actions(t),
             State::Canceled if t.cancel_keeps_branch => vec!["revive"],
@@ -309,9 +316,13 @@ impl<'a> Ctx<'a> {
     /// when one may be asked for (none pending or running, and the budget allows).
     fn failed_actions(&self, t: &Task) -> Vec<&'static str> {
         let rows = self.d.store.diagnoses(Some(t.id.0)).unwrap_or_default();
-        let pending = crate::diagnose::pending_in(&rows, t);
+        let pending = crate::diagnose::pending_for(self.d, t);
         let mut a = vec![];
-        if pending.and_then(crate::diagnose::row_card).is_some() {
+        if pending
+            .as_ref()
+            .and_then(crate::diagnose::row_card)
+            .is_some()
+        {
             a.push("answer");
         }
         a.extend(["retry", "cancel", "open_session"]);
