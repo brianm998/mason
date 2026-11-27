@@ -15,12 +15,10 @@ final class DiagnosisCardTests: XCTestCase {
     func testAnEmptyContextIsOmitted() {
         XCTAssertEqual(AnswerRequest.option(0, context: "   ").context, "")
         XCTAssertNil(contextText(" \n"))
-        let m = MonitorModel()
-        // The command it builds carries no context at all.
+        // The command built from it carries no context at all.
         var c = Mason_V1_Command()
         c.answer = .with { $0.task = 1; $0.answer = "1"; $0.cardHash = "h"; $0.context = AnswerRequest.option(0, context: "").context }
         XCTAssertTrue(c.answer.context.isEmpty)
-        _ = m
     }
 
     func testOtherSendsFreeTextAndTheContext() {
