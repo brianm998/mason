@@ -819,6 +819,7 @@ dependencies = [
  "mason-adapters",
  "mason-definition",
  "mason-landing",
+ "mason-platform",
  "mason-testing",
  "serde",
  "serde_json",

@@ -632,14 +632,12 @@ mod tests {
 
     /// A HOME whose `.local/bin` holds a fake `claude` (when asked), and a PATH with nothing.
     fn machine(with_claude: bool) -> (tempfile::TempDir, questions::Machine) {
-        use std::os::unix::fs::PermissionsExt;
         let home = tempfile::tempdir().unwrap();
         if with_claude {
             let bin = home.path().join(".local/bin");
             std::fs::create_dir_all(&bin).unwrap();
             std::fs::write(bin.join("claude"), "#!/bin/sh\n").unwrap();
-            std::fs::set_permissions(bin.join("claude"), std::fs::Permissions::from_mode(0o755))
-                .unwrap();
+            mason_platform::fs::set_executable(&bin.join("claude"), true).unwrap();
         }
         let m = questions::Machine {
             path: Some(home.path().join("empty-path").into()),
@@ -687,14 +685,12 @@ mod tests {
 
     #[test]
     fn an_agent_on_path_is_written_as_an_absolute_path() {
-        use std::os::unix::fs::PermissionsExt;
         let d = repo(&[]);
         let (h, mut m) = machine(false);
         let bin = h.path().join("pathbin");
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::write(bin.join("claude"), "#!/bin/sh\n").unwrap();
-        std::fs::set_permissions(bin.join("claude"), std::fs::Permissions::from_mode(0o755))
-            .unwrap();
+        mason_platform::fs::set_executable(&bin.join("claude"), true).unwrap();
         m.path = Some(bin.clone().into());
         let mut f = all_answered();
         f.machine = m;
@@ -714,8 +710,7 @@ mod tests {
         );
         assert!(p.warnings.is_empty(), "{:?}", p.warnings);
         // A file that is not executable is not an agent.
-        std::fs::set_permissions(bin.join("claude"), std::fs::Permissions::from_mode(0o644))
-            .unwrap();
+        mason_platform::fs::set_executable(&bin.join("claude"), false).unwrap();
         assert!(f.machine.find_agent(questions::Agent::Claude).is_none());
     }
 
