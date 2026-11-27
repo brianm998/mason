@@ -91,7 +91,7 @@ fn develop(rec: &Path, name: &str, marker: &str) -> Value {
 
 fn changes(finding: &str) -> Value {
     json!([{"call": {"tool": "submit_review", "args": {
-        "verdict": "changes", "summary": "not yet", "findings": [{"issue": finding, "severity": "blocking"}]}}}])
+        "verdict": "changes", "summary": "not yet", "findings": [{"issue": finding, "severity": "blocking", "quote": "diff --git"}]}}}])
 }
 
 fn approve() -> Value {
@@ -103,6 +103,7 @@ fn diagnosis(rec: &Path) -> Value {
         record(rec, "diagnosis"),
         {"call": {"tool": "submit_diagnosis", "args": {
             "summary": "the last round was red",
+            "quote": "not yet",
             "options": [
                 {"label": "Cancel the task", "recommended": true, "action": "cancel"},
                 {"label": "Develop again", "recommended": false, "action": "retry",

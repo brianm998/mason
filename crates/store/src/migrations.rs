@@ -921,6 +921,14 @@ const STEPS: &[&str] = &[
     // once. Additive.
     "ALTER TABLE diagnoses ADD COLUMN card TEXT NOT NULL DEFAULT '';
      ALTER TABLE diagnoses ADD COLUMN failed_at INTEGER NOT NULL DEFAULT 0;",
+    // A task the owner told to wait for another task (a diagnosis' `wait_for`, s1176, decision
+    // 1166): the automatic retry skips it, and it is retried when the other task lands. Additive.
+    "CREATE TABLE diagnosis_waits (
+         task      INTEGER NOT NULL PRIMARY KEY,
+         blocker   INTEGER NOT NULL,
+         diagnosis INTEGER NOT NULL,
+         at_ms     INTEGER NOT NULL
+     );",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;

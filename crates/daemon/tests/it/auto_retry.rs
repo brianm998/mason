@@ -43,6 +43,14 @@ fn auto_retries(d: &Arc<mason_daemon::Daemon>, t: TaskId) -> usize {
         .count()
 }
 
+/// A landing failure is diagnosed as a cause first (s1176) and its automatic retry waits for that
+/// session to end; the fake agent ends it at once, with no verdict. Wait for that before a pass.
+fn settled(d: &Arc<mason_daemon::Daemon>, t: TaskId) {
+    wait_for("the cause diagnosis to end", 180, || {
+        !mason_daemon::diagcause::held(d, t.0)
+    });
+}
+
 fn failed_outside(d: &Arc<mason_daemon::Daemon>, t: TaskId) -> bool {
     let task = task_of(d, t);
     task.state == State::Failed && task.failure_class == Some(FailClass::Outside)
@@ -56,6 +64,7 @@ fn an_outside_failure_is_retried_twice_and_the_third_stays_failed() {
     let t = file_task(&d, "Push is rejected");
     wait_for("the first outside failure", 180, || failed_outside(&d, t));
     // First retry.
+    settled(&d, t);
     mason_daemon::autoretry::pass(&d);
     assert_eq!(auto_retries(&d, t), 1);
     wait_for("the second outside failure", 180, || {
@@ -67,6 +76,7 @@ fn an_outside_failure_is_retried_twice_and_the_third_stays_failed() {
                 >= 2
     });
     // Second retry.
+    settled(&d, t);
     mason_daemon::autoretry::pass(&d);
     assert_eq!(auto_retries(&d, t), 2);
     wait_for("the third outside failure", 180, || {
@@ -78,6 +88,7 @@ fn an_outside_failure_is_retried_twice_and_the_third_stays_failed() {
                 >= 3
     });
     // No retry is left in the window: it stays failed, and the usual alert is raised.
+    settled(&d, t);
     mason_daemon::autoretry::pass(&d);
     assert_eq!(auto_retries(&d, t), 2);
     assert_eq!(state_of(&d, t), State::Failed);
@@ -100,6 +111,7 @@ fn an_outside_failure_that_clears_lands_after_one_automatic_retry() {
         .iter()
         .any(|a| a.0 == format!("failed:{}", t.0)));
     hook(&s, false);
+    settled(&d, t);
     mason_daemon::autoretry::pass(&d);
     wait_state(&d, t, State::Landed, 180);
     assert_eq!(auto_retries(&d, t), 1);

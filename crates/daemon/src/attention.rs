@@ -54,7 +54,7 @@ pub fn intervene(
 /// diagnosis' card, if it has one. Older logs stored the bare question; it is
 /// shown as a card with no options.
 pub fn card_of(d: &Daemon, t: &Task) -> Option<(Card, String)> {
-    if t.state == State::Failed {
+    if matches!(t.state, State::Failed | State::Landing) {
         return crate::diagnose::pending_card(d, t).and_then(|r| crate::diagnose::row_card(&r));
     }
     let w = d.world().ok()?;
@@ -132,7 +132,7 @@ pub fn answer_with(
     // Read once: the diagnosis whose card is checked is the one carried out.
     let diagnosis = crate::diagnose::pending_card(d, t);
     let open = match t.state {
-        State::Failed => diagnosis.as_ref().and_then(crate::diagnose::row_card),
+        State::Failed | State::Landing => diagnosis.as_ref().and_then(crate::diagnose::row_card),
         State::NeedsAttention => card_of(d, t),
         _ => None,
     };
@@ -215,6 +215,7 @@ pub fn answer_with(
     }
     let def = d
         .pinned_def(&t.def)
+        .filter(|_| !t.def.is_empty())
         .unwrap_or_else(|| d.current_def(t.project));
     let mut step = def
         .first_in(State::Developing)
