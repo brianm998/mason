@@ -1055,4 +1055,4 @@ Every requirement from your message and where it's answered.
 
 # Numbered files (added in s43)
 
-MASON hands out the numbers of the stage note (`docs/stages/sNN.md`), exit script (`scripts/exit/sNN.sh`) and decision record (`docs/decisions/NNNN-*.md`) a task adds; a task is told its numbers in its prompt and never looks for "the next one". The README status block is generated from the stage notes when changes land. See `docs/decisions/0021-numbers-readings.md`.
+MASON hands out the numbers of the stage note (`docs/stages/sNN.md`), exit script (`scripts/exit/sNN.sh`) and decision record (`docs/decisions/NNNN-*.md`) a task adds; a task is told its numbers in its prompt and never looks for "the next one". A task does not add an entry to `README.md` for its change, and landing does not write to that file. See `docs/decisions/0021-numbers-readings.md` and `docs/decisions/1102-no-readme-status-block.md`.

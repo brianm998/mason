@@ -275,7 +275,7 @@ impl<'a> Ctx<'a> {
             ],
             State::Landing => vec!["cancel", "skip_test", "land_now", "force"],
             State::NeedsAttention => vec!["answer", "cancel", "retry", "open_session"],
-            State::Failed => vec!["retry", "cancel", "open_session"],
+            State::Failed => self.failed_actions(t),
             State::Canceled if t.cancel_keeps_branch => vec!["revive"],
             State::Canceled | State::Landed => vec![],
         };
@@ -303,6 +303,25 @@ impl<'a> Ctx<'a> {
             a.push("skip_all_tests");
         }
         a.into_iter().map(String::from).collect()
+    }
+
+    /// A failed task's actions: `answer` first when it holds a diagnosis card, and `diagnose`
+    /// when one may be asked for (none pending or running, and the budget allows).
+    fn failed_actions(&self, t: &Task) -> Vec<&'static str> {
+        let rows = self.d.store.diagnoses(Some(t.id.0)).unwrap_or_default();
+        let pending = crate::diagnose::pending_in(&rows, t);
+        let mut a = vec![];
+        if pending.and_then(crate::diagnose::row_card).is_some() {
+            a.push("answer");
+        }
+        a.extend(["retry", "cancel", "open_session"]);
+        if pending.is_none()
+            && crate::diagnose::running(self.d, t.id.0).is_none()
+            && crate::diagnose::budget(&rows, t.state_entered_at.0).is_ok()
+        {
+            a.push("diagnose");
+        }
+        a
     }
 
     /// A self-hosting hold nobody has approved yet, for a task still going.
@@ -433,7 +452,10 @@ impl<'a> Ctx<'a> {
         }
         match &t.activity {
             Activity::Waiting(WaitReason::On(w)) => w.clone(),
-            Activity::Waiting(WaitReason::Slot) => "Waiting for an LLM session to be free".into(),
+            Activity::Waiting(WaitReason::Slot) => self
+                .d
+                .queued_wait_text(self.w, t)
+                .unwrap_or_else(|| "Waiting for an LLM session to be free".into()),
             Activity::Waiting(WaitReason::NotBefore(_)) => "Waiting for its start time".into(),
             Activity::Waiting(WaitReason::Owner) => "Waiting for your answer".into(),
             Activity::Held(_) if crate::blockers::held_line(self.w, t).is_some() => {
@@ -535,7 +557,10 @@ impl<'a> Ctx<'a> {
             title: t.title.clone(),
             project: self.project_name(t),
             state: state_name(t.state).to_string(),
-            activity: crate::http::activity_text(&t.activity),
+            activity: self
+                .d
+                .queued_wait_text(self.w, t)
+                .unwrap_or_else(|| crate::http::activity_text(&t.activity)),
             why_waiting: self.why_waiting(t),
             wait: self
                 .wait_view
@@ -1317,6 +1342,7 @@ impl<'a> Ctx<'a> {
             plan,
             plan_view,
             card: self.card(t),
+            review_findings: crate::reviewfindings::lines(&self.d.cfg.task_dir(id)),
             closing: self
                 .d
                 .store

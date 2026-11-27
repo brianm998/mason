@@ -235,6 +235,18 @@ pub fn compose_body(body: &str, evidence: &str, from: Option<TaskId>) -> String 
 /// Apply every rule and, if the proposal passes, file it. `Err` is the reason it was
 /// refused, in words the agent can act on; nothing is filed then.
 pub fn file(d: &Arc<Daemon>, f: &Filing) -> Result<Filed, String> {
+    file_as(d, f, false)
+}
+
+/// [`file`] for a health session (source `health`, s1175): a proposal that lands in MASON's
+/// own project does not count against `[self] per_week` (the pipeline's findings about itself
+/// must not wait out the week); it has its own `[health] health_proposals_per_week` limit.
+/// Duplicates are refused as for any filing.
+pub fn file_from_health(d: &Arc<Daemon>, f: &Filing) -> Result<Filed, String> {
+    file_as(d, f, true)
+}
+
+fn file_as(d: &Arc<Daemon>, f: &Filing, health: bool) -> Result<Filed, String> {
     let title = f.title.trim().to_string();
     if title.is_empty() || title.chars().count() > 120 {
         return Err("title must be 1 to 120 characters".into());
@@ -372,6 +384,19 @@ pub fn file(d: &Arc<Daemon>, f: &Filing) -> Result<Filed, String> {
         // limits (decision 0046); the cooldown after a rollback still refuses it.
         if all {
             crate::selfguard::check_filing_proposal(d, tid)?;
+        } else if health {
+            let week = d
+                .store
+                .health_since(&["proposal"], now.saturating_sub(7 * DAY_MS))
+                .map_err(|e| e.to_string())?
+                .len() as u32;
+            let max = d.cfg.health.health_proposals_per_week;
+            if week >= max {
+                return Err(format!(
+                    "the health session filed {week} proposals this week and the limit is {max}"
+                ));
+            }
+            crate::selfguard::check_filing_health(d, tid)?;
         } else {
             crate::selfguard::check_filing_as(d, tid, TrustSource::OwnerAgent)?;
         }

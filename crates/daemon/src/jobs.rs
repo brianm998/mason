@@ -106,9 +106,39 @@ pub(crate) fn first_step_in(d: &Arc<Daemon>, t: &Task, state: State) -> Option<S
     def.first_in(state).map(|s| s.name.clone())
 }
 
-/// Every send-back's feedback, in order, for the escalated last round.
+/// Why the next develop round happens: it picks the `fix` or `conflict` prompt pack.
 const ROUND_REASON: &str = "round-reason.txt";
+/// Every red round's feedback, in order: for the escalated last round, the diagnosis and the
+/// owner's session.
 const FEEDBACK_HISTORY: &str = "feedback-history.txt";
+
+/// Add one round's entry to the task's feedback history.
+fn append_history(dir: &Path, run: u64, step: &str, reason: &str, text: &str) {
+    let entry = format!("## After run {run} ({step}): {reason}\n{text}\n\n");
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join(FEEDBACK_HISTORY))
+        .and_then(|mut h| std::io::Write::write_all(&mut h, entry.as_bytes()));
+}
+
+/// Keep a red round's feedback in the task folder `dir`: as `feedback.txt` for the next develop
+/// round, with why that round happens (written together so the two cannot get out of step), and
+/// as one more entry of the history. Done whether the task goes back or fails, so a retry and the
+/// diagnosis see the round that used up the last chance.
+fn save_feedback(
+    dir: &Path,
+    run: StepRunId,
+    step: &str,
+    reason: &str,
+    feedback: &str,
+    round_reason: &str,
+) {
+    let _ = std::fs::create_dir_all(dir);
+    let _ = std::fs::write(dir.join("feedback.txt"), feedback);
+    let _ = std::fs::write(dir.join(ROUND_REASON), round_reason);
+    append_history(dir, run.0, step, reason, feedback);
+}
 
 /// Is the next test round the last one the test step will give (another red would fail the
 /// task), after at least one red round? `done`: test rounds that went red so far.
@@ -372,6 +402,19 @@ impl Ctx {
                 retry_n: self.attempt,
                 at: now_ms(),
             });
+        // Saved only for a red round: a failure with no feedback leaves the earlier files alone.
+        let keep = || {
+            if let Some(f) = feedback.as_deref().filter(|_| outcome == Outcome::Red) {
+                save_feedback(
+                    &self.task_dir(),
+                    self.run,
+                    &self.step.name,
+                    &reason,
+                    f,
+                    round_reason,
+                );
+            }
+        };
         match after(&self.def, &self.step, outcome, round, rounds) {
             Transition::Next { step, state } => {
                 self.emit(EventKind::StepSucceeded {
@@ -391,22 +434,7 @@ impl Ctx {
                 crate::suites::after_landing(&self.d, self.task);
             }
             Transition::SendBack { step } => {
-                if let Some(f) = feedback {
-                    let _ = std::fs::write(self.task_dir().join("feedback.txt"), &f);
-                    // Why the next develop round happens, written with its feedback so the
-                    // two cannot get out of step: it picks the `fix` or `conflict` pack.
-                    let _ = std::fs::write(self.task_dir().join(ROUND_REASON), round_reason);
-                    // Every round's feedback is kept for the last round's fresh session (s251).
-                    let entry = format!(
-                        "## After run {} ({}): {}\n{}\n\n",
-                        self.run.0, self.step.name, reason, f
-                    );
-                    let _ = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(self.task_dir().join(FEEDBACK_HISTORY))
-                        .and_then(|mut h| std::io::Write::write_all(&mut h, entry.as_bytes()));
-                }
+                keep();
                 let step = repin_for_send_back(
                     &self.d,
                     self.task,
@@ -424,6 +452,8 @@ impl Ctx {
                 });
             }
             Transition::Fail(why) => {
+                // Before the failure shows, so a retry and the diagnosis read this round.
+                keep();
                 let reason = match (outcome, reason.is_empty()) {
                     (Outcome::Fail, false) => reason,
                     (_, true) => why,
@@ -4011,6 +4041,8 @@ fn agent_job(c: &Ctx) {
     let mut feedback = std::fs::read_to_string(dir.join("feedback.txt")).ok();
     let one_shot = take_retry_note(&dir);
     let note_shown = one_shot.is_some();
+    // The default explore prompt has no place for feedback, so it takes the note by itself.
+    let explore_note = with_retry_note(None, one_shot.clone());
     feedback = with_retry_note(feedback, one_shot);
     if let Some(files) = &conflicts {
         if kind == StepKind::Develop {
@@ -4124,7 +4156,13 @@ fn agent_job(c: &Ctx) {
                 plan.as_ref(),
             ),
             StepKind::Explore => {
-                crate::prompts::explore_prompt(c.task.0, &c.title, &c.body, c.trust, &c.project)
+                let p = crate::prompts::explore_prompt(
+                    c.task.0, &c.title, &c.body, c.trust, &c.project,
+                );
+                match &explore_note {
+                    Some(n) => format!("{p}\n\n{n}"),
+                    None => p,
+                }
             }
             StepKind::Diagnose | StepKind::Chat | StepKind::Health => String::new(),
         }
@@ -4136,6 +4174,12 @@ fn agent_job(c: &Ctx) {
         Some(b) if kind == StepKind::Review || (kind == StepKind::Develop && !note_shown) => {
             format!("{prompt}\n\n{b}")
         }
+        _ => prompt,
+    };
+
+    // The minor findings of an approval, for the develop round that follows one, if any does.
+    let prompt = match crate::reviewfindings::pending_advice(&dir) {
+        Some(a) if kind == StepKind::Develop => format!("{prompt}\n\n{a}"),
         _ => prompt,
     };
 
@@ -5017,23 +5061,33 @@ fn finish_agent_inner(c: &Ctx, report: StepReport, dir: &Path) {
                     // What landing's dropped-line audit reads: the lines removed on purpose.
                     let _ = std::fs::write(dir.join("change.json"), submission.to_string());
                     let _ = std::fs::remove_file(dir.join("feedback.txt"));
+                    crate::reviewfindings::advice_given(dir);
                 }
                 _ => {}
             }
             // An approval that settles replaced base lines declares them as the task's removals.
             if c.state == State::Review && submission["verdict"] == "approve" {
                 add_removals(dir, &submission["removes"]);
+                // An earlier round's findings are answered: no later develop round gets them.
+                let _ = std::fs::remove_file(dir.join("feedback.txt"));
+            }
+            if c.state == State::Review {
+                crate::reviewfindings::keep(dir, c.run.0, &submission["findings"]);
             }
             // A reviewer who asks for changes is red, not an error.
             if c.state == State::Review && submission["verdict"] == "changes" {
-                let findings: Vec<String> = submission["findings"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .map(|f| format!("- {}{}", f["issue"].as_str().unwrap_or(""), f["file"].as_str().map(|p| format!(" ({p})")).unwrap_or_default()))
-                    .collect();
-                let feedback = format!("The reviewer asked for changes: {}\n{}", submission["summary"].as_str().unwrap_or(""), findings.join("\n"));
+                let feedback = crate::reviewfindings::changes_feedback(
+                    submission["summary"].as_str().unwrap_or(""),
+                    &submission["findings"],
+                );
                 return c.conclude(Outcome::Red, "the reviewer asked for changes".into(), Some(feedback));
+            }
+            if c.state == State::Review {
+                // Approved, with advice: kept in the history and for a later develop round.
+                if let Some(advice) = crate::reviewfindings::advice(&submission["findings"]) {
+                    crate::reviewfindings::keep_advice(dir, &advice);
+                    append_history(dir, c.run.0, &c.step.name, "approved with minor findings", &advice);
+                }
             }
             c.green();
         }
@@ -5988,6 +6042,18 @@ pub fn conclude_approval(
             step.kind.name()
         ));
     }
+    let keep = || {
+        if outcome == Outcome::Red {
+            save_feedback(
+                &d.task_dir(task),
+                run,
+                &step.name,
+                &format!("rejected by the owner: {reason}"),
+                &format!("The owner rejected the work at `{}`: {reason}", step.name),
+                "fix",
+            );
+        }
+    };
     let kind = match after(&def, step, outcome, r.attempt, step.max_rounds) {
         Transition::Next { step, state } => EventKind::StepSucceeded {
             task,
@@ -6001,10 +6067,7 @@ pub fn conclude_approval(
             }),
         },
         Transition::SendBack { step: back } => {
-            let _ = std::fs::write(
-                d.task_dir(task).join("feedback.txt"),
-                format!("The owner rejected the work at `{}`: {reason}", step.name),
-            );
+            keep();
             let back = repin_for_send_back(
                 d,
                 task,
@@ -6021,11 +6084,14 @@ pub fn conclude_approval(
                 to_step: back,
             }
         }
-        Transition::Fail(why) => EventKind::StepFailed {
-            task,
-            reason: format!("rejected by the owner: {reason} ({why})"),
-            class: Some(FailClass::Code),
-        },
+        Transition::Fail(why) => {
+            keep();
+            EventKind::StepFailed {
+                task,
+                reason: format!("rejected by the owner: {reason} ({why})"),
+                class: Some(FailClass::Code),
+            }
+        }
     };
     if d.emit_for_run(task, run, kind) {
         Ok(())

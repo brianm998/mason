@@ -108,6 +108,9 @@ These earlier checks also use something real. They are on this page so that the 
   opens and merges pull requests. `MASON_REAL_REPO=owner/scratch MASON_REAL_APPROVED=yes GH_TOKEN=... bash scripts/exit/s15-real.sh`
 - **s17-real.sh:** MASON lands a change to its own source in a scratch copy and updates itself;
   builds in release mode (minutes); no model. `bash scripts/exit/s17-real.sh`
+- **s1153-real.sh:** the real `claude` CLI, given a plugin directory and the settings MASON writes,
+  lists the plugin's skill and not the working directory's; spends no tokens (closed API port,
+  temporary HOME). Needs the `claude` CLI. `MASON_REAL_APPROVED=yes bash scripts/exit/s1153-real.sh`
 - **s26-real.sh:** `mason init` against a real GitHub remote with the real `claude` CLI; needs a
   scratch repository and a token. `S26_REPO=owner/scratch bash scripts/exit/s26-real.sh`
 - **s40-real.sh:** approve and reject through both monitors against a real daemon; no model.

@@ -2383,6 +2383,8 @@ fn poll(
                 st.save(rec);
             }
         }
+        // The run is still going: the health check does not call its step silent.
+        crate::remote_runs::polled(rec, st.picked_ms, now);
         if let Some(f) = &site.on_phase {
             let text = phase_text(jobs, st.shards.len(), now, st.pushed_ms);
             if live.said.as_deref() != Some(text.as_str()) {
@@ -4089,6 +4091,7 @@ impl HoldGuard {
             &spec.runs_on,
             shards,
             &record_path(dir, &spec.id),
+            spec.limit.as_millis() as u64,
         );
         write_hold(
             &holds,
@@ -7131,12 +7134,17 @@ mod tests {
             )
             .unwrap();
         let giver = lease.giver();
-        giver.shrink(&units_of(2));
-        assert_eq!((b.used("gha"), b.used("compile")), (0, 1));
-        // A grant that says its units are held does not ask: the lease is still held.
+        // A grant that says its units are held does not ask while the lease holds them.
         let held = Grant::borrowed(Some(giver.clone()), units_of(2));
         assert!(held.regain(units_of(2), &|| None));
-        assert_eq!(b.used("gha"), 0, "nothing was asked");
+        assert_eq!(
+            (b.used("gha"), b.used("compile")),
+            (2, 1),
+            "nothing was asked"
+        );
+        // The lease gives its units back (jobs of an earlier run finished).
+        giver.shrink(&units_of(2));
+        assert_eq!((b.used("gha"), b.used("compile")), (0, 1));
         // One that says they were given back asks, and holds them until it is dropped.
         let again = Grant::borrowed_given_up(Some(giver));
         assert!(again.regain(units_of(2), &|| None));

@@ -344,11 +344,22 @@ mod tests {
 
     /// A worktree with a skill and a command of its own, and an owner with one of each,
     /// a synced skill and a plugin.
+    /// A skill named `a:b`. NTFS reads a `:` in a directory name as an alternate
+    /// stream, so on Windows the same name is written as a command instead.
+    fn claude_named(wt: &Path, name: &str) {
+        if cfg!(windows) {
+            let (a, b) = name.split_once(':').unwrap();
+            put(wt, &format!(".claude/commands/{a}/{b}.md"), "x");
+        } else {
+            put(wt, &format!(".claude/skills/{name}/SKILL.md"), "x");
+        }
+    }
+
     fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
         let t = tempfile::tempdir().unwrap();
         let (wt, home) = (t.path().join("wt"), t.path().join("home"));
         put(&wt, ".claude/skills/sneaky/SKILL.md", "x");
-        put(&wt, ".claude/skills/mason:review/SKILL.md", "x");
+        claude_named(&wt, "mason:review");
         put(&wt, ".claude/skills/mine/SKILL.md", "x");
         put(&wt, ".claude/commands/grp/deep.md", "x");
         put(
@@ -462,7 +473,7 @@ mod tests {
             assert!(policy.refusal(no, &wt).is_some(), "{no}");
         }
         // Written after the launch, so it is not among the ones turned off.
-        put(&wt, ".claude/skills/mason:late/SKILL.md", "x");
+        claude_named(&wt, "mason:late");
         assert!(policy.refusal("mason:late", &wt).is_some());
         assert_eq!(policy.refusal("mason:review", &wt), None);
     }

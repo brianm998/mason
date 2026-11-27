@@ -899,6 +899,11 @@ pub struct HealthCfg {
     /// Minutes between checks; 0 turns the loop off (`mason health` still works).
     pub interval_m: u64,
     pub limits: mason_core::health::Limits,
+    /// A health session waiting for the owner this long is ended as timed out (s1175).
+    pub needs_owner_ttl_m: u64,
+    /// Proposals a health session may file per week for MASON's own project; they do not
+    /// count against `[self] per_week` (s1175).
+    pub health_proposals_per_week: u32,
 }
 
 impl Default for HealthCfg {
@@ -906,6 +911,8 @@ impl Default for HealthCfg {
         HealthCfg {
             interval_m: 30,
             limits: Default::default(),
+            needs_owner_ttl_m: 120,
+            health_proposals_per_week: 10,
         }
     }
 }
@@ -953,6 +960,12 @@ pub fn parse_health(text: &str) -> Result<Option<HealthCfg>, String> {
             "cooldown_h" => l.cooldown_ms = n * H,
             "blocked_compiles" => l.blocked_compiles = n as u32,
             "blocked_compile_m" => l.blocked_compile_ms = n * M,
+            "long_factor" => l.long_factor = n,
+            "long_min_h" => l.long_min_ms = n * H,
+            "long_landing_min_m" => l.long_landing_min_ms = n * M,
+            "checks_max" => l.checks_max = n as u32,
+            "needs_owner_ttl_m" => c.needs_owner_ttl_m = n,
+            "health_proposals_per_week" => c.health_proposals_per_week = n as u32,
             other => return Err(format!("daemon.toml: health.{other} is not a known key")),
         }
     }

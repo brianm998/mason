@@ -842,6 +842,7 @@ fn coordinate(weak: &Weak<Daemon>, pid: ProjectId, first: &mut bool, last: &mut 
             remove_refs(&d, pid, None, None);
         }
     }
+    release_finished_integration(&d, pid);
     d.crash.panic_point("coordinator");
     let seen = d.landing.lock().gen;
     let (queue_len, wait) = form_and_start(&d, pid, last);
@@ -860,6 +861,59 @@ fn coordinate(weak: &Weak<Daemon>, pid: ProjectId, first: &mut bool, last: &mut 
             .unwrap_or_else(|e| e.into_inner());
     }
     true
+}
+
+/// A finished batch's integration branch is disposable, but the one-shot cleanup after the
+/// batch ignores a momentary git failure (an index.lock in the worktree). Retry it on every
+/// pass: delete `mason/int/<project>/b<id>` for batches whose row is finished. A running
+/// batch (`finished_at` None) is never touched.
+fn release_finished_integration(d: &Arc<Daemon>, pid: ProjectId) {
+    let Some(p) = d.project(pid) else { return };
+    let finished: Vec<String> = d
+        .store
+        .batches(Some(p.id.as_str()), 50)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|b| b.finished_at.is_some())
+        .map(|b| format!("mason/int/{}/b{}", p.id, b.id))
+        .collect();
+    if finished.is_empty() {
+        return;
+    }
+    let lock = d.repo_lock(pid);
+    let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+    delete_branches(&p.path, &finished);
+}
+
+/// Delete each of `branches` that exists, detaching any worktree standing on it first. A git
+/// failure is logged and the branch stays for the next pass.
+fn delete_branches(repo: &Path, branches: &[String]) {
+    let wts = git::worktrees(repo).unwrap_or_default();
+    for branch in branches {
+        let exists = git::run(
+            repo,
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{branch}"),
+            ],
+        )
+        .is_ok();
+        if !exists {
+            continue;
+        }
+        for (path, b) in &wts {
+            if b.as_deref() == Some(branch.as_str()) {
+                if let Err(e) = git::run(path, &["checkout", "--detach", "--quiet"]) {
+                    tracing::warn!("detaching {} from {branch}: {e}", path.display());
+                }
+            }
+        }
+        if let Err(e) = git::run(repo, &["branch", "-D", branch]) {
+            tracing::warn!("deleting {branch}: {e}");
+        }
+    }
 }
 
 /// A dead daemon's batches left integration branches behind (and a worktree
@@ -1753,7 +1807,7 @@ impl Runner {
                 let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
                 batch.assemble(&active, &point)
             };
-            let mut asm = match asm {
+            let asm = match asm {
                 Ok(a) => a,
                 // A fetch that fails decides nothing (decision 0105): the batch waits for the
                 // remote and assembles again, and its tasks stay in landing meanwhile. Waiting
@@ -1776,14 +1830,6 @@ impl Runner {
             // that fails is logged, not fatal: landing went without it before.
             if let Err(e) = crate::jobs::setup_checkout(&def, &int_wt) {
                 tracing::warn!(batch = batch_id, "{e}");
-            }
-            // MASON, not the tasks, writes the README status block, from the stage notes
-            // the batch brings. It is committed here so the union that is verified is the
-            // union that lands.
-            if !asm.merged.is_empty() && batch.regenerate_status() {
-                if let Ok(h) = git::rev_parse(&int_wt, "HEAD") {
-                    asm.head = h;
-                }
             }
             for t in &asm.already {
                 landed.push(*t);
@@ -2767,9 +2813,13 @@ impl Runner {
         {
             let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
             if int_wt.join(".git").exists() {
-                let _ = git::run(&int_wt, &["checkout", "--detach", "--quiet"]);
+                if let Err(e) = git::run(&int_wt, &["checkout", "--detach", "--quiet"]) {
+                    tracing::warn!("detaching {}: {e}", int_wt.display());
+                }
             }
-            let _ = git::run(&p.path, &["branch", "-D", &int_branch]);
+            if let Err(e) = git::run(&p.path, &["branch", "-D", &int_branch]) {
+                tracing::warn!("deleting {int_branch}: {e}");
+            }
         }
         // -- the verdicts
         let was_ok = outcome.is_ok();
@@ -4550,16 +4600,50 @@ impl Runner {
             .store
             .add_ref(batch, &self.project().id, kind, name, None, now_ms())
             .map_err(|e| e.to_string())?;
-        git::run(
-            wt,
-            &[
-                "push",
-                "--porcelain",
-                &remote,
-                &format!("{sha}:refs/heads/{name}"),
-            ],
-        )
-        .map_err(|e| format!("could not push {name}: {e}"))?;
+        // A push that cannot reach GitHub at all (no DNS, no route) is the network's fault, not
+        // the code's: wait it out like any other outage before failing the landing.
+        let key = self.alert_key("service");
+        let pushed = retry_outage(
+            || {
+                git::run(
+                    wt,
+                    &[
+                        "push",
+                        "--porcelain",
+                        &remote,
+                        &format!("{sha}:refs/heads/{name}"),
+                    ],
+                )
+                .map_err(|e| {
+                    let e = e.to_string();
+                    if is_network_unreachable(&e) {
+                        format!("{}{e}", crate::hostedcheck::OUTAGE_PREFIX)
+                    } else {
+                        e
+                    }
+                })
+            },
+            |waited, why| {
+                self.d.landing.raise(
+                    self.pid,
+                    &key,
+                    "landing",
+                    &format!(
+                        "{}: waiting for the network to push {name}: {why} (waited {waited} s)",
+                        self.project().id
+                    ),
+                );
+                self.alive(OUTAGE_STEP_S);
+            },
+            |s| self.nap(s),
+        );
+        self.d.landing.clear(self.pid, &key);
+        pushed.map_err(|e| {
+            let e = e
+                .strip_prefix(crate::hostedcheck::OUTAGE_PREFIX)
+                .unwrap_or(&e);
+            format!("could not push {name}: {e}")
+        })?;
         self.point(&format!("{kind}_pushed"));
         Ok((sha, id))
     }
@@ -5963,6 +6047,25 @@ fn lint_places(output: &str) -> String {
     }
 }
 
+/// Is this git error "the remote could not be reached" (DNS, route, timeout), as opposed to a
+/// refusal?
+fn is_network_unreachable(e: &str) -> bool {
+    let l = e.to_ascii_lowercase();
+    [
+        "could not resolve hostname",
+        "could not resolve host",
+        "network is unreachable",
+        "no route to host",
+        "connection timed out",
+        "operation timed out",
+        "connection refused",
+        "connection reset",
+        "temporary failure in name resolution",
+    ]
+    .iter()
+    .any(|p| l.contains(p))
+}
+
 /// How long a landing waits out a GitHub outage, and the first and longest pause between tries.
 const OUTAGE_LIMIT_S: u64 = 30 * 60;
 const OUTAGE_STEP_S: u64 = 30;
@@ -6000,6 +6103,16 @@ fn retry_outage<T>(
 #[cfg(test)]
 mod outage_tests {
     use super::*;
+
+    #[test]
+    fn a_dns_failure_is_unreachable_and_a_refusal_is_not() {
+        assert!(is_network_unreachable(
+            "ssh: Could not resolve hostname github.com: nodename nor servname provided, or not known"
+        ));
+        assert!(!is_network_unreachable(
+            "Permission denied (publickey). [remote rejected]"
+        ));
+    }
 
     fn outage() -> String {
         format!(
@@ -6172,5 +6285,52 @@ mod tests {
             BTreeMap::from([("compile".to_string(), 1), ("gha".to_string(), 3)])
         );
         assert!(!needs.amounts.contains_key("test-suite"));
+    }
+
+    #[test]
+    fn a_branch_held_by_a_git_lock_is_deleted_on_a_later_pass() {
+        fn g(dir: &Path, args: &[&str]) {
+            let o = std::process::Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            assert!(
+                o.status.success(),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&o.stderr)
+            );
+        }
+        let t = tempfile::tempdir().unwrap();
+        let repo = t.path().join("repo");
+        let wt = t.path().join("wt");
+        std::fs::create_dir(&repo).unwrap();
+        g(&repo, &["init", "-q", "-b", "main"]);
+        g(&repo, &["commit", "-q", "--allow-empty", "-m", "x"]);
+        g(&repo, &["branch", "mason/int/p/b1"]);
+        g(&repo, &["branch", "mason/int/p/b2"]);
+        g(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                wt.to_str().unwrap(),
+                "mason/int/p/b1",
+            ],
+        );
+        let lock = repo.join(".git/worktrees/wt/index.lock");
+        std::fs::write(&lock, "").unwrap();
+        // b2 belongs to a running batch: it is not in the finished list.
+        let finished = vec!["mason/int/p/b1".to_string()];
+        delete_branches(&repo, &finished);
+        let list = |d: &Path| git::run(d, &["branch", "--list", "mason/int/*"]).unwrap();
+        assert!(list(&repo).contains("mason/int/p/b1"));
+        std::fs::remove_file(&lock).unwrap();
+        delete_branches(&repo, &finished);
+        let left = list(&repo);
+        assert!(!left.contains("b1"), "{left}");
+        assert!(left.contains("b2"), "{left}");
     }
 }
