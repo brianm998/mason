@@ -136,8 +136,6 @@ pub struct DaemonConfig {
     pub adhoc_exit_start: u32,
     /// How often the detector cycle runs (Part 14: daily).
     pub introspect_interval: Duration,
-    /// How often the analyst agent is asked (weekly).
-    pub analyst_interval: Duration,
     /// How often the daemon looks at what is due among the recurring jobs.
     pub schedule_tick: Duration,
 }
@@ -1111,7 +1109,6 @@ impl DaemonConfig {
                 .filter(|n| (1..=crate::numbers::EXIT_CEILING).contains(n))
                 .unwrap_or(crate::numbers::DEFAULT_ADHOC_START),
             introspect_interval: Duration::from_secs(24 * 3600),
-            analyst_interval: Duration::from_secs(7 * 24 * 3600),
             schedule_tick: Duration::from_secs(30),
             owner_names: vec![std::env::var("USER")
                 .or_else(|_| std::env::var("LOGNAME"))
