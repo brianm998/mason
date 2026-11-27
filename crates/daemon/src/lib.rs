@@ -41,6 +41,7 @@ pub mod disk;
 pub mod diskhistory;
 pub mod dnssd;
 pub mod editor;
+pub mod edits;
 pub mod exhausted;
 pub mod fdlimit;
 pub mod file_hold;

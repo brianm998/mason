@@ -95,7 +95,7 @@ class MemoryTokenStore : TokenStore {
     }
 }
 
-/** A `_mason._tcp` record's TXT: proto, fp, version; the instance is "MASON on <host>". */
+/** A `_mason._tcp` record's TXT: proto, fp, version; the instance is "MASON on <host> (<fp8>)". */
 data class ServiceRecord(val instance: String, val proto: Int, val fingerprint: String, val version: String) {
     companion object {
         const val TYPE = "_mason._tcp"

@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+#![cfg(unix)]
+// Unix-only: the remote's pre-receive hook is a sh script and the file mode is set with PermissionsExt.
 
 //! #1185: a short network outage fails no landing batch and costs no test round. The remote
 //! is a real bare repository whose pre-receive hook says what ssh says without DNS.

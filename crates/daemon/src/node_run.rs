@@ -1309,6 +1309,9 @@ pub fn job_env(
             .into_owned(),
     );
     put("MASON_PROJECT", job.project.clone());
+    // A daemon that a job's tests start stays off the owner's network: no Bonjour advertisement
+    // and no browsing (`lan::mdns_off`).
+    put("MASON_NO_MDNS", "1".into());
     // Set so that everything that treats a pipeline run differently (the shims above, the test
     // mode of a project's scripts) does here; the coordinator's own number is kept when sent.
     if !job.env.iter().any(|(k, _)| k == "MASON_TASK") {
@@ -1940,6 +1943,7 @@ mod tests {
         assert_eq!(get("MASON_PROGRESS_FILE"), None);
         assert_eq!(get("MASON_SKIP_SWIFT"), Some("1"));
         assert_eq!(get("MASON_NODE"), Some("1"));
+        assert_eq!(get("MASON_NO_MDNS"), Some("1"));
         assert_eq!(get("NO_COLOR"), Some("1"));
         assert_eq!(get("HOME"), Some("/Users/masonnode"));
         // Daemon tests on the node get a world limit fitting it (a number, whatever the cores).
