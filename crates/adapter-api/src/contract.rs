@@ -25,6 +25,9 @@ pub enum StepKind {
     /// A read-only session that looks at a task that failed on its own code and says what
     /// should happen next (s250). Not a step of the graph.
     Diagnose,
+    /// A read-only session that confirms or rejects the blocking findings of a review that asked
+    /// for changes, before the task is sent back (task 1134). Not a step of the graph.
+    Validate,
     /// A conversation the owner has with the agent in a task's worktree (s364): no contract tool,
     /// the owner is present, and the agent may change files when asked to.
     Chat,
@@ -42,7 +45,8 @@ pub const HEALTH_ACTIONS: [&str; 5] = [
     "restart_round",
 ];
 
-pub const ALL_TOOLS: [&str; 11] = [
+pub const ALL_TOOLS: [&str; 12] = [
+    "submit_validation",
     "submit_health",
     "submit_close",
     "submit_diagnosis",
@@ -63,6 +67,7 @@ impl StepKind {
             StepKind::Develop => "develop",
             StepKind::Review => "review",
             StepKind::Diagnose => "diagnose",
+            StepKind::Validate => "validate",
             StepKind::Chat => "chat",
             StepKind::Health => "health",
         }
@@ -74,6 +79,7 @@ impl StepKind {
             StepKind::Develop,
             StepKind::Review,
             StepKind::Diagnose,
+            StepKind::Validate,
             StepKind::Chat,
             StepKind::Health,
         ]
@@ -102,6 +108,7 @@ impl StepKind {
             ],
             StepKind::Review => &["submit_review", "ask", "file_proposal", "report_progress"],
             StepKind::Diagnose => &["submit_diagnosis", "report_progress"],
+            StepKind::Validate => &["submit_validation", "report_progress"],
             StepKind::Chat => &[],
             StepKind::Health => &["submit_health", "report_progress"],
         }
@@ -114,6 +121,7 @@ impl StepKind {
             StepKind::Develop => &["submit_change", "request_exploration"],
             StepKind::Review => &["submit_review"],
             StepKind::Diagnose => &["submit_diagnosis"],
+            StepKind::Validate => &["submit_validation"],
             StepKind::Chat => &[],
             StepKind::Health => &["submit_health"],
         }
@@ -312,6 +320,21 @@ pub fn tool_spec(tool: &str) -> Option<(String, Value)> {
                 "evidence_lines": {"type": "array", "maxItems": 10, "items": {"type": "string"}, "description": "The decisive lines, at most 10"}
             }),
             &["summary", "options", "quote"],
+        ),
+        "submit_validation" => s(
+            "End your validation with one verdict per blocking finding you were given. \
+             'confirmed': you read the code and the problem is real and serious enough to send the \
+             task back. 'not_confirmed': the claim is wrong, the quote does not show it, the problem \
+             is already on the base branch, or it is real but minor. 'not_confirmed' is an expected \
+             and acceptable answer. You may not change files.",
+            json!({
+                "verdicts": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {
+                    "index": {"type": "integer", "description": "The finding's number, as given"},
+                    "verdict": {"type": "string", "enum": ["confirmed", "not_confirmed"]},
+                    "reason": {"type": "string", "description": "One line: what you read that settles it"}},
+                    "required": ["index", "verdict", "reason"]}}
+            }),
+            &["verdicts"],
         ),
         "submit_review" => s(
             "Submit your review. verdict is 'approve' or 'changes'. Every finding has a severity: only \
@@ -909,6 +932,27 @@ pub fn validate(tool: &str, a: &Value) -> Result<(), Vec<String>> {
         }
         "submit_health" => health_problems(a, &mut p),
         "submit_diagnosis" => diagnosis_problems(a, &mut p),
+        "submit_validation" => match a.get("verdicts").and_then(Value::as_array) {
+            Some(v) if !v.is_empty() => {
+                for (i, e) in v.iter().enumerate() {
+                    if e.get("index").and_then(Value::as_u64).is_none() {
+                        p.push(format!("verdicts[{i}].index: required, a number"));
+                    }
+                    if !matches!(
+                        e.get("verdict").and_then(Value::as_str),
+                        Some("confirmed" | "not_confirmed")
+                    ) {
+                        p.push(format!(
+                            "verdicts[{i}].verdict: required, 'confirmed' or 'not_confirmed'"
+                        ));
+                    }
+                    let mut q = vec![];
+                    text(e, "reason", 400, &mut q);
+                    p.extend(q.into_iter().map(|m| format!("verdicts[{i}].{m}")));
+                }
+            }
+            _ => p.push("verdicts: required, one entry per finding".into()),
+        },
         "submit_review" => {
             text(a, "summary", 4000, &mut p);
             let findings: &[Value] = a
@@ -1840,6 +1884,7 @@ mod tests {
                     StepKind::Develop,
                     StepKind::Review,
                     StepKind::Diagnose,
+                    StepKind::Validate,
                     StepKind::Chat,
                     StepKind::Health
                 ]
@@ -1862,6 +1907,25 @@ mod tests {
             assert!(!s.tools().contains(&"submit_change") && !s.tools().contains(&"run_check"));
         }
         assert!(!StepKind::Develop.read_only());
+        assert!(StepKind::Validate.read_only());
+        assert_eq!(StepKind::Validate.terminal_tools(), &["submit_validation"]);
+        assert!(!StepKind::Review.tools().contains(&"submit_validation"));
+    }
+
+    #[test]
+    fn a_validation_needs_a_known_verdict_and_a_reason_for_each_finding() {
+        let ok = |v: Value| validate("submit_validation", &v).is_ok();
+        assert!(ok(json!({"verdicts": [
+            {"index": 0, "verdict": "confirmed", "reason": "r"},
+            {"index": 1, "verdict": "not_confirmed", "reason": "r"}]})));
+        assert!(!ok(json!({"verdicts": []})));
+        assert!(!ok(
+            json!({"verdicts": [{"index": 0, "verdict": "maybe", "reason": "r"}]})
+        ));
+        assert!(!ok(
+            json!({"verdicts": [{"index": 0, "verdict": "confirmed"}]})
+        ));
+        assert!(!ok(json!({})));
     }
 
     #[test]

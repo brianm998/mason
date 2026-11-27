@@ -95,6 +95,7 @@ mod resume_loss;
 mod retry_idempotent;
 mod retry_outside;
 mod review_severity;
+mod review_validate;
 mod round_feedback;
 mod row_bodies;
 mod selfguard;

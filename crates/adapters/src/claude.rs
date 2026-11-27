@@ -1991,6 +1991,7 @@ mod tests {
             StepKind::Develop,
             StepKind::Review,
             StepKind::Diagnose,
+            StepKind::Validate,
             StepKind::Chat,
             StepKind::Health,
         ] {
