@@ -52,6 +52,8 @@ pub struct Batch<'a> {
     /// A command that resolves a merge conflict in the worktree.
     pub resolver: Option<&'a str>,
     pub max_fold: u32,
+    /// Waits between tries of a develop push the remote rejects transiently (#1247).
+    pub push_backoff: &'a [std::time::Duration],
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -409,7 +411,15 @@ impl Batch<'_> {
                 continue;
             }
             point("batch_before_promote");
-            match promote(self.repo, wt, self.remote, self.base, &base_ref, &commit) {
+            match promote(
+                self.repo,
+                wt,
+                self.remote,
+                self.base,
+                &base_ref,
+                &commit,
+                self.push_backoff,
+            ) {
                 Ok(()) => {
                     point("batch_after_promote");
                     return Ok(Ok(Finish::Promoted { commit, folds }));

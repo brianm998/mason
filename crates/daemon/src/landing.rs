@@ -1764,6 +1764,7 @@ impl Runner {
             remote,
             resolver: self.cfg.resolver.as_deref(),
             max_fold: self.cfg.max_fold,
+            push_backoff: &d.cfg.network_backoff,
         };
         let lock = d.repo_lock(self.pid);
         let log_dir = d
