@@ -248,6 +248,9 @@ struct PhoneTaskRow: View {
                         Text(row.activity).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     }
                 }
+                if let badge = diagnosisBadge(row.diagnosis) {
+                    Text(badge).font(.caption).foregroundStyle(.secondary)
+                }
                 if row.hasWait {
                     Text(QueueWait.badge(row.wait.cause)).font(.caption.weight(.semibold)).foregroundStyle(.orange)
                         .accessibilityIdentifier("wait:badge")
