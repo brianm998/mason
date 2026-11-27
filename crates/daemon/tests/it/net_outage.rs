@@ -242,3 +242,61 @@ fn a_failing_test_beside_a_network_message_is_still_a_red_round() {
             .any(|e| matches!(&e.event.kind, EventKind::SentBack { task, .. } if *task == t))
     });
 }
+
+// ---- the agent step (#1257) -----------------------------------------------------------------
+
+fn unreachable_turn() -> serde_json::Value {
+    serde_json::json!([{"replay": format!(
+        "{}/../adapters/fixtures/claude/synthetic_api_unreachable.jsonl",
+        env!("CARGO_MANIFEST_DIR")
+    )}])
+}
+
+fn agent_quick(c: &mut mason_daemon::config::DaemonConfig) {
+    c.network_backoff = vec![Duration::from_millis(10); 2];
+    c.network_agent_hold = Duration::from_millis(100);
+    c.burst_min = 2;
+}
+
+#[test]
+fn an_agent_that_cannot_reach_its_api_twice_waits_resumes_and_lands_with_one_alert() {
+    let script = serde_json::json!({"steps": {
+        "explore": [explore_turn()],
+        "develop": [unreachable_turn(), unreachable_turn(), develop_turn()]}});
+    let s = Scratch::new("test -f hello.txt", script);
+    let d = s.start_with(agent_quick);
+    let t = file_task(&d, "Meets an outage");
+    wait_for("the task to land", 120, || {
+        let w = d.world().unwrap();
+        assert_ne!(
+            w.tasks[&t].state,
+            State::Failed,
+            "{:?}",
+            w.tasks[&t].failure
+        );
+        w.tasks[&t].state == State::Landed
+    });
+    let w = d.world().unwrap();
+    assert_eq!(w.tasks[&t].failures, 0);
+    assert!(w.tasks[&t].failure.is_none());
+    let alerts = mason_daemon::attention::alerts_now(&d);
+    let outages = alerts.iter().filter(|(k, _, _)| k == "network-outage");
+    assert_eq!(outages.count(), 1, "{alerts:?}");
+}
+
+#[test]
+fn an_agent_that_never_reaches_its_api_fails_as_outside_past_the_bound() {
+    let many: Vec<_> = (0..40).map(|_| unreachable_turn()).collect();
+    let script = serde_json::json!({"steps": {"explore": [explore_turn()], "develop": many}});
+    let s = Scratch::new("test -f hello.txt", script);
+    let d = s.start_with(agent_quick);
+    let t = file_task(&d, "Never reaches");
+    wait_state(&d, t, State::Failed, 120);
+    let task = task_of(&d, t);
+    let why = task.failure.clone().unwrap_or_default();
+    assert!(why.contains(AGENT_UNREACHABLE), "{why}");
+    assert_eq!(
+        FailClass::classify(State::Developing, &why),
+        FailClass::Outside
+    );
+}

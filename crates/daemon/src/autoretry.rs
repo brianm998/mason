@@ -130,7 +130,9 @@ const OUTAGE: &str = "network outage";
 /// Is the reason of a failed task a network failure? As narrow as for a suite's log: a timeout
 /// alone does not say the network was away.
 fn is_network_failure(reason: &str) -> bool {
-    reason.contains(crate::net::SUITE_REASON) || crate::net::log_failure(reason).is_some()
+    reason.contains(crate::net::SUITE_REASON)
+        || reason.contains(mason_core::AGENT_UNREACHABLE)
+        || crate::net::log_failure(reason).is_some()
 }
 
 /// The network failures inside the window as one burst, whatever their project or wording:
@@ -397,5 +399,26 @@ mod tests {
         assert_eq!(b[0].tasks, vec![1, 2, 3]);
         assert!(is_fetch(&b[0].reason));
         assert!(bursts(&list, now, Duration::from_secs(600), 4).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod agent_outage_tests {
+    use super::*;
+
+    #[test]
+    fn several_tasks_waiting_for_their_api_make_one_outage() {
+        let now = 1_000_000;
+        let events = [(now - 3, 1), (now - 2, 2), (now - 1, 3), (now, 2)];
+        let b = outage(&events, &[], now, Duration::from_secs(600), 3).unwrap();
+        assert_eq!(b.tasks, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn an_agent_that_gave_up_on_the_network_counts_as_one() {
+        assert!(is_network_failure(
+            "the agent failed: the agent could not reach its API after waiting 600 s: x"
+        ));
+        assert!(!is_network_failure("the agent failed: API Error: 401"));
     }
 }

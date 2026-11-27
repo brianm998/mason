@@ -214,6 +214,10 @@ pub enum FailClass {
     Outside,
 }
 
+/// What the reason says of an agent step that kept meeting no route to its API after the daemon
+/// waited for the network: not about the code, so it is `Outside` (#1257).
+pub const AGENT_UNREACHABLE: &str = "the agent could not reach its API";
+
 impl FailClass {
     pub fn name(self) -> &'static str {
         match self {
@@ -250,6 +254,7 @@ impl FailClass {
             || (r.contains("git fetch") && r.contains("timed out"))
             || (r.starts_with("the agent failed: the CLI exited with status")
                 && r.contains("and no result"))
+            || r.contains(AGENT_UNREACHABLE)
             || r.contains("the check could not run on GitHub")
             || r.contains("waiting for GitHub")
             || (r.contains("mason/ci/") && (r.contains("push") || r.contains("refused")));
@@ -289,6 +294,7 @@ mod fail_class_tests {
             "the agent failed: the step host was lost before the agent finished",
             "could not start the step: Spawn(TimedOut) step host did not start within 30s",
             "the agent failed: the CLI exited with status 1 and no result",
+            "the agent failed: the agent could not reach its API after waiting 600 s: API Error: Can't reach the API server (ENOTFOUND)",
             "could not push mason/ci/t12 to origin: refused",
             "landing failed: lint: the lint check gave no result: the check could not run on GitHub: could not push mason/run/p/b1-r1: [remote rejected]; run it again",
         ] {
@@ -306,6 +312,8 @@ mod fail_class_tests {
             "the change weakens assertions and does not say so",
             "the agent failed: the agent submitted nothing",
             "the agent failed: the CLI exited with status 1 and said: rate limited",
+            "the agent failed: API Error: 401 invalid x-api-key",
+            "the agent failed: API Error: 400 messages: text content blocks must be non-empty",
         ] {
             assert_eq!(
                 FailClass::classify(State::Testing, code),
