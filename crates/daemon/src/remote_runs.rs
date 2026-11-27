@@ -224,6 +224,27 @@ pub fn pool_waiting(scope: &Path, task: u64) -> bool {
         .any(|e| e.scope == scope && e.task == task && e.waiting)
 }
 
+/// One short line for each unfinished run of `task` under `scope`: kind, where it runs, whether it
+/// waits for a runner, and the age of its last successful poll. Evidence for `stuck:long`.
+pub fn open_of(scope: &Path, task: u64, now: u64) -> Vec<String> {
+    let scope = scope.display().to_string();
+    reg()
+        .iter()
+        .filter(|e| e.scope == scope && e.task == task && e.finished_ms.is_none())
+        .map(|e| {
+            let poll = e.polled_ms.map_or("never polled".to_string(), |p| {
+                format!("polled {} min ago", now.saturating_sub(p) / 60_000)
+            });
+            let on = if e.runs_on.is_empty() {
+                "no runner yet"
+            } else {
+                e.runs_on.as_str()
+            };
+            format!("{} on {on}, waiting {}, {poll}", e.kind, e.waiting)
+        })
+        .collect()
+}
+
 /// The run ended: how, from its record (collected with code 0 is green).
 pub fn finished(scope: &Path, id: &str, outcome: Option<&str>) {
     let scope = scope.display().to_string();
