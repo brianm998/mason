@@ -23,7 +23,7 @@
 //! still applies the recommended option or dismisses the card.
 //!
 //! Budget: one diagnosis per entry into Failed (`state_entered_at`), at most [`MAX_PER_TASK`] per
-//! task, a session without a verdict counted. The owner may ask for one on a failed task
+//! task, a session without a verdict counted (one that could not start is not, s1287). The owner may ask for one on a failed task
 //! (`POST /v1/tasks/{id}/diagnose`) within the same budget. Rows of the older single-verdict
 //! shape stay readable.
 
