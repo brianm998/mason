@@ -860,7 +860,11 @@ mod tests {
             "{}",
             seen[0]
         );
-        assert!(seen[1].starts_with("CANDIDATE PACK 7"), "{}", seen[1]);
+        assert!(
+            seen[1].starts_with("CANDIDATE PACK === TASK #7"),
+            "{}",
+            seen[1]
+        );
         let c = &report.cases[0];
         assert_eq!(c.base.as_ref().unwrap().verdict, "approve");
         assert_eq!(c.candidate.as_ref().unwrap().verdict, "changes");
