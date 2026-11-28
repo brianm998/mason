@@ -168,8 +168,12 @@ pub fn execute_split(
                             out_now.fetch_sub(1, Ordering::SeqCst);
                         }
                         // Room: another job of this run is out, so one will end and free a slot.
+                        // A job after the first may ask while the first is still being placed
+                        // (nothing is out yet): it waits too, and the first job's own failure
+                        // aborts the run, so a node with no room at all is still given back.
                         let room = matches!(&r, Err(Fail::Environmental(w)) if w.starts_with("no node had room"));
-                        if room && out_now.load(Ordering::SeqCst) > 0 && waited < tries {
+                        let others = out_now.load(Ordering::SeqCst) > 0 || i > 0;
+                        if room && others && waited < tries {
                             waited += 1;
                             if let Some(w) = stop_all() {
                                 break Ok(Outcome::Stopped(w));
