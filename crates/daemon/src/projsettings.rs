@@ -1181,21 +1181,38 @@ fn to_item(k: &K, path: &str, v: &Value) -> Result<Item, Refused> {
     }
 }
 
+/// `provider = "codex"` and `[provider.claude]` cannot both be in one file: the string
+/// becomes `[provider] use = "codex"`, its comments going with it.
+fn provider_to_table(t: &mut Table) {
+    let Some(old) = t.get("provider").and_then(|i| i.as_value()) else {
+        return;
+    };
+    if !old.is_str() {
+        return;
+    }
+    let old = old.clone();
+    let mut nt = Table::new();
+    nt.insert("use", Item::Value(old));
+    if let Some(mut k) = t.key_mut("provider") {
+        let above = k.leaf_decor().prefix().and_then(|p| p.as_str());
+        if let Some(above) = above.filter(|p| !p.trim().is_empty()) {
+            nt.decor_mut().set_prefix(above.to_string());
+        }
+        // The space before `=` would otherwise be written inside the header: `[provider ]`.
+        k.fmt();
+    }
+    t.insert("provider", Item::Table(nt));
+}
+
 fn sub<'a>(t: &'a mut Table, key: &str) -> Result<&'a mut Table, Refused> {
+    if key == "provider" {
+        provider_to_table(t);
+    }
     let item = t.entry(key).or_insert_with(|| {
         let mut nt = Table::new();
         nt.set_implicit(true);
         Item::Table(nt)
     });
-    // `provider = "codex"` and `[provider.claude]` cannot both be in one file: the string
-    // becomes `[provider] use = "codex"`.
-    if key == "provider" {
-        if let Some(s) = item.as_str().map(String::from) {
-            let mut nt = Table::new();
-            nt.insert("use", value(s));
-            *item = Item::Table(nt);
-        }
-    }
     item.as_table_mut()
         .ok_or_else(|| bad(format!("`{key}` in the file is not a table")))
 }
