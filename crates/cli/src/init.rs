@@ -76,6 +76,17 @@ pub fn run(mut args: Vec<String>, data_dir: &Path, config_dir: &Path) -> i32 {
             return fail("stopped; nothing was written. Fix the repository (or pass the flags) and run again");
         }
     }
+    // What the repository rules out is said before any question. At a terminal the base
+    // question is still to come, so only a base already given is checked; one that is not a
+    // plain name is left for that question to refuse.
+    let base = flags
+        .base
+        .as_deref()
+        .or((!interactive).then_some(d.branch.as_str()))
+        .filter(|b| !b.is_empty() && !b.starts_with('-') && !b.contains(char::is_whitespace));
+    if let Err(e) = mason_onboard::repo_refusal(&d, base) {
+        return fail(&e);
+    }
     let mut ask = ask_on_terminal;
     let a = match questions::resolve(
         &flags,
