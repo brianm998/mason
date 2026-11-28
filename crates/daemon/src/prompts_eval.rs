@@ -796,7 +796,11 @@ mod tests {
     fn review(verdict: &str) -> Vec<FakeAction> {
         vec![FakeAction::Call {
             tool: "submit_review".into(),
-            args: json!({"verdict": verdict, "summary": "fine", "findings": []}),
+            args: json!({"verdict": verdict, "summary": "fine", "findings": if verdict == "changes" {
+                json!([{"issue": "it is wrong", "severity": "blocking", "quote": "one"}])
+            } else {
+                json!([])
+            }}),
         }]
     }
 
