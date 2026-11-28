@@ -153,7 +153,15 @@ pub fn gate(c: &Ctx) -> Gate {
         return Gate::Go;
     }
     let cmd = format!("git -C {} diff {}", c.project.path.display(), ch.range);
-    let why = found.short(&cmd);
+    let mut why = found.short(&cmd);
+    // A change to a prompt links the latest eval of its head, if there is one (task 1139).
+    let paths: Vec<String> = ch.files.iter().map(|f| f.path.clone()).collect();
+    if let Some(note) = git::rev_parse(&c.project.path, &c.branch)
+        .ok()
+        .and_then(|sha| crate::prompts_eval::approval_note(&d.cfg.data_dir, &paths, &sha))
+    {
+        why = format!("{why}; {note}");
+    }
     let hash = protect::diff_hash(&ch.diff);
     if owner_decides {
         return wait_for_owner(c, &why, &hash);
