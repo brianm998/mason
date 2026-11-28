@@ -1034,6 +1034,11 @@ pub const QUESTIONS: [(&str, &str); 6] = [
     ),
 ];
 
+/// The category of a finding from part 7: a line proposed from repeated owner corrections.
+pub const LESSON: &str = "lesson";
+/// At most this many lesson findings are filed per review.
+pub const MAX_LESSONS: usize = 3;
+
 /// The body of the review task, for the window from `since` to `now`.
 pub fn review_body(d: &Daemon, since: u64, now: u64, max_proposals: u32) -> String {
     let own = crate::proposals::self_project(d).map_or_else(String::new, |(_, p)| p.id.clone());
@@ -1055,6 +1060,13 @@ pub fn review_body(d: &Daemon, since: u64, now: u64, max_proposals: u32) -> Stri
          ## Six questions, six required sections\n\
          Answer each of these. Every section ends in findings, or in \"nothing found, because ...\":\n\n\
          {questions}\n\
+         ## A seventh part: repeated owner corrections\n\
+         Read `{facts}/corrections.json`: the owner's retry notes, rejection reasons, answers, blocking review findings and diagnosis notes of the last day, with task numbers. \
+         Group them by the correction they make (`repeated` is a first grouping by identical text; merge others that say the same). \
+         When the same correction appears on two or more tasks, of any project, propose ONE change as a finding with category `{lesson}`: a one-line CLAUDE.md addition (repository or project), a prompt-pack line, \
+         or a `.mason/rules` rule (only if rules exist in the repository; otherwise CLAUDE.md or a pack line). Put the one-line change in the body, quote each source item and name its tasks. \
+         Set `project` to the project the change belongs to. A correction seen on one task only produces nothing. One line per concept, at most {max_lessons} such findings per review. \
+         This part is not one of the six required sections. Never edit a file: the owner approves or rejects the task as usual.\n\n\
          ## What to read\n\
          The facts are files in `{facts}/` in your worktree (start with `{facts}/README.md`). They are computed from recorded data. \
          You may also run read-only `mason` commands: `mason task list --json`, `mason task show <id>`, `mason digest`, `mason metrics`, `mason health history`. \
@@ -1072,7 +1084,7 @@ pub fn review_body(d: &Daemon, since: u64, now: u64, max_proposals: u32) -> Stri
          At most {max_proposals} findings are filed per review, in the order you write them: put the most important first.\n\n\
          ## The result\n\
          Write `{ANALYST_FILE}` in the root of your worktree, do not commit it, then call submit_change with the hash from `git rev-parse HEAD`:\n\n\
-         ```json\n{{\n  \"findings\": [{{\"category\": \"one of: {categories}\", \"title\": \"1 to 120 characters\", \"body\": \"the ticket\", \
+         ```json\n{{\n  \"findings\": [{{\"category\": \"one of: {categories}, {lesson}\", \"title\": \"1 to 120 characters\", \"body\": \"the ticket\", \
          \"evidence\": \"a file and line or recorded output that shows it, e.g. crates/daemon/src/sched.rs:120\", \
          \"project\": \"the project it is for (leave out for {own})\", \"metric\": \"optional, one of: {metrics}\", \
          \"severity\": \"low or high\", \"cost\": \"small or large\"}}],\n  \
@@ -1080,6 +1092,8 @@ pub fn review_body(d: &Daemon, since: u64, now: u64, max_proposals: u32) -> Stri
          \"nothing_found\": [{{\"category\": \"...\", \"because\": \"...\"}}]\n}}\n```\n\n\
          Each of the six categories must appear in `findings`, `duplicates` or `nothing_found`. A finding with no evidence naming a file is refused.",
         categories = CATEGORIES.join(", "),
+        lesson = LESSON,
+        max_lessons = MAX_LESSONS,
         metrics = METRICS.join(", "),
     )
 }
@@ -1258,6 +1272,7 @@ fn file_result(d: &Arc<Daemon>, task: TaskId, own: &str, result: &ReviewResult, 
     let mut refused: Vec<String> = vec![];
     let mut capped: Vec<String> = vec![];
     let mut windows: BTreeMap<String, Stats> = BTreeMap::new();
+    let mut lessons = 0usize;
     for (draft, named) in &result.findings {
         let project = if named.is_empty() { own } else { named };
         if project != own && !included.contains(project) {
@@ -1272,7 +1287,8 @@ fn file_result(d: &Arc<Daemon>, task: TaskId, own: &str, result: &ReviewResult, 
         let Some(mut f) = ok.into_iter().next() else {
             continue;
         };
-        if filed.len() >= max {
+        let is_lesson = f.category == LESSON;
+        if filed.len() >= max || (is_lesson && lessons >= MAX_LESSONS) {
             capped.push(f.title);
             continue;
         }
@@ -1289,7 +1305,10 @@ fn file_result(d: &Arc<Daemon>, task: TaskId, own: &str, result: &ReviewResult, 
             f.before = measure(&f.metric, stats);
         }
         match file_review_finding(d, task, &f) {
-            Ok(t) => filed.push(t.0),
+            Ok(t) => {
+                filed.push(t.0);
+                lessons += usize::from(is_lesson);
+            }
             Err(why) => match duplicated_task(&why) {
                 Some(of) => dups.push(json!({"idea": f.title, "task": of, "by": "mason"})),
                 None => refused.push(format!("{}: {why}", f.title)),

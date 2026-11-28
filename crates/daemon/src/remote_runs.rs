@@ -216,6 +216,14 @@ pub fn remote_quiet_ms(scope: &Path, task: u64, silent_ms: u64, now: u64) -> u64
         .fold(silent_ms, u64::min)
 }
 
+/// `task` has a request for a GitHub runner pool unit that has not been granted.
+pub fn pool_waiting(scope: &Path, task: u64) -> bool {
+    let scope = scope.display().to_string();
+    reg()
+        .iter()
+        .any(|e| e.scope == scope && e.task == task && e.waiting)
+}
+
 /// One short line for each unfinished run of `task` under `scope`: kind, where it runs, whether it
 /// waits for a runner, and the age of its last successful poll. Evidence for `stuck:long`.
 pub fn open_of(scope: &Path, task: u64, now: u64) -> Vec<String> {
@@ -471,6 +479,29 @@ mod tests {
         let quiet = remote_quiet_ms(&scope, 7, 60 * MIN, now);
         assert_eq!(quiet, 2 * MIN);
         assert!(!reported(quiet));
+    }
+
+    #[test]
+    fn pool_waiting_lasts_from_waiting_to_the_guard_drop() {
+        let (scope, _) = run("poolwait");
+        // A started run is not a pool wait.
+        assert!(!pool_waiting(&scope, 7));
+        let id = "wait-7-#7-test_step".to_string();
+        reg().push(Entry {
+            scope: scope.display().to_string(),
+            id: id.clone(),
+            task: 7,
+            waiting: true,
+            ..Default::default()
+        });
+        let guard = WaitGuard {
+            scope: scope.display().to_string(),
+            id,
+        };
+        assert!(pool_waiting(&scope, 7));
+        assert!(!pool_waiting(&scope, 8));
+        drop(guard);
+        assert!(!pool_waiting(&scope, 7));
     }
 
     #[test]

@@ -665,6 +665,7 @@ pub fn apply(
             &p.base,
             &base_ref,
             &commit,
+            &[],
         ) {
             Ok(()) => {}
             Err(mason_landing::promote::PromoteError::Moved) => {

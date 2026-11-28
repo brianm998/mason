@@ -4,6 +4,10 @@
 //! throwaway config directory. No daemon, no network, no agent: the prove step is shown to
 //! say what is missing rather than to run.
 
+#![cfg(unix)]
+// Unix-only: the fixtures are `#!/bin/sh` agent stubs and `std::os::unix` permissions. Windows
+// coverage comes with the later port tasks.
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 

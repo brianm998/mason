@@ -69,6 +69,7 @@ impl Fx {
             remote: remote.then_some("origin"),
             resolver,
             max_fold: 3,
+            push_backoff: &[],
         }
     }
 
@@ -578,4 +579,30 @@ fn a_listed_removal_lets_the_resolution_through() {
     let a = b.assemble(&[t1], &nop).unwrap();
     assert_eq!(a.resolved, [1]);
     assert!(a.unkept.is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_batch_push_the_remote_rejects_once_is_tried_again() {
+    use std::os::unix::fs::PermissionsExt;
+    let fx = Fx::new();
+    let ts = [fx.branch("t1", "a.txt", "a\n")];
+    let hook = fx.origin.join("hooks/pre-receive");
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    std::fs::write(
+        &hook,
+        "#!/bin/sh\nif [ -e \"$GIT_DIR/seen\" ]; then exit 0; fi\ntouch \"$GIT_DIR/seen\"\nexit 1\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let b = Batch {
+        push_backoff: &[std::time::Duration::ZERO; 2],
+        ..fx.batch(None, true)
+    };
+    let a = b.assemble(&ts, &nop).unwrap();
+    let f = b.finish(&a, &mut |_| true, &nop).unwrap().unwrap();
+    let Finish::Promoted { commit, .. } = f else {
+        panic!("{f:?}")
+    };
+    assert_eq!(fx.origin_main(), commit);
 }
