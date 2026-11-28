@@ -223,6 +223,9 @@ pub fn run(c: &Ctx, plan: Option<&Value>, submission: &Value) -> Outcome {
     drop(slot);
     contract.shutdown();
     crate::jobs::record_usage(c, &spec, &report);
+    if let Some(said) = crate::agentbin::could_not_start(&report.end) {
+        crate::agentbin::launch_failed(&c.d, c.project_id, said);
+    }
     let StepEnd::Accepted { submission: v, .. } = report.end else {
         tracing::info!(
             task = c.task.0,
