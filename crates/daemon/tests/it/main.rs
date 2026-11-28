@@ -82,6 +82,7 @@ mod proposals;
 mod protocol;
 mod pty;
 mod push_auth;
+mod recovery;
 mod red_base;
 mod red_develop;
 mod registration;

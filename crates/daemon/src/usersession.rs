@@ -131,7 +131,7 @@ pub fn draft(d: &Arc<Daemon>, task: TaskId) -> Result<String, String> {
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok());
     let history = std::fs::read_to_string(dir.join("feedback-history.txt")).unwrap_or_default();
-    Ok(draft_prompt(
+    let first = draft_prompt(
         task.0,
         &t.title,
         &t.body,
@@ -140,7 +140,15 @@ pub fn draft(d: &Arc<Daemon>, task: TaskId) -> Result<String, String> {
         &history,
         plan.as_ref(),
         &crate::diagnose::log_tails(&dir, 2, 30),
-    ))
+    );
+    // A task the recovery agent handed off brings its brief, fenced as data (task 1111).
+    Ok(match d.store.recovery_brief(task.0).ok().flatten() {
+        Some((brief, _)) => format!(
+            "{first}\n# The recovery brief\n{}\n",
+            crate::recovery::fenced_brief(&brief)
+        ),
+        None => first,
+    })
 }
 
 /// The open session of a task, if there is one.

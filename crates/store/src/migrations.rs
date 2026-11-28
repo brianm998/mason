@@ -948,6 +948,24 @@ const STEPS: &[&str] = &[
          diagnosis INTEGER NOT NULL,
          at_ms     INTEGER NOT NULL
      );",
+    // What the recovery agent entry point decided for a task that failed or stalled (task 1111,
+    // decision 1196): one row per decision, so "no agent looked at this" is told from "an agent
+    // decided to wait". `brief` is the recovery brief a hand-off leaves on the task. Additive.
+    "CREATE TABLE recoveries (
+         id        INTEGER PRIMARY KEY AUTOINCREMENT,
+         task      INTEGER NOT NULL,
+         at_ms     INTEGER NOT NULL,
+         cause     TEXT NOT NULL,
+         decision  TEXT NOT NULL,
+         why       TEXT NOT NULL,
+         failed_at INTEGER NOT NULL DEFAULT 0
+     );
+     CREATE INDEX recoveries_task ON recoveries(task);
+     CREATE TABLE recovery_briefs (
+         task  INTEGER NOT NULL PRIMARY KEY,
+         at_ms INTEGER NOT NULL,
+         brief TEXT NOT NULL
+     );",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;

@@ -85,6 +85,7 @@ mason: command-line client for the MASON pipeline
   mason task retry <id> [--from STEP] [--restart] [--message TEXT]
                                       the message is shown once in the next round's prompt
   mason task diagnose <id>            ask for a diagnosis of a failed task (owner only)
+  mason task brief <id>               the recovery brief a hand-off left on a failed or stuck task (what failed, what was tried, how to resume)
   mason task diagnosis <id> [apply|dismiss N]   what the diagnosis agent said about a failed task;
                                       apply (its recommended option) or dismiss a pending one
   mason task approve <id> [--priority P]   let a proposed or deferred task start (queued at P: urgent,
@@ -99,6 +100,7 @@ mason: command-line client for the MASON pipeline
   mason task update-priority <id> urgent|normal   owner only; urgent: its landing takes the daemon's own update over at once
   mason task answer <id> <option number | 1,3 | text> [--context TEXT] [--card HASH] [--as NAME]
                                       answer the open question or a failed task's diagnosis card (a multi-select card takes 1,3);
+                                      the options are listed with the recommended one first; free text (Other) comes last, below the options;
                                       --context adds your words to the answer; the card's hash guards against a stale one
   mason task refresh <id>             ask the tracker now (what opening a task does)
   mason task land-now <id> | force <id> [--reason R]   marks the task and records an override and a debt
@@ -3851,6 +3853,27 @@ fn main() {
                         "Retrying task #{id} from {}",
                         r["to"].as_str().unwrap_or("developing")
                     );
+                }
+                "brief" => {
+                    let id = task_id(&mut a);
+                    finish(&a);
+                    let r = or_die(d.call("GET", &format!("/tasks/{id}"), None));
+                    if json_out {
+                        return println!(
+                            "{:#}",
+                            json!({"recovery": r["recovery"], "recovery_brief": r["recovery_brief"]})
+                        );
+                    }
+                    match r["recovery_brief"].as_str() {
+                        Some(b) => println!("{b}"),
+                        None => println!("Task #{id} has no recovery brief."),
+                    }
+                    if let Some(w) = r["recovery"]["why"].as_str() {
+                        println!(
+                            "Recovery: {} ({w})",
+                            r["recovery"]["state"].as_str().unwrap_or("?")
+                        );
+                    }
                 }
                 "diagnose" => {
                     let id = task_id(&mut a);

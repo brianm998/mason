@@ -109,7 +109,17 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
             |(at, on)| json!({"started_ms": at, "ran_on": on}),
         );
     }
+    // What the recovery entry point decided for this failure or stall (task 1111).
+    if let Some(r) = crate::recovery::view(d, t) {
+        v["recovery"] = r;
+    }
     if detail {
+        v["recovery_brief"] = d
+            .store
+            .recovery_brief(t.id.0)
+            .ok()
+            .flatten()
+            .map_or(Value::Null, |(b, _)| json!(b));
         v["body"] = json!(t.body);
         let edits = crate::taskedit::history(d, t.id.0);
         if let Some(last) = edits.last() {

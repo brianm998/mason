@@ -137,7 +137,11 @@ pub fn gather(d: &Arc<Daemon>, now: u64) -> Facts {
                     task: t.id.0,
                     signature: signature(&failure),
                     failed_ms: in_state,
-                    undiagnosed: wants && !diagnoses.iter().any(|r| r.task == t.id.0),
+                    // A recovery row that says why it waited (or what it decided) is an agent's
+                    // answer: not "undiagnosed".
+                    undiagnosed: wants
+                        && !diagnoses.iter().any(|r| r.task == t.id.0)
+                        && !crate::recovery::explained(d, t.id.0, t.state_entered_at.0),
                 });
             }
             _ => {}
@@ -442,6 +446,32 @@ pub fn tick(d: &Arc<Daemon>, now: u64) -> Tick {
         .filter(|r| !timed_out.contains(&r.session))
         .map(|r| (r.key, r.at_ms))
         .collect();
+    // A task that is stuck on its own gets its own agent once its finding has stood a whole
+    // cooldown (task 1111); the pipeline-wide session below still sees the finding.
+    let stuck: Vec<String> = findings
+        .iter()
+        .filter(|f| {
+            crate::recovery::STUCK_PREFIX
+                .iter()
+                .any(|p| f.key.starts_with(p))
+        })
+        .map(|f| f.key.clone())
+        .collect();
+    crate::recovery::on_findings(d, &stuck, now, limits.cooldown_ms);
+    // A failed task that has no diagnosis and no recovery row for longer than a cooldown is a bug
+    // of the recovery entry point, not of the task.
+    if findings.iter().any(|f| f.key == "failures:undiagnosed")
+        && d.store
+            .health_since(&["recovery_bug"], now.saturating_sub(limits.cooldown_ms))
+            .unwrap_or_default()
+            .is_empty()
+    {
+        let _ = d.store.add_health("recovery_bug", "", None, "", now);
+        d.record_bug(
+            "recovery_undiagnosed",
+            "a failed task has had neither a diagnosis nor a recovery decision for over the limit",
+        );
+    }
     let fresh = health::fresh(&findings, &handled, now, limits.cooldown_ms);
     let mut out = Tick {
         fresh: fresh.iter().map(|f| f.key.clone()).collect(),
@@ -965,7 +995,12 @@ fn file(d: &Arc<Daemon>, sid: u64, pid: ProjectId, key: &str, x: &Value) -> Stri
 }
 
 /// One owner-safe action, as the owner could take it.
-fn act(d: &Arc<Daemon>, action: &str, task: u64, reason: &str) -> Result<String, String> {
+pub(crate) fn act(
+    d: &Arc<Daemon>,
+    action: &str,
+    task: u64,
+    reason: &str,
+) -> Result<String, String> {
     if !HEALTH_ACTIONS.contains(&action) {
         return Err(format!("{action:?} is not an allowed action"));
     }
