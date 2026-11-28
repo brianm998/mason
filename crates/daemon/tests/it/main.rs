@@ -10,6 +10,7 @@
 mod support;
 
 mod abandoned_run;
+mod agent_bin;
 mod apns;
 mod approvals;
 mod attention;

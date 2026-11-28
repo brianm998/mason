@@ -102,6 +102,11 @@ pub fn gather(d: &Arc<Daemon>, now: u64) -> Facts {
     let mut landing_failed = 0;
     let mut landed = 0;
     for t in w.tasks.values() {
+        // Waiting for the project's agent CLI: its own notice says so (s1287), and no session
+        // could look into it.
+        if crate::agentbin::is_waiting(d, t) {
+            continue;
+        }
         let in_state = now.saturating_sub(t.state_entered_at.0);
         let last_start = ix.last_start_of(t.id);
         let wait = waits.get(&t.id).cloned();

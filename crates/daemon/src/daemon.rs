@@ -62,6 +62,8 @@ pub struct Daemon {
     admit_again: AtomicBool,
     /// When each queued task was first held back for a shared file (s398); the hold's clock.
     pub(crate) file_held: Mutex<HashMap<TaskId, Instant>>,
+    /// The projects whose agent CLI cannot be started (see `agentbin`).
+    pub(crate) agent_holds: crate::agentbin::Holds,
     /// Tasks whose agent gave its session back to wait on a `run_check` (#765).
     pub(crate) parked: Mutex<std::collections::HashSet<TaskId>>,
     fetch_locks: Mutex<HashMap<PathBuf, Arc<Mutex<Option<std::time::Instant>>>>>,
@@ -321,6 +323,7 @@ impl Daemon {
             admitting: AtomicBool::new(false),
             admit_again: AtomicBool::new(false),
             file_held: Mutex::default(),
+            agent_holds: Default::default(),
             parked: Mutex::default(),
             repo_locks: Mutex::default(),
             fetch_locks: Mutex::default(),
@@ -394,6 +397,8 @@ impl Daemon {
             crate::targets::spawn(&d);
             crate::update::spawn_checker(&d);
             d.progress_cleanup();
+            // Before anything is claimed or launched.
+            crate::agentbin::check_all(&d);
             d.recover();
             d.spawn_progress_ticker();
             d.spawn_sweeper();
@@ -604,6 +609,10 @@ impl Daemon {
                 fixed.join(", ")
             )]);
         }
+        // A reload is a new look at the agent binary, whether the file changed or not, and
+        // forgets what an earlier launch said. Looked at before the registration is current,
+        // so nothing is claimed in between.
+        self.agent_holds.look(pid, &new, true);
         if !changed.is_empty() {
             if let Some(t) = &new.services.tracker {
                 self.tracker.set_interval(pid, t.interval_s);
@@ -615,6 +624,7 @@ impl Daemon {
                 .insert(pid, leaked);
             tracing::info!(project = name, changed = ?changed, "registration reloaded");
         }
+        self.poke();
         Ok(changed)
     }
 
@@ -647,6 +657,7 @@ impl Daemon {
             }
         };
         let leaked: &'static ProjectCfg = Box::leak(Box::new(cfg));
+        self.agent_holds.look(pid, leaked, true);
         self.registry
             .write()
             .unwrap_or_else(|e| e.into_inner())
@@ -1139,6 +1150,8 @@ impl Daemon {
                 && !self.broker.has_lease(t.id)
                 && self.account_of(t.project) == account
                 && self.step_needs_session(t)
+                // A step waiting for its agent CLI keeps no session from other projects.
+                && crate::agentbin::why(self, t.project).is_none()
             {
                 // An agent parked on a check holds no session; it is not reserved one.
                 if parked_set.contains(&t.id) {
@@ -1259,6 +1272,8 @@ impl Daemon {
                 let name = self.project(t.project).map_or("", |p| p.id.as_str());
                 crate::attention::paused(self, name, crate::attention::What::Claim).is_none()
             })
+            // A project whose agent cannot be started claims nothing (s1287).
+            .filter(|t| !crate::agentbin::holds_claims(self, t.project))
             // A project whose check queue is long starts nothing new (s256).
             .filter(|t| self.check_hold(w, t).is_none())
             // A task that changes the same files as one in testing, review or landing waits

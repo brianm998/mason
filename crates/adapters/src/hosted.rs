@@ -156,6 +156,27 @@ pub fn latest_invocation(root: &Path, key: &str) -> Option<String> {
     invocations(root, key).pop().map(|(_, id)| id)
 }
 
+/// What a host's journal begins with when it could not start the CLI.
+const NEVER_STARTED: &[u8] = b"step-host: failed to start ";
+
+/// The step host's `failed to start ["program", …]: error` without the arguments. `None`
+/// for any other line.
+fn without_arguments(line: &str) -> Option<String> {
+    let said = std::str::from_utf8(NEVER_STARTED).ok()?;
+    let command = line.strip_prefix(said)?.strip_prefix('[')?;
+    let end = command.find("\", ").or_else(|| command.find("\"]"))?;
+    let (_, error) = command.rsplit_once("]: ")?;
+    Some(format!("{said}{}: {error}", &command[..=end]))
+}
+
+/// The invocation of `key` a restarted controller may take over: the newest, unless its host
+/// could not start the CLI, in which case there is no session in it.
+pub fn adoptable_invocation(root: &Path, key: &str) -> Option<String> {
+    latest_invocation(root, key).filter(|id| {
+        !read_journal(&root.join(id), 0, NEVER_STARTED.len()).is_ok_and(|b| b == NEVER_STARTED)
+    })
+}
+
 /// Start a host for the next invocation of `key`. Returns its id.
 pub fn spawn(
     h: &HostLaunch,
@@ -280,7 +301,14 @@ impl Feed {
             && serde_json::from_str::<serde_json::Value>(l).is_err()
             && !l.trim().is_empty()
         {
-            push_stderr(&mut self.stderr, l);
+            // The step host's own line quotes the whole command, arguments and all: kept
+            // short, so the start of it survives the cuts and says what happened.
+            let short = self
+                .stderr
+                .is_empty()
+                .then(|| without_arguments(l))
+                .flatten();
+            push_stderr(&mut self.stderr, short.as_deref().unwrap_or(l));
         }
         if let Some(id) = &self.st.session_id {
             *self.session_id.lock().unwrap_or_else(|e| e.into_inner()) = Some(id.clone());
@@ -598,6 +626,27 @@ impl SessionHandle for Session {
 
 #[allow(dead_code)]
 fn _assert_client_error_is_used(_: ClientError) {}
+
+#[cfg(test)]
+mod start_failure_tests {
+    use super::without_arguments;
+
+    #[test]
+    fn a_failure_to_start_keeps_the_program_and_the_error_not_the_arguments() {
+        let cmd = vec!["/x/claude".to_string(), "-p".into(), "long ]: ".repeat(900)];
+        let line = format!("step-host: failed to start {cmd:?}: No such file (os error 2)");
+        assert_eq!(
+            without_arguments(&line).as_deref(),
+            Some("step-host: failed to start \"/x/claude\": No such file (os error 2)")
+        );
+        let alone = format!("step-host: failed to start {:?}: gone", ["/x/claude"]);
+        assert_eq!(
+            without_arguments(&alone).as_deref(),
+            Some("step-host: failed to start \"/x/claude\": gone")
+        );
+        assert_eq!(without_arguments("claude: command not found"), None);
+    }
+}
 
 #[cfg(test)]
 mod stderr_tests {

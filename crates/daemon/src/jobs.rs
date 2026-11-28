@@ -173,6 +173,9 @@ pub struct Ctx {
     /// The step's resources, handed back the moment it reports its result
     /// (not when its thread winds down), so the next waiter starts at once.
     pub lease: StepLease,
+    /// Set when the agent CLI could not be started: nothing is concluded, and the step is
+    /// run again once the project's agent resolves (s1287).
+    pub(crate) agent_wait: std::sync::atomic::AtomicBool,
 }
 
 impl Ctx {
@@ -681,6 +684,7 @@ pub fn ctx(d: &Arc<Daemon>, task: TaskId, run: StepRunId) -> Result<Ctx, String>
         step,
         res,
         lease: Arc::new(std::sync::Mutex::new(None)),
+        agent_wait: Default::default(),
     })
 }
 
@@ -693,22 +697,58 @@ pub fn run(d: &Arc<Daemon>, task: TaskId, step: State, run: StepRunId) {
 fn run_inner(d: &Arc<Daemon>, task: TaskId, step: State, run: StepRunId) {
     // A test hook (`MASON_PANIC_AT=job`): the job's thread panics, as a pipeline bug would.
     d.crash.panic_point("job");
-    let c = match ctx(d, task, run) {
-        Ok(c) => c,
-        Err(why) => {
-            d.emit_for_run(
-                task,
-                run,
-                EventKind::StepFailed {
+    loop {
+        let c = match ctx(d, task, run) {
+            Ok(c) => c,
+            Err(why) => {
+                d.emit_for_run(
                     task,
-                    reason: why,
-                    class: Some(FailClass::Code),
-                },
-            );
+                    run,
+                    EventKind::StepFailed {
+                        task,
+                        reason: why,
+                        class: Some(FailClass::Code),
+                    },
+                );
+                return;
+            }
+        };
+        execute(&c, step);
+        // Run again from a context of its own, so the registration the owner fixed is used.
+        if !c.agent_wait.load(Ordering::SeqCst) || wait_for_agent(&c).is_err() {
             return;
         }
-    };
-    execute(&c, step);
+    }
+}
+
+/// Wait, holding no lease, while the project's agent CLI cannot be started. Says why in the
+/// task's wait. `Err` when the task went away meanwhile.
+fn wait_for_agent(c: &Ctx) -> Result<(), ()> {
+    c.release_lease();
+    let mut announced = false;
+    let mut n = 0u32;
+    while crate::agentbin::check(&c.d, c.project_id) {
+        if !announced {
+            announced = true;
+            let why = crate::agentbin::why(&c.d, c.project_id).unwrap_or_default();
+            if !c.emit(EventKind::WaitStarted {
+                task: c.task,
+                on: crate::agentbin::wait_sentence(&why),
+                class: Some("environment".into()),
+            }) {
+                return Err(());
+            }
+        }
+        std::thread::sleep(HOLD_POLL);
+        n += 1;
+        if n.is_multiple_of(5) && !still_open(c) {
+            return Err(());
+        }
+    }
+    if announced {
+        c.emit(EventKind::WaitEnded { task: c.task });
+    }
+    Ok(())
 }
 
 /// Run the step `c` describes, from waiting out a pause to its verdict.
@@ -4190,6 +4230,13 @@ fn agent_job(c: &Ctx) {
     let mut feedback = std::fs::read_to_string(dir.join("feedback.txt")).ok();
     let one_shot = take_retry_note(&dir);
     let note_shown = one_shot.is_some();
+    // A launch that never happens must not use the note up (s1287).
+    let unshown = one_shot.clone();
+    let keep_note = || {
+        if let Some(n) = &unshown {
+            let _ = std::fs::write(dir.join(RETRY_NOTE), n);
+        }
+    };
     // The default explore prompt has no place for feedback, so it takes the note by itself.
     let explore_note = with_retry_note(None, one_shot.clone());
     feedback = with_retry_note(feedback, one_shot);
@@ -4866,11 +4913,22 @@ fn agent_job(c: &Ctx) {
             runner.adopt(h, spec.clone(), &contract)
         }
         _ => {
+            // Looked at now, not when the task was claimed (s1287).
+            if crate::agentbin::check(&c.d, c.project_id) {
+                keep_note();
+                c.agent_wait.store(true, Ordering::SeqCst);
+                contract.shutdown();
+                return;
+            }
             rec.write(c, "launch", &spec);
             runner.run(spec.clone(), &contract)
         }
     };
     let Some(mut report) = settle_all(c, &runner, first, &spec, &contract, &rec) else {
+        if c.agent_wait.load(Ordering::SeqCst) {
+            keep_note();
+            contract.shutdown();
+        }
         return;
     };
     record_usage(c, &spec, &report);
@@ -4897,6 +4955,10 @@ fn agent_job(c: &Ctx) {
         rec.write(c, "retry", &spec);
         let again = runner.run(spec.clone(), &contract);
         let Some(r) = settle_all(c, &runner, again, &spec, &contract, &rec) else {
+            if c.agent_wait.load(Ordering::SeqCst) {
+                keep_note();
+                contract.shutdown();
+            }
             return;
         };
         record_usage(c, &spec, &r);
@@ -5147,6 +5209,13 @@ fn settle_all(
     let mut forgiven = 0usize;
     let mut lost_at = now_ms();
     loop {
+        // The CLI never ran (s1287): not an attempt, not a failure, nothing to retry. The
+        // project is held, and the step waits for it (`run_inner`).
+        if let Some(said) = crate::agentbin::could_not_start(&report.end) {
+            crate::agentbin::launch_failed(&c.d, c.project_id, said);
+            c.agent_wait.store(true, Ordering::SeqCst);
+            return None;
+        }
         let fresh = match &report.end {
             StepEnd::Failed(FailReason::HostLost { detail }) => {
                 let lost = mason_adapters::hosted::lost_invocations(&root, &base);

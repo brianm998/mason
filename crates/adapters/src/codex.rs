@@ -205,7 +205,7 @@ impl AgentAdapter for CodexAdapter {
         let Some(h) = &self.host else {
             return Ok(None);
         };
-        Ok(crate::hosted::latest_invocation(&h.root, run_key)
+        Ok(crate::hosted::adoptable_invocation(&h.root, run_key)
             .map(|id| crate::hosted::attach_as(h, id, &spec, Dialect::Codex)))
     }
 }
