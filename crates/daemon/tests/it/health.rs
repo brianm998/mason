@@ -521,3 +521,68 @@ fn a_health_proposal_passes_the_weekly_self_task_cap_once() {
     );
     assert_eq!(d.store.proposals_in(&id).unwrap().len(), before + 1);
 }
+
+#[test]
+fn a_failed_update_is_logged_with_its_target_and_error_and_its_recovery_with_the_target() {
+    let (_s, d, _t, _g) = world(json!([submit(
+        json!({"summary": "s", "false_alarm": "seen"})
+    )]));
+    let long = format!("selftest red: s22 {}", "x".repeat(600));
+    {
+        let mut st = d.update_status.lock().unwrap();
+        st.phase = "failed".into();
+        st.target = Some("abc".into());
+        st.error = Some(long.clone());
+        st.log = vec![
+            "building abc into runtimes/abc/".into(),
+            "backing up the database, then the new build's self-test".into(),
+            format!("failed: {long}"),
+        ];
+    }
+    let rows = |kind: &str| -> Vec<Value> {
+        d.store
+            .health_since(&[kind], 0)
+            .unwrap()
+            .iter()
+            .map(|r| serde_json::from_str(&r.detail).unwrap())
+            .collect()
+    };
+    let now = mason_daemon::daemon::now_ms();
+    health::tick(&d, now);
+    let first = rows("update_failed");
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0]["target"], "abc");
+    assert_eq!(first[0]["phase"], "testing");
+    let error = first[0]["error"].as_str().unwrap();
+    assert_eq!(error.chars().count(), 500);
+    assert!(error.starts_with("selftest red: s22"), "{error}");
+
+    // The same failure at later checks still counts towards the limit.
+    let limit = d.cfg.health.limits.update_failures;
+    for i in 1..limit {
+        health::tick(&d, now + u64::from(i));
+    }
+    let (facts, findings) = health::report(&d, now + u64::from(limit));
+    assert_eq!(facts.update_failures, limit);
+    assert!(facts.update_blocked);
+    assert!(findings.iter().any(|f| f.key == "failures:update"));
+
+    d.update_status.lock().unwrap().phase = "idle".into();
+    health::tick(&d, now + 60_000);
+    health::tick(&d, now + 120_000);
+    let ok = rows("update_ok");
+    assert_eq!(ok, vec![json!({"target": "abc"})]);
+
+    // `mason health history` shows both, detail and all.
+    let h = health::history_json(&d, 50);
+    for kind in ["update_failed", "update_ok"] {
+        assert!(
+            h["history"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| { r["kind"] == kind && r["detail"].as_str().unwrap().contains("abc") }),
+            "{kind}: {h}"
+        );
+    }
+}
