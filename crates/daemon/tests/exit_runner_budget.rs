@@ -444,14 +444,18 @@ fn in_a_check_only_the_per_script_limit_makes_a_script_not_run() {
 }
 
 #[test]
-fn the_scripts_are_not_told_they_are_in_a_check_but_are_told_the_tests_ran() {
+fn the_scripts_get_the_tests_ran_flag_but_not_the_runners_own_settings() {
     let r = Repo::new(&[(
         "s10",
-        "[ -z \"${MASON_EXIT_IN_CHECK:-}\" ] && [ \"${MASON_TESTS_ALREADY_RAN:-}\" = 1 ]",
+        "[ -z \"${MASON_EXIT_IN_CHECK:-}${MASON_EXIT_CACHE:-}${MASON_EXIT_TREE_KEY:-}${MASON_EXIT_PASSES:-}\" ] \
+         && [ \"${MASON_TESTS_ALREADY_RAN:-}\" = 1 ]",
     )]);
     let (out, code) = r.run(&[
         ("MASON_EXIT_IN_CHECK", "1"),
         ("MASON_TESTS_ALREADY_RAN", "1"),
+        ("MASON_EXIT_CACHE", "1"),
+        ("MASON_EXIT_TREE_KEY", "coordinator-tree"),
+        ("MASON_EXIT_PASSES", "none"),
     ]);
     assert_eq!(code, 0, "{out}");
 }

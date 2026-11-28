@@ -128,6 +128,9 @@ cache_file() { # cache_file SCRIPT: the record that this script passed on this t
   # A pass without the cargo parts is not a pass for a run that runs them (#1291).
   printf '%s\n' "$1" "$(hash_stdin < "$1")" "$tree_key" "${MASON_EXIT_REPEAT:-}" "${MASON_TESTS_ALREADY_RAN:+tests-ran}" | hash_stdin
 }
+# The cache settings are this run's own. A script that drives this runner itself (s759) must not
+# take them, or its inner run prints `MASON-EXIT-KEY` lines too (#1291).
+unset MASON_EXIT_CACHE MASON_EXIT_TREE_KEY MASON_EXIT_PASSES
 passed=0; failed=0; notrun=0; out_of_time=0
 left=
 for s in $selected; do
