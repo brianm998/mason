@@ -82,6 +82,7 @@ impl Repo {
             "MASON_EXIT_PASSES",
             "MASON_EXIT_IN_CHECK",
             "MASON_TESTS_ALREADY_RAN",
+            "MASON_EXIT_ONLY",
         ] {
             c.env_remove(k);
         }
@@ -474,4 +475,25 @@ fn a_pass_without_the_cargo_parts_is_not_kept_for_a_run_that_has_them() {
     assert_eq!(code, 0);
     let (out, _) = r.run(&env);
     assert!(out.lines().any(|l| l == "PASS s10"), "{out}");
+}
+
+#[test]
+fn a_fast_track_list_runs_only_the_scripts_it_names() {
+    // The change adds all three, so the selector alone would run all three.
+    let r = Repo::new(&[("s10", "exit 0"), ("s11", "exit 1"), ("s12", "exit 0")]);
+    let (out, code) = r.run(&[(
+        "MASON_EXIT_ONLY",
+        "scripts/exit/s10.sh scripts/exit/s12.sh scripts/exit/s99.sh",
+    )]);
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(
+        lines_with(&out, "PASS "),
+        vec!["PASS s10", "PASS s12"],
+        "{out}"
+    );
+    assert!(lines_with(&out, "FAIL ").is_empty(), "{out}");
+    // Without the list the selector runs every script the change adds.
+    let (out, code) = r.run(&[]);
+    assert_ne!(code, 0, "{out}");
+    assert_eq!(lines_with(&out, "FAIL s11").len(), 1, "{out}");
 }
