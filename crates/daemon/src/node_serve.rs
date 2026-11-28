@@ -371,9 +371,61 @@ pub struct Readings {
     /// Free units of the `compile` slot, from the node's own broker. `None`: not known.
     pub compile_free: Option<u32>,
     pub disk_free_gb: Option<u64>,
+    /// The path the data-folder reading is of, for the message ("" when not known).
+    pub disk_path: String,
+    /// The other volumes jobs write to, one per volume, each with a reading or without one.
+    pub other_disks: Vec<VolumeFree>,
     /// Why the node holds off, apart from its owner's wishes: `mason node doctor` found something
     /// it cannot work with, or a runtime is installed and the node is taking over (seconds; its jobs carry on).
     pub held: Option<String>,
+}
+
+/// One volume a job writes to, as read: the first path on it that was asked about, and its free
+/// space. `strict`: the volume holds the build cache, so `min_disk_free_gb` applies to it, not
+/// the lower limit of the home, cargo and temporary folders. `free_gb` `None`: it could not be read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VolumeFree {
+    pub path: String,
+    pub free_gb: Option<u64>,
+    pub strict: bool,
+}
+
+/// Read each volume once. `paths` are `(path, strict)`; a path on a volume already read is not
+/// read again (a volume is strict if any of its paths is). The first path is the data folder: its
+/// volume is returned apart, as `(path, free_gb)`, and is not in the list. A source that cannot say
+/// which volume a path is on is read per path.
+pub fn measure_volumes(
+    src: &dyn crate::disk::DiskSource,
+    paths: &[(PathBuf, bool)],
+) -> (Option<(String, Option<u64>)>, Vec<VolumeFree>) {
+    let mut seen: Vec<(String, VolumeFree)> = Vec::new();
+    for (p, strict) in paths {
+        // A path that is not made yet is read where it will be: at its nearest existing parent.
+        let up = crate::disk::nearest_existing(p).unwrap_or_else(|| p.clone());
+        let (key, gb) = match src.volume(p).or_else(|| src.volume(&up)) {
+            Some(v) => (v.id, Some(v.free_bytes / (1024 * 1024 * 1024))),
+            None => (
+                format!("path:{}", up.display()),
+                src.free_mb(p)
+                    .or_else(|| src.free_mb(&up))
+                    .map(|mb| mb / 1024),
+            ),
+        };
+        match seen.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, v)) => v.strict |= *strict,
+            None => seen.push((
+                key,
+                VolumeFree {
+                    path: p.display().to_string(),
+                    free_gb: gb,
+                    strict: *strict,
+                },
+            )),
+        }
+    }
+    let mut it = seen.into_iter().map(|(_, v)| v);
+    let data = it.next().map(|v| (v.path, v.free_gb));
+    (data, it.collect())
 }
 
 /// Why this node cannot take a job now, in plain words, or `None` when it can. The first rule
@@ -412,10 +464,28 @@ pub fn why_not(r: &Readings, s: &NodeSettings) -> Option<String> {
         return Some("no compile slot is free".into());
     }
     if let Some(g) = r.disk_free_gb.filter(|g| *g < s.min_disk_free_gb) {
+        let on = if r.disk_path.is_empty() {
+            String::new()
+        } else {
+            format!(" on {}", r.disk_path)
+        };
         return Some(format!(
-            "only {g} GB of disk free (needs {})",
+            "only {g} GB of disk free{on} (needs {})",
             s.min_disk_free_gb
         ));
+    }
+    for v in &r.other_disks {
+        let need = if v.strict {
+            s.min_disk_free_gb
+        } else {
+            s.min_other_disk_free_gb
+        };
+        if let Some(g) = v.free_gb.filter(|g| *g < need) {
+            return Some(format!(
+                "only {g} GB of disk free on {} (needs {need})",
+                v.path
+            ));
+        }
     }
     None
 }
@@ -640,6 +710,7 @@ struct Gathered {
     pressure: Option<u32>,
     slots: serde_json::Map<String, Value>,
     disk_free_gb: Option<u64>,
+    other_disks: Vec<VolumeFree>,
     switch: Switch,
 }
 
@@ -726,11 +797,26 @@ fn gather(d: &Daemon, s: &NodeSettings, jobs_running: u32) -> Gathered {
             slots.insert(name.into(), json!({"free": free, "limit": limit}));
         }
     }
-    let disk_free_gb = match &d.cfg.disk {
-        Some(src) => src.free_mb(&d.cfg.data_dir),
-        None => crate::disk::DiskSource::free_mb(&crate::disk::Statvfs, &d.cfg.data_dir),
-    }
-    .map(|mb| mb / 1024);
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let cache = home.as_ref().map(|h| h.join(".cache").join("mason-target"));
+    let cargo = std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| home.as_ref().map(|h| h.join(".cargo")));
+    // The build cache may be a link to another disk: measure where it leads.
+    let cache = cache.map(|c| std::fs::canonicalize(&c).unwrap_or(c));
+    let mut paths = vec![(d.cfg.data_dir.clone(), true)];
+    paths.extend(cache.map(|c| (c, true)));
+    paths.extend(cargo.map(|c| (c, false)));
+    paths.extend(home.map(|h| (h, false)));
+    paths.push((std::env::temp_dir(), false));
+    let (data_disk, other_disks) = match &d.cfg.disk {
+        Some(src) => measure_volumes(src.as_ref(), &paths),
+        None => measure_volumes(&crate::disk::Statvfs, &paths),
+    };
+    let (disk_path, disk_free_gb) = match data_disk {
+        Some((p, g)) => (p, g),
+        None => (String::new(), None),
+    };
     // What this node's own jobs use is not "other work": the whole machine's CPU less the CPU of
     // the jobs' process trees.
     let cores = std::thread::available_parallelism().map_or(1, |n| n.get()) as u32;
@@ -743,6 +829,8 @@ fn gather(d: &Daemon, s: &NodeSettings, jobs_running: u32) -> Gathered {
             other_cpu_pct: other,
             compile_free: slot("compile").map(|(f, _)| f),
             disk_free_gb,
+            disk_path,
+            other_disks: other_disks.clone(),
             held: held_now(d, jobs_running),
         },
         cpu_pct,
@@ -752,6 +840,7 @@ fn gather(d: &Daemon, s: &NodeSettings, jobs_running: u32) -> Gathered {
         pressure,
         slots,
         disk_free_gb,
+        other_disks,
         switch,
     }
 }
@@ -790,6 +879,12 @@ pub fn status_value(d: &Daemon, s: &NodeSettings, coord: Option<&str>) -> Value 
         "slots": g.slots,
         "jobs": {"running": jobs_running, "max": s.max_jobs},
         "disk_free_gb": g.disk_free_gb,
+        "disks": g.other_disks.iter().map(|v| json!({
+            "path": v.path, "free_gb": v.free_gb,
+            "needs_gb": if v.strict { s.min_disk_free_gb } else { s.min_other_disk_free_gb },
+        })).collect::<Vec<_>>(),
+        "disks_unreadable": g.other_disks.iter().filter(|v| v.free_gb.is_none())
+            .map(|v| v.path.clone()).collect::<Vec<_>>(),
         "toolchains": toolchains(),
         "projects": projects,
         "mirrors": mirrors,
@@ -1699,6 +1794,8 @@ mod tests {
             other_cpu_pct: Some(10),
             compile_free: Some(3),
             disk_free_gb: Some(400),
+            disk_path: String::new(),
+            other_disks: vec![],
             held: None,
         }
     }
@@ -1845,6 +1942,88 @@ mod tests {
                 ),
             }
         }
+    }
+
+    fn vol(path: &str, free: Option<u64>, strict: bool) -> VolumeFree {
+        VolumeFree {
+            path: path.into(),
+            free_gb: free,
+            strict,
+        }
+    }
+
+    #[test]
+    fn other_volumes_have_a_lower_limit_and_name_the_path() {
+        let s = NodeSettings::default(); // 50 GB for data, 10 GB for the others
+        let low = Readings {
+            other_disks: vec![vol("/tmp", Some(9), false)],
+            ..ok()
+        };
+        let why = why_not(&low, &s).unwrap();
+        assert!(why.contains("only 9 GB") && why.contains("/tmp") && why.contains("needs 10"));
+        // 48 GB free on home: below min_disk_free_gb, above its own limit: accepts.
+        let fine = Readings {
+            other_disks: vec![
+                vol("/Users/n", Some(48), false),
+                vol("/tmp", Some(10), false),
+            ],
+            ..ok()
+        };
+        assert_eq!(why_not(&fine, &s), None);
+        // The build cache's volume keeps the data limit.
+        let cache = Readings {
+            other_disks: vec![vol("/x/mason-target", Some(48), true)],
+            ..ok()
+        };
+        assert!(why_not(&cache, &s).unwrap().contains("needs 50"));
+        // A volume that cannot be read does not stop the node.
+        let unread = Readings {
+            other_disks: vec![vol("/tmp", None, false)],
+            ..ok()
+        };
+        assert_eq!(why_not(&unread, &s), None);
+        // The data volume names its path.
+        let data = Readings {
+            disk_free_gb: Some(3),
+            disk_path: "/data".into(),
+            ..ok()
+        };
+        assert!(why_not(&data, &s).unwrap().contains("on /data"));
+    }
+
+    #[test]
+    fn a_volume_is_read_once_and_strict_if_any_path_on_it_is() {
+        use crate::disk::FakeDisk;
+        let d = FakeDisk::new_gb(1);
+        d.set_volume(Path::new("/ext"), "ext", 2000, 4000);
+        d.set_volume(Path::new("/"), "int", 48, 500);
+        let paths = vec![
+            (PathBuf::from("/ext/data"), true),
+            (PathBuf::from("/ext/cache"), true),
+            (PathBuf::from("/home/n/.cargo"), false),
+            (PathBuf::from("/home/n"), false),
+            (PathBuf::from("/nonexistent-tmp"), true),
+        ];
+        let (data, others) = measure_volumes(d.as_ref(), &paths);
+        assert_eq!(data, Some(("/ext/data".into(), Some(2000))));
+        assert_eq!(others, vec![vol("/home/n/.cargo", Some(48), true)]);
+    }
+
+    #[test]
+    fn an_unreadable_volume_is_listed_without_a_reading() {
+        #[derive(Debug)]
+        struct Blind;
+        impl crate::disk::DiskSource for Blind {
+            fn free_mb(&self, _: &Path) -> Option<u64> {
+                None
+            }
+        }
+        let (data, others) = measure_volumes(
+            &Blind,
+            &[(PathBuf::from("/"), true), (PathBuf::from("/tmp"), false)],
+        );
+        assert_eq!(data, Some(("/".into(), None)));
+        assert_eq!(others, vec![vol("/tmp", None, false)]);
     }
 
     #[test]
