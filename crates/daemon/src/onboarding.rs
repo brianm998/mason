@@ -105,6 +105,15 @@ fn machine(d: &Daemon) -> mason_onboard::questions::Machine {
             m.known_bins.push((Agent::Codex, b.clone()));
         }
     }
+    m.nodes_enabled = d.nodes.cfg(&d.cfg.config_dir).enabled;
+    // The mode of the most recently registered nodes-only project (ids count up as projects
+    // are registered), which the placement question recommends.
+    m.recent_node_only_mode = d
+        .projects()
+        .into_iter()
+        .rev()
+        .find(|(_, p)| crate::place::nodes_only(d, &p.id))
+        .and_then(|(_, p)| p.services.placement.clone());
     m
 }
 
@@ -143,6 +152,8 @@ pub struct Applied {
     pub registered: bool,
     pub body: Value,
     pub prove: bool,
+    /// Why the proof task must wait: the remote's base has no `.mason/` yet.
+    pub proof_hold: Option<String>,
 }
 
 /// `POST /onboarding/apply`, up to and including registration. Every refusal comes before
@@ -208,10 +219,22 @@ pub fn apply(d: &std::sync::Arc<Daemon>, body: &Value) -> Result<Applied, Refusa
     if let Some(e) = error {
         out["error"] = json!(e);
     }
+    let proof_hold = (!mason_onboard::land::remote_base_has_setup(&applied.detected, &applied.base))
+        .then(|| {
+            let r = applied.detected.remote_name.clone().unwrap_or_default();
+            format!(
+                "the proof task was not filed: {r}/{b} has no .mason/, and tasks branch from it, so they would run the built-in pipeline. Push it (`git push {r} {b}` after merging the setup branch), then run `mason init --prove-only`",
+                b = applied.base
+            )
+        });
+    if let Some(h) = &proof_hold {
+        out["proof_hold"] = json!(h);
+    }
     Ok(Applied {
         id: applied.id,
         registered,
         body: out,
         prove: !flags.no_prove,
+        proof_hold,
     })
 }

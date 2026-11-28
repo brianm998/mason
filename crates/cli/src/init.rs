@@ -101,6 +101,9 @@ pub fn run(mut args: Vec<String>, data_dir: &Path, config_dir: &Path) -> i32 {
             for n in &a.notes {
                 println!("note: {n}");
             }
+            for w in &a.warnings {
+                println!("warning: {w}");
+            }
             // The "Next:" paragraph is for an owner who is landing by hand.
             if a.land == questions::Land::No {
                 println!("{next}");
@@ -213,9 +216,14 @@ pub fn prove(d: &Detected, id: &str, base: &str, data_dir: &Path) -> Result<(), 
             .as_ref()
             .map_or(base.to_string(), |r| format!("{r}/{base}"))
     );
+    // With a remote only its copy counts: tasks branch from it, not from the local base.
     let local = format!("{base}:.mason/mason.toml");
-    if !git::ok(&d.root, &["cat-file", "-e", &at]) && !git::ok(&d.root, &["cat-file", "-e", &local])
-    {
+    let found = if d.remote_name.is_some() {
+        git::ok(&d.root, &["cat-file", "-e", &at])
+    } else {
+        git::ok(&d.root, &["cat-file", "-e", &local])
+    };
+    if !found {
         return Err(format!("{base} has no .mason/ yet, so a task would run the built-in pipeline rather than your workflow. Merge {SETUP_BRANCH} into {base} (and push it, if there is a remote), then run `mason init --prove-only`"));
     }
     let daemon = client::find(data_dir).map_err(|_| "masond is not running. Start it (`masond`), then run `mason init --prove-only` to file the first task".to_string())?;
@@ -249,6 +257,8 @@ mod tests {
             land: Land::No,
             prove: true,
             token: Some("env:GITHUB_TOKEN".into()),
+            placement: None,
+            test: None,
             notes: vec![],
             warnings: vec![],
         }

@@ -146,6 +146,7 @@ mason: command-line client for the MASON pipeline
              [--tracker local|github] [--agent claude|codex] [--agent-bin P] [--sessions N]
              [--suites accept|skip] [--base B] [--landing direct|direct-ci|pr|batched]
              [--alerts sound,speech,email,push|none] [--ci-workflow yes|no] [--id ID]
+             [--test CMD] [--placement local|favor-local|favor-remote|remote]
              [--land no|merge|push|pr] [--no-prove] [--force]
                                       guided setup: writes .mason/ and the Filing notes on branch
                                       mason/setup and the project file; lands it only on --land

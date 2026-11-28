@@ -17,6 +17,8 @@ pub struct Args {
     pub base: Option<String>,
     pub test: Option<String>,
     pub agent_bin: Option<String>,
+    /// `[placement] mode` to write (only when nodes are enabled).
+    pub placement: Option<String>,
 }
 
 impl Args {
@@ -26,6 +28,11 @@ impl Args {
             base: f.base.clone(),
             test: f.test.clone(),
             agent_bin: f.agent_bin.clone(),
+            placement: f
+                .machine
+                .nodes_enabled
+                .then(|| f.placement.clone())
+                .flatten(),
         }
     }
 }
@@ -140,6 +147,8 @@ fn prepare(d: &Detected, args: &Args, config_dir: Option<&Path>) -> Result<Prepa
         land: Land::No,
         prove: false,
         token: Some("env:GITHUB_TOKEN".into()),
+        placement: args.placement.clone(),
+        test: args.test.clone(),
         notes: vec![],
         warnings: vec![],
     };

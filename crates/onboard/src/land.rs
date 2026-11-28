@@ -50,6 +50,48 @@ pub fn commands(d: &Detected, a: &Answers) -> String {
     s
 }
 
+/// Does the remote's copy of the base branch have `.mason/`? MASON branches every task from
+/// `<remote>/<base>`, so only this counts. `true` when there is no remote (nothing to compare).
+pub fn remote_base_has_setup(d: &Detected, base: &str) -> bool {
+    match d.remote_name.as_deref() {
+        None => true,
+        Some(r) => git::ok(
+            &d.root,
+            &["cat-file", "-e", &format!("{r}/{base}:.mason/mason.toml")],
+        ),
+    }
+}
+
+/// Said before Add when there is a remote and the chosen landing leaves `.mason/` off the remote
+/// base: tasks branch from there, so they would run the built-in pipeline. Names the commands.
+/// `push` never warns here (it pushes; [`apply`] says so if that is refused).
+pub fn unpublished_warning(
+    d: &Detected,
+    base: &str,
+    landing: Landing,
+    land: Land,
+) -> Option<String> {
+    let r = d.remote_name.as_deref()?;
+    if land == Land::Push || remote_base_has_setup(d, base) {
+        return None;
+    }
+    let how = match (landing, land) {
+        (Landing::Pr, Land::Pr) => format!(
+            "the pull request has to be merged first (`git push {r} {SETUP_BRANCH}` and `gh pr create --base {base} --head {SETUP_BRANCH}`)"
+        ),
+        (_, Land::Merge) => format!("it is merged into {base} here only; run `git push {r} {base}`"),
+        (Landing::Pr, _) => format!(
+            "merge {SETUP_BRANCH} through a pull request: `git push {r} {SETUP_BRANCH}`, open the pull request, merge it"
+        ),
+        _ => format!(
+            "merge {SETUP_BRANCH} into {base} (`git checkout {base} && git merge --ff-only {SETUP_BRANCH}`) and run `git push {r} {base}`"
+        ),
+    };
+    Some(format!(
+        "{r}/{base} has no .mason/ and MASON branches every task from it, so tasks would run the built-in pipeline, not your workflow: {how}. The proof task is not filed until {r}/{base} has it"
+    ))
+}
+
 fn pr_command(a: &Answers) -> String {
     format!(
         "gh pr create --base {} --head {SETUP_BRANCH} --title {:?} --body {:?}",
@@ -203,6 +245,8 @@ mod tests {
             land: Land::No,
             prove: false,
             token: None,
+            placement: None,
+            test: None,
             notes: vec![],
             warnings: vec![],
         };
@@ -211,5 +255,51 @@ mod tests {
         assert!(!commands(&d(false), &a(Landing::Direct)).contains("push"));
         let pr = commands(&d(true), &a(Landing::Pr));
         assert!(pr.contains("git push origin mason/setup") && pr.contains("gh pr create"));
+    }
+}
+
+#[cfg(test)]
+mod warn_tests {
+    use super::*;
+
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let o = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "git {args:?}");
+    }
+
+    #[test]
+    fn a_remote_without_mason_warns_with_the_push_command_until_it_has_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let bare = dir.path().join("bare.git");
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        git(
+            dir.path(),
+            &["init", "-q", "--bare", "-b", "main", "bare.git"],
+        );
+        git(&work, &["init", "-q", "-b", "main"]);
+        git(&work, &["remote", "add", "origin", bare.to_str().unwrap()]);
+        std::fs::write(work.join("a"), "a").unwrap();
+        git(&work, &["add", "-A"]);
+        git(&work, &["commit", "-qm", "a"]);
+        git(&work, &["push", "-q", "origin", "main"]);
+        let d = crate::detect::detect(&work).unwrap();
+        let w = unpublished_warning(&d, "main", Landing::Direct, Land::Merge).unwrap();
+        assert!(w.contains("git push origin main"), "{w}");
+        assert!(unpublished_warning(&d, "main", Landing::Direct, Land::No).is_some());
+        assert!(unpublished_warning(&d, "main", Landing::Direct, Land::Push).is_none());
+        std::fs::create_dir_all(work.join(".mason")).unwrap();
+        std::fs::write(work.join(".mason/mason.toml"), "").unwrap();
+        git(&work, &["add", "-A"]);
+        git(&work, &["commit", "-qm", "mason"]);
+        assert!(!remote_base_has_setup(&d, "main"));
+        git(&work, &["push", "-q", "origin", "main"]);
+        assert!(remote_base_has_setup(&d, "main"));
+        assert!(unpublished_warning(&d, "main", Landing::Direct, Land::Merge).is_none());
     }
 }

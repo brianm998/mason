@@ -44,6 +44,7 @@ pub fn run(mut args: Vec<String>, config_dir: &Path) -> i32 {
         base,
         test,
         agent_bin: bin,
+        placement: None,
     };
     let done = match adopt(&d, &args, config_dir, &init::validate_overlay) {
         Ok(a) => a,
