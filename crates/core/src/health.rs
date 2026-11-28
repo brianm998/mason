@@ -8,6 +8,8 @@
 
 use std::collections::BTreeMap;
 
+use crate::{Event, EventKind, TaskId};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
     /// Worth seeing, never worth a session.
@@ -143,6 +145,71 @@ pub struct TaskFact {
     /// Waits for a GitHub runner pool unit: no progress is expected, overloaded:slots and
     /// stuck:wait judge it.
     pub pool_wait: bool,
+    /// Of `in_state_ms`, the time spent waiting for rationed capacity ([`capacity_wait_ms`]):
+    /// `stuck:long` does not count it.
+    pub capacity_wait_ms: u64,
+}
+
+/// How the text of a wait for a node starts when no unit of a node is in the broker's line (that
+/// wait is recorded under the `environment` class).
+pub const NODE_WAIT_PREFIX: &str = "Waiting for a node";
+
+/// Whether a recorded wait was for capacity the pipeline rations: a GitHub runner unit, a node,
+/// or a compile, test-suite or exclusive slot. Every other wait (the owner, a pause, the
+/// environment) is not.
+pub fn is_capacity_wait(on: &str, recorded: Option<&str>) -> bool {
+    let class = crate::wait_class(on, recorded);
+    matches!(
+        class.as_str(),
+        "gha" | "gha-macos" | "gha-debt" | "compile" | "test-suite" | "exclusive"
+    ) || class.starts_with("node:")
+        || (class == "environment" && on.starts_with(NODE_WAIT_PREFIX))
+}
+
+/// The time `task` spent in capacity waits within `[from, now)`, from the log's wait events
+/// (the ledger `wait_by_class` totals), oldest first. A wait ends at its `WaitEnded`, at the next
+/// wait of the task, or when a new run of the step starts (`run_starts`: a retry drops the wait
+/// without an event of its own); one still open counts up to `now`. `from` is when the task
+/// entered its state: no wait outlives a change of state.
+pub fn capacity_wait_ms(
+    events: &[Event],
+    task: TaskId,
+    run_starts: &[u64],
+    from: u64,
+    now: u64,
+) -> u64 {
+    let mut total = 0u64;
+    // The start of the open wait, when it is a capacity wait.
+    let mut open: Option<u64> = None;
+    let close = |since: u64, end: u64| {
+        let end = run_starts
+            .iter()
+            .copied()
+            .filter(|s| *s > since)
+            .fold(end.min(now), u64::min);
+        end.saturating_sub(since.max(from))
+    };
+    for e in events {
+        let (t, next) = match &e.kind {
+            EventKind::WaitStarted { task, on, class } => (
+                *task,
+                is_capacity_wait(on, class.as_deref()).then_some(e.at.0),
+            ),
+            EventKind::WaitEnded { task } => (*task, None),
+            _ => continue,
+        };
+        if t != task || e.at.0 < from {
+            continue;
+        }
+        if let Some(since) = open.take() {
+            total += close(since, e.at.0);
+        }
+        open = next;
+    }
+    if let Some(since) = open {
+        total += close(since, now);
+    }
+    total
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -460,14 +527,19 @@ pub fn judge(x: &Facts, l: &Limits) -> Vec<Finding> {
                 l.long_min_ms
             };
             let long = hi.saturating_mul(l.long_factor).max(floor);
-            let too_long = t.in_state_ms > long;
+            // Waits for rationed capacity are not the task's own time, and a wait for a runner
+            // pool unit is judged by stuck:wait.
+            let working = t.in_state_ms.saturating_sub(t.capacity_wait_ms);
+            let too_long = working > long && !t.pool_wait;
             let too_many = rounds > l.checks_max;
             if too_long || too_many {
                 let mut ev = vec![
                     format!(
-                        "in {} for {} min; limit {} min",
+                        "in {} {} min, of which {} min waiting for capacity (a GitHub runner, a node or a slot); working {} min, limit {} min",
                         t.state,
                         mins(t.in_state_ms),
+                        mins(t.capacity_wait_ms),
+                        mins(working),
                         mins(long)
                     ),
                     format!(
@@ -890,6 +962,7 @@ mod tests {
             waiting: None,
             holders: None,
             pool_wait: false,
+            capacity_wait_ms: 0,
         };
         let x = |t: TaskFact, rounds: u32| Facts {
             tasks: vec![t],
@@ -923,6 +996,118 @@ mod tests {
         );
     }
 
+    /// A develop run 900 minutes in its state, against a limit of 815.
+    fn long_develop(capacity_min: u64, pool_wait: bool, rounds: u32) -> Vec<Finding> {
+        let limits = Limits {
+            long_min_ms: 815 * MIN,
+            ..l()
+        };
+        let x = Facts {
+            tasks: vec![TaskFact {
+                id: 5,
+                state: "developing".into(),
+                is_step: true,
+                in_state_ms: 900 * MIN,
+                typical_hi_ms: None,
+                silent_ms: MIN,
+                waiting: pool_wait.then(|| ("a GitHub runner".into(), 30 * MIN)),
+                holders: None,
+                pool_wait,
+                capacity_wait_ms: capacity_min * MIN,
+            }],
+            rounds: vec![RoundFact {
+                task: 5,
+                rounds,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        judge(&x, &limits)
+    }
+
+    #[test]
+    fn stuck_long_does_not_count_capacity_waits() {
+        assert!(long_develop(850, false, 0).is_empty());
+        let out = long_develop(50, false, 0);
+        assert_eq!(keys(&out), ["stuck:long:5"]);
+        assert!(
+            out[0].evidence[0].starts_with("in developing 900 min, of which 50 min waiting for"),
+            "{:?}",
+            out[0].evidence
+        );
+        assert!(out[0].evidence[0].ends_with("working 850 min, limit 815 min"));
+    }
+
+    #[test]
+    fn a_pool_wait_past_the_limit_is_stuck_wait_only() {
+        // A short current wait: stuck:long stays quiet while the pool wait lasts.
+        assert!(long_develop(0, true, 0).is_empty());
+        let x = Facts {
+            tasks: vec![TaskFact {
+                id: 5,
+                state: "developing".into(),
+                is_step: true,
+                in_state_ms: 900 * MIN,
+                waiting: Some(("a GitHub runner".into(), 850 * MIN)),
+                pool_wait: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(keys(&judge(&x, &l())), ["stuck:wait:5"]);
+    }
+
+    #[test]
+    fn the_seventh_check_round_is_stuck_long_whatever_the_waits() {
+        for (capacity, pool_wait) in [(0, false), (900, false), (900, true)] {
+            assert_eq!(
+                keys(&long_develop(capacity, pool_wait, 7)),
+                ["stuck:long:5"]
+            );
+        }
+    }
+
+    #[test]
+    fn capacity_waits_are_totalled_from_the_wait_events() {
+        let task = TaskId(5);
+        let start = |at, task, class: &str, on: &str| Event {
+            at: crate::Timestamp(at),
+            kind: EventKind::WaitStarted {
+                task,
+                on: on.into(),
+                class: Some(class.into()),
+            },
+        };
+        let end = |at| Event {
+            at: crate::Timestamp(at),
+            kind: EventKind::WaitEnded { task },
+        };
+        let events = [
+            // Before the task entered its state.
+            start(10, task, "gha", ""),
+            end(90),
+            start(100, task, "gha", ""),
+            end(130),
+            // Another task's wait.
+            start(130, TaskId(6), "gha", ""),
+            // The owner's, replaced by a compile wait, which a node wait replaces.
+            start(140, task, "approval", ""),
+            start(200, task, "compile", ""),
+            start(210, task, "environment", "Waiting for a node: full"),
+            end(215),
+            start(220, task, "environment", "git is busy"),
+            end(300),
+            // Dropped by the run that starts at 330.
+            start(310, task, "node:n1", ""),
+            // Still open.
+            start(400, task, "test-suite", ""),
+        ];
+        assert_eq!(
+            capacity_wait_ms(&events, task, &[100, 330], 100, 407),
+            30 + 10 + 5 + 20 + 7
+        );
+    }
+
     #[test]
     fn stuck_long_names_open_remote_runs() {
         let mut x = Facts {
@@ -936,6 +1121,7 @@ mod tests {
                 waiting: None,
                 holders: None,
                 pool_wait: false,
+                capacity_wait_ms: 0,
             }],
             rounds: vec![RoundFact {
                 task: 5,
@@ -972,6 +1158,7 @@ mod tests {
                 waiting: None,
                 holders: None,
                 pool_wait: false,
+                capacity_wait_ms: 0,
             }],
             load_pct: Some(40),
             ..Default::default()
@@ -991,6 +1178,7 @@ mod tests {
             waiting: Some(("exclusive".into(), 52 * MIN)),
             holders: None,
             pool_wait: false,
+            capacity_wait_ms: 0,
         };
         let x = Facts {
             tasks: vec![t.clone()],
@@ -1019,6 +1207,7 @@ mod tests {
             waiting: None,
             holders: None,
             pool_wait: false,
+            capacity_wait_ms: 0,
         };
         let x = Facts {
             tasks: vec![t.clone()],
@@ -1053,6 +1242,7 @@ mod tests {
             waiting: Some(("a GitHub runner: 19 of 16 in use".into(), 36 * MIN)),
             holders: None,
             pool_wait: true,
+            capacity_wait_ms: 0,
         };
         let x = |t: &TaskFact| Facts {
             tasks: vec![t.clone()],
@@ -1080,6 +1270,7 @@ mod tests {
             waiting: Some(("compile".into(), wait)),
             holders: h,
             pool_wait: false,
+            capacity_wait_ms: 0,
         }
     }
 

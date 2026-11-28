@@ -101,6 +101,16 @@ pub fn gather(d: &Arc<Daemon>, now: u64) -> Facts {
     let self_pid = crate::proposals::self_project(d).map(|(p, _)| p);
     let mut landing_failed = 0;
     let mut landed = 0;
+    // The wait events since the oldest running step entered its state, for `capacity_wait_ms`.
+    let wait_events = w
+        .tasks
+        .values()
+        .filter(|t| t.state.is_step())
+        .map(|t| t.state_entered_at.0)
+        .min()
+        .map_or_else(Vec::new, |from| {
+            d.store.wait_events_since(from).unwrap_or_default()
+        });
     for t in w.tasks.values() {
         // Waiting for the project's agent CLI: its own notice says so (s1287), and no session
         // could look into it.
@@ -206,6 +216,17 @@ pub fn gather(d: &Arc<Daemon>, now: u64) -> Facts {
                 waiting: wait.clone().map(|r| (r, since_run)),
                 holders: hf.clone(),
                 pool_wait: crate::remote_runs::pool_waiting(&d.cfg.hosts_dir(), t.id.0),
+                capacity_wait_ms: health::capacity_wait_ms(
+                    &wait_events,
+                    t.id,
+                    &w.step_runs
+                        .values()
+                        .filter(|r| r.task == t.id)
+                        .map(|r| r.started_at.0)
+                        .collect::<Vec<_>>(),
+                    t.state_entered_at.0,
+                    now,
+                ),
             });
         } else if t.state == State::Queued {
             if let Some(r) = wait.clone() {
@@ -219,6 +240,7 @@ pub fn gather(d: &Arc<Daemon>, now: u64) -> Facts {
                     waiting: Some((r, in_state)),
                     holders: hf.clone(),
                     pool_wait: false,
+                    capacity_wait_ms: 0,
                 });
             }
         }

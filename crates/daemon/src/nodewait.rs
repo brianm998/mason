@@ -240,7 +240,11 @@ pub fn describe(
         ),
         None => "no estimate".into(),
     });
-    format!("Waiting for a node: {}", parts.join("; "))
+    format!(
+        "{}: {}",
+        mason_core::health::NODE_WAIT_PREFIX,
+        parts.join("; ")
+    )
 }
 
 /// The holders of node slots now, from the runs in the executor, with what is left of their
