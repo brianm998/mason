@@ -64,6 +64,13 @@ fn review(verdict: &str, summary: &str, findings: Value) -> Value {
         "args": {"verdict": verdict, "summary": summary, "findings": findings}}})
 }
 
+/// A round-2 approval that answers round 1's blocking finding 0, as the round-2 rule requires.
+fn approve_after_fix() -> Value {
+    json!({"call": {"tool": "submit_review", "args": {
+        "verdict": "approve", "summary": "fine", "findings": [],
+        "earlier": [{"round": 1, "index": 0, "status": "fixed", "note": "done"}]}}})
+}
+
 /// A line of every diff these tests make.
 const REAL_LINE: &str = "diff --git a/a.txt b/a.txt";
 
@@ -141,7 +148,7 @@ fn one_confirmed_finding_sends_the_task_back_with_the_other_as_a_minor_note() {
             "S",
             json!([blocking("REAL-BUG"), blocking("DOUBTFUL")])
         )]),
-        json!([review("approve", "fine", json!([]))]),
+        json!([approve_after_fix()]),
     ];
     let validations = vec![validation(json!([
         {"index": 0, "verdict": "confirmed", "reason": "seen it"},
@@ -177,7 +184,7 @@ fn a_validation_that_gives_no_verdict_leaves_the_reviewers_changes() {
     let rec = tempfile::tempdir().unwrap();
     let reviews = vec![
         json!([review("changes", "S", json!([blocking("REAL-BUG")]))]),
-        json!([review("approve", "fine", json!([]))]),
+        json!([approve_after_fix()]),
     ];
     // The fake has no "validate" turns, so the session ends without submitting.
     let (_s, d, _v) = run("", &[1, 2], reviews, vec![], rec.path());
@@ -191,7 +198,7 @@ fn validate_false_starts_no_validation() {
     let rec = tempfile::tempdir().unwrap();
     let reviews = vec![
         json!([review("changes", "S", json!([blocking("REAL-BUG")]))]),
-        json!([review("approve", "fine", json!([]))]),
+        json!([approve_after_fix()]),
     ];
     // Would reject the finding, if it ran.
     let validations = vec![validation(json!([
