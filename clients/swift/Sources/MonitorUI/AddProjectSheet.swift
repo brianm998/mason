@@ -147,6 +147,9 @@ struct AddProjectContent: View {
                 }
             }
             .frame(maxHeight: 190)
+            ForEach(wizard.plan?.warnings ?? [], id: \.self) {
+                Text($0).font(theme.small()).foregroundStyle(theme.attention)
+            }
             Picker("When setup is written, land it", selection: Binding(
                 get: { wizard.land }, set: { model.addProject?.land = $0 })
             ) {
@@ -176,6 +179,7 @@ struct AddProjectContent: View {
             if let id = wizard.appliedId {
                 Text("Added \(id).").font(theme.body(.semibold))
                 ForEach(wizard.warnings, id: \.self) { Text($0).font(theme.small()).foregroundStyle(theme.attention) }
+                ForEach(wizard.notes, id: \.self) { Text($0).font(theme.small()).foregroundStyle(theme.attention) }
                 if let t = wizard.proofTask {
                     Button("Open proof task #\(t)") { model.finishAddProject(openProofTask: true) }
                         .accessibilityIdentifier("add-project-proof")

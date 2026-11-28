@@ -975,7 +975,8 @@ fn row_json(row: &mason_store::NodeRow, v: &View, cfg: &NodesCfg, goal: Option<&
         "arch": s["arch"], "os": s["os"], "cores": s["cores"], "version": s["version"],
         "cpu_pct": s["cpu_pct"], "other_cpu_pct": s["other_cpu_pct"],
         "thermal": s["thermal"], "slots": s["slots"], "jobs": s["jobs"],
-        "disk_free_gb": s["disk_free_gb"], "toolchains": s["toolchains"],
+        "disk_free_gb": s["disk_free_gb"], "disks": s["disks"],
+        "disks_unreadable": s["disks_unreadable"], "toolchains": s["toolchains"],
         "settings": cfg.settings_for(&row.name).to_json(),
         "polled_ms": v.polled_ms, "last_error": v.last_error,
     })

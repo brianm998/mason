@@ -38,19 +38,7 @@ const LOG_TAIL: usize = 40;
 
 /// Whether an error is the credential (or the account's rights) being refused.
 pub fn refused(e: &str) -> bool {
-    let l = e.to_ascii_lowercase();
-    [
-        "authentication failed",
-        "permission denied",
-        "could not read username",
-        "invalid username or password",
-        "bad credentials",
-        "error: 401",
-        "error: 403",
-        "protected branch",
-    ]
-    .iter()
-    .any(|m| l.contains(m))
+    mason_landing::promote::refused(e)
 }
 
 fn server_error(l: &str) -> bool {
