@@ -31,6 +31,7 @@ pub mod cpu;
 pub mod cpuhistory;
 pub mod cputasks;
 pub mod crash;
+pub mod criteria;
 pub mod daemon;
 pub mod deadline;
 pub mod defs;

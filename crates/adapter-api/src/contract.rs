@@ -181,6 +181,9 @@ pub fn preamble(step: StepKind) -> String {
 pub const TRIED_MAX: usize = 10;
 pub const TRIED_TEXT_MAX: usize = 300;
 
+/// The most acceptance criteria a plan may have.
+pub const CRITERIA_MAX: usize = 8;
+
 /// What `submit_change` says about `tried`; the other tools that take it say the same.
 const TRIED_DESCRIPTION: &str =
     "Approaches you tried and gave up, and why. The next round and the reviewer read this.";
@@ -210,7 +213,11 @@ pub fn tool_spec(tool: &str) -> Option<(String, Value)> {
                 "summary": {"type": "string", "description": "What will change and why, up to 2000 characters"},
                 "files": {"type": "array", "items": {"type": "string"}, "description": "Files that exist or will be created, relative to the repository root"},
                 "approach": {"type": "string", "description": "How, step by step"},
-                "acceptance_criteria": {"type": "array", "items": {"type": "string"}, "description": "Checkable statements that mean the task is done"}
+                "acceptance_criteria": {"type": "array", "minItems": 1, "maxItems": CRITERIA_MAX, "items": {"type": "object", "properties": {
+                    "criterion": {"type": "string", "description": "A checkable statement that means part of the task is done"},
+                    "check": {"type": "string", "description": "How to verify it: a test name, a command, or a file:line or behaviour to read. Not a repeat of the criterion."}},
+                    "required": ["criterion", "check"]},
+                    "description": "1 to 8 criteria, each naming the check that verifies it. Develop reports on each and cannot change them."}
             }),
             &["summary", "files", "approach", "acceptance_criteria"],
         ),
@@ -219,7 +226,12 @@ pub fn tool_spec(tool: &str) -> Option<(String, Value)> {
             json!({
                 "summary": {"type": "string", "description": "What you changed, up to 2000 characters"},
                 "head": {"type": "string", "description": "Commit hash of the branch head (7 to 40 hex characters)"},
-                "notes": {"type": "string", "description": "Anything the reviewer should know"},
+                "notes": {"type": "string", "description": "Anything the reviewer should know; required when a criterion is not_met"},
+                "criteria": {"type": "array", "items": {"type": "object", "properties": {
+                    "status": {"type": "string", "enum": ["met", "not_met", "partly"]},
+                    "evidence": {"type": "string", "description": "The test that passed, the command output, or file:line"}},
+                    "required": ["status", "evidence"]},
+                    "description": "One entry per criterion of the plan, in order. Required when the plan's criteria name checks; the count must match."},
                 "removes": {"type": "array", "items": {"type": "object", "properties": {
                     "file": {"type": "string"}, "line": {"type": "string"}, "reason": {"type": "string"}},
                     "required": ["file", "line", "reason"]},
@@ -374,6 +386,10 @@ pub fn tool_spec(tool: &str) -> Option<(String, Value)> {
                     "status": {"type": "string", "enum": ["fixed", "not_fixed", "withdrawn"]},
                     "note": {"type": "string"}},
                     "required": ["round", "index", "status"]}},
+                "criteria": {"type": "array", "description": "One entry per acceptance criterion, in order: whether you agree with develop's status", "items": {"type": "object", "properties": {
+                    "status": {"type": "string", "enum": ["agree", "disagree"]},
+                    "why": {"type": "string"}},
+                    "required": ["status", "why"]}},
                 "removes": {"type": "array", "items": {"type": "object", "properties": {
                     "file": {"type": "string"}, "line": {"type": "string"}, "reason": {"type": "string"}},
                     "required": ["file", "line", "reason"]},
@@ -934,6 +950,117 @@ fn tried(a: &Value, out: &mut Vec<String>) {
     }
 }
 
+fn same_words(a: &str, b: &str) -> bool {
+    let norm = |s: &str| {
+        s.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .trim_end_matches('.')
+            .to_lowercase()
+    };
+    norm(a) == norm(b)
+}
+
+/// The plan's `acceptance_criteria`: 1 to [`CRITERIA_MAX`] of `{criterion, check}`, the check not
+/// empty and not a copy of the criterion. A plain string is still taken, as old plans and
+/// scripted fixtures have them; it names no check and develop is not asked to report on it.
+fn plan_criteria(a: &Value, p: &mut Vec<String>) {
+    match a.get("acceptance_criteria") {
+        None => p.push("acceptance_criteria: required".into()),
+        Some(Value::Array(v)) if v.is_empty() => {
+            p.push("acceptance_criteria: must have at least one entry".into())
+        }
+        Some(Value::Array(v)) if v.len() > CRITERIA_MAX => p.push(format!(
+            "acceptance_criteria: {} entries, the limit is {CRITERIA_MAX}",
+            v.len()
+        )),
+        Some(Value::Array(v)) => {
+            for (i, x) in v.iter().enumerate() {
+                match x {
+                    Value::String(s) if !s.trim().is_empty() => {}
+                    Value::Object(_) => {
+                        let mut q = vec![];
+                        let c = text(x, "criterion", 1000, &mut q);
+                        let k = text(x, "check", 1000, &mut q);
+                        if let (Some(c), Some(k)) = (c, k) {
+                            if same_words(c, k) {
+                                q.push(
+                                    "check: must say how to verify the criterion (a test name, a command, a file:line), not repeat it"
+                                        .into(),
+                                );
+                            }
+                        }
+                        p.extend(
+                            q.into_iter()
+                                .map(|m| format!("acceptance_criteria[{i}].{m}")),
+                        );
+                    }
+                    _ => p.push(format!(
+                        "acceptance_criteria[{i}]: must be an object with `criterion` and `check`"
+                    )),
+                }
+            }
+        }
+        Some(_) => p.push("acceptance_criteria: must be an array of {criterion, check}".into()),
+    }
+}
+
+/// `submit_change.criteria`, when present: `{status: met | not_met | partly, evidence}` entries,
+/// and a `notes` reason for any `not_met`. That the count matches the plan is the daemon's check.
+fn change_criteria(a: &Value, p: &mut Vec<String>) {
+    let Some(v) = a.get("criteria").filter(|v| !v.is_null()) else {
+        return;
+    };
+    let Some(v) = v.as_array() else {
+        p.push("criteria: must be a list of {status, evidence}".into());
+        return;
+    };
+    let mut not_met = false;
+    for (i, e) in v.iter().enumerate() {
+        match e.get("status").and_then(Value::as_str) {
+            Some("met" | "partly") => {}
+            Some("not_met") => not_met = true,
+            _ => p.push(format!(
+                "criteria[{i}].status: required, 'met', 'not_met' or 'partly'"
+            )),
+        }
+        let mut q = vec![];
+        text(e, "evidence", 1000, &mut q);
+        p.extend(q.into_iter().map(|m| format!("criteria[{i}].{m}")));
+    }
+    if not_met
+        && a.get("notes")
+            .and_then(Value::as_str)
+            .is_none_or(|n| n.trim().is_empty())
+    {
+        p.push("notes: required when a criterion is not_met; say why it is not met".into());
+    }
+}
+
+/// `submit_review.criteria`, when present: `{status: agree | disagree, why}` entries.
+fn review_criteria(a: &Value, p: &mut Vec<String>) {
+    let Some(v) = a.get("criteria").filter(|v| !v.is_null()) else {
+        return;
+    };
+    let Some(v) = v.as_array() else {
+        p.push("criteria: must be a list of {status, why}".into());
+        return;
+    };
+    for (i, e) in v.iter().enumerate() {
+        if !matches!(
+            e.get("status").and_then(Value::as_str),
+            Some("agree" | "disagree")
+        ) {
+            p.push(format!(
+                "criteria[{i}].status: required, 'agree' or 'disagree'"
+            ));
+        }
+        let mut q = vec![];
+        text(e, "why", 1000, &mut q);
+        p.extend(q.into_iter().map(|m| format!("criteria[{i}].{m}")));
+    }
+}
+
 /// Every problem with `args` for `tool`, or `Ok(())`. Pure.
 pub fn validate(tool: &str, a: &Value) -> Result<(), Vec<String>> {
     let mut p = vec![];
@@ -951,7 +1078,7 @@ pub fn validate(tool: &str, a: &Value) -> Result<(), Vec<String>> {
                     ));
                 }
             }
-            strings(a, "acceptance_criteria", &mut p);
+            plan_criteria(a, &mut p);
         }
         "submit_change" => {
             text(a, "summary", 2000, &mut p);
@@ -964,6 +1091,7 @@ pub fn validate(tool: &str, a: &Value) -> Result<(), Vec<String>> {
             }
             removes(a, &mut p);
             tried(a, &mut p);
+            change_criteria(a, &mut p);
         }
         "submit_close" => {
             text(a, "evidence", 2000, &mut p);
@@ -1030,6 +1158,7 @@ pub fn validate(tool: &str, a: &Value) -> Result<(), Vec<String>> {
                 None => p.push("verdict: required, 'approve' or 'changes'".into()),
             }
             removes(a, &mut p);
+            review_criteria(a, &mut p);
             for (i, e) in a
                 .get("earlier")
                 .and_then(Value::as_array)
@@ -2211,6 +2340,67 @@ mod tests {
         assert!(why.contains("removes[0].reason"), "{why}");
         let bad = json!({"summary": "s", "head": "0123abc", "removes": "all"});
         assert!(validate("submit_change", &bad).is_err());
+    }
+
+    #[test]
+    fn plan_criteria_name_a_check_each() {
+        let with = |c: Value| {
+            let mut a = plan();
+            a["acceptance_criteria"] = c;
+            validate("submit_plan", &a).map_err(|p| p.join("\n"))
+        };
+        assert!(with(json!([{"criterion": "a works", "check": "test a_works"}])).is_ok());
+        assert!(with(json!(["an old plain string"])).is_ok());
+        let why = with(json!([{"criterion": "a works", "check": " "}])).unwrap_err();
+        assert!(
+            why.contains("acceptance_criteria[0].check: must not be empty"),
+            "{why}"
+        );
+        let why = with(json!([{"criterion": "a works", "check": "A  works."}])).unwrap_err();
+        assert!(why.contains("not repeat it"), "{why}");
+        let why = with(json!([{"criterion": "a works"}])).unwrap_err();
+        assert!(why.contains("check: required"), "{why}");
+        assert!(with(json!([])).is_err());
+        let nine: Vec<Value> = (0..9)
+            .map(|i| json!({"criterion": format!("c{i}"), "check": "t"}))
+            .collect();
+        assert!(with(json!(nine)).unwrap_err().contains("limit is 8"));
+    }
+
+    #[test]
+    fn change_criteria_have_statuses_and_not_met_needs_notes() {
+        let base = |c: Value| json!({"summary": "s", "head": "0123abc", "criteria": c});
+        let ok = base(json!([{"status": "met", "evidence": "test a passed"},
+            {"status": "partly", "evidence": "src/a.rs:4"}]));
+        assert!(validate("submit_change", &ok).is_ok());
+        let nm = base(json!([{"status": "not_met", "evidence": "none"}]));
+        let why = validate("submit_change", &nm).unwrap_err().join("\n");
+        assert!(
+            why.contains("notes: required when a criterion is not_met"),
+            "{why}"
+        );
+        let mut with_notes = nm.clone();
+        with_notes["notes"] = json!("the platform has no such call");
+        assert!(validate("submit_change", &with_notes).is_ok());
+        let bad = base(json!([{"status": "done", "evidence": ""}]));
+        let why = validate("submit_change", &bad).unwrap_err().join("\n");
+        assert!(
+            why.contains("criteria[0].status") && why.contains("criteria[0].evidence"),
+            "{why}"
+        );
+    }
+
+    #[test]
+    fn review_criteria_are_agree_or_disagree() {
+        let r = |c: Value| {
+            validate(
+                "submit_review",
+                &json!({"verdict": "approve", "summary": "s", "criteria": c}),
+            )
+        };
+        assert!(r(json!([{"status": "agree", "why": "test a covers it"}])).is_ok());
+        assert!(r(json!([{"status": "maybe", "why": "x"}])).is_err());
+        assert!(r(json!([{"status": "agree"}])).is_err());
     }
 
     #[test]
