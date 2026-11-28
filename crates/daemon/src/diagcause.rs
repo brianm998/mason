@@ -1408,8 +1408,13 @@ fn same_names(g: &Gathered) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// A detached worktree at the project's base for a session about several tasks.
-fn make_checkout(d: &Daemon, task: u64, p: &crate::config::ProjectCfg) -> std::path::PathBuf {
+/// A detached worktree at the project's base, for a session with no task worktree to read: one
+/// about several tasks, or about a task that failed before its worktree was made.
+pub(crate) fn make_checkout(
+    d: &Daemon,
+    task: u64,
+    p: &crate::config::ProjectCfg,
+) -> std::path::PathBuf {
     let dir = d
         .cfg
         .data_dir
@@ -1433,7 +1438,7 @@ fn make_checkout(d: &Daemon, task: u64, p: &crate::config::ProjectCfg) -> std::p
     }
 }
 
-fn remove_checkout(p: &crate::config::ProjectCfg, dir: Option<&std::path::Path>) {
+pub(crate) fn remove_checkout(p: &crate::config::ProjectCfg, dir: Option<&std::path::Path>) {
     let Some(dir) = dir else { return };
     if dir == p.path {
         return;

@@ -391,6 +391,10 @@ fn run_repair(d: &Arc<Daemon>, r: Repair) {
     let Ok(c) = crate::jobs::ctx(d, r.task, r.run) else {
         return fail("the repair could not be set up: the step's context is gone".into());
     };
+    // No branch to repair: the task failed before its worktree was made.
+    if !c.wt.exists() {
+        return fail("the task has no worktree to repair".into());
+    }
     let steps = crate::jobs::task_step_names(d, r.task);
     let to = r.to_step.clone().or_else(|| default_to_step(&steps));
     let text = repair_prompt(r.task.0, &r.title, &r.failure, &r.summary, &steps);
@@ -830,9 +834,10 @@ pub fn on_findings(d: &Arc<Daemon>, keys: &[String], now: u64, cooldown_ms: u64)
     }
 }
 
-/// How many times each source file builds a `StepFailed` event (a construction names its
-/// `reason:`; a pattern such as `StepFailed { task, .. }` does not). The coverage guard compares
-/// this with the emitters it knows, so a new one is added on purpose (task 1111).
+/// How many times each source file builds a `StepFailed` event: a construction names its
+/// `reason`, written out or as shorthand; a pattern does not name it (`StepFailed { task, .. }`),
+/// or is followed by what only follows a pattern (`=>`, `if`, `|`, `=`). The coverage guard
+/// compares this with the emitters it knows, so a new one is added on purpose (task 1111).
 pub fn step_failed_emitters(sources: &[(&str, &str)]) -> std::collections::BTreeMap<String, usize> {
     let needle = concat!("EventKind::", "StepFailed {");
     let mut out = std::collections::BTreeMap::new();
@@ -859,7 +864,16 @@ pub fn step_failed_emitters(sources: &[(&str, &str)]) -> std::collections::BTree
                     _ => {}
                 }
             }
-            if body[..end].contains("reason:") {
+            let named = body[..end].split(',').any(|field| {
+                let field = field.trim();
+                field == "reason" || field.starts_with("reason:")
+            });
+            let after = body[end..].trim_start_matches('}').trim_start();
+            let pattern = after.starts_with(['=', '|'])
+                || after
+                    .strip_prefix("if")
+                    .is_some_and(|r| r.starts_with(char::is_whitespace));
+            if named && !pattern {
                 n += 1;
             }
             rest = &body[end.min(body.len())..];

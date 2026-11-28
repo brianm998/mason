@@ -28,7 +28,6 @@ next = "test"
 type = "test"
 category = "testing"
 command = "test -f fixed.txt"
-max_rounds = 1
 next = "land"
 
 [step.land]
@@ -47,6 +46,7 @@ next = "sign-off"
 [step.sign-off]
 type = "approval"
 category = "review"
+next = "land"
 
 [step.land]
 type = "landing"
@@ -93,6 +93,14 @@ fn rows(d: &Arc<mason_daemon::Daemon>, t: TaskId) -> Vec<mason_store::RecoveryRo
 
 fn has_decision(d: &Arc<mason_daemon::Daemon>, t: TaskId, decision: &str) -> bool {
     rows(d, t).iter().any(|r| r.decision == decision)
+}
+
+/// Wait until the session a failure started by itself has ended, here without a verdict: what a
+/// test does next is not answered with "attached", nor overtaken by that session's row.
+fn wait_session_over(d: &Arc<mason_daemon::Daemon>, t: TaskId) {
+    wait_for("the first session to end", 600, || {
+        has_decision(d, t, "handoff") && mason_daemon::diagnose::running(d, t.0).is_none()
+    });
 }
 
 #[test]
@@ -162,6 +170,7 @@ fn a_second_failure_with_the_same_signature_may_not_repair_again() {
     let (_s, d) = start(DEF, json!({"develop": [develop("one")]}));
     let t = file_task(&d, "Fails twice");
     wait_state(&d, t, State::Failed, 600);
+    wait_session_over(&d, t);
     let failure = task_of(&d, t).failure.unwrap();
     let sig = mason_daemon::health::signature(&failure);
     let failed_at = task_of(&d, t).state_entered_at.0;
@@ -238,6 +247,7 @@ fn a_spent_budget_goes_straight_to_a_handoff() {
     let (_s, d) = start(DEF, json!({"develop": [develop("one")]}));
     let t = file_task(&d, "Budget");
     wait_state(&d, t, State::Failed, 600);
+    wait_session_over(&d, t);
     // Fill the per-task budget with rows of other failures.
     for i in 0..mason_daemon::diagnose::MAX_PER_TASK {
         d.store
@@ -249,7 +259,8 @@ fn a_spent_budget_goes_straight_to_a_handoff() {
         matches!(decision, recovery::Decision::Handoff(_)),
         "{decision:?}"
     );
-    assert!(d.store.recovery_brief(t.0).unwrap().is_some());
+    let (brief, _) = d.store.recovery_brief(t.0).unwrap().expect("a brief");
+    assert!(brief.contains("the budget of"), "{brief}");
     assert!(has_decision(&d, t, "handoff"));
 }
 
@@ -373,6 +384,18 @@ fn a_new_emitter_in_a_fixture_copy_of_the_sources_is_counted() {
     assert!(!a.contains_key("b.rs"), "a pattern is not an emitter");
     let b = recovery::step_failed_emitters(&[("a.rs", &format!("{one}{two}"))]);
     assert_eq!(b.get("a.rs"), Some(&2), "a second construction is seen");
+    let short = "fn h() { emit(EventKind::StepFailed {\n task,\n reason,\n class,\n }); }";
+    let arm = "match k { EventKind::StepFailed { task, reason, .. } => 1 }";
+    let guarded = "match k { EventKind::StepFailed { reason, .. } if x => 1 }";
+    let bound = "let EventKind::StepFailed { reason, .. } = k else { return };";
+    let c = recovery::step_failed_emitters(&[
+        ("short.rs", short),
+        ("arm.rs", arm),
+        ("guarded.rs", guarded),
+        ("bound.rs", bound),
+    ]);
+    assert_eq!(c.get("short.rs"), Some(&1), "shorthand is a construction");
+    assert_eq!(c.len(), 1, "patterns that bind `reason` are not: {c:?}");
 }
 
 // ---- a real masond: a job's panic ------------------------------------------------------------
