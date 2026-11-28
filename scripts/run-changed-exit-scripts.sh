@@ -20,6 +20,11 @@
 # existing directory, each PASS is recorded under it, keyed by the script's path and
 # content, MASON_EXIT_REPEAT and the tree (HEAD, the uncommitted diff, untracked files). A later run
 # on the same tree prints `PASS sNNN (cached)` for it. A FAIL is never recorded.
+# Off this Mac (#1252) a node or GitHub runner has neither the directory nor the tree, so the
+# coordinator keeps the passes: with MASON_EXIT_CACHE=1, MASON_EXIT_TREE_KEY (its key of the tree it
+# sent) and MASON_EXIT_PASSES (the keys it kept, space-separated), a script whose key is listed
+# prints `PASS sNNN (cached)`, and each script that passes here prints `MASON-EXIT-KEY <key>`, which
+# the coordinator reads and removes from the output. The keys are made as above, from the given tree.
 # Scripts that need a real service, person or device (`sNN-real.sh`, `sNN-manual.sh`) are skipped,
 # as scripts/run-exit-scripts.sh skips them.
 set -uo pipefail
@@ -101,6 +106,11 @@ if [ "${MASON_EXIT_CACHE:-}" = 1 ] && [ -n "${MASON_TASK_CACHE:-}" ] && [ -d "$M
     cache="$MASON_TASK_CACHE/exit-scripts-pass"
   fi
 fi
+remote_passes=
+if [ "${MASON_EXIT_CACHE:-}" = 1 ] && [ -n "${MASON_EXIT_TREE_KEY:-}" ] && [ -z "$cache" ]; then
+  tree_key=$MASON_EXIT_TREE_KEY
+  remote_passes=" ${MASON_EXIT_PASSES:-} "
+fi
 cache_file() { # cache_file SCRIPT: the record that this script passed on this tree
   printf '%s\n' "$1" "$(hash_stdin < "$1")" "$tree_key" "${MASON_EXIT_REPEAT:-}" | hash_stdin
 }
@@ -114,6 +124,16 @@ for s in $selected; do
   id=$(basename "$s" .sh)
   n=$((n + 1))
   ckey=
+  rkey=
+  if [ -n "$remote_passes" ]; then
+    rkey=$(cache_file "$s")
+    case "$remote_passes" in
+      *" $rkey "*)
+        echo "PASS $id (cached)"
+        passed=$((passed + 1))
+        continue ;;
+    esac
+  fi
   if [ -n "$cache" ]; then
     ckey="$cache/$(cache_file "$s")"
     if [ -e "$ckey" ]; then
@@ -141,6 +161,7 @@ for s in $selected; do
     echo "PASS $id"
     passed=$((passed + 1))
     if [ -n "$ckey" ]; then : > "$ckey" 2>/dev/null || true; fi
+    if [ -n "$rkey" ]; then echo "MASON-EXIT-KEY $rkey"; fi
   else
     if [ "$rc" -eq 124 ]; then echo "FAIL $id (over $this s)"; else echo "FAIL $id"; fi
     tail -n 30 "$log" | sed 's/^/    | /'
