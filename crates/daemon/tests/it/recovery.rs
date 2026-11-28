@@ -95,6 +95,14 @@ fn has_decision(d: &Arc<mason_daemon::Daemon>, t: TaskId, decision: &str) -> boo
     rows(d, t).iter().any(|r| r.decision == decision)
 }
 
+/// Wait until the session a failure started by itself has ended, here without a verdict: what a
+/// test does next is not answered with "attached", nor overtaken by that session's row.
+fn wait_session_over(d: &Arc<mason_daemon::Daemon>, t: TaskId) {
+    wait_for("the first session to end", 600, || {
+        has_decision(d, t, "handoff") && mason_daemon::diagnose::running(d, t.0).is_none()
+    });
+}
+
 #[test]
 fn a_failed_step_leaves_a_recovery_row_and_a_card_with_the_recommended_option_first() {
     let (_s, d) = start(
@@ -162,6 +170,7 @@ fn a_second_failure_with_the_same_signature_may_not_repair_again() {
     let (_s, d) = start(DEF, json!({"develop": [develop("one")]}));
     let t = file_task(&d, "Fails twice");
     wait_state(&d, t, State::Failed, 600);
+    wait_session_over(&d, t);
     let failure = task_of(&d, t).failure.unwrap();
     let sig = mason_daemon::health::signature(&failure);
     let failed_at = task_of(&d, t).state_entered_at.0;
@@ -238,6 +247,7 @@ fn a_spent_budget_goes_straight_to_a_handoff() {
     let (_s, d) = start(DEF, json!({"develop": [develop("one")]}));
     let t = file_task(&d, "Budget");
     wait_state(&d, t, State::Failed, 600);
+    wait_session_over(&d, t);
     // Fill the per-task budget with rows of other failures.
     for i in 0..mason_daemon::diagnose::MAX_PER_TASK {
         d.store
@@ -249,7 +259,8 @@ fn a_spent_budget_goes_straight_to_a_handoff() {
         matches!(decision, recovery::Decision::Handoff(_)),
         "{decision:?}"
     );
-    assert!(d.store.recovery_brief(t.0).unwrap().is_some());
+    let (brief, _) = d.store.recovery_brief(t.0).unwrap().expect("a brief");
+    assert!(brief.contains("the budget of"), "{brief}");
     assert!(has_decision(&d, t, "handoff"));
 }
 
