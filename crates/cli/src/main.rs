@@ -3575,6 +3575,12 @@ fn main() {
                     if let Some(w) = t["wait"].as_str() {
                         println!("  waiting   {w}");
                     }
+                    // A run waiting for a node with none to go to: why, and no estimate (#1260).
+                    for w in t["node_waits"].as_array().into_iter().flatten() {
+                        if let Some(w) = w.as_str() {
+                            println!("  waiting   {w}");
+                        }
+                    }
                     if let Some(l) = t["landed"].as_str() {
                         println!("  landed    {l}");
                     }
