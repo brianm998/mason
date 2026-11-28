@@ -72,6 +72,7 @@ pub mod node_fleet;
 pub mod node_run;
 pub mod node_runtime;
 pub mod node_serve;
+pub mod node_split;
 pub mod nodes;
 pub mod nodewait;
 pub mod notify;
