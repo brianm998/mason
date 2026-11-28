@@ -195,7 +195,9 @@ mod tests {
 
     #[test]
     fn digest_counts_the_rest() {
-        let t: String = (0..40).map(|i| format!("test m::t{i} ... FAILED\n")).collect();
+        let t: String = (0..40)
+            .map(|i| format!("test m::t{i} ... FAILED\n"))
+            .collect();
         assert!(failure_digest(&t).contains("... and 10 more"));
         assert!(failure_digest("all fine\n").is_empty());
     }
