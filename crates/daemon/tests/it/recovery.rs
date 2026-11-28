@@ -373,6 +373,18 @@ fn a_new_emitter_in_a_fixture_copy_of_the_sources_is_counted() {
     assert!(!a.contains_key("b.rs"), "a pattern is not an emitter");
     let b = recovery::step_failed_emitters(&[("a.rs", &format!("{one}{two}"))]);
     assert_eq!(b.get("a.rs"), Some(&2), "a second construction is seen");
+    let short = "fn h() { emit(EventKind::StepFailed {\n task,\n reason,\n class,\n }); }";
+    let arm = "match k { EventKind::StepFailed { task, reason, .. } => 1 }";
+    let guarded = "match k { EventKind::StepFailed { reason, .. } if x => 1 }";
+    let bound = "let EventKind::StepFailed { reason, .. } = k else { return };";
+    let c = recovery::step_failed_emitters(&[
+        ("short.rs", short),
+        ("arm.rs", arm),
+        ("guarded.rs", guarded),
+        ("bound.rs", bound),
+    ]);
+    assert_eq!(c.get("short.rs"), Some(&1), "shorthand is a construction");
+    assert_eq!(c.len(), 1, "patterns that bind `reason` are not: {c:?}");
 }
 
 // ---- a real masond: a job's panic ------------------------------------------------------------

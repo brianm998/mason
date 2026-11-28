@@ -830,9 +830,10 @@ pub fn on_findings(d: &Arc<Daemon>, keys: &[String], now: u64, cooldown_ms: u64)
     }
 }
 
-/// How many times each source file builds a `StepFailed` event (a construction names its
-/// `reason:`; a pattern such as `StepFailed { task, .. }` does not). The coverage guard compares
-/// this with the emitters it knows, so a new one is added on purpose (task 1111).
+/// How many times each source file builds a `StepFailed` event: a construction names its
+/// `reason`, written out or as shorthand; a pattern does not name it (`StepFailed { task, .. }`),
+/// or is followed by what only follows a pattern (`=>`, `if`, `|`, `=`). The coverage guard
+/// compares this with the emitters it knows, so a new one is added on purpose (task 1111).
 pub fn step_failed_emitters(sources: &[(&str, &str)]) -> std::collections::BTreeMap<String, usize> {
     let needle = concat!("EventKind::", "StepFailed {");
     let mut out = std::collections::BTreeMap::new();
@@ -859,7 +860,16 @@ pub fn step_failed_emitters(sources: &[(&str, &str)]) -> std::collections::BTree
                     _ => {}
                 }
             }
-            if body[..end].contains("reason:") {
+            let named = body[..end].split(',').any(|field| {
+                let field = field.trim();
+                field == "reason" || field.starts_with("reason:")
+            });
+            let after = body[end..].trim_start_matches('}').trim_start();
+            let pattern = after.starts_with(['=', '|'])
+                || after
+                    .strip_prefix("if")
+                    .is_some_and(|r| r.starts_with(char::is_whitespace));
+            if named && !pattern {
                 n += 1;
             }
             rest = &body[end.min(body.len())..];
