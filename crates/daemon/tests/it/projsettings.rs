@@ -52,8 +52,11 @@ fn call(
         })
 }
 
-const EXTRA: &str = r#"# keep this comment
-tool_timeout_s = 900 # trailing note
+// The comments sit above a table header, so they belong to no key a test sets or unsets:
+// unsetting a key removes that key's own comments.
+const EXTRA: &str = r#"tool_timeout_s = 900
+# keep this comment
+# trailing note
 [proposals]
 agent_normal = "proposed"
 
@@ -259,6 +262,13 @@ fn a_tier_mapping_edit_changes_the_next_launch_and_unsetting_it_puts_it_back() {
 #[test]
 fn a_provider_string_becomes_use_when_a_mapping_table_is_written() {
     let (s, d) = world();
+    // The project is about to name the codex adapter, so an account must use it.
+    std::fs::write(
+        s.config_dir.join("providers.toml"),
+        "[provider.claude]\nadapter = \"claude\"\nbilling = \"subscription\"\n\n\
+         [provider.codex]\nadapter = \"codex\"\nbilling = \"subscription\"\n",
+    )
+    .unwrap();
     let (code, v) = set(&d, "brian", false, json!({"set": {"provider": "codex"}}));
     assert_eq!(code, 200, "{v}");
     assert!(file(&s).contains("provider = \"codex\""));
