@@ -80,6 +80,8 @@ impl Repo {
             "MASON_EXIT_REPEAT",
             "MASON_EXIT_TREE_KEY",
             "MASON_EXIT_PASSES",
+            "MASON_EXIT_IN_CHECK",
+            "MASON_TESTS_ALREADY_RAN",
         ] {
             c.env_remove(k);
         }
@@ -388,4 +390,84 @@ fn a_runner_off_this_mac_skips_the_passes_the_coordinator_sends_and_reports_new_
         !out.contains("(cached)") && !out.contains("MASON-EXIT-KEY"),
         "{out}"
     );
+}
+
+/// A script that waits for a file nobody writes runs into whatever limit it is given.
+const WAITS: &str = "while [ ! -e never-written ]; do sleep 0.1; done";
+
+#[test]
+fn a_script_over_its_limit_is_not_run_in_a_check_and_the_rest_still_run() {
+    let r = Repo::new(&[("s10", WAITS), ("s11", "exit 0")]);
+    let (out, code) = r.run(&[
+        ("MASON_EXIT_IN_CHECK", "1"),
+        ("MASON_EXIT_SCRIPT_LIMIT_S", "5"),
+        ("MASON_RUN_BUDGET_S", "3600"),
+    ]);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.lines()
+            .any(|l| l == "NOT RUN s10 (over 5 s, too slow for a check)"),
+        "{out}"
+    );
+    assert!(lines_with(&out, "FAIL").is_empty(), "{out}");
+    assert!(out.lines().any(|l| l == "PASS s11"), "{out}");
+    assert!(
+        out.lines()
+            .any(|l| l == "exit-scripts: 1 passed, 0 failed, 1 not run (time budget 3600 s)"),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_script_over_its_limit_is_a_failure_outside_a_check() {
+    let r = Repo::new(&[("s10", WAITS)]);
+    let (out, code) = r.run(&[("MASON_EXIT_SCRIPT_LIMIT_S", "1")]);
+    assert_ne!(code, 0, "{out}");
+    assert!(out.lines().any(|l| l == "FAIL s10 (over 1 s)"), "{out}");
+    assert!(lines_with(&out, "NOT RUN").is_empty(), "{out}");
+}
+
+#[test]
+fn in_a_check_only_the_per_script_limit_makes_a_script_not_run() {
+    // A script that exits 124 by itself failed; so did one the run's budget cut short.
+    let r = Repo::new(&[("s10", "exit 124"), ("s11", WAITS)]);
+    let (out, code) = r.run(&[
+        ("MASON_EXIT_IN_CHECK", "1"),
+        ("MASON_RUN_BUDGET_S", "6"),
+        ("MASON_RUN_BUDGET_MARGIN_S", "0"),
+        ("MASON_RUN_BUDGET_FLOOR_S", "1"),
+    ]);
+    assert_ne!(code, 0, "{out}");
+    assert_eq!(lines_with(&out, "FAIL s10").len(), 1, "{out}");
+    assert_eq!(lines_with(&out, "FAIL s11").len(), 1, "{out}");
+    assert!(lines_with(&out, "NOT RUN").is_empty(), "{out}");
+}
+
+#[test]
+fn the_scripts_are_not_told_they_are_in_a_check_but_are_told_the_tests_ran() {
+    let r = Repo::new(&[(
+        "s10",
+        "[ -z \"${MASON_EXIT_IN_CHECK:-}\" ] && [ \"${MASON_TESTS_ALREADY_RAN:-}\" = 1 ]",
+    )]);
+    let (out, code) = r.run(&[
+        ("MASON_EXIT_IN_CHECK", "1"),
+        ("MASON_TESTS_ALREADY_RAN", "1"),
+    ]);
+    assert_eq!(code, 0, "{out}");
+}
+
+#[test]
+fn a_pass_without_the_cargo_parts_is_not_kept_for_a_run_that_has_them() {
+    let r = Repo::new(&[("s10", "exit 0")]);
+    let cache = tempfile::tempdir().unwrap();
+    let env = [
+        ("MASON_TASK_CACHE", cache.path().to_str().unwrap()),
+        ("MASON_EXIT_CACHE", "1"),
+    ];
+    let mut without_cargo_parts = env.to_vec();
+    without_cargo_parts.push(("MASON_TESTS_ALREADY_RAN", "1"));
+    let (_, code) = r.run(&without_cargo_parts);
+    assert_eq!(code, 0);
+    let (out, _) = r.run(&env);
+    assert!(out.lines().any(|l| l == "PASS s10"), "{out}");
 }
