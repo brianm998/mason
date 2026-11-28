@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 # s1307 exit test: the projsettings tests pass, including the two that failed on the base
-# because of their fixtures (decision 1297).
+# (decision 1297).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 

@@ -272,6 +272,11 @@ fn a_provider_string_becomes_use_when_a_mapping_table_is_written() {
     let (code, v) = set(&d, "brian", false, json!({"set": {"provider": "codex"}}));
     assert_eq!(code, 200, "{v}");
     assert!(file(&s).contains("provider = \"codex\""));
+    let commented = file(&s).replace(
+        "provider = \"codex\"",
+        "# which agent\nprovider = \"codex\" # mine",
+    );
+    std::fs::write(s.config_dir.join("projects/scratch.toml"), commented).unwrap();
     let (code, v) = set(
         &d,
         "brian",
@@ -285,6 +290,10 @@ fn a_provider_string_becomes_use_when_a_mapping_table_is_written() {
         "{t}"
     );
     assert!(!t.contains("provider = \"codex\""), "{t}");
+    assert!(
+        t.contains("# which agent\n[provider]") && t.contains("use = \"codex\" # mine"),
+        "{t}"
+    );
     mason_daemon::config::parse_project("scratch", &t).expect("the file still loads");
     assert_eq!(
         entry(&get(&d, "brian", false), "provider")["effective"],
@@ -353,13 +362,20 @@ fn every_writable_key_sets_and_unsets_with_comments_intact() {
             false,
             json!({"set": {key: null}, "confirm": true}),
         );
-        assert_eq!(code, 200, "unset {key}: {r}");
+        // `test` is required, so unsetting it is refused and the file keeps the value.
+        if key == "test" {
+            assert_eq!(code, 400, "unset {key}: {r}");
+            assert!(r.to_string().contains("required"), "{r}");
+            assert_eq!(file(&s), t);
+        } else {
+            assert_eq!(code, 200, "unset {key}: {r}");
+        }
         let after = file(&s);
         assert!(
             after.contains("# keep this comment") && after.contains("# trailing note"),
             "{key}"
         );
-        if key != "tool_timeout_s" {
+        if key != "tool_timeout_s" && key != "test" {
             assert_eq!(
                 entry(&get(&d, "brian", false), key)["written"],
                 Value::Null,
