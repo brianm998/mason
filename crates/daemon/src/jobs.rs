@@ -2462,6 +2462,10 @@ impl TestChecks {
                     ran_tests.extend(names.iter().map(|n| format!("test {n}")));
                 } else if !a.exits.is_empty() && suite.command.contains("run-changed-exit-scripts")
                 {
+                    // Only the scripts the change adds or edits: left alone, the runner's selector
+                    // also picks every script that names a changed path (about 160 for #1234's
+                    // one-script change on 2026-11-27, 70 minutes on four runners).
+                    suite.command = light_exit_command(&suite.command, &a.exits);
                     ran_tests.extend(a.exits.iter().map(|e| format!("exit script {e}")));
                 } else if suite.build.is_some() {
                     build_only = true;
@@ -2835,6 +2839,12 @@ fn known_header(d: &Daemon, log_dir: &Path, id: &str, scope: &str) -> Option<Str
 /// A name from a validated scope (letters, digits, `_ : . - /`), quoted all the same.
 fn shell_word(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// The exit-scripts command of a fast-track check: `MASON_EXIT_ONLY` names the scripts the
+/// change adds or edits, so scripts/run-changed-exit-scripts.sh runs those and skips its selector.
+fn light_exit_command(command: &str, exits: &[String]) -> String {
+    format!("MASON_EXIT_ONLY={} {command}", shell_word(&exits.join(" ")))
 }
 
 impl CheckHandler for TestChecks {
@@ -6818,6 +6828,19 @@ pub fn cleanup(d: &Arc<Daemon>, task: TaskId, delete_branch: bool) {
 #[cfg(test)]
 mod tests {
     use mason_core::{State, StepOutcome, StepRun, StepRunId, TaskId, Timestamp};
+
+    #[test]
+    fn a_fast_track_exit_check_names_only_the_scripts_the_change_adds() {
+        let cmd = super::light_exit_command(
+            "bash scripts/run-changed-exit-scripts.sh",
+            &["scripts/exit/s1.sh".into(), "scripts/exit/s2.sh".into()],
+        );
+        assert_eq!(
+            cmd,
+            "MASON_EXIT_ONLY='scripts/exit/s1.sh scripts/exit/s2.sh' \
+             bash scripts/run-changed-exit-scripts.sh"
+        );
+    }
 
     /// A world with one task's runs: `(name, outcome)` in order, ids from 1.
     fn world_of(runs: &[(&str, Option<StepOutcome>)]) -> mason_engine::World {
