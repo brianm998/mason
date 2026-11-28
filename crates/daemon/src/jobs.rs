@@ -2541,6 +2541,20 @@ impl TestChecks {
             if stopped_by_fold(&res) {
                 return self.run_suites(dev, scope, light);
             }
+            // A scoped run in which the suite ran no test proves nothing (#1258).
+            let ran_nothing = matches!(&res, Ok(o) if o.passed)
+                && narrowed.iter().any(|n| n.starts_with(&format!("{name}:")))
+                && matches!(&res, Ok(o) if crate::rerun::ran_no_tests(
+                    &read_whole_log(&self.log_dir.join(format!("{}.log", o.id)))
+                        .unwrap_or_else(|| o.full.clone())));
+            if ran_nothing {
+                failed = true;
+                lines.push(format!(
+                    "{name}: NOT GREEN: the scope matched no test, so the suite ran 0 tests. \
+                     Name a test or package that exists."
+                ));
+                continue;
+            }
             match &res {
                 Ok(o) if o.passed => {
                     self.reds.passed(&name);
@@ -2561,13 +2575,14 @@ impl TestChecks {
                 )),
                 Ok(o) => {
                     failed = true;
-                    if let Some(text) = read_whole_log(&self.log_dir.join(format!("{}.log", o.id)))
                     {
+                        let text = read_whole_log(&self.log_dir.join(format!("{}.log", o.id)))
+                            .unwrap_or_else(|| o.full.clone());
                         failing.extend(crate::rerun::failing_names(&text));
                     }
                     if let Some(a) = &added {
                         let text = read_whole_log(&self.log_dir.join(format!("{}.log", o.id)))
-                            .unwrap_or_else(|| o.output.clone());
+                            .unwrap_or_else(|| o.full.clone());
                         let bad = crate::newtests::failing_among(a, &text);
                         if !bad.is_empty() {
                             lines.push(format!(
@@ -2576,9 +2591,12 @@ impl TestChecks {
                             ));
                         }
                     }
+                    let whole_text = read_whole_log(&self.log_dir.join(format!("{}.log", o.id)))
+                        .unwrap_or_else(|| o.full.clone());
                     lines.push(format!(
-                        "{name}: FAILED{}. Last output:\n{}",
+                        "{name}: FAILED{}.\n{}Last output:\n{}",
                         if o.timed_out { " (timed out)" } else { "" },
+                        crate::rerun::failure_digest(&whole_text),
                         o.output
                     ));
                     if let Some(h) = known_header(&self.slots.d, &self.log_dir, &o.id, &name) {
@@ -3200,14 +3218,24 @@ impl TestChecks {
             Ok(o) => CheckRun::Done {
                 passed: o.passed,
                 summary: header
-                    + &if o.timed_out {
-                        format!(
-                        "The tests did not finish within {} s and were stopped. Last output:\n{}",
-                        self.timeout.as_secs(),
-                        o.output
-                    )
-                    } else {
-                        format!("{whole}Last output:\n{}", o.output)
+                    + &{
+                        let digest = if o.passed {
+                            String::new()
+                        } else {
+                            crate::rerun::failure_digest(
+                                &read_whole_log(&self.log_dir.join(format!("{}.log", o.id)))
+                                    .unwrap_or_else(|| o.full.clone()),
+                            )
+                        };
+                        if o.timed_out {
+                            format!(
+                                "The tests did not finish within {} s and were stopped. {digest}Last output:\n{}",
+                                self.timeout.as_secs(),
+                                o.output
+                            )
+                        } else {
+                            format!("{whole}{digest}Last output:\n{}", o.output)
+                        }
                     },
             },
             Err(e) => CheckRun::Done {
