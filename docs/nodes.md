@@ -600,6 +600,11 @@ mode = "remote"      # or "favor-remote", "favor-local", "local"
   `compose*`, otherwise Rust; and the Xcode version the command names, if it names one.
 - A `remote` project waits while nodes are off or no node has the toolchain. The daemon log says
   "waiting for a node".
+- A project with no suites, only a `test` command (and perhaps a `build`), is placed the same way:
+  its test step runs the build and the command on a node or on GitHub when the mode says so, and in
+  `remote` mode waits for a node and never runs on the coordinator. `command` and `gate` steps
+  always run on the coordinator. A script result file and a pty are not carried to a node: the run
+  is judged by its exit status.
 - Baseline runs, and landing's lint tier and build floor unless the definition sends them away,
   still run on the coordinator.
 - A project with `[remote_runs]` keeps using `[remote_runs] mode`, which wins over `[placement]`.
