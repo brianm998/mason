@@ -283,6 +283,22 @@ fun SessionStepper(model: MonitorModel) {
  * Home's Compilation section: what holds a `compile` slot, what waits for one and why
  * (in line order), the CPU reading, and the limit's stepper.
  */
+/** One GitHub runner pool beside the compile limit (#1261): in use, the limit with minus and plus, the split, the ceiling and the waiting. */
+@Composable
+fun RunnerLimitRows(model: MonitorModel, p: mason.v1.RunnerPool) {
+    val theme = LocalTheme.current
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp), modifier = Modifier.testTag("runners:${p.name}")) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(theme.spacing)) {
+            Text(RunnerLimit.head(p), style = theme.body())
+            Pill("−", enabled = RunnerLimit.canDecrease(p), modifier = Modifier.testTag("${p.name}:decrease")) { model.stepRunnerLimit(p.name, -1) }
+            Text("${p.limit}", style = theme.body(FontWeight.SemiBold))
+            Pill("+", enabled = RunnerLimit.canIncrease(p), modifier = Modifier.testTag("${p.name}:increase")) { model.stepRunnerLimit(p.name, 1) }
+        }
+        Text(RunnerLimit.detail(p), style = theme.body(color = theme.muted))
+        RunnerLimit.notes(p).forEach { Text(it, style = theme.body(color = theme.muted)) }
+    }
+}
+
 @Composable
 fun CompilationSection(model: MonitorModel, c: Compilation, open: (() -> Unit)? = null) {
     val theme = LocalTheme.current
@@ -304,6 +320,7 @@ fun CompilationSection(model: MonitorModel, c: Compilation, open: (() -> Unit)? 
             Text(c.cpuLine, style = theme.body(color = theme.muted))
             c.policyLine?.let { Text(it, style = theme.body(color = theme.muted)) }
         }
+        model.runnerPools.forEach { p -> RunnerLimitRows(model, p) }
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(theme.spacing),
             modifier = Modifier.testTag("compile:cpu")) {
             Text("Start another compile below", style = theme.body())

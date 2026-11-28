@@ -262,6 +262,36 @@ struct SessionStepper: View {
     }
 }
 
+/// The GitHub runner pools beside the compile limit (#1261): in use, the limit with minus and plus,
+/// the split between MASON and other workflows, the account ceiling and how many wait.
+struct RunnerLimitRows: View {
+    @Environment(\.theme) var theme
+    let model: MonitorModel
+
+    var body: some View {
+        ForEach(model.runnerPools, id: \.name) { p in
+            VStack(alignment: .leading, spacing: theme.spacingSmall) {
+                HStack(spacing: theme.spacing) {
+                    Text(RunnerLimit.head(p))
+                    Button { model.stepRunnerLimit(p.name, by: -1) } label: { Image(systemName: "minus") }.touchTarget()
+                        .disabled(!RunnerLimit.canDecrease(p))
+                        .accessibilityIdentifier("\(p.name):decrease")
+                    Text("\(p.limit)").font(theme.body(.semibold))
+                    Button { model.stepRunnerLimit(p.name, by: 1) } label: { Image(systemName: "plus") }.touchTarget()
+                        .disabled(!RunnerLimit.canIncrease(p))
+                        .accessibilityIdentifier("\(p.name):increase")
+                }
+                Text(RunnerLimit.detail(p)).foregroundStyle(theme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+                ForEach(RunnerLimit.notes(p), id: \.self) { Text($0).foregroundStyle(theme.muted).fixedSize(horizontal: false, vertical: true) }
+            }
+            .font(theme.body())
+            .buttonStyle(.bordered)
+            .accessibilityIdentifier("runners:\(p.name)")
+        }
+    }
+}
+
 /// Home's Compilation section: what holds a `compile` slot, what waits for one
 /// and why (in line order), the CPU reading, and the limit's stepper.
 struct CompilationSection: View {
@@ -306,6 +336,8 @@ struct CompilationSection: View {
             .buttonStyle(.bordered)
             .hint("Lowering the limit never stops a compile that is running; it holds back new ones until the count falls.")
             .accessibilityIdentifier("compile")
+
+            RunnerLimitRows(model: model)
 
             HStack(spacing: theme.spacing) {
                 Text("Start another compile below")

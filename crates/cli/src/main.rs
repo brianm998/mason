@@ -943,6 +943,12 @@ fn main() {
                     .and_then(|u| u.parse().ok())
                     .unwrap_or_else(|| die("give the new limit as a whole number"));
                 finish(&a);
+                // Changing a limit is the owner's act: say who.
+                if std::env::var("MASON_AS").is_err() {
+                    if let Ok(u) = std::env::var("USER") {
+                        std::env::set_var("MASON_AS", u);
+                    }
+                }
                 resources::limit(&d, &name, units).unwrap_or_else(|e| die(&e));
             }
             Some("gate") => {

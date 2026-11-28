@@ -772,3 +772,11 @@ ios = "done"
 android = "todo"
 android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 platform_reason = "Swift monitor first (#1156 scopes the Compose client out); the Compose desktop monitor gets it when the owner asks for it"
+
+[feature.runner-limit]
+description = "Home's Compilation section shows the GitHub runner pools (gha, gha-macos): in use, the limit with minus and plus (kept between 0 and the account ceiling, sent as SetLimit), MASON's share and other workflows', the ceiling and the number waiting; at 0 it says no check goes to GitHub; a refusal shows the daemon's reason"
+swift = "done"
+compose = "done"
+ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
