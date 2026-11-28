@@ -52,8 +52,11 @@ fn call(
         })
 }
 
-const EXTRA: &str = r#"# keep this comment
-tool_timeout_s = 900 # trailing note
+// The comments sit above a table header, so they belong to no key a test sets or unsets:
+// unsetting a key removes that key's own comments.
+const EXTRA: &str = r#"tool_timeout_s = 900
+# keep this comment
+# trailing note
 [proposals]
 agent_normal = "proposed"
 
@@ -95,14 +98,17 @@ fn get(d: &Arc<Daemon>, who: &str, paired: bool) -> Value {
 }
 
 fn entry(cat: &Value, key: &str) -> Value {
+    find_entry(cat, key).unwrap_or_else(|| panic!("no entry {key}"))
+}
+
+fn find_entry(cat: &Value, key: &str) -> Option<Value> {
     cat["sections"]
         .as_array()
         .unwrap()
         .iter()
         .flat_map(|s| s["entries"].as_array().unwrap().iter())
         .find(|e| e["key"] == key)
-        .unwrap_or_else(|| panic!("no entry {key}"))
-        .clone()
+        .cloned()
 }
 
 fn set(d: &Arc<Daemon>, who: &str, paired: bool, body: Value) -> (u16, Value) {
@@ -259,9 +265,21 @@ fn a_tier_mapping_edit_changes_the_next_launch_and_unsetting_it_puts_it_back() {
 #[test]
 fn a_provider_string_becomes_use_when_a_mapping_table_is_written() {
     let (s, d) = world();
+    // The project is about to name the codex adapter, so an account must use it.
+    std::fs::write(
+        s.config_dir.join("providers.toml"),
+        "[provider.claude]\nadapter = \"claude\"\nbilling = \"subscription\"\n\n\
+         [provider.codex]\nadapter = \"codex\"\nbilling = \"subscription\"\n",
+    )
+    .unwrap();
     let (code, v) = set(&d, "brian", false, json!({"set": {"provider": "codex"}}));
     assert_eq!(code, 200, "{v}");
     assert!(file(&s).contains("provider = \"codex\""));
+    let commented = file(&s).replace(
+        "provider = \"codex\"",
+        "# which agent\nprovider = \"codex\" # mine",
+    );
+    std::fs::write(s.config_dir.join("projects/scratch.toml"), commented).unwrap();
     let (code, v) = set(
         &d,
         "brian",
@@ -275,6 +293,10 @@ fn a_provider_string_becomes_use_when_a_mapping_table_is_written() {
         "{t}"
     );
     assert!(!t.contains("provider = \"codex\""), "{t}");
+    assert!(
+        t.contains("# which agent\n[provider]") && t.contains("use = \"codex\" # mine"),
+        "{t}"
+    );
     mason_daemon::config::parse_project("scratch", &t).expect("the file still loads");
     assert_eq!(
         entry(&get(&d, "brian", false), "provider")["effective"],
@@ -343,13 +365,23 @@ fn every_writable_key_sets_and_unsets_with_comments_intact() {
             false,
             json!({"set": {key: null}, "confirm": true}),
         );
-        assert_eq!(code, 200, "unset {key}: {r}");
+        // `test` is required, so unsetting it is refused and the file keeps the value.
+        if key == "test" {
+            assert_eq!(code, 400, "unset {key}: {r}");
+            assert!(r.to_string().contains("required"), "{r}");
+            assert_eq!(file(&s), t);
+        } else {
+            assert_eq!(code, 200, "unset {key}: {r}");
+        }
         let after = file(&s);
         assert!(
             after.contains("# keep this comment") && after.contains("# trailing note"),
             "{key}"
         );
-        if key != "tool_timeout_s" {
+        // An environment variable is listed only while the file names it.
+        if key.starts_with("agent_env.") {
+            assert_eq!(find_entry(&get(&d, "brian", false), key), None, "{key}");
+        } else if key != "tool_timeout_s" && key != "test" {
             assert_eq!(
                 entry(&get(&d, "brian", false), key)["written"],
                 Value::Null,
