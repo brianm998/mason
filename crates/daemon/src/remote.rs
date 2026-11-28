@@ -7051,9 +7051,11 @@ mod tests {
     fn an_outage_or_a_refused_token_is_environmental() {
         token();
         let t = tempfile::tempdir().unwrap();
-        // GitHub refusing the dispatch itself (an outage or a refused token) ends the attempt
-        // at once and leaves no ref; waiting out an outage applies once the run is started.
-        for code in [503u16, 401] {
+        // GitHub refusing the dispatch itself ends the attempt at once; waiting out an outage
+        // applies once the run is started. An outage (503) may have taken the dispatch, so the
+        // ref and a `cancel_pending` record stay for the reaper (s1256). A refused token (401)
+        // cannot have, so neither is left.
+        for (code, kept) in [(503u16, true), (401, false)] {
             let r = repo();
             let zip = artifact(t.path(), GREEN, 0, None);
             let gh = FakeGh::new(&r, &zip, Mode::Status(code));
@@ -7064,7 +7066,15 @@ mod tests {
                 .err()
                 .unwrap();
             assert!(matches!(e, Fail::Environmental(_)), "{code}: {e:?}");
-            assert_eq!(refs(&r.bare), "");
+            let rec = record_path(logs.path(), "x8");
+            if kept {
+                let left = refs(&r.bare);
+                assert!(left.contains("mason/run/proj/x8"), "{code}: {left}");
+                assert!(State::load(&rec).unwrap().cancel_pending, "{code}");
+            } else {
+                assert_eq!(refs(&r.bare), "", "{code}");
+                assert!(!rec.exists(), "{code}");
+            }
         }
     }
 
