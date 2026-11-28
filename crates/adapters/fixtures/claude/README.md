@@ -73,3 +73,4 @@ subtype and records the subtype it saw.
 
 The window in `real_plain.jsonl` and `real_tool_suspend.jsonl` is the captured
 `contextWindow` (1000000 for `claude-haiku-5-5`).
+- `synthetic_api_unreachable.jsonl`: the recorded 2026-11-27 outage result: `is_error`, no status, `terminal_reason` `api_error`, ENOTFOUND (#1257).

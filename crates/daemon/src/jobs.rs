@@ -5073,6 +5073,10 @@ fn settle_all(
     let mut fresh_after_gone = false;
     let mut silent = false;
     let mut signaled_retries = 0usize;
+    // How long this step run has waited for its API to be reachable, in all (#1257).
+    let mut api_waited = Duration::ZERO;
+    let mut api_waits = 0usize;
+    let mut api_lost = false;
     // Lost invocations before a resumed session that reached its own end: they are
     // not counted toward the restart budget again (s399).
     let mut forgiven = 0usize;
@@ -5139,6 +5143,49 @@ fn settle_all(
                 signaled_retries += 1;
                 report.session_id.is_none()
             }
+            StepEnd::Failed(FailReason::Crash { detail })
+                if crate::net::agent_unreachable(detail) =>
+            {
+                // The network, not the agent: noted for the one outage alert, then waited out
+                // and resumed. It uses up no round, no failure and no automatic retry.
+                c.d.net.note(now_ms(), c.task.0);
+                let cfg = &c.d.cfg;
+                let wait = cfg
+                    .network_backoff
+                    .get(api_waits)
+                    .or(cfg.network_backoff.last())
+                    .copied()
+                    .unwrap_or(Duration::from_secs(10));
+                if api_waited >= cfg.network_agent_hold {
+                    let detail = format!(
+                        "{} after waiting {} s: {detail}",
+                        mason_core::AGENT_UNREACHABLE,
+                        api_waited.as_secs()
+                    );
+                    report.end = StepEnd::Failed(FailReason::Crash { detail });
+                    return Some(report);
+                }
+                tracing::warn!(
+                    task = c.task.0,
+                    "the agent could not reach its API, resuming in {} s: {detail}",
+                    wait.as_secs()
+                );
+                let note = format!(
+                    "the network failed ({}); waiting {} s before resuming",
+                    detail.chars().take(120).collect::<String>(),
+                    wait.as_secs()
+                );
+                c.d.progress_report(c.run, |p, now| p.set_message(&note, now));
+                c.release_lease();
+                std::thread::sleep(wait);
+                api_waited += wait;
+                api_waits += 1;
+                api_lost = true;
+                if get_lease(c).is_err() {
+                    return None;
+                }
+                report.session_id.is_none()
+            }
             _ => return Some(report),
         };
         if fresh {
@@ -5150,7 +5197,11 @@ fn settle_all(
             resumed = false;
         } else {
             rec.write(c, "resume", spec);
-            let note = if std::mem::take(&mut silent) {
+            let note = if std::mem::take(&mut api_lost) {
+                "The network was down and your last request could not reach the API. Nothing you \
+                 committed is gone. Continue the step where you were, and finish it."
+                    .to_string()
+            } else if std::mem::take(&mut silent) {
                 hl::silent_note()
             } else {
                 hl::interrupted_note(lost_at)

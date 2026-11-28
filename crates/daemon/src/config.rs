@@ -91,6 +91,9 @@ pub struct DaemonConfig {
     /// How long a batch held because a suite could not reach the network waits before it looks:
     /// a fetch of the base may work while the host the suite needs does not.
     pub network_suite_hold: Duration,
+    /// How long in all an agent step that cannot reach its API waits, resuming after each wait,
+    /// before it fails as outside the code (#1257).
+    pub network_agent_hold: Duration,
     /// Wait out the landing window even when no other task is moving toward landing (the
     /// behaviour before #731). Off in production; tests that file several tasks one after the
     /// other and expect one batch turn it on.
@@ -1102,6 +1105,7 @@ impl DaemonConfig {
             network_rerun: Duration::from_secs(30),
             network_probe: Duration::from_secs(15),
             network_suite_hold: Duration::from_secs(600),
+            network_agent_hold: Duration::from_secs(1800),
             landing_window_always: false,
             base_red_poll: Duration::from_secs(60),
             auto_retry_delays: vec![Duration::from_secs(120), Duration::from_secs(600)],
