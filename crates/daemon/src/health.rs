@@ -567,24 +567,64 @@ fn note_late_loop(d: &Daemon, now: u64) {
     }
 }
 
-/// The self-update's failure, once per check while it lasts; its recovery ends the run.
+/// How much of a failed update's error a row keeps.
+const UPDATE_ERROR_CHARS: usize = 500;
+
+/// The phase a failed update was in. [`crate::update::Status`] says only `failed` by then,
+/// so this reads the milestones its log passed, latest stage first (a self-test's own lines
+/// come after the `testing` milestone and cannot move it back).
+fn failed_phase(log: &[String]) -> &'static str {
+    let any = |starts: &[&str]| log.iter().any(|l| starts.iter().any(|s| l.starts_with(s)));
+    if any(&["taking over: "]) {
+        "taking over"
+    } else if any(&["backing up the database"]) {
+        "testing"
+    } else if any(&["building ", "downloading and verifying release "]) {
+        "building"
+    } else if log.iter().any(|l| !l.starts_with("failed: ")) {
+        "fetching"
+    } else {
+        "unknown"
+    }
+}
+
+/// The self-update's failure, once per check while it lasts, with what was tried and why it
+/// failed; its recovery ends the run and names the build. One row per check, not per distinct
+/// failure: `gather` counts the rows against `limits.update_failures`.
 fn note_update(d: &Daemon, now: u64) {
-    let failed = d
+    let status = d
         .update_status
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .phase
-        == "failed";
+        .clone();
     let last = d
         .store
         .health_since(&["update_failed", "update_ok"], 0)
         .unwrap_or_default()
         .last()
         .map(|r| r.kind.clone());
-    if failed {
-        let _ = d.store.add_health("update_failed", "", None, "", now);
+    if status.phase == "failed" {
+        let error: String = status
+            .error
+            .unwrap_or_default()
+            .chars()
+            .take(UPDATE_ERROR_CHARS)
+            .collect();
+        let detail = json!({
+            "target": status.target,
+            "phase": failed_phase(&status.log),
+            "error": error,
+        });
+        let _ = d
+            .store
+            .add_health("update_failed", "", None, &detail.to_string(), now);
     } else if last.as_deref() == Some("update_failed") {
-        let _ = d.store.add_health("update_ok", "", None, "", now);
+        // After a takeover the new daemon's status names no target: it is the one running.
+        let target = status.target.or_else(|| d.cfg.runtime_sha.clone());
+        let detail = json!({"target": target});
+        let _ = d
+            .store
+            .add_health("update_ok", "", None, &detail.to_string(), now);
     }
 }
 
@@ -1296,6 +1336,8 @@ pub fn history_json(d: &Daemon, n: usize) -> Value {
                     | "direct_fix"
                     | "direct_fix_done"
                     | "direct_fix_failed"
+                    | "update_failed"
+                    | "update_ok"
             )
         })
         .take(n)
