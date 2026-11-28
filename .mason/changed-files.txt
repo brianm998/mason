@@ -1,0 +1,10 @@
+.mason/run.json
+crates/daemon/src/jobs.rs
+crates/daemon/src/suites.rs
+crates/daemon/tests/exit_runner_budget.rs
+crates/daemon/tests/it/suite_builds.rs
+docs/decisions/1251-exit-scripts-beside-the-cargo-suite.md
+docs/stages/s1261.md
+scripts/exit/s1261.sh
+scripts/exit/weights.txt
+scripts/run-changed-exit-scripts.sh
