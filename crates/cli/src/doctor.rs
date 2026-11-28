@@ -531,6 +531,7 @@ fn check_project(p: &ProjectCfg, out: &mut Vec<Finding>) {
             "project {name}: no .mason/mason.toml on {base}, so the built-in pipeline is used"
         )));
     }
+    check_unpushed_setup(p, out);
     check_landing(p, &base, out);
     match &p.claude_bin {
         Some(b) if b.is_file() => out.push(ok(format!("project {name}: agent binary {}", b.display()))),
@@ -539,6 +540,27 @@ fn check_project(p: &ProjectCfg, out: &mut Vec<Finding>) {
             Some(b) => out.push(ok(format!("project {name}: agent binary {}", b.display()))),
             None => out.push(warn(format!("project {name}: `claude` is not on PATH and no claude_bin is set; agent steps cannot run"))),
         },
+    }
+}
+
+/// The setup merged into the local base but not pushed: MASON branches tasks from
+/// `<remote>/<base>`, so they run the built-in pipeline while the local branch looks set up.
+fn check_unpushed_setup(p: &ProjectCfg, out: &mut Vec<Finding>) {
+    let Some(r) = &p.remote else { return };
+    let has = |rev: String| {
+        git::ok(
+            &p.path,
+            &["cat-file", "-e", &format!("{rev}:.mason/mason.toml")],
+        )
+    };
+    if has(p.base.clone()) && !has(p.base_ref()) {
+        out.push(warn(format!(
+            "project {}: {} has .mason/ here but {} does not, so tasks run the built-in pipeline; push it: `git push {r} {}`",
+            p.id,
+            p.base,
+            p.base_ref(),
+            p.base
+        )));
     }
 }
 

@@ -84,6 +84,38 @@ pub fn log_failure(output: &str) -> Option<String> {
     })
 }
 
+/// Said by an agent CLI that could not reach its API: Node's error codes and the CLI's own
+/// wording. Looked for in the end reason of the run, never in what the agent wrote.
+const AGENT_UNREACHABLE: [&str; 9] = [
+    "can't reach the api server",
+    "unable to connect to api",
+    "check your internet or dns",
+    "enotfound",
+    "eai_again",
+    "enetunreach",
+    "ehostunreach",
+    "econnrefused",
+    "etimedout",
+];
+
+/// Whether an agent run ended because its API could not be reached (name resolution, no route,
+/// a connect timeout, a lost connection). A refused credential, a rate limit or an API error
+/// about the request is not this: waiting does not change those.
+pub fn agent_unreachable(detail: &str) -> bool {
+    if refused(detail) {
+        return false;
+    }
+    let l = detail.to_ascii_lowercase();
+    if l.contains("api error: 429") || l.contains("rate limit") {
+        return false;
+    }
+    AGENT_UNREACHABLE
+        .iter()
+        .chain(&UNREACHABLE)
+        .any(|m| l.contains(m))
+        || l.contains("econnreset")
+}
+
 /// Run `op`; while its error is the network's, `failed` is told, and after `sleep` of the next
 /// wait of `backoff` it runs again. The first other result, or the error after the last wait.
 pub fn retry<T, E: std::fmt::Display>(
@@ -164,6 +196,28 @@ mod tests {
         }
         assert!(is_transient(" ! [remote rejected] x -> y (failed)"));
         assert!(!is_network(" ! [remote rejected] x -> y (failed)"));
+    }
+
+    #[test]
+    fn an_agent_that_cannot_reach_its_api_is_told_from_the_other_ends() {
+        for e in [
+            "API Error: Can't reach the API server — check your internet or DNS (ENOTFOUND)",
+            "Unable to connect to API (ECONNREFUSED)",
+            "API Error: connect ETIMEDOUT 160.79.104.10:443",
+            "getaddrinfo EAI_AGAIN api.anthropic.com",
+            "read ECONNRESET",
+        ] {
+            assert!(agent_unreachable(e), "{e}");
+        }
+        for e in [
+            "API Error: 401 invalid x-api-key",
+            "API Error: 403 forbidden",
+            "API Error: 429 rate limit reached",
+            "API Error: 400 messages: text content blocks must be non-empty",
+            "the agent submitted nothing",
+        ] {
+            assert!(!agent_unreachable(e), "{e}");
+        }
     }
 
     #[test]

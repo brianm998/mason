@@ -50,6 +50,7 @@ mod hosts;
 mod init;
 mod node;
 mod progress;
+mod prompts;
 mod remote;
 mod remove;
 mod resources;
@@ -85,6 +86,7 @@ mason: command-line client for the MASON pipeline
   mason task retry <id> [--from STEP] [--restart] [--message TEXT]
                                       the message is shown once in the next round's prompt
   mason task diagnose <id>            ask for a diagnosis of a failed task (owner only)
+  mason task brief <id>               the recovery brief a hand-off left on a failed or stuck task (what failed, what was tried, how to resume)
   mason task diagnosis <id> [apply|dismiss N]   what the diagnosis agent said about a failed task;
                                       apply (its recommended option) or dismiss a pending one
   mason task approve <id> [--priority P]   let a proposed or deferred task start (queued at P: urgent,
@@ -99,6 +101,7 @@ mason: command-line client for the MASON pipeline
   mason task update-priority <id> urgent|normal   owner only; urgent: its landing takes the daemon's own update over at once
   mason task answer <id> <option number | 1,3 | text> [--context TEXT] [--card HASH] [--as NAME]
                                       answer the open question or a failed task's diagnosis card (a multi-select card takes 1,3);
+                                      the options are listed with the recommended one first; free text (Other) comes last, below the options;
                                       --context adds your words to the answer; the card's hash guards against a stale one
   mason task refresh <id>             ask the tracker now (what opening a task does)
   mason task land-now <id> | force <id> [--reason R]   marks the task and records an override and a debt
@@ -134,6 +137,9 @@ mason: command-line client for the MASON pipeline
   mason debt list | run <id>          what was skipped and not yet proven; run one on the base branch
   mason quarantine list | add <suite> <test> --owner O --days N [--reason R] | remove <suite> <test>
   mason test parse <parser> <file> [--min N]   read a results file the way a suite would, and judge it
+  mason prompts eval [--project P] [--step review|diagnose|explore] [--against REV] [--candidate REV]
+                                      replay past read-only steps under the prompts of two revisions and grade both
+  mason prompts eval add <task> --step S --expect TEXT [--head REV]   write a case from a finished task
   mason logs <id> [--follow]
   mason status [--json] [--watch]     with --watch, follow every running step's progress
   mason hosts [--json]                this Mac, each node and GitHub, with what runs on each now
@@ -144,6 +150,7 @@ mason: command-line client for the MASON pipeline
              [--tracker local|github] [--agent claude|codex] [--agent-bin P] [--sessions N]
              [--suites accept|skip] [--base B] [--landing direct|direct-ci|pr|batched]
              [--alerts sound,speech,email,push|none] [--ci-workflow yes|no] [--id ID]
+             [--test CMD] [--placement local|favor-local|favor-remote|remote]
              [--land no|merge|push|pr] [--no-prove] [--force]
                                       guided setup: writes .mason/ and the Filing notes on branch
                                       mason/setup and the project file; lands it only on --land
@@ -665,6 +672,13 @@ fn main() {
             )),
         }
     }
+    if cmd == "prompts" {
+        exit(prompts::run(
+            std::mem::take(&mut a.rest),
+            &config_dir,
+            &data_dir,
+        ));
+    }
     if cmd == "remove" {
         exit(remove::run(std::mem::take(&mut a.rest), &config_dir));
     }
@@ -941,6 +955,12 @@ fn main() {
                     .and_then(|u| u.parse().ok())
                     .unwrap_or_else(|| die("give the new limit as a whole number"));
                 finish(&a);
+                // Changing a limit is the owner's act: say who.
+                if std::env::var("MASON_AS").is_err() {
+                    if let Ok(u) = std::env::var("USER") {
+                        std::env::set_var("MASON_AS", u);
+                    }
+                }
                 resources::limit(&d, &name, units).unwrap_or_else(|e| die(&e));
             }
             Some("gate") => {
@@ -1377,7 +1397,7 @@ fn main() {
             }
             match r["result"].as_str() {
                 Some("applied") => println!(
-                    "Reloaded {project}.toml; changed: {}. Tasks admitted from now on use it",
+                    "Reloaded {project}.toml; changed: {}. The next step run of every task uses it; a step already running keeps what it started with",
                     r["changed"]
                         .as_array()
                         .into_iter()
@@ -3573,6 +3593,12 @@ fn main() {
                     if let Some(w) = t["wait"].as_str() {
                         println!("  waiting   {w}");
                     }
+                    // A run waiting for a node with none to go to: why, and no estimate (#1260).
+                    for w in t["node_waits"].as_array().into_iter().flatten() {
+                        if let Some(w) = w.as_str() {
+                            println!("  waiting   {w}");
+                        }
+                    }
                     if let Some(l) = t["landed"].as_str() {
                         println!("  landed    {l}");
                     }
@@ -3851,6 +3877,27 @@ fn main() {
                         "Retrying task #{id} from {}",
                         r["to"].as_str().unwrap_or("developing")
                     );
+                }
+                "brief" => {
+                    let id = task_id(&mut a);
+                    finish(&a);
+                    let r = or_die(d.call("GET", &format!("/tasks/{id}"), None));
+                    if json_out {
+                        return println!(
+                            "{:#}",
+                            json!({"recovery": r["recovery"], "recovery_brief": r["recovery_brief"]})
+                        );
+                    }
+                    match r["recovery_brief"].as_str() {
+                        Some(b) => println!("{b}"),
+                        None => println!("Task #{id} has no recovery brief."),
+                    }
+                    if let Some(w) = r["recovery"]["why"].as_str() {
+                        println!(
+                            "Recovery: {} ({w})",
+                            r["recovery"]["state"].as_str().unwrap_or("?")
+                        );
+                    }
                 }
                 "diagnose" => {
                     let id = task_id(&mut a);

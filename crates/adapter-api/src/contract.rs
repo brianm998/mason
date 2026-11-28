@@ -181,6 +181,9 @@ pub fn preamble(step: StepKind) -> String {
 pub const TRIED_MAX: usize = 10;
 pub const TRIED_TEXT_MAX: usize = 300;
 
+/// The most acceptance criteria a plan may have.
+pub const CRITERIA_MAX: usize = 8;
+
 /// What `submit_change` says about `tried`; the other tools that take it say the same.
 const TRIED_DESCRIPTION: &str =
     "Approaches you tried and gave up, and why. The next round and the reviewer read this.";
@@ -210,7 +213,11 @@ pub fn tool_spec(tool: &str) -> Option<(String, Value)> {
                 "summary": {"type": "string", "description": "What will change and why, up to 2000 characters"},
                 "files": {"type": "array", "items": {"type": "string"}, "description": "Files that exist or will be created, relative to the repository root"},
                 "approach": {"type": "string", "description": "How, step by step"},
-                "acceptance_criteria": {"type": "array", "items": {"type": "string"}, "description": "Checkable statements that mean the task is done"}
+                "acceptance_criteria": {"type": "array", "minItems": 1, "maxItems": CRITERIA_MAX, "items": {"type": "object", "properties": {
+                    "criterion": {"type": "string", "description": "A checkable statement that means part of the task is done"},
+                    "check": {"type": "string", "description": "How to verify it: a test name, a command, or a file:line or behaviour to read. Not a repeat of the criterion."}},
+                    "required": ["criterion", "check"]},
+                    "description": "1 to 8 criteria, each naming the check that verifies it. Develop reports on each and cannot change them."}
             }),
             &["summary", "files", "approach", "acceptance_criteria"],
         ),
@@ -219,7 +226,12 @@ pub fn tool_spec(tool: &str) -> Option<(String, Value)> {
             json!({
                 "summary": {"type": "string", "description": "What you changed, up to 2000 characters"},
                 "head": {"type": "string", "description": "Commit hash of the branch head (7 to 40 hex characters)"},
-                "notes": {"type": "string", "description": "Anything the reviewer should know"},
+                "notes": {"type": "string", "description": "Anything the reviewer should know; required when a criterion is not_met"},
+                "criteria": {"type": "array", "items": {"type": "object", "properties": {
+                    "status": {"type": "string", "enum": ["met", "not_met", "partly"]},
+                    "evidence": {"type": "string", "description": "The test that passed, the command output, or file:line"}},
+                    "required": ["status", "evidence"]},
+                    "description": "One entry per criterion of the plan, in order. Required when the plan's criteria name checks; the count must match."},
                 "removes": {"type": "array", "items": {"type": "object", "properties": {
                     "file": {"type": "string"}, "line": {"type": "string"}, "reason": {"type": "string"}},
                     "required": ["file", "line", "reason"]},
@@ -287,16 +299,21 @@ pub fn tool_spec(tool: &str) -> Option<(String, Value)> {
              an option may also 'file_task' (a ticket for the cause), 'land_now' (the owner's Land \
              now, with its debt), 'wait_for' (hold behind an open task) or 'open_session' (an owner \
              session seeded with your findings), and carries several as `actions`, applied in order. \
-             Splitting, landing a part or re-scoping are notes on a retry or explore. You may not \
+             Splitting, landing a part or re-scoping are notes on a retry or explore. When the cause \
+             is in the task's own branch or worktree state and a small change puts it right, an \
+             option may 'repair' it (a separate session makes the change under the develop step's \
+             guards, then the task runs again from `to_step`); for a task stuck in a step, \
+             'unblock' or 'release_holder' act on this task. When you can neither fix it nor \
+             recommend an option, give `handoff` with a brief instead of `options`. You may not \
              change files.",
             json!({
                 "summary": {"type": "string", "description": "What went wrong and why, and why the recommended option beats the others; up to 2000 characters"},
                 "options": {"type": "array", "minItems": 2, "maxItems": 4, "items": {"type": "object", "properties": {
                     "label": {"type": "string", "description": "What choosing it does, up to 160 characters"},
                     "recommended": {"type": "boolean", "description": "true on exactly one option"},
-                    "action": {"type": "string", "enum": ["retry", "explore", "close", "cancel", "file_task", "land_now", "wait_for", "open_session"]},
+                    "action": {"type": "string", "enum": ["retry", "explore", "close", "cancel", "file_task", "land_now", "wait_for", "open_session", "repair", "unblock", "release_holder"]},
                     "actions": {"type": "array", "minItems": 1, "maxItems": 4, "description": "Instead of `action`: several actions applied in order, each an object with its own `action` and fields, e.g. file_task then land_now", "items": {"type": "object", "properties": {
-                        "action": {"type": "string", "enum": ["retry", "explore", "close", "cancel", "file_task", "land_now", "wait_for", "open_session"]},
+                        "action": {"type": "string", "enum": ["retry", "explore", "close", "cancel", "file_task", "land_now", "wait_for", "open_session", "repair", "unblock", "release_holder"]},
                         "step": {"type": "string"}, "note": {"type": "string"}, "reason": {"type": "string"},
                         "kind": {"type": "string"}, "duplicate_of": {"type": "integer"}, "evidence": {"type": "string"},
                         "project": {"type": "string", "description": "file_task: the project the ticket goes to (MASON's own for a pipeline defect)"},
@@ -305,21 +322,28 @@ pub fn tool_spec(tool: &str) -> Option<(String, Value)> {
                         "after": {"type": "array", "items": {"type": "integer"}},
                         "task": {"type": "integer", "description": "wait_for: the open task to wait for"},
                         "where": {"type": "string", "enum": ["task", "base"], "description": "open_session: in the task's worktree or in a fresh worktree at the base"},
-                        "brief": {"type": "string"}},
+                        "brief": {"type": "string"},
+                        "summary": {"type": "string", "description": "repair: what the change does, up to 2000 characters"},
+                        "to_step": {"type": "string", "description": "repair: the step to run again from once the change is committed (default: the step after develop)"}},
                         "required": ["action"]}},
                     "step": {"type": "string", "description": "retry: the step to run again from (default: the step that failed)"},
                     "note": {"type": "string", "description": "retry: what the next agent must know, up to 2000 characters"},
                     "reason": {"type": "string", "description": "explore: why the plan does not hold, and what to do instead"},
                     "kind": {"type": "string", "enum": ["already_done", "duplicate"], "description": "close: which"},
                     "duplicate_of": {"type": "integer", "description": "close, duplicate: the other task's number"},
-                    "evidence": {"type": "string", "description": "close: what shows it (commit, file, test, task)"}},
+                    "evidence": {"type": "string", "description": "close: what shows it (commit, file, test, task)"},
+                    "summary": {"type": "string", "description": "repair: what the change does, up to 2000 characters"},
+                    "to_step": {"type": "string", "description": "repair: the step to run again from once the change is committed (default: the step after develop)"}},
                     "required": ["label", "recommended", "action"]}},
+                "handoff": {"type": "object", "description": "Instead of `options`, when you can neither fix the task nor recommend an option: a brief the owner or another agent can pick up from", "properties": {
+                    "brief": {"type": "string", "description": "What failed, what was tried, what is suspected and ruled out, and how to resume; up to 4000 characters"}},
+                    "required": ["brief"]},
                 "quote": {"type": "string", "description": "The decisive lines, copied exactly from the failure output, the test log or the code you blame (1 to 10 lines). The contract checks that they are there."},
                 "cause": {"type": "string", "enum": ["code", "outside", "base", "pipeline"], "description": "Whose fault it is: the task's own code, or something outside it (outside), the base branch (base) or MASON (pipeline). When it is not the code, the recommended option must contain a fix-later action (file_task, or wait_for on an open task) and a fix-now action (land_now, retry, wait_for or open_session). land_now is allowed only when every one of the task's own suites is green, or red the same way on the base"},
                 "no_code_change": {"type": "boolean", "description": "true only if the task's code needs no change and running it again is expected to pass (a flaky or environment failure); a recommended retry is then applied by itself"},
                 "evidence_lines": {"type": "array", "maxItems": 10, "items": {"type": "string"}, "description": "The decisive lines, at most 10"}
             }),
-            &["summary", "options", "quote"],
+            &["summary"],
         ),
         "submit_validation" => s(
             "End your validation with one verdict per blocking finding you were given. \
@@ -362,6 +386,10 @@ pub fn tool_spec(tool: &str) -> Option<(String, Value)> {
                     "status": {"type": "string", "enum": ["fixed", "not_fixed", "withdrawn"]},
                     "note": {"type": "string"}},
                     "required": ["round", "index", "status"]}},
+                "criteria": {"type": "array", "description": "One entry per acceptance criterion, in order: whether you agree with develop's status", "items": {"type": "object", "properties": {
+                    "status": {"type": "string", "enum": ["agree", "disagree"]},
+                    "why": {"type": "string"}},
+                    "required": ["status", "why"]}},
                 "removes": {"type": "array", "items": {"type": "object", "properties": {
                     "file": {"type": "string"}, "line": {"type": "string"}, "reason": {"type": "string"}},
                     "required": ["file", "line", "reason"]},
@@ -562,7 +590,6 @@ pub fn check_quote(quote: &str, materials: &[(String, String)]) -> Result<(), St
 /// each with an action that carries what it needs.
 fn diagnosis_problems(a: &Value, p: &mut Vec<String>) {
     text(a, "summary", 2000, p);
-    quote_shape(a, "quote", 10, p);
     if a.get("no_code_change").is_some_and(|c| !c.is_boolean()) {
         p.push("no_code_change: must be true or false".into());
     }
@@ -575,6 +602,20 @@ fn diagnosis_problems(a: &Value, p: &mut Vec<String>) {
             crate::card::EVIDENCE_LINES
         )),
     }
+    // A hand-off stands in for the card: a brief for whoever picks the task up.
+    if let Some(h) = a.get("handoff") {
+        if a.get("options").is_some() {
+            p.push("handoff: give either `handoff` or `options`, not both".into());
+        }
+        match h.as_object() {
+            Some(_) => {
+                text(h, "brief", HANDOFF_BRIEF_MAX, p);
+            }
+            None => p.push("handoff: must be an object with a `brief`".into()),
+        }
+        return;
+    }
+    quote_shape(a, "quote", 10, p);
     let Some(opts) = a.get("options").and_then(Value::as_array) else {
         p.push(
             "options: required, 2 to 4 options (a single `verdict` is no longer accepted)".into(),
@@ -649,6 +690,9 @@ fn diagnosis_problems(a: &Value, p: &mut Vec<String>) {
     }
 }
 
+/// The longest recovery brief a session may hand off with.
+pub const HANDOFF_BRIEF_MAX: usize = 4000;
+
 /// Most actions one option may carry out, in order.
 pub const MAX_ACTIONS: usize = 4;
 
@@ -659,7 +703,15 @@ pub const DIAGNOSIS_CAUSES: [&str; 4] = ["code", "outside", "base", "pipeline"];
 pub const FIX_LATER: [&str; 2] = ["file_task", "wait_for"];
 
 /// Actions that get the task moving now.
-pub const FIX_NOW: [&str; 4] = ["land_now", "retry", "wait_for", "open_session"];
+pub const FIX_NOW: [&str; 7] = [
+    "land_now",
+    "retry",
+    "wait_for",
+    "open_session",
+    "repair",
+    "unblock",
+    "release_holder",
+];
 
 /// One action of an option: its name, or `None` when it has problems (pushed to `q`).
 fn one_action(o: &Value, q: &mut Vec<String>) -> Option<String> {
@@ -729,14 +781,23 @@ fn one_action(o: &Value, q: &mut Vec<String>) -> Option<String> {
             }
             "open_session"
         }
+        Some("repair") => {
+            text(o, "summary", 2000, q);
+            if o.get("to_step").is_some_and(|s| !s.is_string()) {
+                q.push("to_step: must be a string".into());
+            }
+            "repair"
+        }
+        Some("unblock") => "unblock",
+        Some("release_holder") => "release_holder",
         Some(v) => {
             q.push(format!(
-                "action: {v:?} must be one of retry, explore, close, cancel, file_task, land_now, wait_for, open_session"
+                "action: {v:?} must be one of retry, explore, close, cancel, file_task, land_now, wait_for, open_session, repair, unblock, release_holder"
             ));
             return None;
         }
         None => {
-            q.push("action: required (retry, explore, close, cancel, file_task, land_now, wait_for or open_session), or `actions`: a list of them".into());
+            q.push("action: required (retry, explore, close, cancel, file_task, land_now, wait_for, open_session, repair, unblock or release_holder), or `actions`: a list of them".into());
             return None;
         }
     };
@@ -889,6 +950,117 @@ fn tried(a: &Value, out: &mut Vec<String>) {
     }
 }
 
+fn same_words(a: &str, b: &str) -> bool {
+    let norm = |s: &str| {
+        s.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .trim_end_matches('.')
+            .to_lowercase()
+    };
+    norm(a) == norm(b)
+}
+
+/// The plan's `acceptance_criteria`: 1 to [`CRITERIA_MAX`] of `{criterion, check}`, the check not
+/// empty and not a copy of the criterion. A plain string is still taken, as old plans and
+/// scripted fixtures have them; it names no check and develop is not asked to report on it.
+fn plan_criteria(a: &Value, p: &mut Vec<String>) {
+    match a.get("acceptance_criteria") {
+        None => p.push("acceptance_criteria: required".into()),
+        Some(Value::Array(v)) if v.is_empty() => {
+            p.push("acceptance_criteria: must have at least one entry".into())
+        }
+        Some(Value::Array(v)) if v.len() > CRITERIA_MAX => p.push(format!(
+            "acceptance_criteria: {} entries, the limit is {CRITERIA_MAX}",
+            v.len()
+        )),
+        Some(Value::Array(v)) => {
+            for (i, x) in v.iter().enumerate() {
+                match x {
+                    Value::String(s) if !s.trim().is_empty() => {}
+                    Value::Object(_) => {
+                        let mut q = vec![];
+                        let c = text(x, "criterion", 1000, &mut q);
+                        let k = text(x, "check", 1000, &mut q);
+                        if let (Some(c), Some(k)) = (c, k) {
+                            if same_words(c, k) {
+                                q.push(
+                                    "check: must say how to verify the criterion (a test name, a command, a file:line), not repeat it"
+                                        .into(),
+                                );
+                            }
+                        }
+                        p.extend(
+                            q.into_iter()
+                                .map(|m| format!("acceptance_criteria[{i}].{m}")),
+                        );
+                    }
+                    _ => p.push(format!(
+                        "acceptance_criteria[{i}]: must be an object with `criterion` and `check`"
+                    )),
+                }
+            }
+        }
+        Some(_) => p.push("acceptance_criteria: must be an array of {criterion, check}".into()),
+    }
+}
+
+/// `submit_change.criteria`, when present: `{status: met | not_met | partly, evidence}` entries,
+/// and a `notes` reason for any `not_met`. That the count matches the plan is the daemon's check.
+fn change_criteria(a: &Value, p: &mut Vec<String>) {
+    let Some(v) = a.get("criteria").filter(|v| !v.is_null()) else {
+        return;
+    };
+    let Some(v) = v.as_array() else {
+        p.push("criteria: must be a list of {status, evidence}".into());
+        return;
+    };
+    let mut not_met = false;
+    for (i, e) in v.iter().enumerate() {
+        match e.get("status").and_then(Value::as_str) {
+            Some("met" | "partly") => {}
+            Some("not_met") => not_met = true,
+            _ => p.push(format!(
+                "criteria[{i}].status: required, 'met', 'not_met' or 'partly'"
+            )),
+        }
+        let mut q = vec![];
+        text(e, "evidence", 1000, &mut q);
+        p.extend(q.into_iter().map(|m| format!("criteria[{i}].{m}")));
+    }
+    if not_met
+        && a.get("notes")
+            .and_then(Value::as_str)
+            .is_none_or(|n| n.trim().is_empty())
+    {
+        p.push("notes: required when a criterion is not_met; say why it is not met".into());
+    }
+}
+
+/// `submit_review.criteria`, when present: `{status: agree | disagree, why}` entries.
+fn review_criteria(a: &Value, p: &mut Vec<String>) {
+    let Some(v) = a.get("criteria").filter(|v| !v.is_null()) else {
+        return;
+    };
+    let Some(v) = v.as_array() else {
+        p.push("criteria: must be a list of {status, why}".into());
+        return;
+    };
+    for (i, e) in v.iter().enumerate() {
+        if !matches!(
+            e.get("status").and_then(Value::as_str),
+            Some("agree" | "disagree")
+        ) {
+            p.push(format!(
+                "criteria[{i}].status: required, 'agree' or 'disagree'"
+            ));
+        }
+        let mut q = vec![];
+        text(e, "why", 1000, &mut q);
+        p.extend(q.into_iter().map(|m| format!("criteria[{i}].{m}")));
+    }
+}
+
 /// Every problem with `args` for `tool`, or `Ok(())`. Pure.
 pub fn validate(tool: &str, a: &Value) -> Result<(), Vec<String>> {
     let mut p = vec![];
@@ -906,7 +1078,7 @@ pub fn validate(tool: &str, a: &Value) -> Result<(), Vec<String>> {
                     ));
                 }
             }
-            strings(a, "acceptance_criteria", &mut p);
+            plan_criteria(a, &mut p);
         }
         "submit_change" => {
             text(a, "summary", 2000, &mut p);
@@ -919,6 +1091,7 @@ pub fn validate(tool: &str, a: &Value) -> Result<(), Vec<String>> {
             }
             removes(a, &mut p);
             tried(a, &mut p);
+            change_criteria(a, &mut p);
         }
         "submit_close" => {
             text(a, "evidence", 2000, &mut p);
@@ -985,6 +1158,7 @@ pub fn validate(tool: &str, a: &Value) -> Result<(), Vec<String>> {
                 None => p.push("verdict: required, 'approve' or 'changes'".into()),
             }
             removes(a, &mut p);
+            review_criteria(a, &mut p);
             for (i, e) in a
                 .get("earlier")
                 .and_then(Value::as_array)
@@ -1796,6 +1970,47 @@ mod tests {
     }
 
     #[test]
+    fn a_diagnosis_may_repair_unblock_or_hand_off() {
+        let ok = |v: Value| validate("submit_diagnosis", &v).is_ok();
+        let cancel = json!({"label": "Cancel it", "recommended": false, "action": "cancel"});
+        let repair = |rec: bool, extra: Value| {
+            let mut o = json!({"label": "Repair", "recommended": rec, "action": "repair",
+                "summary": "add the missing file"});
+            for (k, v) in extra.as_object().cloned().unwrap_or_default() {
+                o[k] = v;
+            }
+            o
+        };
+        let card = |o: Vec<Value>| json!({"summary": "s", "quote": "q", "options": o});
+        assert!(ok(card(vec![repair(true, json!({})), cancel.clone()])));
+        assert!(ok(card(vec![
+            repair(true, json!({"to_step": "test"})),
+            cancel.clone()
+        ])));
+        assert!(!ok(card(vec![
+            repair(true, json!({"summary": ""})),
+            cancel.clone()
+        ])));
+        assert!(!ok(card(vec![
+            repair(true, json!({"to_step": 3})),
+            cancel.clone()
+        ])));
+        let unblock = json!({"label": "Unblock", "recommended": true, "action": "unblock"});
+        let release = json!({"label": "Release", "recommended": false, "action": "release_holder"});
+        assert!(ok(card(vec![unblock, release])));
+        // A hand-off stands in for the options, and not beside them.
+        assert!(ok(
+            json!({"summary": "s", "handoff": {"brief": "what failed, how to resume"}})
+        ));
+        assert!(!ok(json!({"summary": "s", "handoff": {"brief": " "}})));
+        assert!(!ok(json!({"summary": "s", "handoff": {}})));
+        assert!(!ok(json!({"summary": "s", "handoff": {"brief": "b"},
+            "quote": "q", "options": [repair(true, json!({})), cancel.clone()]})));
+        let long = "x".repeat(HANDOFF_BRIEF_MAX + 1);
+        assert!(!ok(json!({"summary": "s", "handoff": {"brief": long}})));
+    }
+
+    #[test]
     fn a_diagnosis_is_a_card_of_two_to_four_options_with_one_recommended() {
         let ok = |v: Value| validate("submit_diagnosis", &v).is_ok();
         let retry = |rec: bool| {
@@ -2125,6 +2340,67 @@ mod tests {
         assert!(why.contains("removes[0].reason"), "{why}");
         let bad = json!({"summary": "s", "head": "0123abc", "removes": "all"});
         assert!(validate("submit_change", &bad).is_err());
+    }
+
+    #[test]
+    fn plan_criteria_name_a_check_each() {
+        let with = |c: Value| {
+            let mut a = plan();
+            a["acceptance_criteria"] = c;
+            validate("submit_plan", &a).map_err(|p| p.join("\n"))
+        };
+        assert!(with(json!([{"criterion": "a works", "check": "test a_works"}])).is_ok());
+        assert!(with(json!(["an old plain string"])).is_ok());
+        let why = with(json!([{"criterion": "a works", "check": " "}])).unwrap_err();
+        assert!(
+            why.contains("acceptance_criteria[0].check: must not be empty"),
+            "{why}"
+        );
+        let why = with(json!([{"criterion": "a works", "check": "A  works."}])).unwrap_err();
+        assert!(why.contains("not repeat it"), "{why}");
+        let why = with(json!([{"criterion": "a works"}])).unwrap_err();
+        assert!(why.contains("check: required"), "{why}");
+        assert!(with(json!([])).is_err());
+        let nine: Vec<Value> = (0..9)
+            .map(|i| json!({"criterion": format!("c{i}"), "check": "t"}))
+            .collect();
+        assert!(with(json!(nine)).unwrap_err().contains("limit is 8"));
+    }
+
+    #[test]
+    fn change_criteria_have_statuses_and_not_met_needs_notes() {
+        let base = |c: Value| json!({"summary": "s", "head": "0123abc", "criteria": c});
+        let ok = base(json!([{"status": "met", "evidence": "test a passed"},
+            {"status": "partly", "evidence": "src/a.rs:4"}]));
+        assert!(validate("submit_change", &ok).is_ok());
+        let nm = base(json!([{"status": "not_met", "evidence": "none"}]));
+        let why = validate("submit_change", &nm).unwrap_err().join("\n");
+        assert!(
+            why.contains("notes: required when a criterion is not_met"),
+            "{why}"
+        );
+        let mut with_notes = nm.clone();
+        with_notes["notes"] = json!("the platform has no such call");
+        assert!(validate("submit_change", &with_notes).is_ok());
+        let bad = base(json!([{"status": "done", "evidence": ""}]));
+        let why = validate("submit_change", &bad).unwrap_err().join("\n");
+        assert!(
+            why.contains("criteria[0].status") && why.contains("criteria[0].evidence"),
+            "{why}"
+        );
+    }
+
+    #[test]
+    fn review_criteria_are_agree_or_disagree() {
+        let r = |c: Value| {
+            validate(
+                "submit_review",
+                &json!({"verdict": "approve", "summary": "s", "criteria": c}),
+            )
+        };
+        assert!(r(json!([{"status": "agree", "why": "test a covers it"}])).is_ok());
+        assert!(r(json!([{"status": "maybe", "why": "x"}])).is_err());
+        assert!(r(json!([{"status": "agree"}])).is_err());
     }
 
     #[test]

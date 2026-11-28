@@ -557,13 +557,22 @@ pub fn execute(
     stop: &dyn Fn() -> Option<StopWhy>,
     live: &mut dyn FnMut(u64, &[u8]),
 ) -> Result<Outcome, Fail> {
+    let _run = crate::nodewait::register(&spec.id, &spec.project, &spec.suite, now_ms());
     let Some(chosen) = want.and_then(crate::place::wait_for) else {
         return attempt(d, want, spec, cwd, base_ref, dir, stop, live);
     };
+    // The run holds the broker's unit of the node `nodewait::pick` names (when any could take
+    // it), so that is the node it goes to first.
+    let chosen = if chosen.is_empty() {
+        crate::nodewait::pick_for(d, &spec.project, &spec.suite, &spec.command).unwrap_or_default()
+    } else {
+        chosen.to_string()
+    };
     let step = poll_interval();
-    let mut chosen = Some(chosen);
+    let mut chosen = Some(chosen.as_str());
     let mut failed = 0u32;
     let mut said = false;
+    let mut waiting = Waiting::new(d, &spec.id);
     // How long to leave the nodes alone after an attempt that gave nothing.
     let mut rest = Duration::ZERO;
     let mut since = std::time::Instant::now();
@@ -577,7 +586,9 @@ pub fn execute(
         // A job already sent is attached to whatever room the nodes say they have: it is the
         // one taking it up.
         let sent = load(&record_path(dir, &spec.id)).is_some();
-        if sent || (since.elapsed() >= rest && has_room(d, spec)) {
+        let room = if sent { None } else { no_room(d, spec) };
+        if sent || (since.elapsed() >= rest && room.is_none()) {
+            waiting.end();
             match attempt(d, chosen.take(), spec, cwd, base_ref, dir, stop, live) {
                 Err(Fail::Environmental(why)) if is_base_failure(&why) => {
                     tracing::warn!(run = %spec.id, "{why}");
@@ -592,27 +603,90 @@ pub fn execute(
                 }
                 other => return other,
             }
-        } else if !said {
-            said = true;
-            tracing::info!(run = %spec.id, project = %spec.project, "waiting for a node with room (this project has no GitHub setup)");
+        } else {
+            // Nothing is running: say so on the task, with why, as every other wait does.
+            // Resting after a node gave the job back reads as a full node: it had no room.
+            let why = room.unwrap_or(crate::nodewait::Why::Full);
+            if !said {
+                said = true;
+                tracing::info!(run = %spec.id, project = %spec.project, "waiting for a node: {}", why.text());
+            }
+            waiting.start(&why);
         }
         std::thread::sleep(step);
     }
 }
 
-/// Is there a node that says it has room for `spec` now: nodes on and open to the project, the
-/// node accepting, with the toolchains the run needs and a job free?
-fn has_room(d: &Arc<Daemon>, spec: &RunSpec) -> bool {
-    let (rooms, _) = crate::nodes::rooms_for(d, &spec.project, None);
-    let cfg = d.nodes.cfg(&d.cfg.config_dir);
-    d.nodes
-        .usable(&cfg, &spec.suite, &spec.command)
-        .iter()
-        .any(|(row, _, _, status)| {
-            let max = status["jobs"]["max"].as_u64().unwrap_or(0);
-            let running = status["jobs"]["running"].as_u64().unwrap_or(0);
-            running < max && rooms.iter().any(|r| r.nid == row.nid)
-        })
+/// The wait this run has put on its task while it waits in [`execute`] with no unit in the
+/// broker's line: the same `WaitStarted` and `WaitEnded` every other wait emits, so the task
+/// reads as waiting and not running. Ends with the run, whichever way it ends.
+struct Waiting<'a> {
+    d: &'a Arc<Daemon>,
+    id: String,
+    task: Option<mason_core::TaskId>,
+    on: bool,
+}
+
+impl<'a> Waiting<'a> {
+    fn new(d: &'a Arc<Daemon>, id: &str) -> Self {
+        Waiting {
+            d,
+            id: id.to_string(),
+            task: crate::nodewait::task_of_run(id).map(mason_core::TaskId),
+            on: false,
+        }
+    }
+
+    fn start(&mut self, why: &crate::nodewait::Why) {
+        crate::nodewait::set_waiting(&self.id, Some((why.clone(), now_ms())));
+        if self.on {
+            return;
+        }
+        if let Some(task) = self.task {
+            let now = now_ms();
+            let text = crate::nodewait::describe(
+                why,
+                &crate::nodewait::holders(self.d, now),
+                None,
+                None,
+                now,
+            );
+            self.on = self
+                .d
+                .emit(mason_core::EventKind::WaitStarted {
+                    task,
+                    on: text,
+                    class: Some("environment".into()),
+                })
+                .is_ok();
+        }
+    }
+
+    fn end(&mut self) {
+        crate::nodewait::set_waiting(&self.id, None);
+        if self.on {
+            if let Some(task) = self.task {
+                let _ = self.d.emit(mason_core::EventKind::WaitEnded { task });
+            }
+            self.on = false;
+        }
+    }
+}
+
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        self.end();
+    }
+}
+
+/// Why no node can take `spec` now, or `None` when one says it has a job free: nodes on and open
+/// to the project, a node accepting with the toolchains the run needs and a job free. The
+/// broker's own count is not asked: the run holds its unit of the node already, or none could
+/// ever take it.
+fn no_room(d: &Arc<Daemon>, spec: &RunSpec) -> Option<crate::nodewait::Why> {
+    let (enabled, allowed, cands) =
+        crate::nodes::candidates_for(d, &spec.project, &spec.suite, &spec.command);
+    crate::nodewait::diagnose(enabled, allowed, &cands)
 }
 
 pub(crate) fn poll_interval() -> Duration {

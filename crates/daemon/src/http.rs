@@ -109,7 +109,17 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
             |(at, on)| json!({"started_ms": at, "ran_on": on}),
         );
     }
+    // What the recovery entry point decided for this failure or stall (task 1111).
+    if let Some(r) = crate::recovery::view(d, t) {
+        v["recovery"] = r;
+    }
     if detail {
+        v["recovery_brief"] = d
+            .store
+            .recovery_brief(t.id.0)
+            .ok()
+            .flatten()
+            .map_or(Value::Null, |(b, _)| json!(b));
         v["body"] = json!(t.body);
         let edits = crate::taskedit::history(d, t.id.0);
         if let Some(last) = edits.last() {
@@ -187,6 +197,18 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
             .broker
             .explain_task(t.id)
             .map_or(Value::Null, |w| json!(w));
+        // A wait for a node says why, who holds the slots, the place in line and an estimate
+        // (#1260); a run waiting in the node executor with no unit has its own line each.
+        if let Some(line) = d
+            .broker
+            .wait_view()
+            .tasks
+            .get(&t.id.0)
+            .and_then(|i| crate::nodewait::line_for(d, i, now))
+        {
+            v["wait"] = json!(line);
+        }
+        v["node_waits"] = json!(crate::nodewait::waiting_of(d, t.id.0, now));
         v["closing"] = d.store.closing(t.id.0).ok().flatten().map_or(
             Value::Null,
             |(verdict, note)| json!({"verdict": verdict, "note": note}),
@@ -1829,7 +1851,7 @@ async fn onboarding_apply(
         .map_err(pool_err)?
         .map_err(|(c, m)| fail(code(c), m))?;
     let mut out = a.body;
-    if a.prove && a.registered {
+    if a.prove && a.registered && a.proof_hold.is_none() {
         let task = json!({"project": a.id, "title": mason_onboard::PROOF_TITLE,
             "body": mason_onboard::PROOF_BODY, "priority": "normal", "proposed": false,
             "explored": true, "after": []});
@@ -3634,12 +3656,27 @@ async fn remote_set(
     r.map(Json).map_err(|(c, m)| fail(code(c), m))
 }
 
-async fn project_settings_get(Shared(d): Shared<Arc<Daemon>>, Path(name): Path<String>) -> Res {
+/// Who is asking, for the Project page: the identity the request names, and whether it came
+/// through a paired device (the LAN guard and the relay set `x-mason-paired`; this Mac's own
+/// loopback requests never carry it).
+fn caller_of(h: &axum::http::HeaderMap) -> crate::projsettings::Caller {
+    crate::projsettings::Caller {
+        who: who_of(h),
+        paired: h.contains_key("x-mason-paired"),
+    }
+}
+
+async fn project_settings_get(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Path(name): Path<String>,
+) -> Res {
     project_of(&d, &name)?;
+    let caller = caller_of(&headers);
     let d2 = d.clone();
     let r = d
         .pool
-        .run(move || crate::settings::get_project(&d2, &name))
+        .run(move || crate::settings::get_project_as(&d2, &name, &caller))
         .await
         .map_err(pool_err)?;
     r.map(Json).map_err(|(c, m)| fail(code(c), m))
@@ -3655,10 +3692,11 @@ async fn project_settings_set(
 ) -> Res {
     owner_only(&d, &who_of(&headers), "change project settings")?;
     project_of(&d, &name)?;
+    let caller = caller_of(&headers);
     let d2 = d.clone();
     let r = d
         .pool
-        .run(move || crate::settings::set_project(&d2, &name, &b))
+        .run(move || crate::settings::set_project_as(&d2, &name, &b, &caller))
         .await
         .map_err(pool_err)?;
     r.map(Json).map_err(|(c, m)| fail(code(c), m))
@@ -4031,7 +4069,15 @@ async fn targets(Shared(d): Shared<Arc<Daemon>>) -> Res {
     Ok(Json(v))
 }
 
-async fn resource_limit(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
+/// Change a resource's limit. Owner only (#1261): a monitor sends it as the owner's identity (a
+/// paired viewer is refused before it gets here, and a LAN device's identity is its token's), and
+/// `mason resources limit` says who it is the way `resources gate` does.
+async fn resource_limit(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Json(b): Json<Value>,
+) -> Res {
+    owner_only(&d, &who_of(&headers), "change a resource limit")?;
     let (name, units) = (
         b["resource"].as_str().unwrap_or_default().to_string(),
         b["units"].as_u64(),

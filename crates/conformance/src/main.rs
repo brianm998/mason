@@ -13,6 +13,9 @@
 //! conformance check --expected DIR --actual DIR      compare a client's dumps with the expected ones
 //! conformance resume --port P                        connect, disconnect, resume: only what was missed arrives
 //! conformance latency --port P [--limit-ms N]        how long a state change takes to reach a client
+//! conformance runner-limit --port P [--set POOL=N --as NAME]
+//!                                                      print the home view's runner pools (`gha 16 20 ...`),
+//!                                                      after sending `SetLimit` the way a monitor does
 //! ```
 
 use mason_conformance::{conformance, features, mascot, tokens};
@@ -490,6 +493,7 @@ fn main() {
         }
         "resume" => resume(&mut args),
         "latency" => latency(&mut args),
+        "runner-limit" => runner_limit(&mut args),
         other => die(&format!("unknown command {other:?}")),
     }
 }
@@ -601,6 +605,72 @@ fn resume(args: &mut Vec<String>) {
         exit(1);
     }
     println!("a client that was up to date was sent nothing");
+}
+
+/// The home view's runner pools, one line each: `name limit ceiling used mason other waiting`.
+/// With `--set POOL=N`, first send `SetLimit` as `--as NAME` (what a monitor sends), and print
+/// the refusal's reason and exit 1 if the daemon refuses.
+fn runner_limit(args: &mut Vec<String>) {
+    let port = port_of(args);
+    let set = opt(args, "--set");
+    let actor = opt(args, "--as").unwrap_or_default();
+    let mut c = Client::connect(port, Encoding::Json).unwrap_or_else(|e| die(&e));
+    c.hello(0, false).unwrap_or_else(|e| die(&e));
+    if let Some(set) = set {
+        let (pool, units) = set
+            .split_once('=')
+            .and_then(|(p, n)| Some((p.to_string(), n.parse::<u32>().ok()?)))
+            .unwrap_or_else(|| die("--set POOL=N"));
+        let (r, _) = c
+            .command(
+                Command {
+                    id: String::new(),
+                    body: Some(command::Body::SetLimit(SetLimit {
+                        resource: pool,
+                        units,
+                    })),
+                    actor,
+                    reason: String::new(),
+                },
+                Duration::from_secs(10),
+            )
+            .unwrap_or_else(|e| die(&e));
+        if !r.ok {
+            eprintln!("refused: {}", r.error);
+            exit(1);
+        }
+    }
+    // The newest home view: a fresh connection after a change shows the change; one in flight
+    // is read until it says so.
+    let end = std::time::Instant::now() + Duration::from_secs(20);
+    let mut pools: Option<Vec<RunnerPool>> = None;
+    while std::time::Instant::now() < end {
+        let Ok(Some(m)) = c.recv(Duration::from_millis(200)) else {
+            if pools.is_some() {
+                break;
+            }
+            continue;
+        };
+        let views = match m.body {
+            Some(server_message::Body::Snapshot(s)) => s.views,
+            Some(server_message::Body::View(u)) => u.view.into_iter().collect(),
+            _ => continue,
+        };
+        for v in views {
+            if let Some(view::Body::Home(h)) = v.body {
+                pools = Some(h.runner_pools);
+            }
+        }
+    }
+    let Some(pools) = pools else {
+        die("no home view arrived");
+    };
+    for p in pools {
+        println!(
+            "{} {} {} {} {} {} {}",
+            p.name, p.limit, p.ceiling, p.used, p.mason, p.other, p.waiting
+        );
+    }
 }
 
 /// Time from the daemon appending an event to the client holding a view that

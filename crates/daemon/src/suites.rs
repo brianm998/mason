@@ -4761,12 +4761,11 @@ fn gates_failed(
         let criteria: Vec<String> = std::fs::read_to_string(c.task_dir().join("plan.json"))
             .ok()
             .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-            .and_then(|v| {
-                v["acceptance_criteria"].as_array().map(|a| {
-                    a.iter()
-                        .filter_map(|x| x.as_str().map(String::from))
-                        .collect()
-                })
+            .map(|v| {
+                crate::criteria::of_plan(&v)
+                    .into_iter()
+                    .map(|c| c.criterion)
+                    .collect()
             })
             .unwrap_or_default();
         let mapping = std::fs::read_to_string(c.wt.join(".mason/acceptance.json"))

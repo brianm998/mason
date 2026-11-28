@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","cwd":"/scratch","session_id":"synthetic-0001","tools":[],"mcp_servers":[],"model":"claude-haiku-5-5","permissionMode":"dontAsk","apiKeySource":"none","claude_code_version":"2.1.317"}
+{"type":"result","subtype":"success","is_error":true,"result":"API Error: Can't reach the API server — check your internet or DNS (ENOTFOUND)","session_id":"synthetic-0001","total_cost_usd":0,"usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0},"terminal_reason":"api_error"}

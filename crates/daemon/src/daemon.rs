@@ -572,9 +572,12 @@ impl Daemon {
             .collect()
     }
 
-    /// Re-read a project's registration file (`<config>/projects/<name>.toml`) and
-    /// apply it to tasks admitted from now on; tasks already running keep what they
-    /// started with. Returns what changed, as the top-level keys of the file. A file
+    /// Re-read a project's registration file (`<config>/projects/<name>.toml`) and make it the
+    /// current registration. Every step run reads the current registration when it starts
+    /// (`jobs::ctx`), so the next step run of any task uses it, admitted before the reload or not;
+    /// a step already running keeps what it started with, except the limits read through
+    /// `Ctx::live`. (Pipeline definitions differ: a task keeps the definition it was admitted
+    /// under.) Returns what changed, as the top-level keys of the file. A file
     /// that does not parse, or that changes something fixed at start (the repository
     /// path, the base branch, the remote, `[self]`), is refused whole and the current
     /// registration keeps running.
@@ -816,6 +819,7 @@ impl Daemon {
     pub fn emit(self: &Arc<Self>, kind: EventKind) -> Result<Appended, StoreError> {
         let name = kind_name(&kind);
         let kind_for_release = kind.clone();
+        let failing = self.failing_task(&kind);
         let appended = {
             let _g = self.emit_lock.lock().unwrap_or_else(|e| e.into_inner());
             match self.store.append(Event {
@@ -840,7 +844,26 @@ impl Daemon {
         let _ = self.bus.send(appended.seq);
         self.handle_effects(&appended.effects);
         self.admit();
+        self.recover_failed(failing);
         Ok(appended)
+    }
+
+    /// The task and the state it is in, if `kind` fails a step: read before the event is
+    /// applied, since a failed task has lost the step it failed in.
+    fn failing_task(&self, kind: &EventKind) -> Option<(TaskId, State)> {
+        let EventKind::StepFailed { task, .. } = kind else {
+            return None;
+        };
+        let w = self.world().ok()?;
+        w.tasks.get(task).map(|t| (*task, t.state))
+    }
+
+    /// Every way into Failed ends here, the one place all emitters go through (task 1111): the
+    /// recovery entry point decides whether an agent looks at it.
+    fn recover_failed(self: &Arc<Self>, failing: Option<(TaskId, State)>) {
+        if let (Some((task, prior)), false) = (failing, self.demo) {
+            crate::recovery::on_step_failed(self, task, prior);
+        }
     }
 
     /// A store write failed. If the disk is full, say so in the alerts, not only in the log; the
@@ -861,6 +884,7 @@ impl Daemon {
     /// Returns whether the event was appended.
     pub fn emit_for_run(self: &Arc<Self>, task: TaskId, run: StepRunId, kind: EventKind) -> bool {
         let name = kind_name(&kind);
+        let failing = self.failing_task(&kind);
         let appended = {
             let _g = self.emit_lock.lock().unwrap_or_else(|e| e.into_inner());
             match self.store.world() {
@@ -886,6 +910,7 @@ impl Daemon {
         let _ = self.bus.send(appended.seq);
         self.handle_effects(&appended.effects);
         self.admit();
+        self.recover_failed(failing);
         true
     }
 
@@ -975,7 +1000,8 @@ impl Daemon {
                         EventKind::StepFailed {
                             task,
                             reason: "internal error: the step's job panicked".into(),
-                            class: Some(mason_core::FailClass::Code),
+                            // A pipeline bug is never charged to the task's code.
+                            class: Some(mason_core::FailClass::Outside),
                         },
                     );
                 }
@@ -1451,6 +1477,7 @@ impl Daemon {
                 crate::hung::check(&d, &mut tracker, now_ms());
                 crate::hostedcheck::stop_unwanted(&d);
                 crate::remote::reap_adopted(&d);
+                crate::remote::reap_untracked(&d);
             }
             let c = d.broker.compilation();
             let mut now = format!("{} {}", c.limit, c.used);

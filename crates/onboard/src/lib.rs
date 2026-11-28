@@ -205,8 +205,19 @@ pub fn setup(
         }
     }
     let test_cmd = if kept.is_empty() {
-        say("\nwarning: no test suite is set up, so the test step runs `true` and proves nothing. Add one in .mason/mason.toml (see `mason test parse`) before trusting a landing.");
-        "true".to_string()
+        match a.test.as_deref() {
+            None if a.accept_suites => {
+                return Err("no test suite could be proposed or kept (see above), so the test step would run `true` and prove nothing; nothing was written. Pass --test COMMAND, or --test true to add the project with no tests on purpose".into());
+            }
+            Some(t) if t != "true" => {
+                say(&format!("\nTests: no suite is kept, so the test step runs your command `{t}`. Nothing checked that it parses test output; add a suite in .mason/mason.toml (see `mason test parse`)."));
+                t.to_string()
+            }
+            _ => {
+                say("\nwarning: no test suite is set up, so the test step runs `true` and proves nothing. Add one in .mason/mason.toml (see `mason test parse`) before trusting a landing.");
+                "true".to_string()
+            }
+        }
     } else {
         kept.iter()
             .map(|s| s.command.as_str())
@@ -486,7 +497,7 @@ pub fn plan(path: &Path, answers: &Flags) -> Plan {
                 vec![]
             };
             let test_cmd = if suites.is_empty() {
-                "true".to_string()
+                a.test.clone().unwrap_or_else(|| "true".to_string())
             } else {
                 suites
                     .iter()
@@ -563,6 +574,9 @@ pub fn apply_validated(
             )?;
             args.agent_bin = Some(found.display().to_string());
         }
+        if answers.machine.nodes_enabled && args.placement.is_none() {
+            return Err("nodes are enabled, so say where runs go: pass --placement local, favor-local, favor-remote or remote".into());
+        }
         let id = args.id.clone().unwrap_or_else(|| d.id.clone());
         let ad = adopt::adopt(&d, &args, config_dir, validate).map_err(|e| e.message)?;
         return Ok(Applied {
@@ -603,6 +617,14 @@ pub fn apply_validated(
         validate,
     )?;
     let landed = land::apply(&d, &a, progress);
+    if a.land == questions::Land::Push && landed.refused {
+        warnings.extend(land::unpublished_warning(
+            &d,
+            &a.base,
+            a.landing,
+            questions::Land::No,
+        ));
+    }
     Ok(Applied {
         overlay: overlay_path(config_dir, &a.id),
         id: a.id,
@@ -659,6 +681,7 @@ mod tests {
             home: Some(home.path().to_path_buf()),
             known_bins: vec![],
             env: Some(vec![]),
+            ..Default::default()
         };
         (home, m)
     }
@@ -747,7 +770,14 @@ mod tests {
         );
         f.token = Some("none".into());
         let p = plan(d.path(), &f);
-        assert!(p.warnings.is_empty(), "{:?}", p.warnings);
+        // (The made-up remote has no `.mason/`; that warning is not about the token.)
+        let only_token = |p: &Plan| {
+            p.warnings
+                .iter()
+                .filter(|w| !w.contains("has no .mason/"))
+                .count()
+        };
+        assert_eq!(only_token(&p), 0, "{:?}", p.warnings);
         let overlay = &p
             .files
             .iter()
@@ -758,7 +788,7 @@ mod tests {
         f.token = Some("env:GITHUB_TOKEN".into());
         f.machine.env = Some(vec![("GITHUB_TOKEN".into(), "x".into())]);
         let p = plan(d.path(), &f);
-        assert!(p.warnings.is_empty(), "{:?}", p.warnings);
+        assert_eq!(only_token(&p), 0, "{:?}", p.warnings);
     }
 
     fn all_answered() -> Flags {
@@ -851,6 +881,125 @@ mod tests {
             &["rev-parse", "--verify", "-q", "refs/heads/mason/setup"]
         ));
         assert!(!a.landed.merged);
+    }
+
+    #[test]
+    fn packages_only_in_subdirectories_get_suites_that_run_there() {
+        let d = repo(&[("Kit/Package.swift", ""), ("tool/Cargo.toml", "")]);
+        let (_h, m) = machine(true);
+        let mut f = all_answered();
+        f.suites = Some("accept".into());
+        f.machine = m;
+        let p = plan(d.path(), &f);
+        assert!(p.errors.is_empty(), "{:?}", p.errors);
+        let mason = &p
+            .files
+            .iter()
+            .find(|(n, _)| n == ".mason/mason.toml")
+            .unwrap()
+            .1;
+        assert!(
+            mason.contains("cd Kit && swift test") && mason.contains("cd tool && cargo test"),
+            "{mason}"
+        );
+        let overlay = &p
+            .files
+            .iter()
+            .find(|(n, _)| n.starts_with("projects/"))
+            .unwrap()
+            .1;
+        assert!(overlay.contains("cd Kit && swift test"), "{overlay}");
+    }
+
+    #[test]
+    fn no_suite_and_no_explicit_answer_is_refused_and_true_must_be_said() {
+        let d = repo(&[]);
+        let cfg = tempfile::tempdir().unwrap();
+        let (_h, m) = machine(true);
+        let mut f = all_answered();
+        f.suites = Some("accept".into());
+        f.machine = m;
+        let p = plan(d.path(), &f);
+        assert_eq!(p.next.as_ref().map(|q| q.id), Some("test"), "{p:?}");
+        assert!(p.warnings.iter().any(|w| w.contains("--test")), "{p:?}");
+        let e = apply(d.path(), &f, cfg.path(), &mut |_| {}).unwrap_err();
+        assert!(e.contains("--test true"), "{e}");
+        assert!(!cfg.path().join("projects").exists());
+        assert!(!git::ok(
+            d.path(),
+            &["rev-parse", "--verify", "-q", "refs/heads/mason/setup"]
+        ));
+        f.test = Some("true".into());
+        let a = apply(d.path(), &f, cfg.path(), &mut |_| {}).unwrap();
+        assert!(std::fs::read_to_string(&a.overlay)
+            .unwrap()
+            .contains("test = \"true\""));
+        // Another command is used as given.
+        let d2 = repo(&[]);
+        f.test = Some("make check".into());
+        f.id = Some("other".into());
+        let a = apply(d2.path(), &f, cfg.path(), &mut |_| {}).unwrap();
+        assert!(std::fs::read_to_string(&a.overlay)
+            .unwrap()
+            .contains("test = \"make check\""));
+    }
+
+    #[test]
+    fn placement_is_asked_and_written_only_with_nodes_on() {
+        let d = repo(&[]);
+        let (_h, m) = machine(true);
+        let mut f = all_answered();
+        f.machine = m;
+        let overlay_of = |p: &Plan| {
+            p.files
+                .iter()
+                .find(|(n, _)| n.starts_with("projects/"))
+                .unwrap()
+                .1
+                .clone()
+        };
+        let p = plan(d.path(), &f);
+        assert!(p.next.is_none(), "{:?}", p.next);
+        assert!(!overlay_of(&p).contains("[placement]"));
+        f.machine.nodes_enabled = true;
+        let p = plan(d.path(), &f);
+        let q = p.next.as_ref().expect("the placement question");
+        assert_eq!((q.id, q.default.as_str()), ("placement", "local"));
+        f.machine.recent_node_only_mode = Some("remote".into());
+        let p = plan(d.path(), &f);
+        assert_eq!(p.next.as_ref().unwrap().default, "remote");
+        f.placement = Some("favor-remote".into());
+        let p = plan(d.path(), &f);
+        assert!(p.next.is_none());
+        assert!(overlay_of(&p).contains("[placement]\nmode = \"favor-remote\""));
+        f.placement = Some("sideways".into());
+        assert!(!plan(d.path(), &f).errors.is_empty());
+    }
+
+    #[test]
+    fn a_remote_without_the_setup_warns_in_the_plan_and_push_does_not() {
+        let d = repo(&[]);
+        let bare = tempfile::tempdir().unwrap();
+        git(bare.path(), &["init", "-q", "--bare", "-b", "main"]);
+        git(
+            d.path(),
+            &["remote", "add", "origin", bare.path().to_str().unwrap()],
+        );
+        git(d.path(), &["push", "-q", "origin", "main"]);
+        let (_h, m) = machine(true);
+        let mut f = all_answered();
+        f.machine = m;
+        f.land = Some("merge".into());
+        let p = plan(d.path(), &f);
+        assert!(
+            p.warnings
+                .iter()
+                .any(|w| w.contains("git push origin main")),
+            "{:?}",
+            p.warnings
+        );
+        f.land = Some("push".into());
+        assert!(plan(d.path(), &f).warnings.is_empty());
     }
 
     #[test]

@@ -91,6 +91,21 @@ pub struct DiagnosisRow {
     pub failed_at: u64,
 }
 
+/// One decision of the recovery entry point for a failed or stalled task (task 1111).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecoveryRow {
+    pub id: u64,
+    pub task: u64,
+    pub at_ms: u64,
+    /// What brought the task here: `step_failed`, `gave_up`, `stuck:task:N`, `panic`, ...
+    pub cause: String,
+    /// `session`, `waiting`, `attached`, `card`, `repaired`, `handoff`.
+    pub decision: String,
+    pub why: String,
+    /// The `state_entered_at` of the failure or stall it speaks of.
+    pub failed_at: u64,
+}
+
 /// What a suite did at a base commit (s246): failing names and every name, the executed count,
 /// and why a base can be called red the same way as a branch.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -2690,6 +2705,90 @@ impl Store {
                 params![task as i64, now_ms as i64, v, a, s, failed_at as i64],
             )?;
             Ok(c.last_insert_rowid() as u64)
+        })
+    }
+
+    /// One decision of the recovery entry point. Returns its id.
+    pub fn add_recovery(
+        &self,
+        task: u64,
+        cause: &str,
+        decision: &str,
+        why: &str,
+        failed_at: u64,
+        now_ms: u64,
+    ) -> Result<u64, StoreError> {
+        let (c, d, w) = (cause.to_string(), decision.to_string(), why.to_string());
+        self.write(move |conn| {
+            conn.execute(
+                "INSERT INTO recoveries(task, at_ms, cause, decision, why, failed_at) \
+                 VALUES (?1,?2,?3,?4,?5,?6)",
+                params![task as i64, now_ms as i64, c, d, w, failed_at as i64],
+            )?;
+            Ok(conn.last_insert_rowid() as u64)
+        })
+    }
+
+    /// Change what a recovery row decided (a session that was started ends as `repaired`, ...).
+    pub fn set_recovery(&self, id: u64, decision: &str, why: &str) -> Result<(), StoreError> {
+        let (d, w) = (decision.to_string(), why.to_string());
+        self.write(move |c| {
+            c.execute(
+                "UPDATE recoveries SET decision = ?2, why = ?3 WHERE id = ?1",
+                params![id as i64, d, w],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// The recovery decisions of a task (or of all tasks, `None`), oldest first.
+    pub fn recoveries(&self, task: Option<u64>) -> Result<Vec<RecoveryRow>, StoreError> {
+        self.read(move |c| {
+            let mut st = c.prepare(
+                "SELECT id, task, at_ms, cause, decision, why, failed_at FROM recoveries \
+                 WHERE (?1 IS NULL OR task = ?1) ORDER BY id",
+            )?;
+            let rows = st.query_map(params![task.map(|t| t as i64)], |r| {
+                Ok(RecoveryRow {
+                    id: r.get::<_, i64>(0)? as u64,
+                    task: r.get::<_, i64>(1)? as u64,
+                    at_ms: r.get::<_, i64>(2)? as u64,
+                    cause: r.get(3)?,
+                    decision: r.get(4)?,
+                    why: r.get(5)?,
+                    failed_at: r.get::<_, i64>(6)? as u64,
+                })
+            })?;
+            rows.collect()
+        })
+    }
+
+    /// Keep the recovery brief of a task (replacing an older one).
+    pub fn set_recovery_brief(
+        &self,
+        task: u64,
+        brief: &str,
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        let brief = brief.to_string();
+        self.write(move |c| {
+            c.execute(
+                "INSERT OR REPLACE INTO recovery_briefs(task, at_ms, brief) VALUES (?1,?2,?3)",
+                params![task as i64, now_ms as i64, brief],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// The recovery brief of a task and when it was written.
+    pub fn recovery_brief(&self, task: u64) -> Result<Option<(String, u64)>, StoreError> {
+        self.read(move |c| {
+            c.query_row(
+                "SELECT brief, at_ms FROM recovery_briefs WHERE task = ?1",
+                params![task as i64],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64)),
+            )
+            .optional()
         })
     }
 

@@ -94,4 +94,19 @@ final class QueueWaitTests: XCTestCase {
         XCTAssertEqual(QueueWait.line(row(29)), "Proposed, held behind 29 tasks (#990, #991, #992, ...)")
         XCTAssertEqual(QueueWait.line(row(3)), "Proposed, held behind #990, #991, #992")
     }
+
+    /// Task 1260: a suite waiting for a node's slot says why, who holds it, its place in line and
+    /// the estimate; the monitor shows the daemon's sentence under the cause's badge.
+    func testANodeWaitShowsReasonHoldersPlaceAndEstimate() {
+        var r = Mason_V1_TaskRow()
+        r.wait.cause = "full"
+        r.wait.resource = "node:abc"
+        r.wait.position = 2
+        r.whyWaiting = "Waiting for a node: node full: every job slot is in use; held by #1136 cargo-workspace for 4 min; 2nd in line; no estimate"
+        let line = QueueWait.line(r)
+        XCTAssertTrue(line.hasPrefix("[\(QueueWait.badge("full"))] Waiting for a node: node full"), line)
+        XCTAssertTrue(line.contains("held by #1136 cargo-workspace for 4 min"), line)
+        XCTAssertTrue(line.contains("2nd in line"), line)
+        XCTAssertTrue(line.hasSuffix("no estimate"), line)
+    }
 }

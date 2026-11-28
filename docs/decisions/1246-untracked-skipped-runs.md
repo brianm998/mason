@@ -1,0 +1,3 @@
+# 1246: stop following a run only by cancelling it
+
+Decision: a run is checked against skip before it is pushed and before it is dispatched, and a run that is stopped while GitHub has not listed it keeps its record (`cancel_pending`) until the reaper cancels it. Why: a dispatch returns no run id, so a cancel right after it finds nothing, and deleting the record then leaves a run nobody counts. The backstop cancels only runs on refs tagged with this coordinator's tag, since GitHub names no coordinator; it cancels nothing when it cannot tell. No gate, budget or verdict changed and no protected file was touched.

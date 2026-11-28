@@ -66,12 +66,33 @@ pub struct Facts<'a> {
     pub applied_recently: bool,
     /// The automatic retry loop already has a retry coming for this failure (`autoretry::pending`).
     pub auto_retry_pending: bool,
+    /// The owner made the call that failed the task (a rejected approval): a card only, never an
+    /// automatic action (task 1111).
+    pub card_only: bool,
+    /// A `repair` was already made for a failure with this signature: it may not repair again.
+    pub repaired_before: bool,
 }
 
 /// Only a `retry` is applied by itself, and then only when the failure was not the task's code
 /// (any project), or when it was and the diagnosis says no code change is needed, once per task
 /// per day. Everything else is a card.
 pub fn decide(f: Facts) -> Action {
+    if f.card_only {
+        return Action::Card;
+    }
+    // The recovery session's own fixes (task 1111): a repair of the task's branch, once per
+    // signature, and the health actions aimed at this one task.
+    match f.verdict {
+        "repair" => {
+            return if f.repaired_before {
+                Action::Card
+            } else {
+                Action::Apply
+            }
+        }
+        "unblock" | "release_holder" => return Action::Apply,
+        _ => {}
+    }
     if f.verdict != "retry" {
         return Action::Card;
     }
@@ -164,7 +185,7 @@ impl Drop for RunMark {
 }
 
 /// The keys an option's action carries.
-const ACTION_KEYS: [&str; 15] = [
+const ACTION_KEYS: [&str; 17] = [
     "action",
     "step",
     "note",
@@ -180,6 +201,8 @@ const ACTION_KEYS: [&str; 15] = [
     "task",
     "where",
     "brief",
+    "summary",
+    "to_step",
 ];
 
 fn pick_keys(o: &Value) -> Value {
@@ -228,6 +251,10 @@ pub fn recommended(a: &Value) -> (String, Value) {
         }
     }
     for k in ["summary", "no_code_change"] {
+        // A `repair` carries its own summary: what the change does.
+        if k == "summary" && args[k].is_string() {
+            continue;
+        }
         args[k] = a[k].clone();
     }
     (act["action"].as_str().unwrap_or("none").to_string(), args)
@@ -451,7 +478,14 @@ pub fn prompt(
          duplicate of another task: give the `evidence`, and `duplicate_of` for a duplicate) or \
          `cancel`. The note in a `retry` or `explore` option is what the next agent is told, so \
          splitting the task, landing a partial change or re-scoping are written as notes on those \
-         actions. Say in the summary why the recommended option beats the others. Set \
+         actions. When the cause is in the task's own branch or worktree state and a small change \
+         puts it right (a merge left half-done, a missed rebase, a one-line compile or fmt error, a \
+         test the change broke in an obvious way), recommend a `repair` with a `summary` of the \
+         change and, if it should not be the step after develop, a `to_step`: another session \
+         makes the change under the develop step's guards and MASON runs the task again from \
+         there, tested and reviewed. A repair is made once per failure; if you cannot fix the task \
+         and have no option you would recommend, give `handoff` with a `brief` instead of \
+         `options`. Say in the summary why the recommended option beats the others. Set \
          `no_code_change` only if the code is right and running it again is expected to pass; \
          MASON then retries by itself. Put the decisive lines in `evidence_lines`, and copy the lines your diagnosis rests on, exactly, into `quote` \
          (1 to 10 lines from the failure, the test logs or the code you blame; a quote that is not found is refused).\n\n\
@@ -493,13 +527,42 @@ pub fn on_failed(d: &Arc<Daemon>, task: TaskId, run: StepRunId) {
 /// Start a diagnosis of a failed task. `manual`: the owner asked, so a pending automatic retry and
 /// the project's switch do not stop it; the budget and a running session still do.
 pub fn start(d: &Arc<Daemon>, task: TaskId, run: StepRunId, manual: bool) -> Result<(), String> {
+    start_with(
+        d,
+        task,
+        run,
+        Opts {
+            manual,
+            ..Default::default()
+        },
+    )
+}
+
+/// How a session was asked for (task 1111).
+#[derive(Clone, Debug, Default)]
+pub struct Opts {
+    /// The owner asked: a pending automatic retry and the project's switch do not stop it.
+    pub manual: bool,
+    /// The failure is the owner's own call: the session ends in a card, whatever it recommends.
+    pub card_only: bool,
+    /// The task is not failed but stuck: the key of the health finding that says so. Such a
+    /// session may only fix by `unblock` or `release_holder`, or hand off.
+    pub stall: Option<String>,
+}
+
+/// [`start`] with its options.
+pub fn start_with(d: &Arc<Daemon>, task: TaskId, run: StepRunId, opts: Opts) -> Result<(), String> {
+    let manual = opts.manual;
     let failed_at = {
         let w = d.world().map_err(|e| e.to_string())?;
         let t = w.tasks.get(&task).ok_or("no such task")?;
-        if t.state != State::Failed {
+        if t.state != State::Failed && opts.stall.is_none() {
             return Err(format!("#{} is not failed", task.0));
         }
-        if !manual {
+        if t.state == State::Failed && opts.stall.is_some() {
+            return Err(format!("#{} has failed since", task.0));
+        }
+        if !manual && t.state == State::Failed {
             if crate::autoretry::pending(d, t) {
                 return Err("an automatic retry is coming".into());
             }
@@ -519,7 +582,7 @@ pub fn start(d: &Arc<Daemon>, task: TaskId, run: StepRunId, manual: bool) -> Res
         .name(format!("diagnose-{}", task.0))
         .spawn(move || {
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                diagnose(&d, task, run, failed_at, &mark)
+                diagnose(&d, task, run, failed_at, &mark, &opts)
             }));
             if r.is_err() {
                 tracing::error!(task = task.0, "the diagnosis panicked");
@@ -529,12 +592,26 @@ pub fn start(d: &Arc<Daemon>, task: TaskId, run: StepRunId, manual: bool) -> Res
         .map_err(|e| e.to_string())
 }
 
-fn diagnose(d: &Arc<Daemon>, task: TaskId, run: StepRunId, failed_at: u64, mark: &RunMark) {
+fn diagnose(
+    d: &Arc<Daemon>,
+    task: TaskId,
+    run: StepRunId,
+    failed_at: u64,
+    mark: &RunMark,
+    opts: &Opts,
+) {
     let Ok(w) = d.world() else { return };
     let Some(t) = w.tasks.get(&task) else { return };
-    if t.state != State::Failed {
+    if t.state != State::Failed && opts.stall.is_none() {
         return;
     }
+    let stalled_in = (t.state != State::Failed).then(|| {
+        format!(
+            "{} for {} min",
+            mason_store::state_name(t.state),
+            now_ms().saturating_sub(t.state_entered_at.0) / 60_000
+        )
+    });
     if d.project(t.project).is_none() {
         return;
     }
@@ -567,18 +644,33 @@ fn diagnose(d: &Arc<Daemon>, task: TaskId, run: StepRunId, failed_at: u64, mark:
         plan.as_ref(),
         &reason,
         &history,
-        match (
-            crate::prompts::tried_block(&crate::tried::rounds(&dir)),
-            crate::prompts::edits_block(&dir),
-        ) {
-            (Some(t), Some(e)) => Some(format!("{t}\n\n{e}")),
-            (t, e) => t.or(e),
+        {
+            let change: Option<Value> = std::fs::read_to_string(dir.join("change.json"))
+                .ok()
+                .and_then(|t| serde_json::from_str(&t).ok());
+            [
+                crate::criteria::block(plan.as_ref(), change.as_ref()),
+                crate::prompts::tried_block(&crate::tried::rounds(&dir)),
+                crate::prompts::edits_block(&dir),
+            ]
+            .into_iter()
+            .flatten()
+            .reduce(|a, b| format!("{a}\n\n{b}"))
         }
         .as_deref(),
         &log_tails(&dir, 3, 40),
         &diffstat,
         &steps,
     );
+    let text = match (&opts.stall, &stalled_in) {
+        (Some(key), Some(how)) => format!(
+            "NOTE: this task has not failed. It is stuck: it has been {how} with no progress \
+             (health finding `{key}`). Look at why. You may fix it only with an option whose \
+             action is `unblock` (release the task's blockers) or `release_holder` (stop its \
+             stuck command host), recommended and applied by MASON by itself, or give `handoff`.\n\n{text}"
+        ),
+        _ => text,
+    };
     let agent = c.project.agent();
     let eff = crate::tiermap::effective(&d.cfg.config_dir, agent.provider, &c.project.overlay_text);
     let (mut spec, ran_on) = session_spec(&text, &c.wt, &c.project, &eff);
@@ -650,6 +742,12 @@ fn diagnose(d: &Arc<Daemon>, task: TaskId, run: StepRunId, failed_at: u64, mark:
             now_ms(),
             failed_at,
         );
+        // Nothing is left behind but the failure line, so the daemon writes the brief itself.
+        crate::recovery::handoff_without_verdict(
+            d,
+            task,
+            "the recovery session ended without a verdict",
+        );
         return;
     };
     let mut submission = submission;
@@ -681,13 +779,37 @@ pub fn session_spec(
     (spec, mason_definition::tiers::diagnose_text(&entry, from))
 }
 
+/// The options with the recommended one first and the others in their order, so the card shows
+/// it first and an option's number means the same on the card and in the stored actions.
+pub fn recommended_first(mut a: Value) -> Value {
+    if let Some(opts) = a["options"].as_array_mut() {
+        // Stable: `false` sorts before `true`, so key on "not recommended".
+        opts.sort_by_key(|o| o["recommended"].as_bool() != Some(true));
+    }
+    a
+}
+
 /// Store a submitted diagnosis, and apply its recommended option or leave the card pending.
 pub fn record_verdict(d: &Arc<Daemon>, task: TaskId, a: Value) {
+    let a = recommended_first(a);
+    // A hand-off stands in for the card: the brief is kept and the owner is told.
+    if a["handoff"].is_object() {
+        crate::recovery::record_handoff(d, task, &a);
+        return;
+    }
     let (verdict, rec_args) = recommended(&a);
     let now = now_ms();
     let Ok(w) = d.world() else { return };
     let Some(t) = w.tasks.get(&task) else { return };
     let failed_at = t.state_entered_at.0;
+    // A task that is stuck, not failed, has no card to answer: only the fixes aimed at it apply,
+    // and anything else is handed off with what the session found.
+    if t.state != State::Failed && !matches!(verdict.as_str(), "unblock" | "release_holder") {
+        drop(w);
+        crate::recovery::handoff_from_card(d, task, &a);
+        return;
+    }
+    let signature = crate::health::signature(t.failure.as_deref().unwrap_or(""));
     let recent = d
         .store
         .diagnoses(Some(task.0))
@@ -701,6 +823,8 @@ pub fn record_verdict(d: &Arc<Daemon>, task: TaskId, a: Value) {
         no_code_change: rec_args["no_code_change"].as_bool().unwrap_or(false),
         applied_recently: recent,
         auto_retry_pending: crate::autoretry::pending(d, t),
+        card_only: crate::recovery::card_only(d, task.0, failed_at),
+        repaired_before: crate::recovery::repaired_before(d, task.0, &signature),
     });
     drop(w);
     let task = task.0;
@@ -811,6 +935,17 @@ pub fn apply_args(
             }
             Ok(said.join(" | "))
         }
+        // A change in the task's own branch, made by a session of its own (task 1111).
+        "repair" => crate::recovery::repair(d, task, a, auto),
+        "unblock" | "release_holder" => crate::health::act(
+            d,
+            verdict,
+            task,
+            s("reason")
+                .or_else(|| s("summary"))
+                .as_deref()
+                .unwrap_or(""),
+        ),
         "file_task" => crate::diagcause::file_task(d, task, a),
         "land_now" => crate::diagcause::land_now(d, task, a),
         "wait_for" => crate::diagcause::wait_for(d, task, a),
@@ -990,6 +1125,7 @@ pub fn alerts(d: &Daemon) -> Vec<(String, String, String)> {
             )
         })
         .chain(crate::diagcause::alerts(d))
+        .chain(crate::recovery::alerts(d))
         .chain(applied_alerts(d))
         .collect()
 }
@@ -1088,7 +1224,47 @@ mod tests {
             no_code_change: false,
             applied_recently: false,
             auto_retry_pending: false,
+            card_only: false,
+            repaired_before: false,
         }
+    }
+
+    #[test]
+    fn the_recommended_option_comes_first_and_the_rest_keep_their_order() {
+        let a = json!({"options": [
+            {"label": "a", "recommended": false},
+            {"label": "b", "recommended": true},
+            {"label": "c", "recommended": false}]});
+        let labels: Vec<String> = recommended_first(a)["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o["label"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(labels, ["b", "a", "c"]);
+    }
+
+    #[test]
+    fn a_repair_is_applied_once_per_signature_and_never_when_the_owner_made_the_call() {
+        let mut f = facts(false, FailClass::Code, "repair");
+        assert_eq!(decide(f), Action::Apply);
+        f.repaired_before = true;
+        assert_eq!(
+            decide(f),
+            Action::Card,
+            "a second failure may not repair again"
+        );
+        let mut f = facts(false, FailClass::Code, "repair");
+        f.card_only = true;
+        assert_eq!(
+            decide(f),
+            Action::Card,
+            "an owner's rejection is a card only"
+        );
+        assert_eq!(
+            decide(facts(false, FailClass::Code, "unblock")),
+            Action::Apply
+        );
     }
 
     #[test]

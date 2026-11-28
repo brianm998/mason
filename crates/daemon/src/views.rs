@@ -459,7 +459,8 @@ impl<'a> Ctx<'a> {
     fn why_waiting(&self, t: &Task) -> String {
         // The sentence comes with the structured wait, from the same plan.
         if let Some(i) = self.wait_view.tasks.get(&t.id.0) {
-            return i.sentence.clone();
+            return crate::nodewait::line_for(self.d, i, self.now)
+                .unwrap_or_else(|| i.sentence.clone());
         }
         if let Some(w) = self.waits.get(&t.id) {
             return w.clone();
@@ -594,6 +595,13 @@ impl<'a> Ctx<'a> {
                 .tasks
                 .get(&t.id.0)
                 .cloned()
+                .map(|mut i| {
+                    // A wait for a node's unit says why, who holds it and the estimate (#1260).
+                    if let Some(l) = crate::nodewait::line_for(self.d, &i, self.now) {
+                        i.sentence = l;
+                    }
+                    i
+                })
                 .or_else(|| self.red_wait(t)),
             enqueued_ms: t.enqueued_at.0,
             // Whole minutes, so a sidebar that changed in nothing else hashes the same.
@@ -1234,6 +1242,7 @@ impl<'a> Ctx<'a> {
                 })
                 .collect(),
             remote: remote_summary(self.d, &holds),
+            runner_pools: runner_pools(self.d),
             developing: {
                 let kinds: Vec<mason_core::checks::PhaseKind> = tasks
                     .iter()
@@ -1343,7 +1352,19 @@ impl<'a> Ctx<'a> {
         let tail = log_tail(self.d, id);
         let plan =
             std::fs::read_to_string(self.d.cfg.task_dir(id).join("plan.json")).unwrap_or_default();
-        let plan_view = (!plan.is_empty()).then(|| crate::plan_view::parse_plan(&plan));
+        let mut plan_view = (!plan.is_empty()).then(|| crate::plan_view::parse_plan(&plan));
+        // Develop's status for each criterion, once it has reported (task 1136).
+        if let (Some(v), Ok(p), Some(ch)) = (
+            plan_view.as_mut(),
+            serde_json::from_str::<serde_json::Value>(&plan),
+            std::fs::read_to_string(self.d.cfg.task_dir(id).join("change.json"))
+                .ok()
+                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()),
+        ) {
+            if crate::criteria::is_graded(&p) {
+                v.criteria = crate::criteria::lines(&p, Some(&ch));
+            }
+        }
         let removes = crate::landing::removals_view(&self.d.cfg.task_dir(id));
         Some(TaskDetailView {
             running_on: self.running_on(id),
@@ -2348,6 +2369,58 @@ fn queued_why(
         Some((_, w)) if w > 0 => format!("waiting for the {w}s window to close"),
         _ => "waiting for the next batch".into(),
     }
+}
+
+/// The `gha` and `gha-macos` pools for the monitors' limit control (#1261): the limit, the
+/// account ceiling, MASON's units and the other workflows', and how many requests wait. Always
+/// sent, so an idle view can still raise the limit. A pool the daemon has no capacity for is left
+/// out.
+pub fn runner_pools(d: &crate::daemon::Daemon) -> Vec<mason_protocol::RunnerPool> {
+    let snap = d.broker.snapshot();
+    let gha = &snap["gha"];
+    let num = |v: &serde_json::Value| v.as_u64().unwrap_or(0).min(u64::from(u32::MAX)) as u32;
+    let mut waiting = [0u32; 2];
+    for w in gha["waiters"].as_array().into_iter().flatten() {
+        for (i, name) in [mason_scheduler::GHA, mason_scheduler::GHA_MACOS]
+            .iter()
+            .enumerate()
+        {
+            if w["uses"].get(*name).is_some() {
+                waiting[i] += 1;
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for (i, name) in [mason_scheduler::GHA, mason_scheduler::GHA_MACOS]
+        .into_iter()
+        .enumerate()
+    {
+        let Some(limit) = d.broker.limit(name) else {
+            continue;
+        };
+        let (ceiling, other) = if i == 0 {
+            (num(&gha["ceiling"]), num(&gha["other"]))
+        } else {
+            (num(&gha["macos"]["ceiling"]), num(&gha["macos"]["other"]))
+        };
+        let used = d.broker.used(name);
+        // MASON's share: what is held beyond the other workflows' jobs and the part of the limit
+        // above the ceiling.
+        let phantom = other.min(limit)
+            + limit
+                .saturating_sub(ceiling)
+                .min(limit.saturating_sub(other.min(limit)));
+        out.push(mason_protocol::RunnerPool {
+            name: name.into(),
+            limit,
+            ceiling,
+            used,
+            mason: used.saturating_sub(phantom),
+            other,
+            waiting: waiting[i],
+        });
+    }
+    out
 }
 
 /// The runs out on GitHub now, by pool and by what they are for. `None` when there are none.

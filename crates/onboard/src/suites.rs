@@ -83,6 +83,100 @@ pub fn propose(root: &Path, languages: &[String]) -> Vec<SuiteSpec> {
             _ => {}
         }
     }
+    out.extend(propose_below(root, languages));
+    out
+}
+
+/// Folders that never hold a project of their own.
+const SKIP_DIRS: [&str; 7] = [
+    "node_modules",
+    "target",
+    "build",
+    "Pods",
+    "vendor",
+    "dist",
+    "DerivedData",
+];
+
+/// A suite name for a folder: lowercase letters, digits, `-` and `_`.
+fn dir_slug(dir: &str) -> String {
+    dir.chars()
+        .map(|c| {
+            let c = c.to_ascii_lowercase();
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+/// Suites for Swift packages, Cargo, Go and Gradle projects one folder down, for a repository
+/// whose root has none of that kind (a language already found at the root is proposed there).
+/// Each runs in its own folder (`cd <dir> && ...`) and is named `<language>-<dir>`.
+fn propose_below(root: &Path, languages: &[String]) -> Vec<SuiteSpec> {
+    let mut dirs: Vec<String> = std::fs::read_dir(root)
+        .map(|rd| {
+            rd.flatten()
+                .filter(|e| e.path().is_dir())
+                .filter_map(|e| e.file_name().into_string().ok())
+                .filter(|n| !n.starts_with('.') && !SKIP_DIRS.contains(&n.as_str()))
+                .filter(|n| !n.ends_with(".xcodeproj") && !n.ends_with(".xcworkspace"))
+                .collect()
+        })
+        .unwrap_or_default();
+    dirs.sort();
+    let at_root = |l: &str| languages.iter().any(|x| x == l);
+    let mut out = vec![];
+    for dir in dirs {
+        let d = root.join(&dir);
+        let has = |f: &str| d.join(f).is_file();
+        let cd = format!("cd {} && ", shell_quote(&dir));
+        let slug = dir_slug(&dir);
+        if has("Package.swift") && !root.join("Package.swift").exists() {
+            out.push(spec(
+                &format!("swift-{slug}"),
+                &format!("{cd}swift test 2>&1"),
+                "xctest",
+                None,
+                None,
+            ));
+        }
+        if has("Cargo.toml") && !at_root("rust") {
+            out.push(spec(
+                &format!("rust-{slug}"),
+                &format!("{cd}cargo test 2>&1"),
+                "regex",
+                Some(r"^test (.+) \.\.\. ok$"),
+                Some(r"^test (.+) \.\.\. FAILED$"),
+            ));
+        }
+        if has("go.mod") && !at_root("go") {
+            out.push(spec(
+                &format!("go-{slug}"),
+                &format!("{cd}go test -v ./... 2>&1"),
+                "regex",
+                Some(r"^--- PASS: (\S+)"),
+                Some(r"^--- FAIL: (\S+)"),
+            ));
+        }
+        if (has("build.gradle") || has("build.gradle.kts") || has("gradlew")) && !at_root("gradle")
+        {
+            let tool = if has("gradlew") {
+                "./gradlew"
+            } else {
+                "gradle"
+            };
+            out.push(spec(
+                &format!("gradle-{slug}"),
+                &format!("{cd}{tool} test --console=plain 2>&1"),
+                "regex",
+                Some(r"^(.+) PASSED$"),
+                Some(r"^(.+) FAILED$"),
+            ));
+        }
+    }
     out
 }
 
@@ -280,6 +374,33 @@ pub fn render_baselines(all: &[Baseline]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn packages_one_folder_down_get_suites_that_run_in_their_folders() {
+        let d = tempfile::tempdir().unwrap();
+        for (f, name) in [
+            ("Kit/Package.swift", "swift-kit"),
+            ("core/Cargo.toml", "rust-core"),
+            ("svc/go.mod", "go-svc"),
+            ("app/gradlew", "gradle-app"),
+        ] {
+            let p = d.path().join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, "").unwrap();
+            let _ = name;
+        }
+        std::fs::create_dir_all(d.path().join("node_modules/x")).unwrap();
+        std::fs::write(d.path().join("node_modules/x/Cargo.toml"), "").unwrap();
+        let p = propose(d.path(), &[]);
+        let names: Vec<&str> = p.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["swift-kit", "gradle-app", "rust-core", "go-svc"]);
+        let swift = p.iter().find(|s| s.name == "swift-kit").unwrap();
+        assert_eq!(swift.command, "cd Kit && swift test 2>&1");
+        assert!(p.iter().all(|s| s.command.starts_with("cd ")));
+        // A language found at the root is proposed there, not again below.
+        let p = propose(d.path(), &["rust".to_string()]);
+        assert!(p.iter().any(|s| s.name == "rust") && !p.iter().any(|s| s.name == "rust-core"));
+    }
 
     #[test]
     fn suites_are_proposed_by_language_and_python_follows_pytest() {

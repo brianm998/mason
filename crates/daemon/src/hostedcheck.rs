@@ -742,7 +742,11 @@ pub fn node_units(
     spec: &CheckSpec,
 ) -> Option<std::collections::BTreeMap<String, u32>> {
     let (nid, _) = node_for(d, spec)?;
-    Some(crate::remote::node_units_of(&nid))
+    let project = crate::remote::project_of(d, &spec.cwd).unwrap_or_default();
+    let suite = spec.place.as_ref().map_or("", |(_, s)| s.name.as_str());
+    Some(crate::remote::node_units_waiting(
+        d, &project, suite, &spec.cmd, &nid,
+    ))
 }
 
 /// Asked while a check waits for runner units: the unit of a node that has room for it now, or

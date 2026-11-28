@@ -446,12 +446,8 @@ impl Ctx {
                     reason,
                     class,
                 });
-                // Every failure gets one look from a diagnosis session (s250, s1048), unless a
-                // retry is already coming.
-                // A landing failure, or the same outside failure again, is looked at as a cause
-                // (s1176) first: it takes the task's diagnosis mark, so #1044's does not also run.
-                crate::diagcause::on_step_failed(&self.d, self.task, self.run, self.state);
-                crate::diagnose::on_failed(&self.d, self.task, self.run);
+                // The recovery entry point looks at it from `Daemon::emit` (task 1111): every
+                // way into Failed goes through there, this one included.
             }
         }
         self.release_lease();
@@ -695,6 +691,8 @@ pub fn run(d: &Arc<Daemon>, task: TaskId, step: State, run: StepRunId) {
 }
 
 fn run_inner(d: &Arc<Daemon>, task: TaskId, step: State, run: StepRunId) {
+    // A test hook (`MASON_PANIC_AT=job`): the job's thread panics, as a pipeline bug would.
+    d.crash.panic_point("job");
     let c = match ctx(d, task, run) {
         Ok(c) => c,
         Err(why) => {
@@ -1583,6 +1581,52 @@ pub(crate) fn tool_timeout_for(kind: StepKind, project: &ProjectCfg) -> Duration
             .max(project.test_timeout + Duration::from_secs(60)),
         _ => project.tool_timeout,
     }
+}
+
+/// The contract of a recovery session that repairs a task's branch (task 1111): a develop
+/// step's own `run_check` and the same guards on `submit_change` (protected paths, no weakening
+/// edits, a head that is the branch's tip, a clean tree), and nothing else. The repair is not
+/// pushed or landed here: the task runs on from a step, which tests and reviews it.
+pub(crate) fn repair_contract(c: &Ctx) -> ContractHandle {
+    let tests_cmd = test_commands(&c.d, &c.def, c.project_id, Some(c.task));
+    let extra = mason_adapter_api::DeadlineExtra::kept_in(
+        c.task_dir().join(format!("repair-credit-r{}", c.run.0)),
+    );
+    let checks = Box::new(TestChecks {
+        cmd: tests_cmd,
+        wt: c.wt.clone(),
+        timeout: c.live().test_timeout,
+        slots: CheckSlots::new(c),
+        extra,
+        id_prefix: format!("t{}r{}-repair-check", c.task.0, c.run.0),
+        log_dir: c.task_dir(),
+        suites: DevSuites::of(&c.def, c.project.base_ref()),
+        task: c.task.0,
+        run: c.run.0,
+        base_fold: None,
+        project: c.project.id.clone(),
+        reds: Default::default(),
+        last_red: std::sync::Mutex::new(None),
+        check_failing: Default::default(),
+        replay: Default::default(),
+    });
+    let validator = change_validator(
+        c.wt.clone(),
+        c.project.base_ref(),
+        c.branch.clone(),
+        c.d.caps_for(&c.project),
+        c.project.self_cfg.as_ref().map(|s| WeakeningCheck {
+            base: c.project.base.clone(),
+            holds: s.holds,
+            note_file: c
+                .task_dir()
+                .join(format!("weakening-note-repair-r{}.txt", c.run.0)),
+        }),
+        None,
+        crate::contentscan::Source::new(&c.d.cfg.config_dir, &c.project.id),
+        Box::new(|| false),
+    );
+    ContractHandle::with_validator(StepKind::Develop, checks, Some(validator))
 }
 
 /// The tool-call limit of a develop agent once the step's budget is known. A `run_check`
@@ -4315,6 +4359,19 @@ fn agent_job(c: &Ctx) {
         _ => prompt,
     };
 
+    // The acceptance criteria with develop's report, for review (task 1136).
+    let prompt = if kind == StepKind::Review {
+        let change: Option<Value> = std::fs::read_to_string(dir.join("change.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok());
+        match crate::criteria::block(plan.as_ref(), change.as_ref()) {
+            Some(b) => format!("{prompt}\n\n{b}"),
+            None => prompt,
+        }
+    } else {
+        prompt
+    };
+
     // The minor findings of an approval, for the develop round that follows one, if any does.
     let prompt = match crate::reviewfindings::pending_advice(&dir) {
         Some(a) if kind == StepKind::Develop => format!("{prompt}\n\n{a}"),
@@ -4500,6 +4557,29 @@ fn agent_job(c: &Ctx) {
                     Err(p)
                 }
             })
+        })
+    });
+    // Each acceptance criterion is reported on by develop and graded by review (task 1136).
+    let validator = validator.map(|inner| -> Validator {
+        let (plan, dir) = (plan.clone(), dir.clone());
+        Box::new(move |tool, args| {
+            let mut p = inner(tool, args).err().unwrap_or_default();
+            if let Some(plan) = &plan {
+                if tool == "submit_change" {
+                    p.extend(crate::criteria::change_problems(plan, args));
+                } else if tool == "submit_review" {
+                    let change: Value = std::fs::read_to_string(dir.join("change.json"))
+                        .ok()
+                        .and_then(|t| serde_json::from_str(&t).ok())
+                        .unwrap_or_default();
+                    p.extend(crate::criteria::review_problems(plan, &change, args));
+                }
+            }
+            if p.is_empty() {
+                Ok(())
+            } else {
+                Err(p)
+            }
         })
     });
     // A head whose tree was red on the test step, unchanged since, is not submitted again.
@@ -5058,6 +5138,10 @@ fn settle_all(
     let mut fresh_after_gone = false;
     let mut silent = false;
     let mut signaled_retries = 0usize;
+    // How long this step run has waited for its API to be reachable, in all (#1257).
+    let mut api_waited = Duration::ZERO;
+    let mut api_waits = 0usize;
+    let mut api_lost = false;
     // Lost invocations before a resumed session that reached its own end: they are
     // not counted toward the restart budget again (s399).
     let mut forgiven = 0usize;
@@ -5124,6 +5208,49 @@ fn settle_all(
                 signaled_retries += 1;
                 report.session_id.is_none()
             }
+            StepEnd::Failed(FailReason::Crash { detail })
+                if crate::net::agent_unreachable(detail) =>
+            {
+                // The network, not the agent: noted for the one outage alert, then waited out
+                // and resumed. It uses up no round, no failure and no automatic retry.
+                c.d.net.note(now_ms(), c.task.0);
+                let cfg = &c.d.cfg;
+                let wait = cfg
+                    .network_backoff
+                    .get(api_waits)
+                    .or(cfg.network_backoff.last())
+                    .copied()
+                    .unwrap_or(Duration::from_secs(10));
+                if api_waited >= cfg.network_agent_hold {
+                    let detail = format!(
+                        "{} after waiting {} s: {detail}",
+                        mason_core::AGENT_UNREACHABLE,
+                        api_waited.as_secs()
+                    );
+                    report.end = StepEnd::Failed(FailReason::Crash { detail });
+                    return Some(report);
+                }
+                tracing::warn!(
+                    task = c.task.0,
+                    "the agent could not reach its API, resuming in {} s: {detail}",
+                    wait.as_secs()
+                );
+                let note = format!(
+                    "the network failed ({}); waiting {} s before resuming",
+                    detail.chars().take(120).collect::<String>(),
+                    wait.as_secs()
+                );
+                c.d.progress_report(c.run, |p, now| p.set_message(&note, now));
+                c.release_lease();
+                std::thread::sleep(wait);
+                api_waited += wait;
+                api_waits += 1;
+                api_lost = true;
+                if get_lease(c).is_err() {
+                    return None;
+                }
+                report.session_id.is_none()
+            }
             _ => return Some(report),
         };
         if fresh {
@@ -5135,7 +5262,11 @@ fn settle_all(
             resumed = false;
         } else {
             rec.write(c, "resume", spec);
-            let note = if std::mem::take(&mut silent) {
+            let note = if std::mem::take(&mut api_lost) {
+                "The network was down and your last request could not reach the API. Nothing you \
+                 committed is gone. Continue the step where you were, and finish it."
+                    .to_string()
+            } else if std::mem::take(&mut silent) {
                 hl::silent_note()
             } else {
                 hl::interrupted_note(lost_at)
@@ -5260,6 +5391,13 @@ fn finish_agent_inner(c: &Ctx, report: StepReport, dir: &Path) {
                 .ok()
                 .and_then(|t| serde_json::from_str(&t).ok());
             let mut submission = submission;
+            if c.state == State::Review {
+                let change: Option<serde_json::Value> =
+                    std::fs::read_to_string(dir.join("change.json"))
+                        .ok()
+                        .and_then(|t| serde_json::from_str(&t).ok());
+                submission = crate::criteria::apply_review(plan.as_ref(), change.as_ref(), submission);
+            }
             if c.state == State::Review && submission["verdict"] == "changes" {
                 match crate::validate::run(c, plan.as_ref(), &submission) {
                     crate::validate::Outcome::Stands => {}
@@ -5418,56 +5556,70 @@ fn command_job(c: &Ctx) {
     // A test step with a build builds first, holding one `compile` slot, and
     // lets it go before the tests run: they hold what the step uses without
     // `compile`, so a long test run leaves the build slot to the next task.
-    let held = match builds_first(c) {
-        None => c.step.uses.clone(),
-        Some(build) => {
-            let uses = build_uses();
-            let reused = reuse_build(c, &build);
-            if !reused && !started(c, "build", 0) {
-                match acquire_needs(c, crate::sched::needs_of(&uses, None)) {
-                    Ok(l) => *c.lease.lock().unwrap_or_else(|e| e.into_inner()) = Some(l),
-                    Err(_) => return,
-                }
+    // Placement says this test step leaves the coordinator (a node, or GitHub): its build and
+    // its command go out as one run, and nothing of it runs here (#1237).
+    let placed = is_test && placed_test(c);
+    let mut placed_build: Option<String> = None;
+    let held = if placed {
+        match placed_hold(c, &cmd) {
+            Some((held, build)) => {
+                placed_build = build;
+                held
             }
-            if !reused {
-                let built =
-                    run_command_once(c, &build, "build", 0, &uses, &format!("{what}'s build"));
-                c.release_lease();
-                if let Some(t) = crate::cmdreuse::content_tree(&c.wt) {
-                    let bk = crate::cmdreuse::build_key(&build);
-                    if matches!(
-                        &built,
-                        Ok(CommandRun {
-                            verdict: RunVerdict::Green,
-                            ..
-                        })
-                    ) {
-                        crate::cmdreuse::record_build_green(&c.d, &t, &bk, &c.wt);
-                    } else {
-                        crate::cmdreuse::record_build_red(&c.d, &t, &bk, &c.wt);
+            None => return,
+        }
+    } else {
+        match builds_first(c) {
+            None => c.step.uses.clone(),
+            Some(build) => {
+                let uses = build_uses();
+                let reused = reuse_build(c, &build);
+                if !reused && !started(c, "build", 0) {
+                    match acquire_needs(c, crate::sched::needs_of(&uses, None)) {
+                        Ok(l) => *c.lease.lock().unwrap_or_else(|e| e.into_inner()) = Some(l),
+                        Err(_) => return,
                     }
                 }
-                match built {
-                    Err(why) => return c.fail(why),
-                    Ok(CommandRun {
-                        verdict:
-                            RunVerdict::Red {
-                                reason, feedback, ..
-                            },
-                        ..
-                    }) => return c.conclude(Outcome::Red, reason, Some(feedback)),
-                    Ok(_) => {}
+                if !reused {
+                    let built =
+                        run_command_once(c, &build, "build", 0, &uses, &format!("{what}'s build"));
+                    c.release_lease();
+                    if let Some(t) = crate::cmdreuse::content_tree(&c.wt) {
+                        let bk = crate::cmdreuse::build_key(&build);
+                        if matches!(
+                            &built,
+                            Ok(CommandRun {
+                                verdict: RunVerdict::Green,
+                                ..
+                            })
+                        ) {
+                            crate::cmdreuse::record_build_green(&c.d, &t, &bk, &c.wt);
+                        } else {
+                            crate::cmdreuse::record_build_red(&c.d, &t, &bk, &c.wt);
+                        }
+                    }
+                    match built {
+                        Err(why) => return c.fail(why),
+                        Ok(CommandRun {
+                            verdict:
+                                RunVerdict::Red {
+                                    reason, feedback, ..
+                                },
+                            ..
+                        }) => return c.conclude(Outcome::Red, reason, Some(feedback)),
+                        Ok(_) => {}
+                    }
                 }
-            }
-            let uses = tests_uses(&c.step.uses);
-            let needs = crate::sched::needs_of(&uses, None);
-            if (needs.exclusive || !needs.amounts.is_empty()) && !started(c, suffix, 0) {
-                match acquire_needs(c, needs) {
-                    Ok(l) => *c.lease.lock().unwrap_or_else(|e| e.into_inner()) = Some(l),
-                    Err(_) => return,
+                let uses = tests_uses(&c.step.uses);
+                let needs = crate::sched::needs_of(&uses, None);
+                if (needs.exclusive || !needs.amounts.is_empty()) && !started(c, suffix, 0) {
+                    match acquire_needs(c, needs) {
+                        Ok(l) => *c.lease.lock().unwrap_or_else(|e| e.into_inner()) = Some(l),
+                        Err(_) => return,
+                    }
                 }
+                uses
             }
-            uses
         }
     };
     let reruns = if is_test { c.live().test_reruns } else { 0 };
@@ -5482,8 +5634,15 @@ fn command_job(c: &Ctx) {
     // Set when a filtered rerun ran none of the tests it was given: run it all.
     let mut filter_off = false;
     for k in 0..=reruns {
-        let run = match run_command_once(c, &this_cmd, suffix, k, &held, &what) {
+        let ran = if placed {
+            run_placed(c, &this_cmd, placed_build.as_deref(), suffix, k, &what)
+        } else {
+            run_command_once(c, &this_cmd, suffix, k, &held, &what)
+        };
+        let run = match ran {
             Ok(r) => r,
+            // A daemon that is stopping says nothing of the step: it is run again after.
+            Err(_) if placed && c.d.is_shutting_down() => return,
             Err(why) => return c.fail(why),
         };
         let log = run.log.clone();
@@ -5845,6 +6004,207 @@ impl From<String> for Unfinished {
     fn from(s: String) -> Self {
         Unfinished::Other(s)
     }
+}
+
+/// The test step as a suite, for placement alone: its name and what it uses, none of a
+/// suite's own settings. Placement then asks what it asks of any check of this task, and a
+/// step that uses `exclusive` stays here by the rule every run answers to.
+fn placed_suite(c: &Ctx) -> mason_testing::Suite {
+    let mut s = mason_testing::Suite::new(&c.step.name, "", mason_testing::ParserKind::Junit);
+    s.uses = c.step.uses.clone();
+    s
+}
+
+/// Does placement send this test step (one without suites: its `build`, then its `test`
+/// command) off the coordinator, to a node or to GitHub? The task's own `run_on` first, then
+/// the project's mode and the global switch, as every other run of the project asks (#1237).
+fn placed_test(c: &Ctx) -> bool {
+    c.step.kind == StepType::Test
+        && c.step.suites.is_empty()
+        && crate::remote::executor_for(
+            &c.d,
+            &c.project.id,
+            crate::remote::Kind::Check,
+            Some((Some(c.task), &placed_suite(c))),
+        )
+        .is_off_machine()
+}
+
+/// The run of a placed test step, in the shape every placed check has: the one function
+/// that decides where runs go sends it, and a node or GitHub that gives no result is waited
+/// for, not judged (`hostedcheck`).
+fn placed_spec(
+    c: &Ctx,
+    cmd: &str,
+    build: Option<&str>,
+    held: &std::collections::BTreeMap<String, u32>,
+) -> crate::hostedcheck::CheckSpec {
+    let mut env = step_env_pairs(c);
+    for (k, v) in env.iter_mut() {
+        if k == "MASON_HELD" {
+            *v = held_text(held);
+        }
+    }
+    let (d, task, run) = (c.d.clone(), c.task, c.run);
+    crate::hostedcheck::CheckSpec {
+        id_prefix: format!("t{}r{}-test", c.task.0, c.run.0),
+        log_dir: c.task_dir(),
+        cmd: cmd.to_string(),
+        build: build.map(str::to_string),
+        cwd: c.wt.clone(),
+        env,
+        limit: c
+            .res
+            .budget
+            .as_ref()
+            .map_or(c.live().test_timeout, |a| a.value),
+        tree: crate::hostedcheck::tree_key(&c.wt),
+        holds: held.clone(),
+        label: format!("#{} {}", c.task.0, c.step.name),
+        // The step's run was ended (cancelled, retried): nobody collects the result.
+        stop: Some(Arc::new(move || match d.world() {
+            Ok(w) if w.open_run(task) != Some(run) => Some("the step's run ended".to_string()),
+            _ => None,
+        })),
+        place: Some((Some(c.task), Box::new(placed_suite(c)))),
+        global: false,
+    }
+}
+
+/// What a placed test step holds before it runs, and the build that goes out with it. Its
+/// lease asks for the node's unit or GitHub's runner units, never this machine's slots; a run
+/// already out after a restart is attached to and asks for nothing. `None`: the step ended
+/// while it waited.
+fn placed_hold(
+    c: &Ctx,
+    cmd: &str,
+) -> Option<(std::collections::BTreeMap<String, u32>, Option<String>)> {
+    let build = builds_first(c).filter(|b| !reuse_build(c, b));
+    let held = c.step.uses.clone();
+    let have = c.lease.lock().unwrap_or_else(|e| e.into_inner()).is_some();
+    if !have {
+        let spec = placed_spec(c, cmd, build.as_deref(), &held);
+        if !crate::hostedcheck::pending(&c.d, &spec) {
+            match acquire(c) {
+                Ok(l) => *c.lease.lock().unwrap_or_else(|e| e.into_inner()) = Some(l),
+                Err(_) => return None,
+            }
+        }
+    }
+    Some((held, build))
+}
+
+/// One run of a placed test step's command (with its build, when it has one that was not
+/// reused) on a node or GitHub, judged as the local run is: green by its exit, red with its
+/// output, a timeout red. A run that gave no result because the node or GitHub could not
+/// is waited out and run again, and past the limit is an error, never a red (#1237).
+fn run_placed(
+    c: &Ctx,
+    cmd: &str,
+    build: Option<&str>,
+    suffix: &str,
+    k: u32,
+    what: &str,
+) -> Result<CommandRun, String> {
+    let spec = placed_spec(c, cmd, build, &c.step.uses);
+    let grant = match c.lease.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        Some(l) => crate::remote::Grant::borrowed(Some(l.giver()), l.units()),
+        None => crate::remote::Grant::attached(),
+    };
+    let pr = crate::hostedcheck::CheckProgress {
+        run: c.run,
+        // No entry of a develop check history: this is a step, its counts are the step's.
+        check: usize::MAX,
+        name: c.step.name.clone(),
+        suite: None,
+    };
+    let said = |t: &str| c.d.progress_report(c.run, |p, now| p.set_message(t, now));
+    said(&format!(
+        "{what} runs {}",
+        crate::hostedcheck::where_ran(&c.d, &spec)
+    ));
+    const GIVE_UP_S: u64 = 30 * 60;
+    let (mut waited, mut nap) = (0u64, 30u64);
+    let o = loop {
+        match crate::hostedcheck::run_with(&c.d, &spec, Some(&pr), &grant) {
+            Ok(o) => break o,
+            Err(e)
+                if crate::hostedcheck::is_outage(&e)
+                    && waited < GIVE_UP_S
+                    && !c.d.is_shutting_down() =>
+            {
+                said(&format!(
+                    "{what}: {} (waited {waited} s)",
+                    e.trim_start_matches(crate::hostedcheck::OUTAGE_PREFIX)
+                ));
+                std::thread::sleep(Duration::from_secs(nap));
+                waited += nap;
+                nap = (nap * 2).min(300);
+            }
+            Err(e) => return Err(e),
+        }
+    };
+    if o.stopped.is_some() {
+        return Err("the step's run ended while its command ran".into());
+    }
+    // The log where the local run puts it, and where it ran.
+    let log = c
+        .task_dir()
+        .join(format!("{suffix}-r{}{}.log", c.run.0, again(k)));
+    let src = spec.log_dir.join(format!("{}.log", o.id));
+    if std::fs::copy(&src, &log).is_err() {
+        let _ = std::fs::write(&log, &o.full);
+    }
+    let ran = o
+        .output
+        .lines()
+        .next()
+        .filter(|l| l.starts_with('(') && l.ends_with(')'))
+        .map_or_else(
+            || "on this Mac".to_string(),
+            |l| l.trim_matches(|ch| ch == '(' || ch == ')').to_string(),
+        );
+    let note = format!("{what} ran ({ran})");
+    let _ = std::fs::write(
+        c.task_dir()
+            .join(format!("{suffix}-r{}{}.ran", c.run.0, again(k))),
+        &note,
+    );
+    said(&note);
+    c.d.progress_catch_up(c.run, &again(k), &log);
+    // What it says of the build is recorded for the tree, as `run_check`'s is.
+    if let (Some(b), Some(t)) = (build, crate::cmdreuse::content_tree(&c.wt)) {
+        let bk = crate::cmdreuse::build_key(b);
+        if o.passed || o.phase.as_deref() == Some("run") {
+            crate::cmdreuse::record_build_green(&c.d, &t, &bk, &c.wt);
+        } else if o.phase.as_deref() == Some("build") {
+            crate::cmdreuse::record_build_red(&c.d, &t, &bk, &c.wt);
+        }
+    }
+    let output = tail(&o.full, 60);
+    let verdict = if o.passed {
+        RunVerdict::Green
+    } else if o.timed_out {
+        let why = format!("timed out after {} s", spec.limit.as_secs());
+        RunVerdict::Red {
+            reason: format!("{what} failed ({why})"),
+            feedback: format!("{what} failed ({why}). Last output:\n{output}"),
+            rerun: false,
+        }
+    } else if build.is_some() && o.phase.as_deref() == Some("build") {
+        RunVerdict::Red {
+            reason: format!("{what}'s build failed"),
+            feedback: format!("{what}'s build failed. Last output:\n{output}"),
+            rerun: false,
+        }
+    } else {
+        RunVerdict::Red {
+            reason: format!("{what} failed ({ran})"),
+            feedback: format!("{what} failed ({ran}). Last output:\n{output}"),
+            rerun: true,
+        }
+    };
+    Ok(CommandRun { verdict, log })
 }
 
 /// Run the command once (the `k`th time). If its host is lost before the command
@@ -6339,7 +6699,7 @@ pub fn conclude_approval(
             keep();
             EventKind::StepFailed {
                 task,
-                reason: format!("rejected by the owner: {reason} ({why})"),
+                reason: format!("{}{reason} ({why})", crate::recovery::REJECTED_PREFIX),
                 class: Some(FailClass::Code),
             }
         }
