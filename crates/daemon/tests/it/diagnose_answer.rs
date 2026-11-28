@@ -108,6 +108,7 @@ impl World {
 }
 
 /// Four options, one of each action; `cancel` is recommended so nothing applies by itself.
+/// The card lists the recommended option first, so answer by label, not by number.
 fn submission() -> Value {
     json!({"summary": "the gate file is missing", "options": [
         {"label": "Retry with the gate", "recommended": false, "action": "retry",
@@ -314,7 +315,13 @@ fn a_retry_option_retries_with_the_note_and_the_context() {
     let t = failed(&d, "Retried by the card");
     let hash = diagnose(&d, t);
     w.open_gate();
-    let (code, body) = answer(&d, t, "1", &hash, Some("CTX-RETRY use the small fix"));
+    let (code, body) = answer(
+        &d,
+        t,
+        "Retry with the gate",
+        &hash,
+        Some("CTX-RETRY use the small fix"),
+    );
     assert_eq!(code, 200, "{body}");
     let stored = "Retry with the gate\nOwner's context: CTX-RETRY use the small fix";
     assert_eq!(body["answer"], stored);
@@ -374,7 +381,7 @@ fn the_explore_close_and_cancel_options_do_what_they_say() {
 
     let t = failed(&d, "Closed");
     let hash = diagnose(&d, t);
-    let (code, body) = answer(&d, t, "3", &hash, Some("CTX-CLOSE"));
+    let (code, body) = answer(&d, t, "Close it as done", &hash, Some("CTX-CLOSE"));
     assert_eq!(code, 200, "{body}");
     let k = task_of(&d, t);
     assert_eq!(k.state, State::Landed);
@@ -397,7 +404,7 @@ fn the_explore_close_and_cancel_options_do_what_they_say() {
 
     let t = failed(&d, "Canceled");
     let hash = diagnose(&d, t);
-    let (code, body) = answer(&d, t, "4", &hash, None);
+    let (code, body) = answer(&d, t, "Cancel the task", &hash, None);
     assert_eq!(code, 200, "{body}");
     assert_eq!(body["answer"], "Cancel the task");
     assert_eq!(task_of(&d, t).state, State::Canceled);
