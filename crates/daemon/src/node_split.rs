@@ -121,6 +121,10 @@ pub fn execute_split(
     let next = AtomicUsize::new(0);
     let out_now = AtomicUsize::new(0);
     let abort = AtomicBool::new(false);
+    // Set once any job of this run has been placed. The other workers begin only then, so a node
+    // with no room for the first job gives the run back, and a later job that finds the node full
+    // knows that one of this run's own jobs is out (#1252).
+    let placed = AtomicBool::new(false);
     let done: Mutex<Vec<(usize, Finished)>> = Mutex::new(vec![]);
     let failed: Mutex<Option<Fail>> = Mutex::new(None);
     let stopped: Mutex<Option<StopWhy>> = Mutex::new(None);
@@ -135,11 +139,24 @@ pub fn execute_split(
     let tries = room_tries();
     let pause = crate::node_exec::poll_interval() * 2;
     std::thread::scope(|sc| {
-        for _ in 0..width.clamp(1, jobs.len().max(1)) {
+        for worker in 0..width.clamp(1, jobs.len().max(1)) {
             let tx = tx.clone();
-            let (next, out_now, abort, done, failed, stopped, stop_all) =
-                (&next, &out_now, &abort, &done, &failed, &stopped, &stop_all);
+            let (next, out_now, abort, done, failed, stopped, stop_all, placed) = (
+                &next, &out_now, &abort, &done, &failed, &stopped, &stop_all, &placed,
+            );
             sc.spawn(move || {
+                while worker > 0 && !placed.load(Ordering::SeqCst) {
+                    if abort.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    if let Some(w) = stop_all() {
+                        if !abort.swap(true, Ordering::SeqCst) {
+                            *stopped.lock().unwrap_or_else(|e| e.into_inner()) = Some(w);
+                        }
+                        return;
+                    }
+                    std::thread::sleep(pause);
+                }
                 loop {
                     let i = next.fetch_add(1, Ordering::SeqCst);
                     if i >= jobs.len() || abort.load(Ordering::SeqCst) {
@@ -161,6 +178,7 @@ pub fn execute_split(
                             },
                             &|| {
                                 started.set(true);
+                                placed.store(true, Ordering::SeqCst);
                                 out_now.fetch_add(1, Ordering::SeqCst);
                             },
                         );
@@ -168,12 +186,8 @@ pub fn execute_split(
                             out_now.fetch_sub(1, Ordering::SeqCst);
                         }
                         // Room: another job of this run is out, so one will end and free a slot.
-                        // A job after the first may ask while the first is still being placed
-                        // (nothing is out yet): it waits too, and the first job's own failure
-                        // aborts the run, so a node with no room at all is still given back.
                         let room = matches!(&r, Err(Fail::Environmental(w)) if w.starts_with("no node had room"));
-                        let others = out_now.load(Ordering::SeqCst) > 0 || i > 0;
-                        if room && others && waited < tries {
+                        if room && out_now.load(Ordering::SeqCst) > 0 && waited < tries {
                             waited += 1;
                             if let Some(w) = stop_all() {
                                 break Ok(Outcome::Stopped(w));
