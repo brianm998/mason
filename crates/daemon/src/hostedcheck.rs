@@ -853,10 +853,12 @@ fn remote_check(
         &spec.holds,
         false,
     )?;
-    let rs = rm::with_site_env(
+    let mut rs = rm::with_site_env(
         rm::with_build(check_run_spec(&project, id, spec, &runs_on), build),
         &site,
     );
+    // The passes the coordinator kept of this tree go with the job (#1252).
+    let kept = with_kept_passes(spec, &mut rs);
     // The suite's own command (whole, or narrowed with a shard command of its own, #873) goes
     // out as one job per shard.
     let rs = match place.map(|(_, s)| s) {
@@ -947,15 +949,25 @@ fn remote_check(
             }),
             Ok((Some(rm::Outcome::Done(f)), notes)) => {
                 let retried: String = notes.iter().map(|n| format!("({n})\n")).collect();
+                let full = crate::node_split::keep_passes(&spec.env, &kept, &f.output);
+                let said = crate::node_split::out_of_time_note(
+                    &full,
+                    f.ran_ms.map_or(0, |ms| ms / 1000),
+                    rs.runners(),
+                    rs.shards_wanted.max(rs.runners()),
+                    !kept.is_empty(),
+                )
+                .map(|n| format!("({n})\n"))
+                .unwrap_or_default();
                 Ok(CheckOutcome {
                     passed: f.code == 0 && f.signal == 0 && !f.timed_out,
                     timed_out: f.timed_out,
                     output: format!(
-                        "{retried}({})\n{}",
+                        "{retried}({})\n{said}{}",
                         f.ran_on,
-                        crate::jobs::tail(&f.output, 40)
+                        crate::jobs::tail(&full, 40)
                     ),
-                    full: f.output.clone(),
+                    full,
                     id: id.to_string(),
                     stopped: None,
                     phase: f.phase.clone(),
@@ -997,7 +1009,12 @@ fn node_check(
     // The suite's build is the first part of what runs there, as a separate process.
     let build = build_choice(place.map(|(_, s)| s), &spec.cmd);
     let build = spec.build.as_deref().or(build);
-    let rs = rm::with_build(check_run_spec(&project, id, spec, "node"), build);
+    let mut rs = rm::with_build(check_run_spec(&project, id, spec, "node"), build);
+    // The passes the coordinator kept of this tree go with the job (#1252).
+    let kept = with_kept_passes(spec, &mut rs);
+    // A suite with shards is one job per shard on the node, as it is one runner per shard on
+    // GitHub (#1252).
+    let split = node_split_plan(d, spec, &project, &rs, &nid);
     let note: Mutex<Option<String>> = Mutex::new(None);
     let stop = || {
         let asked = cancel_requests()
@@ -1022,8 +1039,20 @@ fn node_check(
     if grant.give_runners() {
         tracing::info!(check = %id, node = %nid, "the check runs on a node: its GitHub runner units go back");
     }
-    Some(
-        match crate::node_exec::execute(
+    let ways = split.as_ref().map_or(1, |(jobs, _)| jobs.len() as u32);
+    let outcome = match &split {
+        Some((jobs, width)) => crate::node_split::execute_split(
+            d,
+            &nid,
+            jobs,
+            *width,
+            &spec.cwd,
+            &base_ref,
+            &spec.log_dir,
+            &stop,
+            &mut |_, b| feed(b),
+        ),
+        None => crate::node_exec::execute(
             d,
             Some(&nid),
             &rs,
@@ -1032,44 +1061,106 @@ fn node_check(
             &spec.log_dir,
             &stop,
             &mut |_, b| feed(b),
-        ) {
-            Err(rm::Fail::Environmental(why)) => {
-                tracing::warn!(check = %id, "{why}; running it here instead");
-                // The result of wherever it runs next says why it left the node (#1197).
-                if crate::node_exec::is_base_failure(&why) {
-                    *node_failed = Some(why);
-                }
-                return None;
+        ),
+    };
+    Some(match outcome {
+        Err(rm::Fail::Environmental(why)) => {
+            tracing::warn!(check = %id, "{why}; running it here instead");
+            // The result of wherever it runs next says why it left the node (#1197).
+            if crate::node_exec::is_base_failure(&why) {
+                *node_failed = Some(why);
             }
-            // A node without the job's base (#1197) is said as an outage: no verdict.
-            Err(rm::Fail::Error(e)) => Err(match rm::environmental(&e) {
-                Some(why) => format!("{OUTAGE_PREFIX}{why}"),
-                None => e,
-            }),
-            // A wait for a node ends with the daemon: that is no verdict on the check.
-            Ok(rm::Outcome::Stopped(rm::StopWhy::Gone)) if d.is_shutting_down() => {
-                Err("the daemon is stopping; run the check again".into())
-            }
-            Ok(rm::Outcome::Stopped(_)) => Ok(CheckOutcome {
-                passed: false,
-                timed_out: false,
-                output: String::new(),
-                full: String::new(),
-                id: id.to_string(),
-                stopped: note.lock().unwrap_or_else(|e| e.into_inner()).clone(),
-                phase: None,
-            }),
-            Ok(rm::Outcome::Done(f)) => Ok(CheckOutcome {
+            return None;
+        }
+        // A node without the job's base (#1197) is said as an outage: no verdict.
+        Err(rm::Fail::Error(e)) => Err(match rm::environmental(&e) {
+            Some(why) => format!("{OUTAGE_PREFIX}{why}"),
+            None => e,
+        }),
+        // A wait for a node ends with the daemon: that is no verdict on the check.
+        Ok(rm::Outcome::Stopped(rm::StopWhy::Gone)) if d.is_shutting_down() => {
+            Err("the daemon is stopping; run the check again".into())
+        }
+        Ok(rm::Outcome::Stopped(_)) => Ok(CheckOutcome {
+            passed: false,
+            timed_out: false,
+            output: String::new(),
+            full: String::new(),
+            id: id.to_string(),
+            stopped: note.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            phase: None,
+        }),
+        Ok(rm::Outcome::Done(f)) => {
+            let full = crate::node_split::keep_passes(&spec.env, &kept, &f.output);
+            let said = crate::node_split::out_of_time_note(
+                &full,
+                f.ran_ms.map_or(0, |ms| ms / 1000),
+                ways,
+                ways,
+                !kept.is_empty(),
+            )
+            .map(|n| format!("({n})\n"))
+            .unwrap_or_default();
+            Ok(CheckOutcome {
                 passed: f.code == 0 && f.signal == 0 && !f.timed_out,
                 timed_out: f.timed_out,
-                output: format!("({})\n{}", f.ran_on, crate::jobs::tail(&f.output, 40)),
-                full: f.output.clone(),
+                output: format!("({})\n{said}{}", f.ran_on, crate::jobs::tail(&full, 40)),
+                full,
                 id: id.to_string(),
                 stopped: None,
                 phase: f.phase.clone(),
-            }),
-        },
-    )
+            })
+        }
+    })
+}
+
+/// Put the passes kept of this check's tree into `rs`'s environment, when it is an agent's
+/// `exit-scripts` check (#1252). Returns what was added (empty: nothing is kept for this run).
+fn with_kept_passes(spec: &CheckSpec, rs: &mut crate::remote::RunSpec) -> Vec<(String, String)> {
+    let kept = crate::node_split::kept_env(&spec.env, &rs.suite, &spec.tree);
+    rs.env.retain(|(k, _)| !kept.iter().any(|(n, _)| n == k));
+    rs.env.extend(kept.iter().cloned());
+    kept
+}
+
+/// The jobs a suite with shards is split into on node `nid`, and how many run at once: `None`
+/// when the check is not the suite's own sharded command.
+fn node_split_plan(
+    d: &Arc<Daemon>,
+    spec: &CheckSpec,
+    project: &str,
+    rs: &crate::remote::RunSpec,
+    nid: &str,
+) -> Option<(Vec<crate::remote::RunSpec>, usize)> {
+    let (_, ps) = spec.place.as_ref()?;
+    if ps.shards <= 1 || spec.cmd != ps.command {
+        return None;
+    }
+    let sc = ps
+        .dev_shard_command
+        .as_deref()
+        .filter(|c| !c.contains('{'))
+        .or(ps.shard_command.as_deref())?;
+    let cfg = d.nodes.cfg(&d.cfg.config_dir);
+    let (max, running) = d
+        .nodes
+        .usable(&cfg, &rs.suite, &rs.command)
+        .iter()
+        .find(|r| r.0.nid == nid)
+        .map_or((1, 0), |r| {
+            (
+                r.3["jobs"]["max"].as_u64().unwrap_or(1),
+                r.3["jobs"]["running"].as_u64().unwrap_or(0),
+            )
+        });
+    let jobs = crate::node_split::split(
+        rs,
+        ps.shards,
+        sc,
+        crate::suites::shard_lists(d, project, ps, ps.shards),
+        crate::suites::lists_partial(ps),
+    );
+    Some((jobs, crate::node_split::width(ps.shards, max, running)))
 }
 
 /// What an error from [`run`] starts with when GitHub, not the code, kept the check from running.
