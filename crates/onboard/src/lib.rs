@@ -97,6 +97,32 @@ pub fn summary(a: &Answers, config_dir: &Path) -> String {
     )
 }
 
+/// What the repository itself rules out: no commits yet, then (when `base` is given) a base
+/// branch that is neither here nor on the remote. [`setup`] refuses on these, and a caller can
+/// ask before any question, so the owner hears of them first.
+pub fn repo_refusal(d: &Detected, base: Option<&str>) -> Result<(), String> {
+    if git::rev_parse(&d.root, "HEAD").is_err() {
+        return Err(
+            "the repository has no commits yet; make one first (the setup is a branch from it)"
+                .into(),
+        );
+    }
+    let Some(base) = base else {
+        return Ok(());
+    };
+    let has = |r: String| git::ok(&d.root, &["rev-parse", "--verify", "-q", &r]);
+    if !has(format!("refs/heads/{base}"))
+        && d.remote_name
+            .as_ref()
+            .is_none_or(|r| !has(format!("refs/remotes/{r}/{base}")))
+    {
+        return Err(format!(
+            "the base branch {base:?} does not exist here; pass --base with an existing branch"
+        ));
+    }
+    Ok(())
+}
+
 /// Questions 5 and part of 8: everything that is written. Returns the closing instructions.
 pub fn setup(
     flags: &Flags,
@@ -111,12 +137,7 @@ pub fn setup(
         let n = a.agent.name();
         return Err(format!("no `{n}` executable was found on PATH, in another project's setting or in ~/.local/bin, so the project could not start an agent; nothing was written. Pass --agent-bin PATH (the absolute path of `{n}`)"));
     }
-    if git::rev_parse(&d.root, "HEAD").is_err() {
-        return Err(
-            "the repository has no commits yet; make one first (the setup is a branch from it)"
-                .into(),
-        );
-    }
+    repo_refusal(d, None)?;
     let on_head = git::run(&d.root, &["ls-tree", "--name-only", "HEAD", ".mason"])
         .is_ok_and(|s| !s.trim().is_empty());
     if (on_head || d.existing_mason) && !flags.force {
@@ -138,30 +159,7 @@ pub fn setup(
     {
         return Err(format!("the branch {SETUP_BRANCH} already exists from an earlier init; merge or delete it, or use --force"));
     }
-    if !git::ok(
-        &d.root,
-        &[
-            "rev-parse",
-            "--verify",
-            "-q",
-            &format!("refs/heads/{}", a.base),
-        ],
-    ) && d.remote_name.as_ref().is_none_or(|r| {
-        !git::ok(
-            &d.root,
-            &[
-                "rev-parse",
-                "--verify",
-                "-q",
-                &format!("refs/remotes/{r}/{}", a.base),
-            ],
-        )
-    }) {
-        return Err(format!(
-            "the base branch {:?} does not exist here; pass --base with an existing branch",
-            a.base
-        ));
-    }
+    repo_refusal(d, Some(&a.base))?;
 
     // 5. Tests: propose, run each once, keep what parses.
     let mut kept: Vec<SuiteSpec> = vec![];
