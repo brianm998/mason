@@ -78,6 +78,8 @@ impl Repo {
             "MASON_EXIT_SHARD",
             "MASON_EXIT_SCRIPT_LIMIT_S",
             "MASON_EXIT_REPEAT",
+            "MASON_EXIT_TREE_KEY",
+            "MASON_EXIT_PASSES",
         ] {
             c.env_remove(k);
         }
@@ -330,5 +332,60 @@ fn a_test_step_keeps_no_passes_without_the_check_opt_in() {
     assert!(
         std::fs::read_dir(cache.path()).unwrap().next().is_none(),
         "nothing written to the task cache"
+    );
+}
+
+#[test]
+fn a_runner_off_this_mac_skips_the_passes_the_coordinator_sends_and_reports_new_ones() {
+    let r = Repo::new(&[
+        ("s10", "echo s10 >> \"$MASON_TEST_MARK\""),
+        ("s11", "echo s11 >> \"$MASON_TEST_MARK\""),
+        ("s12", "echo s12 >> \"$MASON_TEST_MARK\""),
+    ]);
+    let marks = tempfile::tempdir().unwrap();
+    let mark = marks.path().join("mark");
+    let base = [
+        ("MASON_EXIT_CACHE", "1"),
+        ("MASON_EXIT_TREE_KEY", "coordinator-tree"),
+        ("MASON_TEST_MARK", mark.to_str().unwrap()),
+    ];
+    // The first run reports the key of each pass.
+    let (out, code) = r.run(&base);
+    assert_eq!(code, 0, "{out}");
+    let keys: Vec<String> = lines_with(&out, "MASON-EXIT-KEY ")
+        .iter()
+        .map(|l| l.trim_start_matches("MASON-EXIT-KEY ").to_string())
+        .collect();
+    assert_eq!(keys.len(), 3, "{out}");
+    assert_eq!(runs_of(&mark, "s10"), 1);
+
+    // The coordinator sends the first script's key: the rest run, that one does not.
+    let sent = keys[0].clone();
+    let mut env = base.to_vec();
+    env.push(("MASON_EXIT_PASSES", sent.as_str()));
+    let (out, code) = r.run(&env);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.lines().any(|l| l == "PASS s10 (cached)"), "{out}");
+    assert!(out.lines().any(|l| l == "PASS s11"), "{out}");
+    assert_eq!(runs_of(&mark, "s10"), 1, "a kept pass is not run again");
+    assert_eq!(runs_of(&mark, "s11"), 2);
+
+    // A key made for another tree matches nothing.
+    let mut env = base.to_vec();
+    env[1] = ("MASON_EXIT_TREE_KEY", "another-tree");
+    env.push(("MASON_EXIT_PASSES", sent.as_str()));
+    let (out, _) = r.run(&env);
+    assert!(!out.contains("(cached)"), "{out}");
+
+    // A test step (no MASON_EXIT_CACHE) ignores the keys and reports none.
+    let env = [
+        ("MASON_EXIT_TREE_KEY", "coordinator-tree"),
+        ("MASON_EXIT_PASSES", sent.as_str()),
+        ("MASON_TEST_MARK", mark.to_str().unwrap()),
+    ];
+    let (out, _) = r.run(&env);
+    assert!(
+        !out.contains("(cached)") && !out.contains("MASON-EXIT-KEY"),
+        "{out}"
     );
 }
