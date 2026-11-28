@@ -459,7 +459,8 @@ impl<'a> Ctx<'a> {
     fn why_waiting(&self, t: &Task) -> String {
         // The sentence comes with the structured wait, from the same plan.
         if let Some(i) = self.wait_view.tasks.get(&t.id.0) {
-            return i.sentence.clone();
+            return crate::nodewait::line_for(self.d, i, self.now)
+                .unwrap_or_else(|| i.sentence.clone());
         }
         if let Some(w) = self.waits.get(&t.id) {
             return w.clone();
@@ -594,6 +595,13 @@ impl<'a> Ctx<'a> {
                 .tasks
                 .get(&t.id.0)
                 .cloned()
+                .map(|mut i| {
+                    // A wait for a node's unit says why, who holds it and the estimate (#1260).
+                    if let Some(l) = crate::nodewait::line_for(self.d, &i, self.now) {
+                        i.sentence = l;
+                    }
+                    i
+                })
                 .or_else(|| self.red_wait(t)),
             enqueued_ms: t.enqueued_at.0,
             // Whole minutes, so a sidebar that changed in nothing else hashes the same.

@@ -187,6 +187,18 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
             .broker
             .explain_task(t.id)
             .map_or(Value::Null, |w| json!(w));
+        // A wait for a node says why, who holds the slots, the place in line and an estimate
+        // (#1260); a run waiting in the node executor with no unit has its own line each.
+        if let Some(line) = d
+            .broker
+            .wait_view()
+            .tasks
+            .get(&t.id.0)
+            .and_then(|i| crate::nodewait::line_for(d, i, now))
+        {
+            v["wait"] = json!(line);
+        }
+        v["node_waits"] = json!(crate::nodewait::waiting_of(d, t.id.0, now));
         v["closing"] = d.store.closing(t.id.0).ok().flatten().map_or(
             Value::Null,
             |(verdict, note)| json!({"verdict": verdict, "note": note}),

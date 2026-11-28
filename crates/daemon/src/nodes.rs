@@ -687,21 +687,35 @@ pub fn nid_of_resource(resource: &str) -> Option<&str> {
 fn set_capacity(d: &Arc<Daemon>, nid: &str, v: &View, lost_after: u32) {
     let name = resource(nid);
     let held = d.broker.used(&name);
-    let free = v
+    let (free, max) = v
         .status
         .as_ref()
         .map(|s| {
             let max = s["jobs"]["max"].as_u64().unwrap_or(0);
             let running = s["jobs"]["running"].as_u64().unwrap_or(0);
-            max.saturating_sub(running) as u32
+            (max.saturating_sub(running) as u32, max as u32)
         })
-        .unwrap_or(0);
-    let units = if state_of(v, lost_after).usable() {
-        free + held
-    } else {
-        held
-    };
+        .unwrap_or((0, 0));
+    let units = capacity_units(free, held, max, state_of(v, lost_after).usable());
     d.broker.set_pool_units(&name, units.max(1));
+}
+
+/// The units the broker may lease of a node: what the node has free plus what this coordinator
+/// holds, and never more than the node's own `max` jobs. A unit leased but not yet running at the
+/// node is in `held` and not yet in the node's `running`, so `free + held` counted it twice and
+/// the pool read `7/7` on a node with six job slots (2026-11-27). Held units stay whatever the
+/// node says (they are given back by their runs), and a node that does not say its `max` is not
+/// capped.
+pub fn capacity_units(free: u32, held: u32, max: u32, usable: bool) -> u32 {
+    if !usable {
+        return held;
+    }
+    let sum = free + held;
+    if max == 0 {
+        sum
+    } else {
+        sum.min(max).max(held)
+    }
 }
 
 /// Does a node with this status have what a run of `suite` needs? The toolchain names the suite
@@ -863,6 +877,45 @@ pub fn rooms_for(
         })
         .collect();
     (rooms, prefer_github)
+}
+
+/// Every paired node as a [`crate::nodewait::Cand`] for a run of `suite_name` / `command`, with
+/// whether `[nodes]` is on and the project may use nodes: what [`crate::nodewait::diagnose`] and
+/// [`crate::nodewait::pick`] decide from. A node's `free` is what it says it has free (its `max`
+/// jobs less those running), not the broker's count.
+pub fn candidates_for(
+    d: &Daemon,
+    project: &str,
+    suite_name: &str,
+    command: &str,
+) -> (bool, bool, Vec<crate::nodewait::Cand>) {
+    let cfg = d.nodes.cfg(&d.cfg.config_dir);
+    let (rows, views) = {
+        let g = d.nodes.lock();
+        (g.paired.clone(), g.views.clone())
+    };
+    let cands = rows
+        .iter()
+        .map(|r| {
+            let v = views.get(&r.nid);
+            let usable = v.is_some_and(|v| state_of(v, cfg.lost_after_polls).usable());
+            let status = v.and_then(|v| v.status.as_ref());
+            let covers = status.is_some_and(|s| covers_run(s, suite_name, command));
+            let free = status.map_or(0, |s| {
+                let max = s["jobs"]["max"].as_u64().unwrap_or(0);
+                let running = s["jobs"]["running"].as_u64().unwrap_or(0);
+                max.saturating_sub(running) as u32
+            });
+            crate::nodewait::Cand {
+                nid: r.nid.clone(),
+                name: r.name.clone(),
+                usable,
+                covers,
+                free,
+            }
+        })
+        .collect();
+    (cfg.enabled, cfg.allows(project), cands)
 }
 
 /// May a node take a run of `project` once it is back (or has room)? `[nodes] enabled`, the

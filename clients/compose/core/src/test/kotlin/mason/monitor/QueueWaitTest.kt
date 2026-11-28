@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 package mason.monitor
 
+import mason.v1.TaskRow
 import mason.v1.WaitInfo
 import mason.v1.WaitLink
 import mason.v1.WaitParty
@@ -54,5 +55,19 @@ class QueueWaitTest {
         assertEquals("starpipe heavy, from starpipe in /work/star, wants exclusive, waiting 9 min",
             QueueWait.lease(lease, 1_000_000 + 9 * 60_000))
         assertEquals("holds exclusive, for 1 min", QueueWait.leaseDetail(lease.copy(holding = true), 1_000_000 + 60_000).substringAfter("star, "))
+    }
+
+    /** Task 1260: a node wait says why, who holds the slot, the place in line and the estimate. */
+    @Test
+    fun aNodeWaitShowsReasonHoldersPlaceAndEstimate() {
+        val row = TaskRow(
+            wait = WaitInfo(cause = "full", resource = "node:abc", position = 2),
+            why_waiting = "Waiting for a node: node full: every job slot is in use; held by #1136 cargo-workspace for 4 min; 2nd in line; no estimate",
+        )
+        val line = QueueWait.line(row)
+        assertTrue(line.startsWith("[${QueueWait.badge("full")}] Waiting for a node: node full"), line)
+        assertTrue(line.contains("held by #1136 cargo-workspace for 4 min"), line)
+        assertTrue(line.contains("2nd in line"), line)
+        assertTrue(line.endsWith("no estimate"), line)
     }
 }

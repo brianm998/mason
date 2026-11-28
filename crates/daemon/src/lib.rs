@@ -73,6 +73,7 @@ pub mod node_run;
 pub mod node_runtime;
 pub mod node_serve;
 pub mod nodes;
+pub mod nodewait;
 pub mod notify;
 pub mod numbers;
 pub mod onboarding;

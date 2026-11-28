@@ -2731,6 +2731,27 @@ pub fn node_units_of(nid: &str) -> std::collections::BTreeMap<String, u32> {
     }
 }
 
+/// [`node_units_of`] for a run placed by `d`: a nodes-only run that found no node with room when
+/// it was placed (`wait:` with no node) holds the unit of the node
+/// [`crate::nodewait::pick`] names, so it waits for it in the broker's ranked line like any
+/// other request (#1260). With no node that could ever take it, it holds nothing and waits in
+/// the node executor, which says why.
+pub fn node_units_waiting(
+    d: &Daemon,
+    project: &str,
+    suite: &str,
+    cmd: &str,
+    nid: &str,
+) -> std::collections::BTreeMap<String, u32> {
+    if crate::place::wait_for(nid) == Some("") {
+        return match crate::nodewait::pick_for(d, project, suite, cmd) {
+            Some(n) => std::collections::BTreeMap::from([(crate::nodes::resource(&n), 1)]),
+            None => Default::default(),
+        };
+    }
+    node_units_of(nid)
+}
+
 /// Where a run goes and what it holds there (#818).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RunPlace {
@@ -2778,7 +2799,7 @@ pub fn run_place(
         // was placed as a run here until now, so a check or step bound for a node queued for
         // this Mac's `test-suite` slot (and its heat hold) before it ever went out.
         Executor::Node { nid, name } => {
-            let units = node_units_of(&nid);
+            let units = node_units_waiting(d, project, suite.map_or("", |s| &s.name), cmd, &nid);
             RunPlace::Node { nid, name, units }
         }
     }
@@ -3147,7 +3168,7 @@ pub fn pool_needs(
         Executor::GitHub { runs_on } => units_for(&runs_on, 1),
         // A step bound for a node holds one unit of that node's resource and nothing of this
         // machine, whichever node the run then finds room on.
-        Executor::Node { nid, .. } => node_units_of(&nid),
+        Executor::Node { nid, .. } => node_units_waiting(d, project, "", "", &nid),
         Executor::Local => return None,
     };
     Some(with_units(needs, units))
