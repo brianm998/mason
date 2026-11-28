@@ -649,13 +649,20 @@ fn diagnose(
     if let Err(e) = crate::worktrees::restore(d, task) {
         tracing::warn!(task = task.0, "the worktree could not be added again: {e}");
     }
+    // A task that failed before its worktree was made has no branch either, and no CLI starts
+    // in a directory that is not there: the session reads a checkout of the base.
+    let checkout = BaseCheckout {
+        project: &c.project,
+        dir: (!c.wt.exists()).then(|| crate::diagcause::make_checkout(d, task.0, &c.project)),
+    };
+    let wt = checkout.dir.as_deref().unwrap_or(&c.wt);
     let dir = c.task_dir();
     let plan: Option<Value> = std::fs::read_to_string(dir.join("plan.json"))
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok());
     let history = std::fs::read_to_string(dir.join("feedback-history.txt")).unwrap_or_default();
     let base = c.project.base_ref();
-    let diffstat = mason_landing::git::run(&c.wt, &["diff", "--stat", &format!("{base}...HEAD")])
+    let diffstat = mason_landing::git::run(wt, &["diff", "--stat", &format!("{base}...HEAD")])
         .unwrap_or_default();
     let text = prompt(
         task.0,
@@ -693,15 +700,15 @@ fn diagnose(
     };
     let agent = c.project.agent();
     let eff = crate::tiermap::effective(&d.cfg.config_dir, agent.provider, &c.project.overlay_text);
-    let (mut spec, ran_on) = session_spec(&text, &c.wt, &c.project, &eff);
+    let (mut spec, ran_on) = session_spec(&text, wt, &c.project, &eff);
     mark.ran_on(&ran_on);
     let adapter = crate::jobs::adapter(&c);
     let runner = StepRunner::new(adapter.as_ref(), RunnerConfig::default());
     // The quote must be in what the agent was given or can read: the failure, the task and
     // plan, what the rounds were told, the whole test logs, or the diff of the branch.
     let materials = {
-        let diff = mason_landing::git::run(&c.wt, &["diff", &format!("{base}...HEAD")])
-            .unwrap_or_default();
+        let diff =
+            mason_landing::git::run(wt, &["diff", &format!("{base}...HEAD")]).unwrap_or_default();
         vec![
             ("the failure reason".to_string(), reason.clone()),
             (
@@ -782,6 +789,18 @@ fn diagnose(
         o.insert("ran_on".into(), json!(ran_on));
     }
     record_verdict(d, c.task, submission);
+}
+
+/// The checkout of the base [`diagnose`] made for a session, removed when the session is over.
+struct BaseCheckout<'a> {
+    project: &'a crate::config::ProjectCfg,
+    dir: Option<std::path::PathBuf>,
+}
+
+impl Drop for BaseCheckout<'_> {
+    fn drop(&mut self) {
+        crate::diagcause::remove_checkout(self.project, self.dir.as_deref());
+    }
 }
 
 /// The session the diagnosis runs, with the model and effort the project, the provider file

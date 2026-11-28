@@ -391,6 +391,10 @@ fn run_repair(d: &Arc<Daemon>, r: Repair) {
     let Ok(c) = crate::jobs::ctx(d, r.task, r.run) else {
         return fail("the repair could not be set up: the step's context is gone".into());
     };
+    // No branch to repair: the task failed before its worktree was made.
+    if !c.wt.exists() {
+        return fail("the task has no worktree to repair".into());
+    }
     let steps = crate::jobs::task_step_names(d, r.task);
     let to = r.to_step.clone().or_else(|| default_to_step(&steps));
     let text = repair_prompt(r.task.0, &r.title, &r.failure, &r.summary, &steps);

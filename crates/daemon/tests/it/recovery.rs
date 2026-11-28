@@ -28,7 +28,6 @@ next = "test"
 type = "test"
 category = "testing"
 command = "test -f fixed.txt"
-max_rounds = 1
 next = "land"
 
 [step.land]
@@ -47,6 +46,7 @@ next = "sign-off"
 [step.sign-off]
 type = "approval"
 category = "review"
+next = "land"
 
 [step.land]
 type = "landing"
