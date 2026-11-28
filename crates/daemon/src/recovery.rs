@@ -425,6 +425,10 @@ fn run_repair(d: &Arc<Daemon>, r: Repair) {
     let report = runner.run(spec, &contract);
     drop(slot);
     contract.shutdown();
+    if let Some(said) = crate::agentbin::could_not_start(&report.end) {
+        crate::agentbin::launch_failed(d, c.project_id, said);
+        return fail(format!("the repair session could not start: {said}"));
+    }
     let StepEnd::Accepted { submission, .. } = report.end else {
         return fail("the repair session ended without a committed change".into());
     };

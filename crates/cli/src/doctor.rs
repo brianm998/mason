@@ -433,7 +433,7 @@ fn remote_run_findings(
     out
 }
 
-fn check_project(p: &ProjectCfg, out: &mut Vec<Finding>) {
+fn check_project(p: &ProjectCfg, agents: Option<&serde_json::Value>, out: &mut Vec<Finding>) {
     let name = &p.id;
     if !p.path.join(".git").exists() && !p.path.is_dir() {
         out.push(fail(format!(
@@ -533,13 +533,61 @@ fn check_project(p: &ProjectCfg, out: &mut Vec<Finding>) {
     }
     check_unpushed_setup(p, out);
     check_landing(p, &base, out);
-    match &p.claude_bin {
-        Some(b) if b.is_file() => out.push(ok(format!("project {name}: agent binary {}", b.display()))),
-        Some(b) => out.push(fail(format!("project {name}: claude_bin {} does not exist", b.display()))),
-        None => match on_path("claude") {
-            Some(b) => out.push(ok(format!("project {name}: agent binary {}", b.display()))),
-            None => out.push(warn(format!("project {name}: `claude` is not on PATH and no claude_bin is set; agent steps cannot run"))),
-        },
+    out.push(agent_finding(p, agents));
+}
+
+/// The project's agent binary: what the running daemon resolves it to (it is the daemon that
+/// launches it), else what this shell's `PATH` gives, said as such.
+fn agent_finding(p: &ProjectCfg, agents: Option<&serde_json::Value>) -> Finding {
+    let name = &p.id;
+    let theirs = agents
+        .and_then(|a| a["projects"].as_array())
+        .and_then(|a| a.iter().find(|v| v["project"] == name.as_str()));
+    if let Some(v) = theirs {
+        return daemon_agent_finding(name, v);
+    }
+    let w = mason_daemon::agentbin::wanted(p);
+    let from = if agents.is_some() {
+        "masond does not report this project, so only this shell's PATH was checked"
+    } else {
+        "masond did not say, so only this shell's PATH was checked"
+    };
+    let path = std::env::var_os("PATH");
+    match mason_daemon::agentbin::resolve(&w.program, path.as_deref(), &p.path) {
+        Ok(b) => ok(format!(
+            "project {name}: agent binary {} ({from})",
+            b.display()
+        )),
+        // A file the project names and nobody can run is wrong whoever looks.
+        Err(e) if w.program != Path::new(w.cli) => {
+            fail(format!("project {name}: {}: {e} ({from})", w.key))
+        }
+        Err(e) => warn(format!(
+            "project {name}: {e} and no {} is set; agent steps cannot run ({from})",
+            w.key
+        )),
+    }
+}
+
+/// One project's entry of the daemon's `/agents`.
+fn daemon_agent_finding(name: &str, v: &serde_json::Value) -> Finding {
+    let key = v["key"].as_str().unwrap_or("claude_bin");
+    let why = v["held"].as_str().or_else(|| v["error"].as_str());
+    match why {
+        None => ok(format!(
+            "project {name}: masond runs the agent binary {}",
+            v["binary"].as_str().unwrap_or("?")
+        )),
+        Some(why) => {
+            let text = format!(
+                "project {name}: masond cannot run the agent binary: {why}. Set `{key}` in the project's registration file, then `mason project reload --project {name}`"
+            );
+            if v["needs_agent"].as_bool() == Some(false) {
+                warn(format!("{text} (its pipeline has no agent step)"))
+            } else {
+                fail(text)
+            }
+        }
     }
 }
 
@@ -797,8 +845,11 @@ pub fn run(data_dir: &Path, config_dir: &Path) -> Vec<Finding> {
             let live = crate::client::find(data_dir)
                 .ok()
                 .and_then(|d| d.call("GET", "/status", None).ok());
+            let agents = crate::client::find(data_dir)
+                .ok()
+                .and_then(|d| d.call("GET", "/agents", None).ok());
             for p in &ps {
-                check_project(p, &mut out);
+                check_project(p, agents.as_ref(), &mut out);
                 check_providers(p, config_dir, &mut out);
                 check_tracker(p, live.as_ref(), &mut out);
                 check_remote_access(p, &mut out);
@@ -870,6 +921,28 @@ mod tests {
             actions,
             Ok(()),
         )
+    }
+
+    #[test]
+    fn the_daemons_resolution_is_what_doctor_reports() {
+        let entry = |held: Option<&str>, needs: bool| {
+            serde_json::json!({"project": "p", "key": "claude_bin", "binary": "/x/claude",
+                "error": null, "held": held, "needs_agent": needs})
+        };
+        let f = super::daemon_agent_finding("p", &entry(None, true));
+        assert!(
+            f.level == super::Level::Ok
+                && f.text.contains("masond runs the agent binary /x/claude")
+        );
+        let f = super::daemon_agent_finding("p", &entry(Some("a launch failed"), true));
+        assert!(f.level == super::Level::Fail);
+        assert!(
+            f.text.contains("a launch failed") && f.text.contains("claude_bin"),
+            "{}",
+            f.text
+        );
+        let f = super::daemon_agent_finding("p", &entry(Some("gone"), false));
+        assert!(f.level == super::Level::Warn);
     }
 
     #[test]

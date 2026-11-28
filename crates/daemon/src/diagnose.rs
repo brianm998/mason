@@ -316,6 +316,9 @@ pub fn build_card(id: u64, task: u64, a: &Value) -> Option<Value> {
     Some(v)
 }
 
+/// What a `none` row says.
+pub const NO_VERDICT: &str = "the session ended without a verdict";
+
 /// The words of a pending diagnosis, as the alert and `mason task diagnosis` show them. A
 /// submission with options reads as the card; an older one as its single verdict.
 pub fn card_text(task: u64, id: u64, verdict: &str, a: &Value) -> String {
@@ -342,6 +345,10 @@ pub fn card_text(task: u64, id: u64, verdict: &str, a: &Value) -> String {
             s("summary"),
             list.join(" / ")
         );
+    }
+    // A session that ended without a verdict said nothing about the task (s1287).
+    if verdict == "none" {
+        return format!("Diagnosis #{id}: {NO_VERDICT}");
     }
     let what = match verdict {
         "retry" => format!(
@@ -396,6 +403,10 @@ pub fn row_text(r: &DiagnosisRow) -> String {
                 .join(", ")
         ),
     };
+    if r.verdict == "none" && card.is_none() {
+        // A cause's row too: no task is said to have failed on anything.
+        return format!("Diagnosis #{}: {NO_VERDICT}", r.id);
+    }
     match card {
         Some(c) => format!(
             "{who}. Diagnosis #{}: {}. Options: {}",
@@ -572,6 +583,15 @@ pub fn start_with(d: &Arc<Daemon>, task: TaskId, run: StepRunId, opts: Opts) -> 
         }
         t.state_entered_at.0
     };
+    // No session can start while the project's agent cannot (s1287), whoever asks.
+    let project = d
+        .world()
+        .ok()
+        .and_then(|w| w.tasks.get(&task).map(|t| t.project));
+    if let Some(pid) = project.filter(|p| crate::agentbin::check(d, *p)) {
+        let why = crate::agentbin::why(d, pid).unwrap_or_default();
+        return Err(format!("the project's agent CLI cannot be started: {why}"));
+    }
     // Counted before the session, and the mark taken before the thread: two callers do not start
     // two sessions.
     let rows = d.store.diagnoses(Some(task.0)).map_err(|e| e.to_string())?;
@@ -731,9 +751,16 @@ fn diagnose(
     let report = runner.run(spec, &contract);
     drop(_slot);
     contract.shutdown();
+    // A session that never started looked at nothing: it spends no budget and says nothing
+    // about the task (s1287).
+    if let Some(said) = crate::agentbin::could_not_start(&report.end) {
+        crate::agentbin::launch_failed(d, c.project_id, said);
+        return;
+    }
     let StepEnd::Accepted { submission, .. } = report.end else {
         tracing::info!(task = task.0, "the diagnosis ended without a verdict");
         // Counted all the same, so a session that never answers is not tried again and again.
+        // The row is never a card or words about the task (`card_text`).
         let _ = d.store.add_diagnosis(
             task.0,
             "none",
@@ -1337,6 +1364,21 @@ mod tests {
         assert!(budget(&[], 100).is_ok());
         // A row with no failure time (an older one) does not stand for any failure.
         assert!(budget(&[row(0)], 100).is_ok());
+    }
+
+    #[test]
+    fn a_none_row_is_no_card_and_says_nothing_about_the_task() {
+        let mut r = row(100);
+        r.id = 182;
+        r.task = 1232;
+        r.args = json!({"ran_on": "model x"}).to_string();
+        let said = "Diagnosis #182: the session ended without a verdict";
+        assert_eq!(row_text(&r), said);
+        assert_eq!(card_text(1232, 182, "none", &json!({})), said);
+        assert!(row_card(&r).is_none());
+        // A cause's row, which lists several tasks, says no more.
+        r.args = json!({"kind": "cause", "tasks": [1, 2]}).to_string();
+        assert_eq!(row_text(&r), said);
     }
 
     #[test]

@@ -891,6 +891,7 @@ pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
     }
     out.extend(crate::diagnose::alerts(d));
     out.extend(crate::redwatch::alerts(d));
+    out.extend(crate::agentbin::alerts(d));
     out.extend(silent_alerts(d));
     out.extend(bursts);
     out.extend(d.landing().attention());
@@ -1150,7 +1151,12 @@ fn stalled_alert(d: &Daemon, w: &mason_engine::World) -> Option<(String, String,
         .event
         .at
         .0;
-    let tasks: Vec<&Task> = w.tasks.values().collect();
+    // A task waiting for its agent CLI has its own notice (s1287).
+    let tasks: Vec<&Task> = w
+        .tasks
+        .values()
+        .filter(|t| !crate::agentbin::is_waiting(d, t))
+        .collect();
     let stall = stall_check(
         &tasks,
         last_event,

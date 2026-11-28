@@ -8,6 +8,7 @@
 
 pub mod abandon;
 pub mod affected;
+pub mod agentbin;
 pub mod agentshim;
 pub mod attention;
 pub mod autoquarantine;

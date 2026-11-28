@@ -1034,6 +1034,10 @@ pub fn start_cause(
         .diagnoses(Some(primary))
         .map_err(|e| e.to_string())?;
     crate::diagnose::budget(&own, failed_at(d, primary).unwrap_or(0))?;
+    // No session can start while the project's agent cannot (s1287).
+    if crate::agentbin::check(d, pid) {
+        return Err("the project's agent CLI cannot be started".into());
+    }
     let mark = crate::diagnose::take_mark(d, primary).ok_or("a diagnosis is already running")?;
     for t in &tasks {
         hold(&sc, *t, now);
@@ -1360,6 +1364,11 @@ fn run_cause(
     remove_checkout(&c.project, checkout.as_deref());
     let tasks = guard.tasks();
     let sees = same_names(&gathered);
+    // Never started: no row, so the budget is not spent (s1287).
+    if let Some(said) = crate::agentbin::could_not_start(&report.end) {
+        crate::agentbin::launch_failed(d, c.project_id, said);
+        return;
+    }
     let StepEnd::Accepted { submission, .. } = report.end else {
         tracing::info!(key, "the cause diagnosis ended without a verdict");
         // Counted all the same; the automatic retries go when `guard` drops.

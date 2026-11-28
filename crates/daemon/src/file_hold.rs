@@ -222,6 +222,11 @@ impl Daemon {
         if t.state != State::Queued || !matches!(t.activity, Activity::Waiting(WaitReason::Slot)) {
             return None;
         }
+        if let Some(why) = crate::agentbin::why(self, t.project)
+            .filter(|_| crate::agentbin::holds_claims(self, t.project))
+        {
+            return Some(crate::agentbin::wait_sentence(&why));
+        }
         if let Some((n, limit)) = self.check_hold(w, t) {
             return Some(check_hold_sentence(n, limit));
         }

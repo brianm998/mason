@@ -387,7 +387,9 @@ impl Daemon {
             d.watch_definitions(fetch);
             d.defs_ready
                 .store(true, std::sync::atomic::Ordering::SeqCst);
-            // A pause that has run out lets claims go.
+            // A pause that has run out lets claims go, and so does an agent CLI that is
+            // there again.
+            crate::agentbin::check_all(&d);
             d.admit();
             d.defs_pass_ended_ms
                 .store(crate::daemon::now_ms(), std::sync::atomic::Ordering::SeqCst);

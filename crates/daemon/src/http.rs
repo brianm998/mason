@@ -1788,13 +1788,29 @@ async fn project_reload(Shared(d): Shared<Arc<Daemon>>, Path(name): Path<String>
     }))
 }
 
+/// What each project's agent resolves to in this daemon's environment (`mason doctor`).
+async fn agents(Shared(d): Shared<Arc<Daemon>>) -> Res {
+    let d2 = d.clone();
+    let v = d
+        .view_pool
+        .run(move || crate::agentbin::report(&d2))
+        .await
+        .map_err(pool_err)?;
+    Ok(Json(v))
+}
+
 /// Re-read the project's registration file for tasks admitted from now on.
 async fn registration_reload(Shared(d): Shared<Arc<Daemon>>, Path(name): Path<String>) -> Res {
     project_of(&d, &name)?;
     let d2 = d.clone();
     let r = d
         .pool
-        .run(move || d2.reload_registration(&name))
+        .run(move || {
+            let r = d2.reload_registration(&name);
+            // A hold the reload lifted lets claims go at once.
+            d2.admit();
+            r
+        })
         .await
         .map_err(pool_err)?;
     Ok(Json(match r {
@@ -1868,7 +1884,11 @@ async fn project_register(Shared(d): Shared<Arc<Daemon>>, Path(name): Path<Strin
     let d2 = d.clone();
     let r = d
         .pool
-        .run(move || d2.register_project(&name))
+        .run(move || {
+            let r = d2.register_project(&name);
+            d2.admit();
+            r
+        })
         .await
         .map_err(pool_err)?;
     match r {
@@ -4626,6 +4646,7 @@ async fn debug_wait_repo(Shared(d): Shared<Arc<Daemon>>) -> Res {
 pub fn api_router(d: Arc<Daemon>) -> Router {
     Router::new()
         .route("/status", get(status))
+        .route("/agents", get(agents))
         .route("/node/status", get(crate::node_serve::local_status))
         .route("/node/pair-code", post(crate::node_serve::issue_code))
         .route("/node/accept", post(crate::node_serve::accept))
