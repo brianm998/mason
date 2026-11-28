@@ -85,6 +85,7 @@ pub mod plugins;
 pub mod policyd;
 pub mod pool;
 pub mod progress;
+pub mod projsettings;
 pub mod prompts;
 pub mod proposals;
 pub mod protect;

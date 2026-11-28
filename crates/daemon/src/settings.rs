@@ -63,6 +63,23 @@ fn secret_view(v: Option<&str>) -> Value {
 
 /// The project's settings, read from the file as it stands.
 pub fn get_project(d: &Daemon, name: &str) -> Result<Value, Refused> {
+    get_project_as(d, name, &crate::projsettings::Caller::local(""))
+}
+
+/// The project's settings plus the catalogue of every key (`catalogue`, s1232), as this caller
+/// may use it.
+pub fn get_project_as(
+    d: &Daemon,
+    name: &str,
+    caller: &crate::projsettings::Caller,
+) -> Result<Value, Refused> {
+    let mut v = get_project_legacy(d, name)?;
+    let cat = crate::projsettings::catalogue(d, name, caller, &v)?;
+    v["catalogue"] = cat;
+    Ok(v)
+}
+
+fn get_project_legacy(d: &Daemon, name: &str) -> Result<Value, Refused> {
     let text = std::fs::read_to_string(project_file(d, name))
         .map_err(|e| (404, format!("{name}: {e}")))?;
     let doc: DocumentMut = text.parse().map_err(|e| bad(format!("{name}: {e}")))?;
@@ -267,19 +284,73 @@ fn write_atomic(path: &Path, text: &str) -> Result<(), Refused> {
 /// Change a project's settings. The file is untouched unless the whole change validates and
 /// the daemon accepts the reload.
 pub fn set_project(d: &Daemon, name: &str, change: &Value) -> Result<Value, Refused> {
+    set_project_as(
+        d,
+        name,
+        change,
+        &crate::projsettings::Caller::local(owner_of(d)),
+    )
+}
+
+fn owner_of(d: &Daemon) -> &str {
+    d.cfg.owner_names.first().map_or("", String::as_str)
+}
+
+/// `set_project` for a known caller. `{"set": {key: value|null}}` edits any catalogued key (null
+/// unsets it); `"preview": true` returns the diff and writes nothing; a key that runs a program
+/// or weakens a guard also needs `"confirm": true`, and is refused from a paired device.
+pub fn set_project_as(
+    d: &Daemon,
+    name: &str,
+    change: &Value,
+    caller: &crate::projsettings::Caller,
+) -> Result<Value, Refused> {
     let _one = EDITING.lock().unwrap_or_else(|e| e.into_inner());
     let path = project_file(d, name);
     let old = std::fs::read_to_string(&path).map_err(|e| (404, format!("{name}: {e}")))?;
     let mut doc: DocumentMut = old.parse().map_err(|e| bad(format!("{name}: {e}")))?;
-    apply_project(&mut doc, change)?;
+    let mut rest = change.clone();
+    let (mut set, mut preview, mut confirm) = (Map::new(), false, false);
+    if let Some(o) = rest.as_object_mut() {
+        if let Some(Value::Object(s)) = o.remove("set") {
+            set = s;
+        }
+        preview = o
+            .remove("preview")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        confirm = o
+            .remove("confirm")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+    }
+    apply_project(&mut doc, &rest)?;
+    let touched = crate::projsettings::apply_set(d, caller, &mut doc, &set)?;
     let new = doc.to_string();
     if new == old {
         return Ok(json!({"result": "unchanged", "changed": []}));
     }
-    crate::config::parse_project(name, &new).map_err(bad)?;
+    crate::projsettings::check_text(d, name, &new)?;
+    let diff = crate::projsettings::diff(&old, &new);
+    if preview {
+        return Ok(json!({"result": "preview", "diff": diff}));
+    }
+    if !confirm && touched.iter().any(|k| k.sens.local_only()) {
+        return Err((
+            409,
+            format!("this change runs a program or weakens a guard; send it again with confirm: true after reading the diff:\n{diff}"),
+        ));
+    }
     write_atomic(&path, &new)?;
     match d.reload_registration(name) {
-        Ok(changed) => Ok(json!({"result": "applied", "changed": changed})),
+        Ok(changed) => {
+            if crate::projsettings::touches_overlay(&set) {
+                if let Some(pid) = d.project_id_by_name(name) {
+                    let _ = d.reload_definition(pid);
+                }
+            }
+            Ok(json!({"result": "applied", "changed": changed, "diff": diff}))
+        }
         Err(errors) => {
             write_atomic(&path, &old)?;
             Err(bad(errors.join("; ")))

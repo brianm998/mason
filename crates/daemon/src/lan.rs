@@ -423,6 +423,11 @@ async fn guard(State(d): State<Arc<Daemon>>, mut req: Request, next: Next) -> Re
         Role::Viewer => format!("viewer:{}", dev.id),
     };
     req.headers_mut().remove("x-mason-as");
+    // Everything past this guard came through a paired device, an owner's included: the
+    // Project page refuses the keys that run a program or weaken a guard to it.
+    req.headers_mut().remove("x-mason-paired");
+    req.headers_mut()
+        .insert("x-mason-paired", HeaderValue::from_static("1"));
     if let Ok(v) = HeaderValue::from_str(&as_who) {
         req.headers_mut().insert("x-mason-as", v);
     }

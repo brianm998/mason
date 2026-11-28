@@ -77,6 +77,7 @@ mod plugin_adapters;
 mod plugins;
 mod port;
 mod process;
+mod projsettings;
 mod prompt_packs;
 mod proposals;
 mod protocol;
