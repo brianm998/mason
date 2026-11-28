@@ -378,6 +378,10 @@ pub struct Site {
     /// Told what a run in progress is doing ("on GitHub: running, 4 min"), whenever that text
     /// changes. For display only.
     pub on_phase: Option<PhaseFn>,
+    /// This coordinator's tag, part of the name of every run ref it pushes (`mason/run/<project>/
+    /// <tag>-<id>`; empty: no tag). The backstop ([`reap_unrecorded`]) cancels only runs whose
+    /// ref carries it, so another coordinator's runs on the same repository are never touched.
+    pub owner_tag: String,
 }
 
 /// Why this machine has no room for the run now (a hold is active, a slot it needs has no free
@@ -466,6 +470,7 @@ pub fn site_for_task(d: &Daemon, project: &str, cwd: &Path, task: Option<u64>) -
         poll_s: 10,
         env_retry: d.cfg.env_retry,
         on_phase: None,
+        owner_tag: coordinator_tag(&d.cfg.data_dir),
     })
 }
 
@@ -1146,6 +1151,10 @@ struct State {
     ref_deleted: bool,
     /// The workflow was dispatched on the ref (once; a restarted daemon finds the run by SHA).
     dispatched: bool,
+    /// The run was stopped (or its dispatch failed after GitHub may have taken it) while GitHub
+    /// had not yet listed it, so it could not be cancelled. The record and ref stay for the
+    /// reaper, which cancels the run once it is listed ([`settle_pending`]).
+    cancel_pending: bool,
     code: i32,
     signal: i32,
     timed_out: bool,
@@ -1179,6 +1188,7 @@ impl State {
                 ("released", (self.released as u8).to_string()),
                 ("ref_deleted", (self.ref_deleted as u8).to_string()),
                 ("dispatched", (self.dispatched as u8).to_string()),
+                ("cancel_pending", (self.cancel_pending as u8).to_string()),
                 ("code", self.code.to_string()),
                 ("signal", self.signal.to_string()),
                 ("timed_out", (self.timed_out as u8).to_string()),
@@ -1228,6 +1238,7 @@ impl State {
             released: flag("released"),
             ref_deleted: flag("ref_deleted"),
             dispatched: flag("dispatched"),
+            cancel_pending: flag("cancel_pending"),
             code: s("code").parse().unwrap_or(0),
             signal: s("signal").parse().unwrap_or(0),
             timed_out: flag("timed_out"),
@@ -1486,20 +1497,89 @@ fn delete_ref(site: &Site, st: &mut State, rec: &Path) {
     st.save(rec);
 }
 
-fn cancel(site: &Site, st: &State) {
+/// Cancel the run of `st`. `true`: nothing is left to cancel (no run was ever started) or every
+/// run found was cancelled. `false`: a run may be out that could not be reached, because GitHub
+/// has not listed it yet (a dispatch answers no run id), the look failed, or the cancel was
+/// refused; the caller keeps the record so the reaper tries again ([`retire`]).
+fn cancel(site: &Site, st: &State) -> bool {
     let runs = match st.run_id {
         Some(id) => vec![ActionRun {
             id,
             branch: st.ref_name.clone(),
             ..Default::default()
         }],
-        None => site.gh.runs_for_sha(&st.sha).unwrap_or_default(),
+        None if !st.dispatched && !st.cancel_pending => return true,
+        None => match site.gh.runs_for_sha(&st.sha) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(ref_name = %st.ref_name, "could not look for the run to cancel: {e}");
+                return false;
+            }
+        },
     };
-    for r in runs.iter().filter(|r| r.branch == st.ref_name) {
+    let mine: Vec<&ActionRun> = runs.iter().filter(|r| r.branch == st.ref_name).collect();
+    if mine.is_empty() {
+        return false;
+    }
+    let mut all = true;
+    // A run GitHub already finished needs no cancel (and would refuse one).
+    for r in mine.into_iter().filter(|r| r.status != "completed") {
         if let Err(e) = site.gh.cancel_own_run(r) {
             tracing::warn!(run = r.id, "could not cancel the run: {e}");
+            all = false;
         }
     }
+    all
+}
+
+/// Stop following a run that is, or may be, out: cancel it, delete its ref and end its record.
+/// When the run cannot be reached yet the record and the ref stay, marked `cancel_pending`, for
+/// the reaper ([`settle_pending`]): a record is never dropped while a dispatch may have made a
+/// run nothing else would find.
+fn retire(site: &Site, st: &mut State, rec: &Path) {
+    if !cancel(site, st) {
+        st.cancel_pending = true;
+        st.save(rec);
+        tracing::info!(
+            ref_name = %st.ref_name,
+            "the run is not listed on GitHub yet: kept its record to cancel it later"
+        );
+        return;
+    }
+    delete_ref(site, st, rec);
+    let _ = std::fs::remove_file(rec);
+}
+
+/// The id a run's ref is named from: `<tag>-<id>`, or just the id without a tag.
+fn tagged_id(tag: &str, id: &str) -> String {
+    if tag.is_empty() {
+        id.to_string()
+    } else {
+        format!("{tag}-{id}")
+    }
+}
+
+/// This coordinator's tag, kept in `<data_dir>/run-owner` and made on first use. It is what
+/// tells this coordinator's runs from another's on a shared repository.
+pub fn coordinator_tag(data_dir: &Path) -> String {
+    let path = data_dir.join("run-owner");
+    if let Ok(t) = std::fs::read_to_string(&path) {
+        let t = t.trim();
+        if !t.is_empty() && t.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return t.to_string();
+        }
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tag = format!(
+        "c{:08x}",
+        (nanos ^ (std::process::id() as u128) << 20) as u32
+    );
+    let _ = std::fs::create_dir_all(data_dir);
+    let _ = std::fs::write(&path, format!("{tag}\n"));
+    tag
 }
 
 /// How long a run cut off at its limit is given, after the cancel, to end and show its artifact.
@@ -1797,7 +1877,7 @@ pub fn execute(
     let (mut st, resumed) = match loaded {
         Some(s) => (s, true),
         None => {
-            let name = ref_name(&spec.project, &spec.id);
+            let name = ref_name(&spec.project, &tagged_id(&site.owner_tag, &spec.id));
             let sha = snapshot(
                 &site.cwd,
                 &site.base_ref,
@@ -1839,11 +1919,12 @@ pub fn execute(
         delete_ref(site, &mut st, &rec);
         return Ok(Outcome::Done(finished_from(&st, &log)));
     }
-    let abandon = |st: &mut State| {
-        delete_ref(site, st, &rec);
-        let _ = std::fs::remove_file(&rec);
-    };
     if !resumed {
+        // Skipped (or the step has its result) before anything is sent: nothing to take down.
+        if let Some(why) = stop() {
+            let _ = std::fs::remove_file(&rec);
+            return Ok(Outcome::Stopped(why));
+        }
         if let Err(e) = push(site, &st) {
             let _ = std::fs::remove_file(&rec);
             return Err(Fail::Environmental(format!(
@@ -1851,16 +1932,25 @@ pub fn execute(
                 st.ref_name
             )));
         }
+        // The push can take minutes of retries: look again before the run is started.
+        if let Some(why) = stop() {
+            retire(site, &mut st, &rec);
+            return Ok(Outcome::Stopped(why));
+        }
         if let Err(e) = dispatch(site, spec, &mut st, &rec) {
-            // The ref is there and no run was started: take it down again.
-            delete_ref(site, &mut st, &rec);
-            let _ = std::fs::remove_file(&rec);
+            // The ref is there; no run was started unless GitHub took the dispatch and the
+            // answer was lost (`cancel_pending`): then the run is cancelled when it is found.
+            retire(site, &mut st, &rec);
             return Err(Fail::Environmental(format!(
                 "could not start {} on GitHub: {e}",
                 st.ref_name
             )));
         }
     } else if !st.dispatched && st.run_id.is_none() {
+        if let Some(why) = stop() {
+            retire(site, &mut st, &rec);
+            return Ok(Outcome::Stopped(why));
+        }
         // A daemon that died between the push and the dispatch: start the run, unless GitHub
         // already has one for this commit.
         let known = site
@@ -1874,8 +1964,12 @@ pub fn execute(
             }
             _ => {
                 let _ = push(site, &st);
+                if let Some(why) = stop() {
+                    retire(site, &mut st, &rec);
+                    return Ok(Outcome::Stopped(why));
+                }
                 if let Err(e) = dispatch(site, spec, &mut st, &rec) {
-                    abandon(&mut st);
+                    retire(site, &mut st, &rec);
                     return Err(Fail::Environmental(format!(
                         "could not start {} on GitHub: {e}",
                         st.ref_name
@@ -1896,8 +1990,7 @@ pub fn execute(
     let scratch = dir.join(format!("{}.remote-artifact", spec.id));
     loop {
         if let Some(why) = stop() {
-            cancel(site, &st);
-            abandon(&mut st);
+            retire(site, &mut st, &rec);
             return Ok(Outcome::Stopped(why));
         }
         let now = site.clock.now_ms();
@@ -1950,8 +2043,7 @@ pub fn execute(
                         // room, so it comes back now instead of waiting out the pickup timeout.
                         // The run is cancelled, its ref deleted and its units freed, as for a
                         // timeout.
-                        cancel(site, &st);
-                        abandon(&mut st);
+                        retire(site, &mut st, &rec);
                         return Err(Fail::Environmental(format!(
                             "no runner picked up {} within {} s (favor-remote: this machine has room, so it runs here)",
                             st.ref_name,
@@ -1959,8 +2051,7 @@ pub fn execute(
                         )));
                     }
                     None => {
-                        cancel(site, &st);
-                        abandon(&mut st);
+                        retire(site, &mut st, &rec);
                         return Err(Fail::Environmental(format!(
                             "no runner picked up {} within {} s",
                             st.ref_name,
@@ -2016,8 +2107,7 @@ pub fn execute(
         match step {
             Ok(Step::Wait) => outage_since = None,
             Ok(Step::Fail(why)) => {
-                cancel(site, &st);
-                abandon(&mut st);
+                retire(site, &mut st, &rec);
                 let _ = std::fs::remove_dir_all(&scratch);
                 return Err(Fail::Environmental(why));
             }
@@ -2065,7 +2155,8 @@ pub fn execute(
                 if !missing.is_empty() {
                     // Not collected: the caller runs the missing shards again and keeps these.
                     let ran_on = st.where_text();
-                    abandon(&mut st);
+                    delete_ref(site, &mut st, &rec);
+                    let _ = std::fs::remove_file(&rec);
                     return Ok(Outcome::Done(Finished {
                         code,
                         signal,
@@ -2137,13 +2228,13 @@ pub fn execute(
                     PollEvent::Stopped { why } => {
                         // A token that is refused or a repository that is gone: nothing here
                         // will change by waiting.
-                        abandon(&mut st);
+                        retire(site, &mut st, &rec);
                         return Err(Fail::Environmental(format!("GitHub refused: {why}")));
                     }
                     _ => {
                         let since = *outage_since.get_or_insert(now);
                         if now.saturating_sub(since) >= site.pickup_timeout.as_millis() as u64 {
-                            abandon(&mut st);
+                            retire(site, &mut st, &rec);
                             return Err(Fail::Environmental(format!(
                                 "GitHub did not answer for {} s: {e}",
                                 site.pickup_timeout.as_secs()
@@ -2173,9 +2264,17 @@ pub fn dispatch_inputs(spec: &RunSpec) -> Vec<(String, String)> {
 
 /// Start the workflow on the pushed ref, once, and record that it was.
 fn dispatch(site: &Site, spec: &RunSpec, st: &mut State, rec: &Path) -> Result<(), String> {
-    site.gh
+    if let Err(e) = site
+        .gh
         .dispatch_workflow(&site.workflow, &st.ref_name, &dispatch_inputs(spec))
-        .map_err(|e| e.to_string())?;
+    {
+        // An outage or a lost answer: GitHub may have taken the dispatch all the same.
+        if e.kind == ErrorKind::Unavailable {
+            st.cancel_pending = true;
+            st.save(rec);
+        }
+        return Err(e.to_string());
+    }
     st.dispatched = true;
     st.save(rec);
     Ok(())
@@ -3931,6 +4030,170 @@ pub fn holder_views(d: &Daemon) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// A record marked `cancel_pending` ([`retire`]): the run was not listed when it was stopped.
+/// Cancel it now if GitHub lists it, delete its ref and end the record. A run still unlisted
+/// after [`orphan_after_ms`] is given up (GitHub never made one, or it is finished): ref and
+/// record go. Returns what was done, for the log; `None`: nothing yet.
+pub fn settle_pending(site: &Site, record: &Path, now_ms: u64) -> Option<String> {
+    let mut st = State::load(record)?;
+    if !st.cancel_pending {
+        return None;
+    }
+    let what = if cancel(site, &st) {
+        "cancelled the GitHub run stopped before GitHub listed it"
+    } else if now_ms.saturating_sub(st.pushed_ms) >= orphan_after_ms(site) {
+        "gave up looking for the GitHub run stopped before GitHub listed it"
+    } else {
+        return None;
+    };
+    delete_ref(site, &mut st, record);
+    if st.ref_deleted {
+        let _ = std::fs::remove_file(record);
+    }
+    Some(format!("{what}: {}", st.ref_name))
+}
+
+/// The backstop: cancel this coordinator's queued or in-progress runs that no record names.
+///
+/// How another coordinator's runs are told apart: each coordinator tags every ref it pushes
+/// (`mason/run/<project>/<tag>-<id>`, the tag from [`coordinator_tag`]), and only a ref
+/// carrying `tag` is touched. A run on an untagged ref (an older run, or another coordinator's)
+/// is never cancelled; with an empty `tag` nothing is. A run younger than `grace_s`, or one
+/// whose age cannot be read, is left alone, and so is every run when either listing fails.
+/// `recorded` is the refs the records on disk name. Returns the runs cancelled.
+pub fn reap_unrecorded(
+    site: &Site,
+    project: &str,
+    recorded: &std::collections::HashSet<String>,
+    now_s: u64,
+    grace_s: u64,
+) -> Vec<String> {
+    let tag = &site.owner_tag;
+    if tag.is_empty() {
+        return vec![];
+    }
+    let prefix = ref_name(project, &format!("{tag}-"));
+    let mut runs = vec![];
+    for status in ["queued", "in_progress"] {
+        match site.gh.runs_by_status(status) {
+            Ok(v) => runs.extend(v),
+            Err(e) => {
+                tracing::warn!("could not list the {status} runs: {e}; cancelling none");
+                return vec![];
+            }
+        }
+    }
+    let mut done = vec![];
+    for r in runs {
+        if !r.branch.starts_with(&prefix) || recorded.contains(&r.branch) {
+            continue;
+        }
+        let old = parse_iso(&r.created_at).is_some_and(|c| now_s.saturating_sub(c) >= grace_s);
+        if !old {
+            continue;
+        }
+        match site.gh.cancel_own_run(&r) {
+            Ok(()) => {
+                tracing::info!(
+                    run = r.id,
+                    ref_name = %r.branch,
+                    "cancelled a GitHub run of this coordinator that no record names (older than {grace_s} s)"
+                );
+                done.push(r.branch);
+            }
+            Err(e) => tracing::warn!(run = r.id, "could not cancel an untracked run: {e}"),
+        }
+    }
+    done
+}
+
+/// The run records under `roots` (a run's `.remote` file), as [`live_run_refs`] finds them.
+fn run_records(roots: &[PathBuf]) -> Vec<PathBuf> {
+    fn walk(dir: &Path, depth: u32, out: &mut Vec<PathBuf>) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            let Ok(ft) = e.file_type() else { continue };
+            if ft.is_dir() {
+                if depth > 0 {
+                    walk(&p, depth - 1, out);
+                }
+            } else if p.extension().is_some_and(|x| x == "remote") {
+                out.push(p);
+            }
+        }
+    }
+    let mut out = vec![];
+    for r in roots {
+        walk(r, 3, &mut out);
+    }
+    out
+}
+
+/// Settle the runs stopped before GitHub listed them, then cancel untracked ones
+/// ([`reap_unrecorded`]). Off the caller's thread, one pass at a time, at most every
+/// [`REAP_EVERY_S`] (stretched by the budget as background work), and not while the quota is
+/// used up.
+pub fn reap_untracked(d: &Arc<Daemon>) {
+    static BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    if !any_remote(d) || github_budget::wait_s().is_some() {
+        return;
+    }
+    let now = now_ms();
+    let every = github_budget::paced(REAP_EVERY_S, Priority::Background) * 1000;
+    if now.saturating_sub(LAST.load(std::sync::atomic::Ordering::SeqCst)) < every
+        || BUSY.swap(true, std::sync::atomic::Ordering::SeqCst)
+    {
+        return;
+    }
+    LAST.store(now, std::sync::atomic::Ordering::SeqCst);
+    let d = d.clone();
+    std::thread::spawn(move || {
+        let _caller = github_budget::as_caller("remote-hold");
+        let mut roots = vec![d.cfg.landing_dir()];
+        if let Ok(rd) = std::fs::read_dir(d.cfg.data_dir.join("t")) {
+            roots.extend(rd.flatten().map(|e| e.path()));
+        }
+        let records = run_records(&roots);
+        for rec in &records {
+            let Some(st) = State::load(rec) else { continue };
+            if !st.cancel_pending {
+                continue;
+            }
+            if let Some(site) = site_of_state(&d, &st) {
+                if let Some(line) = settle_pending(&site, rec, now) {
+                    tracing::info!("{line}");
+                }
+            }
+        }
+        let mut recorded = live_run_refs(&roots);
+        for h in running_holds(&holds_dir(&d.cfg.hosts_dir())) {
+            if let Some(st) = State::load(&h.record) {
+                recorded.insert(st.ref_name);
+            }
+        }
+        let ids: Vec<(String, PathBuf)> = d
+            .projects()
+            .values()
+            .filter(|p| p.services.remote.is_some())
+            .map(|p| (p.id.clone(), p.path.clone()))
+            .collect();
+        for (id, path) in ids {
+            let Some(site) = site_for(&d, &id, &path) else {
+                continue;
+            };
+            let grace_s = orphan_after_ms(&site) / 1000;
+            for line in reap_unrecorded(&site, &id, &recorded, now / 1000, grace_s) {
+                tracing::info!(project = %id, "backstop cancelled {line}");
+            }
+        }
+        BUSY.store(false, std::sync::atomic::Ordering::SeqCst);
+    });
+}
+
 /// How often an adopted run is asked about at GitHub, before the budget stretches it.
 pub const REAP_EVERY_S: u64 = 120;
 
@@ -4733,6 +4996,14 @@ mod tests {
         dispatches: Mutex<Vec<String>>,
         /// The status of each job of the run, in order, when a test sets them one by one.
         job_status: Mutex<Option<Vec<&'static str>>>,
+        /// GitHub lists a dispatched run only after this many looks by commit (listing lag).
+        list_lag: Mutex<u32>,
+        /// The dispatch is accepted (the run exists) but the answer is lost: an outage error.
+        dispatch_lost: Mutex<bool>,
+        /// The runs `GET /actions/runs?status=` lists (queued and in progress alike).
+        status_runs: Mutex<Vec<serde_json::Value>>,
+        /// Listing by status fails.
+        list_fails: Mutex<bool>,
     }
 
     impl FakeGh {
@@ -4754,6 +5025,10 @@ mod tests {
                 die_at: Mutex::new(None),
                 dispatches: Mutex::new(vec![]),
                 job_status: Mutex::new(None),
+                list_lag: Mutex::new(0),
+                dispatch_lost: Mutex::new(false),
+                status_runs: Mutex::new(vec![]),
+                list_fails: Mutex::new(false),
             })
         }
         fn requests(&self) -> Vec<String> {
@@ -4819,7 +5094,13 @@ mod tests {
             }
             let u = r.url.as_str();
             if r.method == "POST" && u.ends_with("/cancel") {
-                self.cancels.lock().unwrap().push(4242);
+                let id = u
+                    .trim_end_matches("/cancel")
+                    .rsplit('/')
+                    .next()
+                    .and_then(|n| n.parse().ok())
+                    .unwrap_or(4242);
+                self.cancels.lock().unwrap().push(id);
                 return Ok(Response {
                     status: 202,
                     headers: vec![],
@@ -4832,6 +5113,13 @@ mod tests {
                     .lock()
                     .unwrap()
                     .push(format!("{u} {}", r.body.clone().unwrap_or_default()));
+                if *self.dispatch_lost.lock().unwrap() {
+                    return Ok(Response {
+                        status: 502,
+                        headers: vec![],
+                        body: String::new(),
+                    });
+                }
                 return Ok(Response {
                     status: 204,
                     headers: vec![],
@@ -4848,6 +5136,27 @@ mod tests {
                     body: String::new(),
                 });
             }
+            if u.contains("/actions/runs?status=") {
+                if *self.list_fails.lock().unwrap() {
+                    return Err(Transport("fake GitHub: listing is down".into()));
+                }
+                let status = u
+                    .split("status=")
+                    .nth(1)
+                    .unwrap()
+                    .split('&')
+                    .next()
+                    .unwrap();
+                let runs: Vec<_> = self
+                    .status_runs
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|r| r["status"] == status)
+                    .cloned()
+                    .collect();
+                return ok(serde_json::json!({ "workflow_runs": runs }));
+            }
             if u.contains("/actions/runs?head_sha=") {
                 let sha = u
                     .split("head_sha=")
@@ -4862,6 +5171,13 @@ mod tests {
                 if self.dispatches.lock().unwrap().is_empty() {
                     // Pushed and not dispatched: nothing starts on the push.
                     return ok(serde_json::json!({"workflow_runs": []}));
+                }
+                {
+                    let mut lag = self.list_lag.lock().unwrap();
+                    if *lag > 0 {
+                        *lag -= 1;
+                        return ok(serde_json::json!({"workflow_runs": []}));
+                    }
                 }
                 self.runs_seen.lock().unwrap().insert(sha.to_string());
                 let (st, _) = self.phase();
@@ -5063,6 +5379,7 @@ mod tests {
             poll_s: 10,
             env_retry: Duration::from_secs(30),
             on_phase: None,
+            owner_tag: String::new(),
         }
     }
 
@@ -5603,6 +5920,233 @@ mod tests {
             assert_eq!(refs(&r.bare), "");
             assert!(!record_path(logs.path(), "x6").exists());
         }
+    }
+
+    fn post_requests(gh: &FakeGh) -> Vec<String> {
+        gh.requests()
+            .into_iter()
+            .filter(|q| q.starts_with("POST"))
+            .collect()
+    }
+
+    #[test]
+    fn untracked_run_a_skip_before_the_push_sends_nothing() {
+        token();
+        let r = repo();
+        let t = tempfile::tempdir().unwrap();
+        let zip = artifact(t.path(), GREEN, 0, None);
+        let gh = FakeGh::new(&r, &zip, Mode::Normal);
+        let s = site(&r, gh.clone(), clock(), false);
+        let logs = tempfile::tempdir().unwrap();
+        let out = execute(
+            &s,
+            &spec("u1"),
+            logs.path(),
+            &|| Some(StopWhy::Skipped),
+            &Grant::test(),
+        )
+        .unwrap();
+        assert!(matches!(out, Outcome::Stopped(StopWhy::Skipped)));
+        assert!(post_requests(&gh).is_empty(), "{:?}", gh.requests());
+        assert!(gh.dispatches.lock().unwrap().is_empty());
+        assert_eq!(refs(&r.bare), "");
+        assert!(!record_path(logs.path(), "u1").exists());
+    }
+
+    #[test]
+    fn untracked_run_a_skip_between_the_push_and_the_dispatch_sends_no_dispatch() {
+        token();
+        let r = repo();
+        let t = tempfile::tempdir().unwrap();
+        let zip = artifact(t.path(), GREEN, 0, None);
+        let gh = FakeGh::new(&r, &zip, Mode::Normal);
+        let s = site(&r, gh.clone(), clock(), false);
+        let logs = tempfile::tempdir().unwrap();
+        let looks = std::sync::atomic::AtomicU32::new(0);
+        // The first look is before the push; the skip comes with the second, after it.
+        let out = execute(
+            &s,
+            &spec("u2"),
+            logs.path(),
+            &|| (looks.fetch_add(1, Ordering::SeqCst) >= 1).then_some(StopWhy::Skipped),
+            &Grant::test(),
+        )
+        .unwrap();
+        assert!(matches!(out, Outcome::Stopped(StopWhy::Skipped)));
+        assert!(gh.dispatches.lock().unwrap().is_empty());
+        assert!(gh.cancels.lock().unwrap().is_empty());
+        assert_eq!(refs(&r.bare), "");
+        assert!(!record_path(logs.path(), "u2").exists());
+        assert!(!hold_file(&logs.path().join("remote-holds"), "u2").exists());
+    }
+
+    #[test]
+    fn untracked_run_a_skip_after_the_dispatch_is_cancelled_once_github_lists_the_run() {
+        token();
+        let r = repo();
+        let t = tempfile::tempdir().unwrap();
+        let zip = artifact(t.path(), GREEN, 0, None);
+        let gh = FakeGh::new(&r, &zip, Mode::Normal);
+        // GitHub has not listed the run at the stop, nor at the first look after it.
+        *gh.list_lag.lock().unwrap() = 2;
+        let clk = clock();
+        let s = site(&r, gh.clone(), clk.clone(), false);
+        let logs = tempfile::tempdir().unwrap();
+        let g = gh.clone();
+        let out = execute(
+            &s,
+            &spec("u3"),
+            logs.path(),
+            &|| (!g.dispatches.lock().unwrap().is_empty()).then_some(StopWhy::Skipped),
+            &Grant::test(),
+        )
+        .unwrap();
+        assert!(matches!(out, Outcome::Stopped(StopWhy::Skipped)));
+        // Nothing could be cancelled, so the record and the ref stay for the reaper.
+        let rec = record_path(logs.path(), "u3");
+        assert!(State::load(&rec).unwrap().cancel_pending);
+        assert!(refs(&r.bare).contains("mason/run/proj/u3"));
+        assert!(gh.cancels.lock().unwrap().is_empty());
+        assert!(live_run_refs(&[logs.path().to_path_buf()]).contains("mason/run/proj/u3"));
+        // The first look of the reaper still sees nothing; the next lists the run.
+        assert_eq!(settle_pending(&s, &rec, clk.now_ms()), None);
+        assert!(rec.exists());
+        let said = settle_pending(&s, &rec, clk.now_ms()).unwrap();
+        assert!(said.contains("cancelled"), "{said}");
+        assert_eq!(*gh.cancels.lock().unwrap(), vec![4242]);
+        assert_eq!(refs(&r.bare), "");
+        assert!(!rec.exists());
+        // Done once: another pass finds nothing to do.
+        assert_eq!(settle_pending(&s, &rec, clk.now_ms()), None);
+        assert_eq!(gh.cancels.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn untracked_run_a_pending_cancel_is_given_up_after_the_orphan_age() {
+        token();
+        let r = repo();
+        let t = tempfile::tempdir().unwrap();
+        let zip = artifact(t.path(), GREEN, 0, None);
+        let gh = FakeGh::new(&r, &zip, Mode::Normal);
+        *gh.list_lag.lock().unwrap() = 1_000;
+        let clk = clock();
+        let s = site(&r, gh.clone(), clk.clone(), false);
+        let logs = tempfile::tempdir().unwrap();
+        let g = gh.clone();
+        execute(
+            &s,
+            &spec("u4"),
+            logs.path(),
+            &|| (!g.dispatches.lock().unwrap().is_empty()).then_some(StopWhy::Skipped),
+            &Grant::test(),
+        )
+        .unwrap();
+        let rec = record_path(logs.path(), "u4");
+        assert_eq!(settle_pending(&s, &rec, clk.now_ms()), None);
+        clk.sleep(orphan_after_ms(&s));
+        let said = settle_pending(&s, &rec, clk.now_ms()).unwrap();
+        assert!(said.contains("gave up"), "{said}");
+        assert_eq!(refs(&r.bare), "");
+        assert!(!rec.exists());
+    }
+
+    #[test]
+    fn untracked_run_a_dispatch_accepted_but_not_answered_keeps_its_record_for_the_reaper() {
+        token();
+        let r = repo();
+        let t = tempfile::tempdir().unwrap();
+        let zip = artifact(t.path(), GREEN, 0, None);
+        let gh = FakeGh::new(&r, &zip, Mode::Normal);
+        *gh.dispatch_lost.lock().unwrap() = true;
+        *gh.list_lag.lock().unwrap() = 1;
+        let clk = clock();
+        let s = site(&r, gh.clone(), clk.clone(), false);
+        let logs = tempfile::tempdir().unwrap();
+        let e = execute(&s, &spec("u5"), logs.path(), &|| None, &Grant::test());
+        assert!(matches!(e, Err(Fail::Environmental(_))), "{e:?}");
+        assert_eq!(gh.dispatches.lock().unwrap().len(), 1);
+        let rec = record_path(logs.path(), "u5");
+        assert!(
+            State::load(&rec).unwrap().cancel_pending,
+            "kept for the reaper"
+        );
+        assert!(refs(&r.bare).contains("mason/run/proj/u5"));
+        let said = settle_pending(&s, &rec, clk.now_ms()).unwrap();
+        assert!(said.contains("cancelled"), "{said}");
+        assert_eq!(*gh.cancels.lock().unwrap(), vec![4242]);
+        assert_eq!(refs(&r.bare), "");
+        assert!(!rec.exists());
+    }
+
+    #[test]
+    fn untracked_run_a_dispatch_the_github_refused_leaves_nothing() {
+        token();
+        let r = repo();
+        let t = tempfile::tempdir().unwrap();
+        let zip = artifact(t.path(), GREEN, 0, None);
+        let gh = FakeGh::new(&r, &zip, Mode::Status(422));
+        let s = site(&r, gh.clone(), clock(), false);
+        let logs = tempfile::tempdir().unwrap();
+        let e = execute(&s, &spec("u6"), logs.path(), &|| None, &Grant::test());
+        assert!(e.is_err());
+        assert_eq!(refs(&r.bare), "");
+        assert!(!record_path(logs.path(), "u6").exists());
+    }
+
+    #[test]
+    fn untracked_run_the_backstop_cancels_only_old_unrecorded_runs_of_this_coordinator() {
+        token();
+        let r = repo();
+        let t = tempfile::tempdir().unwrap();
+        let zip = artifact(t.path(), GREEN, 0, None);
+        let gh = FakeGh::new(&r, &zip, Mode::Normal);
+        let mut s = site(&r, gh.clone(), clock(), false);
+        s.owner_tag = "cabc".into();
+        let now_s = parse_iso("2026-11-27T12:00:00Z").unwrap();
+        let old = "2026-11-27T10:00:00Z";
+        let run = |id: u64, status: &str, branch: &str, at: &str| {
+            serde_json::json!({"id": id, "status": status, "head_branch": branch,
+                "html_url": "", "created_at": at})
+        };
+        *gh.status_runs.lock().unwrap() = vec![
+            run(1, "queued", "mason/run/proj/cabc-recorded", old),
+            run(2, "in_progress", "mason/run/proj/cabc-orphan", old),
+            run(
+                3,
+                "queued",
+                "mason/run/proj/cabc-young",
+                "2026-11-27T11:59:00Z",
+            ),
+            run(4, "in_progress", "mason/run/proj/cxyz-theirs", old),
+            run(5, "queued", "mason/run/proj/untagged", old),
+            run(6, "queued", "feature/x", old),
+            run(7, "queued", "mason/run/other/cabc-elsewhere", old),
+            run(8, "queued", "mason/run/proj/cabc-orphan2", "not a time"),
+        ];
+        let recorded =
+            std::collections::HashSet::from(["mason/run/proj/cabc-recorded".to_string()]);
+        // A listing that fails cancels nothing.
+        *gh.list_fails.lock().unwrap() = true;
+        assert!(reap_unrecorded(&s, "proj", &recorded, now_s, 1800).is_empty());
+        assert!(gh.cancels.lock().unwrap().is_empty());
+        *gh.list_fails.lock().unwrap() = false;
+        // Without a tag nothing can be told from another coordinator's: none is cancelled.
+        let mut untagged = site(&r, gh.clone(), clock(), false);
+        untagged.owner_tag = String::new();
+        assert!(reap_unrecorded(&untagged, "proj", &recorded, now_s, 1800).is_empty());
+        let gone = reap_unrecorded(&s, "proj", &recorded, now_s, 1800);
+        assert_eq!(gone, vec!["mason/run/proj/cabc-orphan".to_string()]);
+        assert_eq!(*gh.cancels.lock().unwrap(), vec![2]);
+    }
+
+    #[test]
+    fn untracked_run_the_coordinator_tag_is_made_once_and_kept() {
+        let d = tempfile::tempdir().unwrap();
+        let a = coordinator_tag(d.path());
+        assert!(a.starts_with('c') && a.len() > 4, "{a}");
+        assert_eq!(coordinator_tag(d.path()), a);
+        assert_eq!(tagged_id(&a, "t1r2-u-x"), format!("{a}-t1r2-u-x"));
+        assert_eq!(tagged_id("", "t1r2-u-x"), "t1r2-u-x");
     }
 
     /// An adopted run: its ref pushed, its record saying it is out with run 4242, and its hold.
@@ -7538,6 +8082,7 @@ mod tests {
             poll_s: 10,
             env_retry: Duration::from_secs(30),
             on_phase: None,
+            owner_tag: String::new(),
         };
         let dir = r._t.path().join("runs");
         let spec = sharded_spec("sh1", &[&["a", "b"], &["c"], &["d"]]);

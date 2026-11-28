@@ -1507,6 +1507,21 @@ impl GitHub {
         Ok(Some((runs, resp.header("etag").map(String::from))))
     }
 
+    /// The runs with a status (`queued`, `in_progress`), with their branch and creation time
+    /// (`GET /actions/runs?status=`; the newest 100). An error is an error: a caller that acts on
+    /// the list must not act on a failed look.
+    pub fn runs_by_status(&self, status: &str) -> Result<Vec<ActionRun>, ApiError> {
+        let v = self.json(Request::get(
+            &self.url(&format!("/actions/runs?status={status}&per_page=100")),
+        ))?;
+        Ok(v["workflow_runs"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(action_run)
+            .collect())
+    }
+
     /// The latest attempt's jobs of a run.
     pub fn remote_run_jobs(&self, id: u64) -> Result<Vec<ActionJob>, ApiError> {
         let v = self.json(Request::get(&self.url(&format!(
