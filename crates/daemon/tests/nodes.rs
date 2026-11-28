@@ -1027,6 +1027,15 @@ fn turning_the_switch_off_lets_a_running_job_finish_and_takes_no_new_one() {
     );
 }
 
+/// A command that hangs in a slot of the pair's node and runs `here` anywhere else. It tells by
+/// the directory: `MASON_NODE` is inherited by a local run when the tests themselves run on a node.
+fn hangs_on_the_node(p: &Pair, here: &str) -> String {
+    format!(
+        "case \"$(pwd -P)\" in */{}/*) sleep 300 ;; *) {here} ;; esac",
+        root_name(&p.sb)
+    )
+}
+
 /// (cancel) `on_switch_off = "cancel"`, or `mason node stop-jobs`: the job is killed, the
 /// coordinator's run is placed again, and here that is this machine: green. The node's job
 /// directory is cleaned up.
@@ -1050,7 +1059,7 @@ fn a_cancelled_job_is_run_again_here_and_the_node_cleans_up() {
             id_prefix: "t0r1-cancel".into(),
             log_dir: logs.path().to_path_buf(),
             // On the node this hangs; anywhere else it ends at once.
-            cmd: "if [ -n \"$MASON_NODE\" ]; then sleep 300; else echo local-ok; fi".into(),
+            cmd: hangs_on_the_node(&p, "echo local-ok"),
             build: None,
             cwd: p.sa.repo.clone(),
             env: vec![],
@@ -1146,7 +1155,7 @@ fn a_check_the_node_gives_back_runs_under_the_slot_its_task_holds() {
                 id_prefix: format!("t{t}r1-check"),
                 log_dir: logs.path().to_path_buf(),
                 // On the node this hangs; anywhere else it ends at once.
-                cmd: "if [ -n \"$MASON_NODE\" ]; then sleep 300; else echo local-ok; fi".into(),
+                cmd: hangs_on_the_node(&p, "echo local-ok"),
                 build: None,
                 cwd: p.sa.repo.clone(),
                 env: vec![],
@@ -1491,9 +1500,9 @@ fn a_check_in_flight_is_listed_under_its_host_until_it_ends() {
         id_prefix: format!("t{t}r1-check"),
         log_dir: logs.path().to_path_buf(),
         // On the node this hangs; here it waits for the flag.
-        cmd: format!(
-            "if [ -n \"$MASON_NODE\" ]; then sleep 300; else while [ ! -f '{}' ]; do sleep 0.1; done; fi",
-            flag.display()
+        cmd: hangs_on_the_node(
+            &p,
+            &format!("while [ ! -f '{}' ]; do sleep 0.1; done", flag.display()),
         ),
         build: None,
         cwd: p.sa.repo.clone(),
