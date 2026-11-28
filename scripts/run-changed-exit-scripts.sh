@@ -74,7 +74,15 @@ run_limited() {
 # Scripts the change adds or edits, plus those whose text names a changed path, crate or test target
 # (scripts/select-exit-scripts.sh, s669).
 # The selector is read from this helper'"'"'s own directory, so a helper run inside another repository still finds it (s716).
-selected=$(bash "$here/select-exit-scripts.sh" "$base") || { echo "FAIL select-exit-scripts"; exit 1; }
+if [ -n "${MASON_EXIT_ONLY:-}" ]; then
+  # MASON_EXIT_ONLY="scripts/exit/sA.sh scripts/exit/sB.sh": a check of a task whose testing the
+  # owner skipped runs only the scripts the change adds or edits, not every script that names a
+  # changed path (the selector picked about 160 for a one-script change on 2026-11-27).
+  selected=
+  for s in $MASON_EXIT_ONLY; do [ -e "$s" ] && selected="$selected $s"; done
+else
+  selected=$(bash "$here/select-exit-scripts.sh" "$base") || { echo "FAIL select-exit-scripts"; exit 1; }
+fi
 # MASON_EXIT_SHARD=i/n (a GitHub shard, s843): keep only the scripts that scripts/run-exit-scripts.sh
 # plans for shard i. Its plan covers the whole directory, so a script's shard does not move with the
 # selection, and every selected script runs on exactly one shard.
