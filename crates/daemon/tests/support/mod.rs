@@ -583,6 +583,7 @@ impl Scratch {
 
     /// Start a daemon after letting `f` adjust its configuration.
     pub fn start_with(&self, f: impl FnOnce(&mut DaemonConfig)) -> Arc<Daemon> {
+        scrub_step_env();
         self.prefetch();
         let mut c = self.config();
         f(&mut c);
@@ -628,6 +629,47 @@ impl Scratch {
             .map(String::from)
             .collect()
     }
+}
+
+/// What MASON puts in the environment of a step, and what its exit-scripts runner reads.
+/// When MASON runs this suite as a task's test step these are in the test process's
+/// environment. A test daemon is not part of that step: its hosts inherit what it has, so a
+/// check would read MASON_STEP and act as a test step.
+const STEP_ENV: &[&str] = &[
+    "MASON_TASK",
+    "MASON_TASK_CACHE",
+    "MASON_TITLE",
+    "MASON_PROJECT",
+    "MASON_WORKTREE",
+    "MASON_BRANCH",
+    "MASON_BASE",
+    "MASON_STEP",
+    "MASON_ATTEMPT",
+    "MASON_HELD",
+    "MASON_RESULT_FILE",
+    "MASON_PROGRESS_FILE",
+    "MASON_TESTS_ALREADY_RAN",
+    "MASON_EXIT_IN_CHECK",
+    "MASON_EXIT_CACHE",
+    "MASON_EXIT_TREE_KEY",
+    "MASON_EXIT_PASSES",
+    "MASON_EXIT_REPEAT",
+    "MASON_EXIT_SHARD",
+    "MASON_EXIT_SCRIPT_LIMIT_S",
+    "MASON_RUN_BUDGET_S",
+    "MASON_RUN_BUDGET_MARGIN_S",
+    "MASON_RUN_BUDGET_FLOOR_S",
+];
+
+/// Remove [`STEP_ENV`] from this process, for a daemon started inside it. Once: the other
+/// tests of the process run meanwhile.
+fn scrub_step_env() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        for k in STEP_ENV {
+            std::env::remove_var(k);
+        }
+    });
 }
 
 pub fn explore_turn() -> Value {
@@ -1056,22 +1098,8 @@ impl Scratch {
         let disk = self.root.path().join("disk-for-masond");
         let _ = std::fs::write(&disk, "1000\n");
         cmd.env("MASON_DISK_FILE", &disk);
-        // When MASON runs this suite as a task's test step, the step's own variables are in
-        // this process's environment. A test daemon is not part of that step: its hosts
-        // inherit what it has, so a check would read MASON_STEP and act as a test step.
-        for k in [
-            "MASON_TASK",
-            "MASON_TITLE",
-            "MASON_PROJECT",
-            "MASON_WORKTREE",
-            "MASON_BRANCH",
-            "MASON_BASE",
-            "MASON_STEP",
-            "MASON_ATTEMPT",
-            "MASON_HELD",
-            "MASON_RESULT_FILE",
-            "MASON_PROGRESS_FILE",
-        ] {
+        // See [`STEP_ENV`].
+        for k in STEP_ENV {
             cmd.env_remove(k);
         }
         for (k, v) in env.iter().filter(|(k, _)| *k != "MASON_TEST_STDERR") {
