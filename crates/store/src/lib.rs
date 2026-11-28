@@ -928,6 +928,31 @@ impl Store {
         read_events(&conn, after, limit)
     }
 
+    /// The `WaitStarted` and `WaitEnded` events at or after `at_ms`, oldest first.
+    pub fn wait_events_since(&self, at_ms: u64) -> Result<Vec<Event>, StoreError> {
+        let conn = self.reader.lock().unwrap_or_else(|e| e.into_inner());
+        let mut st = conn.prepare(
+            "SELECT at, kind, payload FROM events
+             WHERE kind IN ('wait_started', 'wait_ended') AND at >= ?1 ORDER BY seq",
+        )?;
+        let rows = st.query_map(params![at_ms as i64], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut out = vec![];
+        for row in rows {
+            let (at, kind, payload) = row?;
+            out.push(Event {
+                at: Timestamp(at as u64),
+                kind: codec::decode(&kind, &payload).map_err(StoreError::Codec)?,
+            });
+        }
+        Ok(out)
+    }
+
     pub fn last_seq(&self) -> Result<u64, StoreError> {
         let conn = self.reader.lock().unwrap_or_else(|e| e.into_inner());
         last_seq(&conn)

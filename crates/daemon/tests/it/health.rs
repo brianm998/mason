@@ -429,6 +429,26 @@ fn a_busy_task_is_stuck_long_and_the_prompt_names_the_restart() {
 }
 
 #[test]
+fn health_facts_total_a_steps_capacity_waits_from_the_log() {
+    let (_s, d, t, _g) = world(submit(json!({
+        "summary": "long", "false_alarm": {"finding": "stuck:long", "why": "x"}
+    })));
+    d.emit(mason_core::EventKind::WaitStarted {
+        task: t,
+        on: "Waiting for a GitHub runner".into(),
+        class: Some("gha".into()),
+    })
+    .unwrap();
+    // Ten hours after the wait began, as the log timed it.
+    let since = d.world().unwrap().waits[&t].since.0;
+    let (x, findings) = health::report(&d, since + 10 * H);
+    let fact = x.tasks.iter().find(|f| f.id == t.0).unwrap();
+    assert_eq!(fact.capacity_wait_ms, 10 * H);
+    let long = format!("stuck:long:{}", t.0);
+    assert!(!findings.iter().any(|f| f.key == long), "{findings:?}");
+}
+
+#[test]
 fn a_needs_owner_session_does_not_block_a_new_finding_and_times_out() {
     let ask = submit(json!({"summary": "s",
         "needs_owner": {"question": "Cancel?", "recommendation": "Cancel it"}}));
