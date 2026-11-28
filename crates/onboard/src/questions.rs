@@ -663,6 +663,7 @@ pub fn resolve(
         "--suites",
     )
     .map_err(|_| "--suites is accept or skip".to_string())?;
+    let mut test_refusal: Option<String> = None;
     // With nothing to propose, a test command is asked for. `true` is only ever an answer.
     let test = match f.test.as_deref().map(str::trim) {
         Some("") => return Err(
@@ -690,7 +691,9 @@ pub fn resolve(
             };
             match given.trim() {
                 "" => {
-                    return Err("no test suite could be proposed for this repository (build files are looked for at its top and one folder down), so the test step would run `true` and prove nothing. Pass --test COMMAND, or --test true to add it with no tests on purpose, or --suites skip".into());
+                    // Refused once the other answers are checked, so their refusals come first.
+                    test_refusal = Some("no test suite could be proposed for this repository (build files are looked for at its top and one folder down), so the test step would run `true` and prove nothing. Pass --test COMMAND, or --test true to add it with no tests on purpose, or --suites skip".to_string());
+                    None
                 }
                 PENDING => {
                     warnings.push("no test suite could be proposed: a test command is needed (--test COMMAND, or --test true for none)".into());
@@ -899,6 +902,9 @@ pub fn resolve(
         return Err(format!(
             "project id {id:?} must be lowercase letters, digits, - and _; pass --id"
         ));
+    }
+    if let Some(e) = test_refusal {
+        return Err(e);
     }
     Ok(Answers {
         id,
