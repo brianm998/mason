@@ -98,14 +98,17 @@ fn get(d: &Arc<Daemon>, who: &str, paired: bool) -> Value {
 }
 
 fn entry(cat: &Value, key: &str) -> Value {
+    find_entry(cat, key).unwrap_or_else(|| panic!("no entry {key}"))
+}
+
+fn find_entry(cat: &Value, key: &str) -> Option<Value> {
     cat["sections"]
         .as_array()
         .unwrap()
         .iter()
         .flat_map(|s| s["entries"].as_array().unwrap().iter())
         .find(|e| e["key"] == key)
-        .unwrap_or_else(|| panic!("no entry {key}"))
-        .clone()
+        .cloned()
 }
 
 fn set(d: &Arc<Daemon>, who: &str, paired: bool, body: Value) -> (u16, Value) {
@@ -375,7 +378,10 @@ fn every_writable_key_sets_and_unsets_with_comments_intact() {
             after.contains("# keep this comment") && after.contains("# trailing note"),
             "{key}"
         );
-        if key != "tool_timeout_s" && key != "test" {
+        // An environment variable is listed only while the file names it.
+        if key.starts_with("agent_env.") {
+            assert_eq!(find_entry(&get(&d, "brian", false), key), None, "{key}");
+        } else if key != "tool_timeout_s" && key != "test" {
             assert_eq!(
                 entry(&get(&d, "brian", false), key)["written"],
                 Value::Null,
