@@ -1887,6 +1887,56 @@ impl Who {
     }
 }
 
+/// The suite whose run covers the exit scripts' own cargo-test parts (#1291).
+pub(crate) const CARGO_SUITE: &str = "cargo-workspace";
+
+/// Read by the exit scripts: the cargo suite runs beside them, so they leave out their own
+/// cargo-test parts, as GitHub CI's exit-script jobs do (#1291).
+pub(crate) const TESTS_ALREADY_RAN_ENV: &str = "MASON_TESTS_ALREADY_RAN";
+
+/// Set for an agent's check: scripts/run-changed-exit-scripts.sh reports a script killed at the
+/// per-script limit as `NOT RUN` there, not as a failure (#1291). A test step never sets it.
+pub(crate) const EXIT_IN_CHECK_ENV: &str = "MASON_EXIT_IN_CHECK";
+
+/// Does `suite` run the change's exit scripts? The landing tier's suite runs the same command and
+/// keeps its behaviour (#1291), so it is not one.
+pub(crate) fn runs_changed_exit_scripts(suite: &Suite) -> bool {
+    suite.level != "landing" && suite.command.contains("run-changed-exit-scripts")
+}
+
+/// Did the cargo suite run, among the suites of a test step that came before this one? A green
+/// reused from the same tree or inputs counts; a skipped or unselected suite does not.
+fn cargo_suite_ran(outcomes: &[(String, SuiteOutcome)]) -> bool {
+    outcomes.iter().any(|(name, o)| {
+        name == CARGO_SUITE
+            && matches!(
+                o,
+                SuiteOutcome::Proven
+                    | SuiteOutcome::Reused
+                    | SuiteOutcome::Flaky
+                    | SuiteOutcome::Excused
+            )
+    })
+}
+
+/// A line for a check's answer naming the exit scripts its runner reported as too slow for a
+/// check, from the whole log of the run of `suite`; `None` when there are none.
+pub(crate) fn too_slow_note(suite: &str, output: &str) -> Option<String> {
+    let slow: Vec<&str> = output
+        .lines()
+        .filter(|l| l.ends_with("too slow for a check)"))
+        .filter_map(|l| l.strip_prefix("NOT RUN ")?.split_whitespace().next())
+        .collect();
+    (!slow.is_empty()).then(|| {
+        format!(
+            "{suite}: NOT RUN, too slow for a check: {}. Each needs a longer run than a check \
+             gives one script. This is not a failure of your code, so do not chase it or run the \
+             check again for it. The test step runs it and fails if it cannot finish there.",
+            slow.join(", ")
+        )
+    })
+}
+
 /// The debt scope of a task made immune to testing: every suite and every step that tests
 /// is skipped for it, from develop's checks to landing, and the full run is owed.
 pub const ALL_TESTS: &str = "tests:all";
@@ -4448,6 +4498,16 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
             who.cover.giver = held.as_ref().map(|l| l.giver());
             who.cover.runners = held.as_ref().and_then(|l| l.granted_runners());
         }
+        // The exit scripts leave out the cargo parts that this step's cargo suite ran (#1291).
+        let covered;
+        let runner = if runs_changed_exit_scripts(&suite) && cargo_suite_ran(&outcomes) {
+            let mut w = who.clone();
+            w.env.push((TESTS_ALREADY_RAN_ENV.into(), "1".into()));
+            covered = w;
+            &covered
+        } else {
+            &who
+        };
         let ran = match ran_beside {
             Some(r) => r,
             None if reused_whole.is_some() => SuiteRun::Done {
@@ -4456,7 +4516,7 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
                 notes: vec![],
             },
             None => run_suite(
-                &who,
+                runner,
                 &c.project.path,
                 &lock,
                 &c.def,

@@ -606,3 +606,106 @@ fn a_fast_tracked_green_check_says_it_built_and_ran_only_the_new_test() {
     assert!(!logs.contains("RAN-FULL"), "{logs}");
     assert!(!logs.contains("RED"), "{logs}");
 }
+
+/// A stand-in for the exit-scripts runner: it records what it was told, and in an agent's check
+/// reports one script as too slow for it.
+const FAKE_EXITS: &str = r#"#!/bin/sh
+echo "step=${MASON_STEP:-check} ran=${MASON_TESTS_ALREADY_RAN:-unset} in_check=${MASON_EXIT_IN_CHECK:-unset}" >> "$1"
+if [ "${MASON_EXIT_IN_CHECK:-}" = 1 ]; then echo "NOT RUN s7 (over 900 s, too slow for a check)"; fi
+echo "PASS s1"
+"#;
+
+/// A check and then a test step over a change the impact map gives `selected` for; returns what
+/// the fake runner recorded, and the task's logs.
+fn exit_script_runs(selected: &str) -> (String, String) {
+    let marks = tempfile::tempdir().unwrap();
+    let mark = marks.path().join("mark").display().to_string();
+    let definition = format!(
+        r#"{HEAD}
+[step.test]
+type = "test"
+category = "testing"
+uses = {{ test-suite = 1 }}
+suites = ["cargo-workspace", "exit-scripts"]
+on_red = "develop"
+max_rounds = 2
+next = "land"
+
+[suite.cargo-workspace]
+command = "sh checks.sh"
+parser = "tap"
+min_tests = 3
+level = "unit"
+
+[suite.exit-scripts]
+command = "sh run-changed-exit-scripts.sh {mark}"
+parser = "regex"
+pass_regex = '^PASS (.+)$'
+fail_regex = '^FAIL (.+)$'
+min_tests = 1
+level = "unit"
+
+[binding.unit]
+when = ["development", "test_step"]
+
+[impact]
+"hello.txt" = {selected}
+"#
+    );
+    let turns = commit("echo hello > hello.txt", "change", true);
+    let s = Scratch::new("false", json!({"steps": {"develop": [turns]}}));
+    s.push_files(
+        &[
+            (".mason/mason.toml", definition.as_str()),
+            ("checks.sh", CHECKS),
+            ("run-changed-exit-scripts.sh", FAKE_EXITS),
+        ],
+        "project setup",
+    );
+    let d = s.start();
+    let t = file_task_as(
+        &d,
+        "Exits",
+        "Please do it.",
+        true,
+        TrustSource::Owner,
+        false,
+    );
+    wait_state(&d, t, State::Landed, 120);
+    let ran = std::fs::read_to_string(marks.path().join("mark")).unwrap();
+    (ran, render_logs(&d, t.0))
+}
+
+/// #1291: beside the cargo suite, the exit scripts are told its tests already ran, in a check and
+/// in the test step; only the check reports a script too slow for it as not run.
+#[test]
+fn exit_scripts_beside_the_cargo_suite_are_told_its_tests_ran() {
+    let (ran, logs) = exit_script_runs(r#"["cargo-workspace", "exit-scripts"]"#);
+    assert!(
+        ran.lines().any(|l| l == "step=check ran=1 in_check=1"),
+        "{ran}"
+    );
+    assert!(
+        ran.lines().any(|l| l == "step=test ran=1 in_check=unset"),
+        "{ran}"
+    );
+    assert!(logs.contains("exit-scripts: passed"), "{logs}");
+    assert!(
+        logs.contains("exit-scripts: NOT RUN, too slow for a check: s7."),
+        "{logs}"
+    );
+}
+
+#[test]
+fn exit_scripts_without_the_cargo_suite_run_their_own_cargo_parts() {
+    let (ran, _) = exit_script_runs(r#"["exit-scripts"]"#);
+    assert!(
+        ran.lines().any(|l| l == "step=check ran=unset in_check=1"),
+        "{ran}"
+    );
+    assert!(
+        ran.lines()
+            .any(|l| l == "step=test ran=unset in_check=unset"),
+        "{ran}"
+    );
+}

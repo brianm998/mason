@@ -2237,6 +2237,10 @@ impl TestChecks {
         let mut failed = false;
         let mut built: Vec<(String, bool)> = vec![];
         let mut any = false;
+        // Set once the cargo suite has run in this check: the exit scripts after it leave out
+        // their own cargo-test parts (#1291). Not for a run of named tests only, nor a fast
+        // track: neither runs what those parts would.
+        let mut cargo_ran = false;
         for sel in &sels {
             if !sel.selected {
                 lines.push(format!("{}: not run, {}", sel.suite.name, sel.why));
@@ -2258,7 +2262,18 @@ impl TestChecks {
                 .map(|p| crate::suites::split_for_suite(&def, &sel.suite, p).0);
             let limit = suite.timeout.unwrap_or(self.timeout).min(self.timeout);
             // The one function that decides where runs go (#698) is asked for this suite.
+            let tests_ran = cargo_ran;
             let placed = |mut s: crate::hostedcheck::CheckSpec, suite: &mason_testing::Suite| {
+                // Under a skip the check is the only run of the added scripts: a script too
+                // slow for it stays a failure.
+                if !light && crate::suites::runs_changed_exit_scripts(suite) {
+                    s.env
+                        .push((crate::suites::EXIT_IN_CHECK_ENV.into(), "1".into()));
+                    if tests_ran {
+                        s.env
+                            .push((crate::suites::TESTS_ALREADY_RAN_ENV.into(), "1".into()));
+                    }
+                }
                 s.place = Some((Some(TaskId(self.task)), Box::new(suite.clone())));
                 // A skip while it waits or runs ends it (#873).
                 // Not for a call made under a skip: that one runs the build and the new tests
@@ -2463,6 +2478,7 @@ impl TestChecks {
             if suite.command != before && !split_kept {
                 suite.shards = 0;
             }
+            let covers_scripts = name == crate::suites::CARGO_SUITE && !light && !small;
             if let Some(b) = &suite.build {
                 let known = built.iter().find(|(c, _)| c == b).map(|(_, ok)| *ok);
                 let ok = match known {
@@ -2543,6 +2559,8 @@ impl TestChecks {
                 };
                 if !ok {
                     failed = true;
+                    // Its red is reported here.
+                    cargo_ran |= covers_scripts;
                     continue;
                 }
                 if light {
@@ -2639,6 +2657,16 @@ impl TestChecks {
                 ));
                 continue;
             }
+            cargo_ran |= covers_scripts && res.is_ok();
+            let too_slow = res
+                .as_ref()
+                .ok()
+                .filter(|_| crate::suites::runs_changed_exit_scripts(&suite))
+                .and_then(|o| {
+                    let text = read_whole_log(&self.log_dir.join(format!("{}.log", o.id)))
+                        .unwrap_or_else(|| o.full.clone());
+                    crate::suites::too_slow_note(&name, &text)
+                });
             match &res {
                 Ok(o) if o.passed => {
                     self.reds.passed(&name);
@@ -2698,6 +2726,7 @@ impl TestChecks {
                     }
                 }
             }
+            lines.extend(too_slow);
         }
         self.slots.take_agent_slot_back();
         if !any {

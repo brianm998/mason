@@ -15,10 +15,18 @@
 # no more start, and each script not run is `FAIL sNNN (not run: out of time; ...)`, so the run ends
 # red with the passes listed instead of being killed with no verdict.
 #
+# A script killed at the per-script limit (#1291): in an agent's check (MASON_EXIT_IN_CHECK=1, set
+# by the daemon) it is `NOT RUN sNNN (over N s, too slow for a check)`, counted as not run, and
+# does not make the run red. Anywhere else (a test step, a landing run) it is `FAIL sNNN (over N s)`.
+# A script cut short because the run's time budget left it less than the limit is a FAIL either way.
+#
+# MASON_TESTS_ALREADY_RAN (set by the daemon when the cargo-workspace suite runs in the same check
+# or test step, #1291) is read by the scripts themselves: they leave out their own cargo-test parts.
+#
 # Passes kept between runs: with MASON_EXIT_CACHE=1 (an agent's run_check sets it; a test step and a
 # landing run never do, so a gate counts only what it ran itself) and MASON_TASK_CACHE set to an
 # existing directory, each PASS is recorded under it, keyed by the script's path and
-# content, MASON_EXIT_REPEAT and the tree (HEAD, the uncommitted diff, untracked files). A later run
+# content, MASON_EXIT_REPEAT, MASON_TESTS_ALREADY_RAN and the tree (HEAD, the uncommitted diff, untracked files). A later run
 # on the same tree prints `PASS sNNN (cached)` for it. A FAIL is never recorded.
 # Off this Mac (#1252) a node or GitHub runner has neither the directory nor the tree, so the
 # coordinator keeps the passes: with MASON_EXIT_CACHE=1, MASON_EXIT_TREE_KEY (its key of the tree it
@@ -48,9 +56,11 @@ export MASON_EXIT_REPEAT=${MASON_EXIT_REPEAT:-1}
 log=$(mktemp)
 trap 'rm -f "$cpu" "$log"' EXIT
 fail=0; n=0
-# run_limited SCRIPT SECONDS LOG: runs the script with its output in LOG; 124 when it was killed for time.
+# run_limited SCRIPT SECONDS LOG: runs the script with its output in LOG; 124, with killed=1, when it was
+# killed for time (a script may itself exit 124).
 run_limited() {
   local s=$1 secs=$2 out=$3 pid watcher flag rc
+  killed=0
   if ! [ "$secs" -gt 0 ] 2>/dev/null; then bash "$s" > "$out" 2>&1; return $?; fi
   flag=$(mktemp); rm -f "$flag"
   bash "$s" > "$out" 2>&1 & pid=$!
@@ -58,7 +68,7 @@ run_limited() {
   watcher=$!
   wait "$pid"; rc=$?
   kill "$watcher" 2>/dev/null; wait "$watcher" 2>/dev/null
-  if [ -e "$flag" ]; then rm -f "$flag"; return 124; fi
+  if [ -e "$flag" ]; then rm -f "$flag"; killed=1; return 124; fi
   return $rc
 }
 # Scripts the change adds or edits, plus those whose text names a changed path, crate or test target
@@ -76,6 +86,9 @@ if [ -n "${MASON_EXIT_SHARD:-}" ]; then
   done
   selected=$keep
 fi
+# Read here and not passed on: a script that drives this runner itself is not in the agent's check.
+in_check=${MASON_EXIT_IN_CHECK:-}
+unset MASON_EXIT_IN_CHECK
 # One script must not use a whole run: over the limit it is killed and reported, the rest still run (s843).
 limit=${MASON_EXIT_SCRIPT_LIMIT_S:-900}
 budget=${MASON_RUN_BUDGET_S:-}
@@ -112,8 +125,12 @@ if [ "${MASON_EXIT_CACHE:-}" = 1 ] && [ -n "${MASON_EXIT_TREE_KEY:-}" ] && [ -z 
   remote_passes=" ${MASON_EXIT_PASSES:-} "
 fi
 cache_file() { # cache_file SCRIPT: the record that this script passed on this tree
-  printf '%s\n' "$1" "$(hash_stdin < "$1")" "$tree_key" "${MASON_EXIT_REPEAT:-}" | hash_stdin
+  # A pass without the cargo parts is not a pass for a run that runs them (#1291).
+  printf '%s\n' "$1" "$(hash_stdin < "$1")" "$tree_key" "${MASON_EXIT_REPEAT:-}" "${MASON_TESTS_ALREADY_RAN:+tests-ran}" | hash_stdin
 }
+# The cache settings are this run's own. A script that drives this runner itself (s759) must not
+# take them, or its inner run prints `MASON-EXIT-KEY` lines too (#1291).
+unset MASON_EXIT_CACHE MASON_EXIT_TREE_KEY MASON_EXIT_PASSES
 passed=0; failed=0; notrun=0; out_of_time=0
 left=
 for s in $selected; do
@@ -163,6 +180,12 @@ for s in $selected; do
     if [ -n "$ckey" ]; then : > "$ckey" 2>/dev/null || true; fi
     if [ -n "$rkey" ]; then echo "MASON-EXIT-KEY $rkey"; fi
   else
+    if [ "$killed" -eq 1 ] && [ "$in_check" = 1 ] && [ "$this" = "$limit" ]; then
+      echo "NOT RUN $id (over $this s, too slow for a check)"
+      tail -n 30 "$log" | sed 's/^/    | /'
+      notrun=$((notrun + 1))
+      continue
+    fi
     if [ "$rc" -eq 124 ]; then echo "FAIL $id (over $this s)"; else echo "FAIL $id"; fi
     tail -n 30 "$log" | sed 's/^/    | /'
     failed=$((failed + 1))
