@@ -22,8 +22,8 @@ final class RunnerLimitTests: XCTestCase {
         return (m, { sent })
     }
 
-    private func limit(_ c: Mason_V1_Command) -> (String, UInt32)? {
-        if case .setLimit(let l)? = c.body { return (l.resource, l.units) }
+    private func limit(_ c: Mason_V1_Command) -> String? {
+        if case .setLimit(let l)? = c.body { return "\(l.resource)=\(l.units)" }
         return nil
     }
 
@@ -32,8 +32,8 @@ final class RunnerLimitTests: XCTestCase {
         m.stepRunnerLimit("gha", by: 1)
         m.stepRunnerLimit("gha", by: -1)
         XCTAssertEqual(sent().count, 2)
-        XCTAssertTrue(limit(sent()[0]) == ("gha", 17))
-        XCTAssertTrue(limit(sent()[1]) == ("gha", 15))
+        XCTAssertTrue(limit(sent()[0]) == "gha=17")
+        XCTAssertTrue(limit(sent()[1]) == "gha=15")
         XCTAssertEqual(sent()[0].actor, m.identity)
     }
 
@@ -46,7 +46,7 @@ final class RunnerLimitTests: XCTestCase {
         XCTAssertTrue(sentZero().isEmpty, "minus at 0 sends nothing")
         let (over, sentOver) = model(limit: 25, ceiling: 20)
         over.stepRunnerLimit("gha", by: -1)
-        XCTAssertTrue(limit(sentOver()[0]) == ("gha", 20), "a limit above the ceiling steps down to it")
+        XCTAssertTrue(limit(sentOver()[0]) == "gha=20", "a limit above the ceiling steps down to it")
     }
 
     func testMacosPoolHasItsOwnCeiling() {
@@ -54,7 +54,7 @@ final class RunnerLimitTests: XCTestCase {
         m.stepRunnerLimit("gha-macos", by: 1)
         XCTAssertTrue(sent().isEmpty)
         m.stepRunnerLimit("gha-macos", by: -1)
-        XCTAssertTrue(limit(sent()[0]) == ("gha-macos", 5))
+        XCTAssertTrue(limit(sent()[0]) == "gha-macos=5")
     }
 
     func testWordsSayWhatTheLimitDoes() {
